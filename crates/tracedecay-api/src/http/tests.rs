@@ -1,23 +1,56 @@
 use std::collections::BTreeSet;
 
 use super::{
-    DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOwnerKind, HttpPageQuery,
-    http_application_full_route_path, http_application_owner_kind,
+    HttpApplicationControls, HttpApplicationOwnerKind, HttpPageQuery,
+    admit_http_application_request, http_application_full_route_path, http_application_owner_kind,
     is_http_application_operation_exposed, parse_callable_code_operation,
     parse_configuration_operation, parse_context_scout_operation, parse_feedback_read_operation,
     parse_git_read_operation, parse_native_integration_operation,
 };
+use axum::Json;
+use axum::extract::Query;
 use tracedecay_contracts::{
-    configuration::CONFIGURATION_SURFACE_OPERATION_NAMES, configuration_executable_binding_registry,
+    CancellationSignal, Deadline, RequestId, application_http_executable_binding_registry,
+    configuration::configuration_surface_operation_names,
 };
+use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId, RouteExposureV1};
 
 #[test]
-fn omitted_http_page_query_uses_the_canonical_default() {
-    let query: HttpPageQuery = serde_json::from_value(serde_json::json!({}))
-        .expect("empty HTTP query uses adapter defaults");
-    assert_eq!(query.page_size, DEFAULT_HTTP_PAGE_SIZE);
-    assert!(query.cursor.is_none());
+fn omitted_http_page_query_uses_each_operations_catalog_default() {
+    let omitted_page_size = |operation, request_id: &'static str| {
+        let query: HttpPageQuery =
+            serde_json::from_value(serde_json::json!({})).expect("empty HTTP query");
+        admit_http_application_request(
+            operation,
+            RequestId::new(request_id).expect("request ID"),
+            HttpApplicationControls {
+                deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+                cancellation: CancellationSignal::active(format!("cancel.{request_id}"))
+                    .expect("cancellation"),
+            },
+            Ok(Query(query)),
+            Ok(Json(serde_json::json!({}))),
+        )
+        .expect("admitted HTTP request")
+        .page
+        .page_size
+    };
+
+    assert_eq!(
+        omitted_page_size(
+            ApplicationSurfaceOperation::DiagnosticsRead,
+            "request.http-diagnostics-default"
+        ),
+        1_000
+    );
+    assert_eq!(
+        omitted_page_size(
+            ApplicationSurfaceOperation::QualifiedName,
+            "request.http-qualified-name-default"
+        ),
+        10
+    );
 }
 
 #[test]
@@ -36,7 +69,14 @@ fn git_read_operation_parser_is_exact_and_read_only() {
         );
         assert_eq!(operation.as_str(), format!("git_{route}"));
     }
-    for rejected in ["", "preview", "apply", "git_status", "status/"] {
+    for (route, operation) in [
+        ("preview", ApplicationSurfaceOperation::GitPreview),
+        ("apply", ApplicationSurfaceOperation::GitApply),
+    ] {
+        assert_eq!(parse_git_read_operation(route), Some(operation));
+        assert!(!is_http_application_operation_exposed(operation).unwrap());
+    }
+    for rejected in ["", "git_status", "status/"] {
         assert_eq!(parse_git_read_operation(rejected), None);
     }
 }
@@ -158,10 +198,6 @@ fn configuration_operation_parser_is_exact_and_closed() {
             ApplicationSurfaceOperation::ConfigurationList,
         ),
         (
-            "configuration_explain",
-            ApplicationSurfaceOperation::ConfigurationExplain,
-        ),
-        (
             "configuration_get",
             ApplicationSurfaceOperation::ConfigurationGet,
         ),
@@ -176,10 +212,6 @@ fn configuration_operation_parser_is_exact_and_closed() {
         (
             "configuration_batch",
             ApplicationSurfaceOperation::ConfigurationBatch,
-        ),
-        (
-            "configuration_write_credential",
-            ApplicationSurfaceOperation::ConfigurationWriteCredential,
         ),
         (
             "configuration_observed_state",
@@ -225,6 +257,7 @@ fn configuration_operation_parser_is_exact_and_closed() {
         "configuration",
         "configuration_LIST",
         "configuration_list/",
+        "configuration_explain",
         "configuration_unknown",
     ] {
         assert_eq!(parse_configuration_operation(rejected), None);
@@ -233,9 +266,10 @@ fn configuration_operation_parser_is_exact_and_closed() {
 
 #[test]
 fn configuration_http_routes_match_the_executable_sdk_catalog() {
-    let registry = configuration_executable_binding_registry().expect("configuration registry");
+    let registry =
+        application_http_executable_binding_registry().expect("application HTTP registry");
 
-    for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
+    for name in configuration_surface_operation_names() {
         let operation =
             ApplicationSurfaceOperation::from_catalog_name(name).expect("HTTP operation");
         let operation_id =
@@ -289,10 +323,7 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
             "canonical operation names must be unique"
         );
         assert_eq!(
-            ApplicationSurfaceOperation::from_tool_name(&format!(
-                "tracedecay_{}",
-                operation.as_str()
-            )),
+            ApplicationSurfaceOperation::from_tool_name(operation.mcp_tool_name()),
             Some(operation),
             "{} must round-trip through the canonical tool name",
             operation.as_str()
@@ -302,15 +333,14 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
         ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics"),
         Some(ApplicationSurfaceOperation::DiagnosticsRead)
     );
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitPreview
-    ));
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitApply
-    ));
-    assert!(!is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::ObservatoryRead
-    ));
+    assert!(
+        !is_http_application_operation_exposed(ApplicationSurfaceOperation::GitPreview).unwrap()
+    );
+    assert!(!is_http_application_operation_exposed(ApplicationSurfaceOperation::GitApply).unwrap());
+    assert!(
+        !is_http_application_operation_exposed(ApplicationSurfaceOperation::ObservatoryRead)
+            .unwrap()
+    );
     assert_eq!(
         http_application_owner_kind(ApplicationSurfaceOperation::ObservatoryRead),
         HttpApplicationOwnerKind::Observatory
@@ -323,9 +353,10 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
         http_application_owner_kind(ApplicationSurfaceOperation::GitApply),
         HttpApplicationOwnerKind::Git
     );
-    assert!(is_http_application_operation_exposed(
-        ApplicationSurfaceOperation::GitHubStackSignalExpand
-    ));
+    assert!(
+        is_http_application_operation_exposed(ApplicationSurfaceOperation::GitHubStackSignalExpand)
+            .unwrap()
+    );
     assert_eq!(
         http_application_full_route_path(ApplicationSurfaceOperation::GitHubStackSignalExpand),
         "/application/github-stack/signal-expand"
@@ -333,7 +364,7 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
 }
 
 #[test]
-fn native_worktree_http_parser_admits_only_the_five_public_operations() {
+fn native_integration_parser_and_catalog_keep_exposure_distinct() {
     for operation in [
         ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory,
         ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect,
@@ -349,6 +380,7 @@ fn native_worktree_http_parser_admits_only_the_five_public_operations() {
             http_application_full_route_path(operation),
             format!("/application/native-integration/{}", operation.as_str())
         );
+        assert!(is_http_application_operation_exposed(operation).unwrap());
     }
     for operation in [
         ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
@@ -358,6 +390,10 @@ fn native_worktree_http_parser_admits_only_the_five_public_operations() {
         ApplicationSurfaceOperation::NativeIntegrationStatus,
         ApplicationSurfaceOperation::NativeIntegrationCancel,
     ] {
-        assert_eq!(parse_native_integration_operation(operation.as_str()), None);
+        assert_eq!(
+            parse_native_integration_operation(operation.as_str()),
+            Some(operation)
+        );
+        assert!(!is_http_application_operation_exposed(operation).unwrap());
     }
 }

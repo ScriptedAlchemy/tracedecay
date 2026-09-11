@@ -8,10 +8,11 @@ use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
-use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
-use tracedecay::config::{discover_project_root, get_config_path, load_config};
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::config::USER_DATA_DIR_ENV;
+use tracedecay::config::discover_project_root;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_configuration::{TraceDecayConfig, get_config_path, load_config};
 use tracedecay_global_db::{ProjectObservationStoreError, StoreInstanceUpsert};
 use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,

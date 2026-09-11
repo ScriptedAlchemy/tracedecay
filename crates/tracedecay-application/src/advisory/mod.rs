@@ -83,7 +83,7 @@ pub use github_runtime::{
     ProjectGitHubReleaseReadOutcomeV1, ProjectGitHubReleaseReadRequestV1,
     ProjectGitHubReviewStoreV1, build_github_review_runtime_owner_v1,
     github_anchor_authorities_arc_v1, github_anchor_authorities_v1,
-    open_project_github_release_read_authority_v1,
+    open_project_github_release_read_authority_v1, public_repository_read_credential_v1,
     register_github_read_only_credential_authority_v1,
     register_profile_github_read_only_credential_authority_v1,
     unregister_github_read_only_credential_authority_v1,
@@ -102,8 +102,7 @@ pub use host_delivery::{
     register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
 };
 pub use production::{
-    AdvisoryProductionAuthoritiesV1, AdvisoryProductionHookDeliveryPortV1,
-    AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionAuthoritiesV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
     AdvisoryProductionProviderAuthoritiesV1, AdvisoryProductionStartupRegistrationV1,
     open_advisory_production_authorities,
 };

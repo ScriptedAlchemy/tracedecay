@@ -13,6 +13,7 @@ pub mod capture;
 pub mod config;
 pub mod core_events;
 pub mod delivery_spool;
+pub mod hook_v2_replay;
 mod lock_admission;
 pub mod native;
 pub mod runtime;
@@ -37,20 +38,25 @@ pub use core_events::{
 pub use delivery_spool::{
     HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, hook_delivery_receipt_spool_root,
 };
+pub use hook_v2_replay::{
+    HookReplayAdmissionOutcomeV1, HookReplayPassReportV1, HookReplayTombstoneReasonV1,
+    admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
+    published_hook_scope_binding,
+};
 pub use native::{
     DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
     OpenCodePluginSurfaceV1, ProfileScopedNativeHookAdmissionV1, decode_bound_native_hook_event,
     decode_native_hook_event, decode_opencode_lsp_event, decode_opencode_plugin_event,
 };
 pub use runtime::{
-    AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HookAdmissionFutureV1,
-    HookAdmissionReceiptV1, HookDeliveryFutureV1, HookFeedbackDeliveryOutcomeV1,
-    HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1, HookFeedbackDeliveryV1,
-    HookFeedbackRollbackSwitchV1, HookGuidanceDispositionV1, HookGuidanceStateV1,
-    HookImmediateAdmissionStateV1, HookImmediateAdmissionV1, HookReadyGuidanceV1,
-    HookRuntimeControlV1, HookRuntimeErrorV1, HookScopedFeedbackV1, HookSynchronousDeadlineV1,
-    admit_async_exact_scope, deliver_feedback_with_rollback, deliver_hook_feedback,
-    finish_synchronous_hook,
+    AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HOOK_SYNCHRONOUS_BUDGET,
+    HookAdmissionFutureV1, HookAdmissionReceiptV1, HookDeliveryFutureV1,
+    HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1,
+    HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1, HookGuidanceDispositionV1,
+    HookGuidanceStateV1, HookImmediateAdmissionStateV1, HookImmediateAdmissionV1,
+    HookReadyGuidanceV1, HookRuntimeControlV1, HookRuntimeErrorV1, HookScopedFeedbackV1,
+    HookSynchronousDeadlineV1, admit_async_exact_scope, deliver_feedback_with_rollback,
+    deliver_hook_feedback, finish_synchronous_hook,
 };
 pub use spool::{
     HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1, HookSpoolError,

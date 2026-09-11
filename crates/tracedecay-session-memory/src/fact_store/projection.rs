@@ -14,7 +14,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactStoreResult, ProjectMemoryFactProjectionV1,
     ProjectMemoryFactSnapshotV1, ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1,
-    ProjectMemoryFactUnavailableV1, ProjectMemoryFactV1,
+    ProjectMemoryFactUnavailableV1, ProjectMemoryFactV1, StoredFactV1,
 };
 
 use super::primitives::{
@@ -156,6 +156,52 @@ pub(super) async fn load_project_memory_projection_controlled_tx(
     )
     .await?
     .pop())
+}
+
+pub(super) async fn project_retired_memory_fact_tx(
+    transaction: &Transaction<'_>,
+    retired: StoredFactV1,
+    superseded_by: FactId,
+) -> FactStoreResult<ProjectMemoryFactProjectionV1> {
+    let Some(payload) = retired.payload().cloned() else {
+        return Ok(ProjectMemoryFactProjectionV1::Unavailable(
+            ProjectMemoryFactUnavailableV1::new(ProjectMemoryFactStatusV1::new(
+                retired.owner().clone(),
+                retired.fact_id().clone(),
+                retired.payload_access(),
+                retired.projected_as_of(),
+            )?)?,
+        ));
+    };
+    let (source, telemetry) =
+        project_memory_projection_metadata_tx(transaction, retired.owner(), retired.fact_id())
+            .await?;
+    let telemetry = ProjectMemoryFactTelemetryV1::new(
+        telemetry.retrieval_count(),
+        telemetry.access_count(),
+        telemetry.helpful_count(),
+        telemetry.unhelpful_count(),
+        telemetry.created_at(),
+        retired.projected_as_of(),
+        telemetry.last_retrieved_at(),
+        telemetry.last_recalled_at(),
+        telemetry.last_feedback_at(),
+    )?;
+    let fact = ProjectMemoryFactV1::new(
+        retired.fact_id().clone(),
+        retired.owner().clone(),
+        payload,
+        retired.trust(),
+        ProjectMemoryFactSnapshotV1::new(
+            retired.active_assertion_id().clone(),
+            retired.last_event_id().clone(),
+            retired.projected_as_of(),
+        ),
+        source,
+        telemetry,
+    )?
+    .with_superseded_by(superseded_by)?;
+    Ok(ProjectMemoryFactProjectionV1::Available(Box::new(fact)))
 }
 
 /// Loads many canonical projections with one joined query per bounded

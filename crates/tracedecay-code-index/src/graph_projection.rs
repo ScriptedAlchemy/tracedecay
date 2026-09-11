@@ -38,7 +38,7 @@ pub use self::interactive::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
     CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolSummaryV1, INTERACTIVE_CATALOG_ARTIFACT_NAME,
+    CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1, INTERACTIVE_CATALOG_ARTIFACT_NAME,
     write_interactive_catalog_artifact,
 };
 use self::schema::{
@@ -145,6 +145,10 @@ impl From<GraphDbError> for CodeGraphProjectionError {
             GraphDbError::Corrupt { message } => Self::Corrupt(message),
             GraphDbError::Unavailable { message }
             | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
+            error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
+            | GraphDbError::SealedRevisionIncompatible { .. }) => {
+                Self::Unavailable(error.to_string())
+            }
             GraphDbError::DurabilityUncertain { message } => Self::DurabilityUncertain(message),
             GraphDbError::Closed => Self::Closed,
         }

@@ -721,7 +721,16 @@ fn assert_capture_transport_response(label: &str, output: &Output, expected_exit
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"{}\n", "{label}: {output:?}");
-    assert!(output.stderr.is_empty(), "{label}: {output:?}");
+    // A landed capture is silent on stderr; a refused one must name its
+    // refusal there rather than exit 1 with nothing to act on.
+    if expected_exit == 0 {
+        assert!(output.stderr.is_empty(), "{label}: {output:?}");
+    } else {
+        assert!(
+            output.stderr.starts_with(b"tracedecay hook: "),
+            "{label}: refusal must be named on stderr: {output:?}"
+        );
+    }
 }
 
 #[test]
@@ -1415,26 +1424,20 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
     init_project_with_cli(&home_path, &project_path);
     let daemon = spawn_tracedecay_daemon(&home_path);
 
-    let observed = configuration_tool_success(
-        &home_path,
-        &project_path,
-        "configuration_observed_state",
-        json!({}),
-    );
-    let project_id = observed["scope"]["project_id"]
-        .as_str()
-        .expect("configuration scope project id")
-        .to_owned();
-    let initial_revision = observed["outcome"]["value"]["payload"][0]["desired_revision_id"]
-        .as_str()
-        .expect("initial configuration revision")
-        .to_owned();
     let initial = configuration_tool_success(
         &home_path,
         &project_path,
         "configuration_get",
         json!({ "key": "diagnostics.prewarm.v1" }),
     );
+    let project_id = initial["scope"]["project_id"]
+        .as_str()
+        .expect("configuration scope project id")
+        .to_owned();
+    let initial_revision = initial["outcome"]["value"]["payload"]["revision_id"]
+        .as_str()
+        .expect("configuration get revision")
+        .to_owned();
     let initial_value = initial["outcome"]["value"]["payload"]["effective_value"]["value"]
         .as_bool()
         .expect("initial diagnostics prewarm value");
@@ -1482,6 +1485,10 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
     assert_eq!(
         reloaded["outcome"]["value"]["payload"]["effective_value"]["value"], next_value,
         "the CLI mutation must survive a daemon restart and affect the resolved setting"
+    );
+    assert_eq!(
+        reloaded["outcome"]["value"]["payload"]["revision_id"], advanced_revision,
+        "configuration get must return the revision accepted by the next mutation CAS"
     );
 
     let stale_mutation = json!({
@@ -2540,4 +2547,80 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
         Some("unavailable"),
         "stock Hermes regression: temporal store must stay attached, got {payload}"
     );
+}
+
+#[tokio::test]
+async fn daemon_upgrades_retained_receipts_and_reopens_without_reset() {
+    let home = TempDir::new().unwrap();
+    let db_path = home.path().join(".tracedecay/global.db");
+    common::write_empty_global_db_schema(&db_path).await;
+    {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch("DROP TABLE session_relation_receipts;")
+            .unwrap();
+        db.execute_batch(include_str!(
+            "../../../tracedecay-global-db/tests/fixtures/session-relation-receipts-before-recovery.sql"
+        )).unwrap();
+        db.execute_batch(
+            "INSERT INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES ('retained-upgrade', 1, 'building', '{}', 100);
+             INSERT INTO session_relation_receipts (
+                session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+                state, graph_watermark, created_at, applied_at
+             ) VALUES ('retained-upgrade', 1, 'project_sessions', 'project-a',
+                       'watermark-1', 'applied', 'watermark-1', 101, 102);
+             INSERT INTO session_relation_effect_journal (
+                session_id, generation, projection_json, created_at
+             ) VALUES ('retained-upgrade', 1, '{\"effects\":1}', 102);",
+        )
+        .unwrap();
+        let version: i64 = db.query_row(
+            "SELECT version FROM session_temporal_schema_migrations WHERE name = 'session-temporal'",
+            [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(version, 4);
+    }
+    for _ in 0..2 {
+        let daemon = spawn_tracedecay_daemon(home.path());
+        let db = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let retained: (String, String, i64, i64, Option<String>, i64, i64) = db
+            .query_row(
+                "SELECT state, recovery_state, created_at, applied_at, recovery_failure_code,
+                    recovery_failure_count, recovery_next_attempt_at
+             FROM session_relation_receipts WHERE session_id = 'retained-upgrade'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            retained,
+            ("applied".into(), "pending".into(), 101, 102, None, 0, 0)
+        );
+        let journal: String = db
+            .query_row(
+                "SELECT projection_json FROM session_relation_effect_journal
+             WHERE session_id = 'retained-upgrade'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(journal, r#"{"effects":1}"#);
+        drop(db);
+        drop(daemon);
+    }
 }

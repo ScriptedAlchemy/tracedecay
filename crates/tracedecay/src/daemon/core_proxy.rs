@@ -18,7 +18,7 @@ use super::{
     next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
-use super::{binary_version, connect_with_restart_grace, log_daemon_event};
+use super::{binary_version, connect_with_restart_grace};
 #[cfg(unix)]
 use tracedecay_daemon_identity::connection_for_socket_path;
 #[cfg(unix)]
@@ -32,6 +32,8 @@ use tracedecay_mcp::transport::StdioTransport;
 use tracedecay_mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
 #[cfg(unix)]
 use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
+#[cfg(unix)]
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///
@@ -510,7 +512,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 // initialize-roots repos unable to open at all.
                 let allow_init = crate::config::cached_sync_config(&identity.worktree_root)
                     .map_or_else(
-                        |_| crate::config::SyncConfig::default().auto_init,
+                        |_| tracedecay_configuration::SyncConfig::default().auto_init,
                         |config| config.auto_init,
                     );
                 return Ok(Some(InitializeRouteMetadata {
@@ -578,7 +580,7 @@ async fn write_proxy_request_result(
                 &responses,
                 binary_version()?,
             ) {
-                eprintln!("[tracedecay] warning: {warning}");
+                log_daemon_event("core_proxy_warning", &[("warning", warning)]);
             }
             for response in responses {
                 writer.write_line(&response).await?;

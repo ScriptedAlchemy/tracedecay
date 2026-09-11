@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{Confidence, FactCategoryV1, PayloadAccessState};
-use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
+use tracedecay_session_memory::memory::{
+    MemoryApplicationError, ProjectMemoryFactAddRequest, memory_application_error,
+};
 use tracedecay_store::{
     ProjectMemoryFactProjectionV1, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
@@ -14,6 +16,16 @@ use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_session_memory::memory::trust::{
     DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE,
 };
+
+fn map_session_reflector_memory_error(
+    operation: &'static str,
+    error: MemoryApplicationError,
+) -> TraceDecayError {
+    if error.is_cancellation() {
+        return memory_application_error(error);
+    }
+    TraceDecayError::database_operation(operation, error)
+}
 
 pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
@@ -283,7 +295,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
         .find_exact_fact_by_content(&content, run_control.read_control())
         .await
         .map_err(|error| {
-            TraceDecayError::database_operation(
+            map_session_reflector_memory_error(
                 "validate session reflector exact duplicate through memory authority",
                 error,
             )
@@ -339,7 +351,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
         .search_project_memory_facts(query, run_control.read_control())
         .await
         .map_err(|error| {
-            TraceDecayError::database_operation(
+            map_session_reflector_memory_error(
                 "validate session reflector near duplicate through memory authority",
                 error,
             )

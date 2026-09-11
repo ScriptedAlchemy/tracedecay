@@ -29,7 +29,7 @@ pub use application_surface::{
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardNativeIntegrationStatusFuture, DashboardScopeSetReadFuture,
 };
-pub use tracedecay::DashboardProjectRuntime;
+pub use tracedecay::DashboardProjectContext;
 
 /// Installs the registered global/session schema into the kernel's fail-closed
 /// port for this crate's test process.
@@ -177,9 +177,8 @@ mod settings_api;
 pub use settings_api::{
     DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
     DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
-    DashboardCodeIndexWorkerSettingsFuture, DashboardPrAutoTrackEntryV1,
-    DashboardPrAutoTrackReadPort, DashboardProfileCodeIndexWorkerSettingsPort,
-    install_dashboard_pr_autotrack_read_port,
+    DashboardCodeIndexWorkerSettingsFuture, DashboardProfileCodeIndexWorkerSettingsPort,
+    PrAutoTrackManagedSummaryEntryV1, PrAutoTrackManagedSummaryReader,
 };
 mod storage_findings_api;
 mod storage_telemetry_api;
@@ -207,7 +206,6 @@ use tower::ServiceExt;
 
 use tracedecay_api::{WorkOperation, WorkflowOperation};
 
-use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_automation_runtime::automation::host_io::HostIo;
@@ -282,8 +280,6 @@ pub type DashboardAutomationObservationFuture = Pin<
             + 'static,
     >,
 >;
-pub type DashboardAutomationObservationPortV1 =
-    Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>;
 pub type DoctorReportReadFuture = Pin<
     Box<
         dyn Future<
@@ -296,12 +292,7 @@ pub type DoctorReportReadFuture = Pin<
     >,
 >;
 pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
-pub type RemoteOperationalStatusReader = Arc<
-    dyn Fn() -> tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1
-        + Send
-        + Sync
-        + 'static,
->;
+pub type RemoteOperationalStatusReader = tracedecay_contracts::RemoteOperationalStatusReaderV1;
 
 /// Runtime authorities retained by one daemon-managed dashboard state.
 ///
@@ -343,7 +334,9 @@ pub struct DashboardStateCompositionV1 {
     /// managed-skill materialization capabilities. Standalone states leave it
     /// absent and automation mutation routes report typed unavailable.
     pub automation_authority: Option<DashboardAutomationAuthorityV1>,
-    pub automation_observation: Option<DashboardAutomationObservationPortV1>,
+    pub automation_observation: Option<
+        Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>,
+    >,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
@@ -356,6 +349,10 @@ pub struct DashboardStateCompositionV1 {
     /// it absent and the source reports typed `unsupported`.
     pub explorer_semantic_reader: Option<ExplorerSemanticReader>,
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
+    /// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
+    /// Selected projects reuse the resolver but resolve their own exact store
+    /// root on every call.
+    pub pr_autotrack_reader: Option<settings_api::PrAutoTrackManagedSummaryReader>,
     pub code_diagnostics_broker:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
@@ -414,7 +411,7 @@ pub struct DashboardState {
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.
-    pub project_graph: Option<Arc<TraceDecay>>,
+    pub project_graph: Option<Arc<DashboardProjectContext>>,
     /// Resolves other registered projects only when their graph is already
     /// mounted by the daemon.
     pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
@@ -468,6 +465,8 @@ pub struct DashboardState {
     /// observation owner. Selected projects reuse the resolver but resolve
     /// their own exact project root on every call.
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
+    /// Daemon-owned read over PR-autotrack managed branches for settings.
+    pub pr_autotrack_reader: Option<settings_api::PrAutoTrackManagedSummaryReader>,
     /// Storage mode resolved for the active project store.
     pub storage_mode: String,
     /// Resolved active project store root.
@@ -478,7 +477,7 @@ pub struct DashboardState {
     pub dashboard_root: PathBuf,
     /// Retention policy resolved with the owning runtime configuration.
     /// Dashboard reads must not re-open mutable config input per request.
-    pub retention_config: crate::config::RetentionConfig,
+    pub retention_config: tracedecay_configuration::RetentionConfig,
     /// Daemon-owned user-profile settings authority. Dashboard routes never
     /// load or mutate `config.toml` directly.
     pub user_settings: Arc<dyn tracedecay_configuration::UserSettingsDaemonClient>,
@@ -501,7 +500,9 @@ pub struct DashboardState {
     /// Daemon-selected profile and canonical automation mutation authority.
     /// HTTP handlers never reconstruct this capability from the environment.
     pub automation_authority: Option<DashboardAutomationAuthorityV1>,
-    pub automation_observation: Option<DashboardAutomationObservationPortV1>,
+    pub automation_observation: Option<
+        Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>,
+    >,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub automation_writer: DashboardAutomationWriter,
@@ -536,6 +537,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     profile_code_index_worker_settings:
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
+    pr_autotrack_reader: Option<PrAutoTrackManagedSummaryReader>,
 }
 
 #[cfg(feature = "test-transport")]
@@ -561,7 +563,13 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             delivery_read_authority: None,
             profile_code_index_worker_settings: None,
             application_invocation_executor: None,
+            pr_autotrack_reader: None,
         }
+    }
+
+    pub fn with_pr_autotrack_reader(mut self, reader: PrAutoTrackManagedSummaryReader) -> Self {
+        self.pr_autotrack_reader = Some(reader);
+        self
     }
 
     /// Attaches the daemon-owned application runtime used by mutating
@@ -640,16 +648,17 @@ impl DashboardHostAdmissionTestAuthorityV1 {
 #[cfg(feature = "test-transport")]
 #[derive(Clone, Default)]
 pub struct DashboardTestProjectGraphsV1 {
-    graphs: Arc<std::sync::RwLock<std::collections::HashMap<PathBuf, Arc<TraceDecay>>>>,
+    graphs:
+        Arc<std::sync::RwLock<std::collections::HashMap<PathBuf, Arc<DashboardProjectContext>>>>,
 }
 
 #[cfg(feature = "test-transport")]
 impl DashboardTestProjectGraphsV1 {
-    pub fn register(&self, graph: Arc<TraceDecay>) {
+    pub fn register(&self, graph: Arc<DashboardProjectContext>) {
         self.graphs
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(graph.project_root().to_path_buf(), graph);
+            .insert(graph.store_layout.project_root.clone(), graph);
     }
 
     fn resolver(&self) -> crate::project_graph::RetainedProjectGraphResolver {
@@ -697,10 +706,10 @@ pub struct LcmStoreSelection {
 }
 
 pub async fn resolve_lcm_store(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
 ) -> LcmStoreSelection {
-    resolve_lcm_store_for_layout(cg.store_layout(), registered_project_session_db)
+    resolve_lcm_store_for_layout(&cg.store_layout, registered_project_session_db)
 }
 
 fn resolve_lcm_store_for_layout(
@@ -728,10 +737,10 @@ pub fn storage_mode_label(mode: &StorageMode) -> &'static str {
     }
 }
 
-pub fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) {
+pub fn resolve_project_memory_store(cg: &DashboardProjectContext) -> (String, Arc<Database>) {
     (
-        cg.dashboard_db_path().display().to_string(),
-        cg.dashboard_database_guard(),
+        cg.dashboard_db_path.display().to_string(),
+        Arc::clone(&cg.dashboard_database),
     )
 }
 
@@ -739,8 +748,8 @@ pub fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) 
 ///
 /// Dashboard routes must never infer ownership from a path, label, or
 /// optional display field after construction.
-pub fn project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
-    project_memory_owner_for_layout(cg.store_layout())
+pub fn project_memory_owner(cg: &DashboardProjectContext) -> Result<FactOwnerV1> {
+    project_memory_owner_for_layout(&cg.store_layout)
 }
 
 fn project_memory_owner_for_layout(layout: &StoreLayout) -> Result<FactOwnerV1> {
@@ -756,8 +765,8 @@ fn project_memory_owner_for_layout(layout: &StoreLayout) -> Result<FactOwnerV1> 
 }
 
 async fn build_state_inner(
-    cg: &TraceDecay,
-    project_graph: Option<Arc<TraceDecay>>,
+    cg: &DashboardProjectContext,
+    project_graph: Option<Arc<DashboardProjectContext>>,
     warm_token_counts: bool,
     composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
@@ -781,6 +790,7 @@ async fn build_state_inner(
         code_index_freshness_reader,
         explorer_semantic_reader,
         feedback_status_reader,
+        pr_autotrack_reader,
         code_diagnostics_broker,
         application_invocation_executor,
         delivery_settlement_authority,
@@ -788,10 +798,10 @@ async fn build_state_inner(
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
     let lcm = resolve_lcm_store(cg, registered_project_session_db).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let store_root = cg.store_layout().data_root.clone();
-    let config_path = cg.store_layout().config_path.clone();
-    let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
+    let dashboard_root = cg.store_layout.dashboard_root.clone();
+    let store_root = cg.store_layout.data_root.clone();
+    let config_path = cg.store_layout.config_path.clone();
+    let storage_mode = storage_mode_label(&cg.store_layout.storage_mode).to_string();
     let code_diagnostics_authority = match (
         code_diagnostics_broker,
         code_graph_read_admission.as_ref(),
@@ -799,7 +809,7 @@ async fn build_state_inner(
     ) {
         (Some(broker), Some(graph_admission), Some(graph_projection)) => Some(
             crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
-                cg.project_root().to_path_buf(),
+                cg.store_layout.project_root.clone(),
                 dashboard_root.clone(),
                 Arc::clone(graph_admission),
                 Arc::clone(graph_projection),
@@ -821,11 +831,11 @@ async fn build_state_inner(
     );
     let mut state = DashboardState {
         build_version,
-        host_io: cg.automation_runtime().host_io(),
-        project_id: cg.store_layout().identity.project_id.clone(),
+        host_io: cg.host_io,
+        project_id: cg.store_layout.identity.project_id.clone(),
         resolved_scope: scope::resolve_dashboard_scope(
-            cg.project_root(),
-            cg.store_layout().identity.project_id.as_deref(),
+            &cg.store_layout.project_root,
+            cg.store_layout.identity.project_id.as_deref(),
         ),
         code_graph_read_admission,
         code_graph_projection_read_port,
@@ -834,11 +844,8 @@ async fn build_state_inner(
         memory_owner,
         graph_conn: mem_db.read_connection(),
         _database_guards: vec![mem_db.clone()],
-        graph_telemetry_handle: cg
-            .dashboard_database_guard()
-            .storage_telemetry_handle()
-            .ok(),
-        graph_db_path: cg.dashboard_db_path().display().to_string(),
+        graph_telemetry_handle: cg.dashboard_database.storage_telemetry_handle().ok(),
+        graph_db_path: cg.dashboard_db_path.display().to_string(),
         mem_db,
         mem_db_path,
         lcm_db: lcm.lcm_db,
@@ -849,16 +856,17 @@ async fn build_state_inner(
         delivery_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
-        project_root: cg.project_root().to_path_buf(),
+        project_root: cg.store_layout.project_root.clone(),
         code_index_freshness_reader,
         explorer_semantic_reader,
         feedback_status_reader,
+        pr_autotrack_reader,
         storage_mode,
         store_root,
         config_path,
         dashboard_root,
-        retention_config: cg.retention_config(),
-        user_settings: cg.user_settings_client(),
+        retention_config: cg.retention_config.clone(),
+        user_settings: Arc::clone(&cg.user_settings_client),
         profile_code_index_worker_settings,
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         derived_snapshots: Arc::new(snapshot_cache::DerivedSnapshotCaches::new()),
@@ -886,7 +894,7 @@ async fn build_state_inner(
 }
 
 pub async fn build_state_with_automation_reconciler(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
     build_state_inner(cg.as_ref(), Some(Arc::clone(&cg)), true, composition).await
@@ -896,7 +904,7 @@ pub async fn build_state_with_automation_reconciler(
 /// dashboard project picker. Automation authority is inherited from the active
 /// dashboard state so daemon-selected projects cannot fall back to direct open.
 pub async fn build_selected_project_state(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     active: &DashboardState,
 ) -> Result<DashboardState> {
     build_state_inner(
@@ -938,6 +946,7 @@ pub async fn build_selected_project_state(
             // resolves the selected state's exact root on every call.
             explorer_semantic_reader: active.explorer_semantic_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
+            pr_autotrack_reader: active.pr_autotrack_reader.clone(),
             code_diagnostics_broker: None,
             // Rebinding an application transport is required only for the
             // selected project's application routes. Ordinary read routes
@@ -975,7 +984,7 @@ pub struct DashboardTestEndpointV1<'a> {
 #[doc(hidden)]
 #[cfg(feature = "test-transport")]
 pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
     endpoint: DashboardTestEndpointV1<'_>,
@@ -1013,12 +1022,12 @@ struct DashboardRunRequest<'a> {
     spa_routes: Router,
     test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
     test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
-    test_project_graph: Option<Arc<TraceDecay>>,
+    test_project_graph: Option<Arc<DashboardProjectContext>>,
 }
 
 #[cfg(feature = "test-transport")]
 async fn run_until_shutdown_inner<F>(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     request: DashboardRunRequest<'_>,
     shutdown: F,
 ) -> Result<()>
@@ -1040,8 +1049,8 @@ where
     // entry point started the dashboard.
     let code_diagnostics_broker =
         crate::application::dashboard_diagnostics::open_diagnostic_broker(
-            cg.project_root().to_path_buf(),
-            &cg.store_layout().dashboard_root,
+            cg.store_layout.project_root.clone(),
+            &cg.store_layout.dashboard_root,
         )
         .await;
     let state = build_state_inner(
@@ -1082,6 +1091,8 @@ where
             code_index_freshness_reader: None,
             explorer_semantic_reader: None,
             feedback_status_reader: None,
+            pr_autotrack_reader: test_authority
+                .and_then(|authority| authority.pr_autotrack_reader.clone()),
             code_diagnostics_broker: Some(code_diagnostics_broker),
             application_invocation_executor: test_authority
                 .and_then(|authority| authority.application_invocation_executor.clone()),
@@ -1096,7 +1107,7 @@ where
     let url = format!("http://{addr}/");
     // Stable, parseable line for wrappers (the Hermes plugin reads this).
     println!("tracedecay dashboard listening on {url}");
-    eprintln!("Serving project {}", cg.project_root().display());
+    eprintln!("Serving project {}", cg.store_layout.project_root.display());
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -1358,7 +1369,7 @@ struct ActiveProjectApplicationRoutes {
 
 impl ActiveProjectApplicationRoutes {
     fn for_active_project(
-        cg: &TraceDecay,
+        cg: &DashboardProjectContext,
         executor: Option<Arc<dyn DashboardApplicationRuntime>>,
     ) -> Result<Self> {
         let executor = executor
@@ -1396,7 +1407,7 @@ impl ActiveProjectApplicationRoutes {
 /// panics on overlapping paths. Pass `Router::new()` to serve the JSON API
 /// with no UI.
 pub async fn router(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     mut state: DashboardState,
     spa_routes: Router,
 ) -> Result<Router> {
@@ -1790,7 +1801,7 @@ async fn project_scoped_api_gateway(
                     .active_state()
                     .application_invocation_executor
                     .as_ref(),
-                project_graph.project_root(),
+                &project_graph.store_layout.project_root,
             ) {
                 Ok(application_runtime) => application_runtime,
                 Err(err) => {
@@ -2396,11 +2407,12 @@ mod authority_tests {
                 code_index_freshness_reader: None,
                 explorer_semantic_reader: None,
                 feedback_status_reader: None,
+                pr_autotrack_reader: None,
                 storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),
                 store_root: layout.data_root.clone(),
                 config_path: layout.config_path.clone(),
                 dashboard_root: layout.dashboard_root.clone(),
-                retention_config: crate::config::RetentionConfig::default(),
+                retention_config: tracedecay_configuration::RetentionConfig::default(),
                 user_settings: Arc::new(
                     tracedecay_configuration::ProductionUserSettingsDaemonClient::default(),
                 ),

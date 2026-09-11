@@ -32,7 +32,10 @@ mod goal_event_tests {
     use crate::admission::HostAdmission;
     use crate::admission::test_support::MemoryHostAdmission;
     use crate::observation::{CaptureObservationRequest, ObservationCancellation};
-    use crate::runtime::codex::try_admit_codex_jsonl_observations_for_project_with_admission;
+    use crate::runtime::codex::{
+        try_admit_codex_jsonl_observations_for_project_window,
+        try_admit_codex_jsonl_observations_for_project_with_admission,
+    };
 
     fn goal_event_line(objective: &str, status: &str) -> Value {
         json!({
@@ -894,6 +897,82 @@ mod goal_event_tests {
             .unwrap();
         assert_eq!(projected.projected, 2);
         assert_eq!(admission.pending_projection_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn project_provider_yields_after_one_window_and_resumes_without_loss() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        let session_id = "session-windowed-project";
+        let mut lines = vec![json!({
+            "timestamp": "2026-09-04T12:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": project}
+        })];
+        lines.extend((0..256).map(|ordinal| {
+            json!({
+                "timestamp": "2026-09-04T12:00:01.004Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": session_id,
+                    "turn_id": format!("turn-{ordinal}"),
+                    "item": {
+                        "type": "UserMessage",
+                        "id": format!("user-item-{ordinal}"),
+                        "content": [{"type": "text", "text": format!("message {ordinal}")}]
+                    }
+                }
+            })
+        }));
+        let encoded = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&transcript, &encoded).unwrap();
+        let project_id = ProjectId::new("project-windowed-provider").unwrap();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+
+        let first = try_admit_codex_jsonl_observations_for_project_window(
+            &transcript,
+            &project,
+            project_id.clone(),
+            &admission,
+            u64::MAX,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.frames_persisted, 256);
+        assert!(first.source_deferred);
+        assert!(first.bytes_consumed < encoded.len() as u64);
+        assert_eq!(admission.observations().len(), 256);
+
+        let second = try_admit_codex_jsonl_observations_for_project_window(
+            &transcript,
+            &project,
+            project_id,
+            &admission,
+            u64::MAX,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(second.frames_persisted, 1);
+        assert!(!second.source_deferred);
+        assert_eq!(admission.observations().len(), 257);
+        assert_eq!(
+            first.bytes_consumed + second.bytes_consumed,
+            encoded.len() as u64
+        );
     }
 
     #[tokio::test]

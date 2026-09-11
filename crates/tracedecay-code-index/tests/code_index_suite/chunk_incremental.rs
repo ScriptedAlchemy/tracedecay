@@ -272,6 +272,9 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                         line_span: 1,
                         start_line: 0,
                         signature: None,
+                        docstring: None,
+                        is_async: false,
+                        derives: Vec::new(),
                         skip_test_coverage: false,
                         file_identity: id::<FileIdentityDigest>(&format!(
                             "sha256:{}",
@@ -422,6 +425,70 @@ fn deletion_emits_removed_file_chunks_and_preserves_unchanged_file_reuse() {
             .iter()
             .all(|change| change.prior_digest.is_some() && change.current_digest.is_none())
     );
+}
+
+#[test]
+fn mixed_increment_preserves_sorted_change_partitions() {
+    let prior_generation = generation(1);
+    let current_generation = generation(2);
+    let prior = manifest(
+        &prior_generation,
+        ["a", "c", "e"]
+            .into_iter()
+            .map(|name| {
+                baseline_file(
+                    &prior_generation,
+                    &format!("file.{name}.1"),
+                    &format!("src/{name}.rs"),
+                )
+            })
+            .collect(),
+    );
+    let current = manifest(
+        &current_generation,
+        ["b", "c", "d"]
+            .into_iter()
+            .map(|name| {
+                baseline_file(
+                    &current_generation,
+                    &format!("file.{name}.2"),
+                    &format!("src/{name}.rs"),
+                )
+            })
+            .collect(),
+    );
+    let changes = plan_chunk_increment(Some(&prior), &current).unwrap();
+    assert_eq!(changes.added_or_changed.len(), 8);
+    assert_eq!(changes.deleted.len(), 8);
+    assert_eq!(changes.reused.len(), 4);
+    for change in changes
+        .added_or_changed
+        .iter()
+        .chain(&changes.deleted)
+        .chain(&changes.reused)
+    {
+        assert_eq!(
+            change.prior_digest.as_ref(),
+            prior
+                .chunk(&change.chunk_id)
+                .map(|chunk| &chunk.content_digest)
+        );
+        assert_eq!(
+            change.current_digest.as_ref(),
+            current
+                .chunk(&change.chunk_id)
+                .map(|chunk| &chunk.content_digest)
+        );
+    }
+    changes.validate().unwrap();
+
+    let empty = manifest(&current_generation, vec![]);
+    let removed = plan_chunk_increment(Some(&prior), &empty).unwrap();
+    assert_eq!(removed.deleted.len(), prior.chunks().len());
+    assert!(removed.added_or_changed.is_empty() && removed.reused.is_empty());
+    let initial = plan_chunk_increment(None, &current).unwrap();
+    assert_eq!(initial.added_or_changed.len(), current.chunks().len());
+    assert!(initial.deleted.is_empty() && initial.reused.is_empty());
 }
 
 #[test]

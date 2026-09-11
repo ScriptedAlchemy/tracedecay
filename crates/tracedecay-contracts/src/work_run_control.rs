@@ -120,7 +120,8 @@ pub trait WorkRunControlStoragePort: Send + Sync {
     ) -> Result<Option<WorkRunControlFrontierV1>, WorkRunControlStorageError>;
 
     /// The admitted deadline and live attempt frontier for one run, or `None`
-    /// when the run holds no durable attempt at all.
+    /// when the run holds no durable attempt at all. Retry-superseded recovery
+    /// records still count toward history, but are absent from the frontier.
     fn run_admission(
         &self,
         authority: &WorkAuthority,
@@ -128,7 +129,7 @@ pub trait WorkRunControlStoragePort: Send + Sync {
         run_id: &RunId,
     ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError>;
 
-    /// Resolves the canonical workflow journal binding for every durable
+    /// Resolves the canonical workflow journal binding for every active
     /// attempt of one run. Journal replay happens only while a pause is about
     /// to create interval evidence, never on ordinary reads or reservations.
     fn workflow_bound_live_attempts(

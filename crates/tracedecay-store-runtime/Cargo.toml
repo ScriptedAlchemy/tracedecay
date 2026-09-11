@@ -54,6 +54,7 @@ tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version =
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 
 # glibc `malloc_trim` for allocator release, and `statfs(2)` for the store

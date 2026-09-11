@@ -302,6 +302,7 @@ describe('the Workflows page over mounted routes', () => {
             fan_out_plans: {},
             released_fan_out_attempts: [],
             settled_fan_out_attempts: [],
+            active_fan_out_attempts: {},
             history: [
               {
                 run_id: 'run.release-train.1',

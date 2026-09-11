@@ -14,9 +14,7 @@ use tracedecay_contracts::context_scout::{
     ContextScoutEvidenceSourceReceiptV1, ContextScoutModelBackendV1,
     ContextScoutRedactionReceiptV1,
 };
-use tracedecay_contracts::feedback::{
-    FeedbackCompletedPublicationReadPort, FeedbackCompletedPublicationV1,
-};
+use tracedecay_contracts::feedback::{FeedbackPublicationReadPort, FeedbackPublicationV1};
 use tracedecay_contracts::{
     CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, FreshnessState,
     RequestAdmission, RequestContext, ResolvedScope, RetrieverContributionState, TemporalState,
@@ -385,7 +383,7 @@ impl ProjectContextScoutAddressRegistryV1 {
         }))
     }
 
-    async fn bind(
+    pub async fn bind(
         &self,
         hook: &AdmittedContextScoutHookV1,
         pin: &ContextScoutAuthorityPinV1,
@@ -738,7 +736,7 @@ impl ProjectContextScoutAddressRegistryV1 {
 pub struct ContextScoutCanonicalInputV1 {
     pub address: ContextScoutAddressV1,
     pub control: ContextScoutControlV1,
-    pub latest_publication: Option<FeedbackCompletedPublicationV1>,
+    pub latest_publication: Option<FeedbackPublicationV1>,
     pub candidates: Vec<ContextScoutCandidateV1>,
 }
 
@@ -784,7 +782,7 @@ pub struct ContextScoutCanonicalInputAssemblerV1<'a, P> {
 
 impl<'a, P> ContextScoutCanonicalInputAssemblerV1<'a, P>
 where
-    P: FeedbackCompletedPublicationReadPort,
+    P: FeedbackPublicationReadPort,
 {
     pub const fn new(
         registry: &'a ProjectContextScoutAddressRegistryV1,
@@ -896,7 +894,7 @@ where
 }
 
 fn publication_matches_pin(
-    publication: &FeedbackCompletedPublicationV1,
+    publication: &FeedbackPublicationV1,
     pin: &ContextScoutAuthorityPinV1,
 ) -> bool {
     publication.validate().is_ok()
@@ -918,7 +916,7 @@ fn publication_matches_pin(
 /// redaction, and coverage are copied into one reference-only claim; no
 /// evidence body or generic finding text is cached by Scout.
 pub fn context_scout_candidates_from_publication(
-    publication: &FeedbackCompletedPublicationV1,
+    publication: &FeedbackPublicationV1,
     control: ContextScoutControlV1,
     observed_at: UtcMicros,
 ) -> Vec<ContextScoutCandidateV1> {

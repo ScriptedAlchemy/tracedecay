@@ -271,6 +271,190 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
 }
 
 #[tokio::test]
+async fn constructors_distinguishes_explicit_update_and_missing_fields() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+#[derive(Default)]
+pub struct BuildOptions {
+    pub name: String,
+    pub retries: u8,
+    pub verbose: bool,
+}
+
+pub fn explicit() -> BuildOptions {
+    BuildOptions { name: String::new(), retries: 3, verbose: true }
+}
+
+pub fn updated() -> BuildOptions {
+    BuildOptions { name: String::new(), ..Default::default() }
+}
+
+pub fn incomplete() -> BuildOptions {
+    BuildOptions { name: String::new() }
+}
+
+pub fn recovered() -> BuildOptions {
+    BuildOptions { name: String::new(), retries: }
+}
+"#,
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_constructors",
+        json!({"struct": "BuildOptions"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let sites = payload["sites"].as_array().expect("constructor sites");
+    assert_eq!(
+        sites.len(),
+        4,
+        "all indexed literals must be returned: {payload}"
+    );
+    assert_eq!(payload["candidate_count"], 1);
+    assert_eq!(payload["resolution_status"], "unverified");
+    assert_eq!(payload["resolution_reason"], "syntax_only_simple_name");
+
+    assert_eq!(sites[0]["fields"], json!(["name", "retries", "verbose"]));
+    assert_eq!(sites[0]["update_fields"], json!([]));
+    assert_eq!(sites[0]["missing_fields"], json!([]));
+    assert_eq!(sites[0]["field_coverage"], "complete");
+
+    assert_eq!(sites[1]["fields"], json!(["name"]));
+    assert_eq!(sites[1]["update_fields"], json!(["retries", "verbose"]));
+    assert_eq!(sites[1]["missing_fields"], json!([]));
+    assert_eq!(sites[1]["field_coverage"], "complete");
+
+    assert_eq!(sites[2]["fields"], json!(["name"]));
+    assert_eq!(sites[2]["update_fields"], json!([]));
+    assert_eq!(sites[2]["missing_fields"], json!(["retries", "verbose"]));
+    assert_eq!(sites[2]["field_coverage"], "complete");
+
+    assert_eq!(sites[3]["fields"], json!(["name", "retries"]));
+    assert_eq!(sites[3]["update_fields"], json!([]));
+    assert_eq!(sites[3]["missing_fields"], json!([]));
+    assert_eq!(sites[3]["field_coverage"], "unknown");
+}
+
+#[tokio::test]
+async fn constructors_marks_same_name_struct_resolution_unknown() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+pub mod first {
+    pub struct Options { pub one: u8 }
+    pub fn build() -> Options { Options { one: 1 } }
+}
+pub mod second {
+    pub struct Options { pub two: u8 }
+    pub fn build() -> Options { Options { two: 2 } }
+}
+"#,
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_constructors",
+        json!({"struct": "Options"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["candidate_count"], 2);
+    assert_eq!(payload["resolution_status"], "unverified");
+    assert_eq!(payload["resolution_reason"], "ambiguous_simple_name");
+    assert!(payload["expected_fields"].is_null());
+    let sites = payload["sites"].as_array().expect("constructor sites");
+    assert_eq!(
+        sites.len(),
+        2,
+        "both syntax sites remain visible: {payload}"
+    );
+    assert!(sites.iter().all(|site| {
+        site["field_coverage"] == "unknown"
+            && site["update_fields"] == json!([])
+            && site["missing_fields"] == json!([])
+    }));
+}
+
+#[tokio::test]
+async fn unmounted_files_ignores_comment_quotes_when_reading_config_entries() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src/app")).unwrap();
+    fs::write(
+        project_root.join("package.json"),
+        r#"{"name":"dashboard","private":true}"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("rsbuild.config.ts"),
+        r#"// Canonical dashboard build. build.rs embeds this build's output into the
+// binary served at `/`, including every client-routed workspace.
+export default defineConfig({
+  source: {
+    entry: { index: './src/app/main.tsx' },
+    dynamicEntry: `./src/app/${page}.ts`,
+  },
+});
+"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/main.tsx"),
+        "import './boot';\nexport const app = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/boot.ts"),
+        "export const boot = 1;\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/app/orphan.ts"),
+        "export const orphan = 1;\n",
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_unmounted_files",
+        json!({"ecosystem": "typescript"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    let files = payload["unmounted"]
+        .as_array()
+        .expect("unmounted file rows")
+        .iter()
+        .filter_map(|row| row["file"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(files, vec!["src/app/orphan.ts"], "{payload}");
+}
+
+#[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
@@ -489,39 +673,6 @@ async fn test_rename_preview() {
         referrers.contains(&"main"),
         "`main` calls `helper`, so it must appear as a rename reference, \
          got {referrers:?}: {payload}"
-    );
-}
-
-/// Both `use crate::utils::helper;` statements the fixture plants (in
-/// `src/main.rs` and `tests/test_utils.rs`) are followed by a real `helper()`
-/// call, so nothing is unused. `scanned_files` is the anti-vacuity signal: a
-/// zero finding only means something if the scan actually inspected files.
-#[tokio::test]
-async fn test_unused_imports() {
-    let (cg, _dir) = setup_project().await;
-    wait_for_current_graph(&cg).await;
-    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
-        .await
-        .unwrap();
-    let payload = extract_json(&result.value);
-
-    assert!(
-        payload["scanned_files"].as_u64().is_some_and(|n| n > 0),
-        "a zero finding is only meaningful if files were scanned: {payload}"
-    );
-    assert_eq!(
-        payload["complete"],
-        json!(true),
-        "the fixture is far under the scan budget: {payload}"
-    );
-    assert_eq!(
-        payload["unused_import_count"].as_u64(),
-        Some(0),
-        "every fixture import is used, so none may be flagged: {payload}"
-    );
-    assert!(
-        payload["imports"].as_array().is_some_and(Vec::is_empty),
-        "unused_import_count and imports must agree: {payload}"
     );
 }
 
@@ -1925,156 +2076,6 @@ async fn changelog_filters_directory_paths() {
     }
 }
 
-/// `tracedecay_unused_imports` must flag unused imports. Testing
-/// `incoming.is_empty()` on every Use node never fires: Use nodes always
-/// have at least one incoming Contains edge from their containing
-/// module/file, so that condition returned 0 on every real codebase.
-#[tokio::test]
-async fn unused_imports_detects_truly_unused() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    fs::create_dir_all(&project_root).unwrap();
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-use std::collections::HashMap;
-use std::collections::HashSet;
-mod inner;
-
-pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
-"#,
-    )
-    .unwrap();
-    fs::write(project.join("src/inner.rs"), "pub fn inner_fn() {}\n").unwrap();
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let imports = output["imports"].as_array().unwrap();
-    let names: Vec<&str> = imports.iter().filter_map(|u| u["name"].as_str()).collect();
-    // `HashSet` is imported but never used in the file body.
-    assert!(
-        names.iter().any(|n| n.contains("HashSet")),
-        "HashSet should be reported as unused; got names={names:?}"
-    );
-}
-
-/// An import named only in a nearby comment (like the audit fixture's own
-/// `// Planted unused import: BTreeMap …`) must not be read as "used" by the
-/// text scan. The masked scan must flag it in both markdown and JSON with
-/// file:line, and must not flag a genuinely-used import.
-#[tokio::test]
-async fn unused_imports_reports_in_markdown_and_json() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    fs::create_dir_all(&project_root).unwrap();
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    // `HashMap` is used; `BTreeMap` is unused but named in the comment above it.
-    fs::write(
-        project.join("src/lib.rs"),
-        "use std::collections::HashMap;\n\
-         // Planted unused import: BTreeMap is referenced nowhere in real code.\n\
-         use std::collections::BTreeMap;\n\
-         \n\
-         pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }\n",
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(project).await;
-
-    // Markdown (runtime default; request explicitly so the test helper does not
-    // force-inject `format=json`).
-    let md = handle_tool_call(
-        &cg,
-        "tracedecay_unused_imports",
-        json!({"format": "markdown"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&md.value);
-    assert!(text.contains("## Unused Imports"), "got: {text}");
-    // `line` is the node's 0-based start line (source line 3 → 2), matching the
-    // rest of the graph API.
-    assert!(
-        text.contains("**BTreeMap unused in src/lib.rs:2**"),
-        "markdown must report the unused import with file:line: {text}"
-    );
-    assert!(
-        !text.contains("HashMap unused"),
-        "used import must not be flagged: {text}"
-    );
-
-    // JSON output must carry the same structured finding.
-    let js = handle_tool_call(
-        &cg,
-        "tracedecay_unused_imports",
-        json!({"format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&js.value)).unwrap();
-    assert_eq!(payload["unused_import_count"], 1, "payload: {payload}");
-    let imports = payload["imports"].as_array().unwrap();
-    assert_eq!(imports.len(), 1, "payload: {payload}");
-    let m = &imports[0];
-    assert_eq!(m["unused"], "BTreeMap");
-    assert_eq!(m["file"], "src/lib.rs");
-    assert_eq!(m["line"], 2);
-    // The used import must never appear.
-    assert!(
-        imports
-            .iter()
-            .all(|u| u["unused"].as_str() != Some("HashMap")),
-        "used HashMap must not be flagged: {payload}"
-    );
-}
-
-/// Rust's format macros implicitly capture identifiers named inside the format
-/// string. Those captures are real references even though they are lexically
-/// inside a string literal, so masking string noise must preserve them.
-#[tokio::test]
-async fn unused_imports_keeps_implicit_format_capture() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    fs::create_dir_all(&project_root).unwrap();
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        "use std::f64::consts::PI;\n\
-         pub fn print_pi() { println!(\"{PI}\"); }\n",
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_unused_imports",
-        json!({"format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    let imports = payload["imports"].as_array().unwrap();
-    assert!(
-        imports
-            .iter()
-            .all(|item| item["unused"].as_str() != Some("PI")),
-        "PI is used by the implicit format capture and must not be flagged: {payload}"
-    );
-}
-
 /// `tracedecay_dead_code` must support `include_public` so agents can audit
 /// pub items with no callers in the indexed scope. SQL that hard-codes
 /// `visibility != 'public'` reports 0 dead symbols on a mostly-`pub` codebase.
@@ -2714,6 +2715,344 @@ pub trait Leaf: Middle {}
     assert!(depth >= 2, "Leaf depth should be >= 2 hops, got {depth}");
 }
 
+#[tokio::test]
+async fn analysis_symbol_locations_are_one_based() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("package.json"),
+        "{\"name\":\"analysis-locations\",\"private\":true,\"type\":\"module\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/engine.ts"),
+        "export class AuditEngine {\n  private total = 0;\n  private label = \"audit\";\n  private enabled = true;\n\n  add(value: number): number {\n    this.total += value;\n    return this.total;\n  }\n\n  reset(): void {\n    this.total = 0;\n  }\n\n  describe(): string {\n    return `${this.label}:${this.total}`;\n  }\n\n  evaluate(value: number): number {\n    if (!this.enabled) {\n      return 0;\n    }\n    if (value < 0) {\n      return -1;\n    }\n    if (value === 0) {\n      return this.total;\n    }\n    if (value % 2 === 0) {\n      return this.add(value);\n    }\n    if (value > 100) {\n      return value * 2;\n    }\n    return value + 1;\n  }\n}\n\nexport function sharedScore(value: number): number {\n  return value * 3;\n}\n\nexport function firstScore(value: number): number {\n  return sharedScore(value);\n}\n\nexport function secondScore(value: number): number {\n  return sharedScore(value + 1);\n}\n\nexport function thirdScore(value: number): number {\n  return sharedScore(value + 2);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/recursion.ts"),
+        "export function factorial(value: number): number {\n  if (value <= 1) {\n    return 1;\n  }\n  return value * factorial(value - 1);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/hierarchy.ts"),
+        "export interface Base {}\nexport interface Middle extends Base {}\nexport interface Leaf extends Middle {}\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/dead.ts"),
+        "function abandonedHelper(): number { return 7; }\nexport function entry(): number { return 1; }\n",
+    )
+    .unwrap();
+    let (graph, _env) = init_test_project(&project_root).await;
+
+    for (tool, arguments, collection, symbol, expected_line) in [
+        (
+            "tracedecay_hotspots",
+            json!({"limit": 100, "format": "json"}),
+            "hotspots",
+            "sharedScore",
+            39,
+        ),
+        (
+            "tracedecay_dead_code",
+            json!({"format": "json"}),
+            "symbols",
+            "abandonedHelper",
+            1,
+        ),
+        (
+            "tracedecay_inheritance_depth",
+            json!({"format": "json"}),
+            "ranking",
+            "Leaf",
+            3,
+        ),
+    ] {
+        let result = handle_tool_call(&graph, tool, arguments, None, None)
+            .await
+            .unwrap();
+        let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        let item = output[collection]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == symbol)
+            .unwrap_or_else(|| panic!("{tool} omitted {symbol}: {output}"));
+        assert_eq!(item["line"], expected_line, "{tool} returned {item}");
+    }
+
+    for (tool, collection, symbol, expected_line) in [
+        ("tracedecay_complexity", "ranking", "evaluate", 19),
+        ("tracedecay_god_class", "ranking", "AuditEngine", 1),
+    ] {
+        let result = handle_tool_call(
+            &graph,
+            tool,
+            json!({"limit": 100, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        let item = output[collection]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == symbol)
+            .unwrap_or_else(|| panic!("{tool} omitted {symbol}: {output}"));
+        assert_eq!(item["line"], expected_line, "{tool} returned {item}");
+    }
+
+    let result = handle_tool_call(
+        &graph,
+        "tracedecay_recursion",
+        json!({"limit": 100, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let factorial = output["cycles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|cycle| cycle["chain"].as_array().unwrap())
+        .find(|item| item["name"] == "factorial")
+        .unwrap_or_else(|| panic!("tracedecay_recursion omitted factorial: {output}"));
+    assert_eq!(factorial["line"], 1, "recursion returned {factorial}");
+
+    close_test_graph(graph).await;
+}
+
+#[tokio::test]
+async fn typescript_typed_variables_reach_public_type_relation_queries() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("package.json"),
+        r#"{"name":"typescript-type-relations","private":true,"type":"module"}"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/types.ts"),
+        "export interface Greeter { greet(): string }\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/values.ts"),
+        "import type { Greeter } from './types';\n\
+         export const primary: Greeter = { greet: () => 'primary' };\n\
+         export let fallback: Greeter = primary;\n",
+    )
+    .unwrap();
+    let (graph, ()) = init_test_project(&project_root).await;
+    let greeter_id = find_node_id(&graph, "Greeter").await;
+    let variable_ids = [
+        ("primary", find_node_id(&graph, "primary").await),
+        ("fallback", find_node_id(&graph, "fallback").await),
+    ];
+    let request = |node_id: &str| {
+        json!({
+            "node_id": node_id,
+            "scope": {
+                "generation": tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL,
+                "path_prefix": Value::Null,
+            },
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "cursor": Value::Null,
+            },
+        })
+    };
+
+    for (name, node_id) in &variable_ids {
+        let result = call_production_tool(
+            &graph.harness,
+            &graph.project_root,
+            "tracedecay_code_type_definition",
+            request(node_id),
+        )
+        .await
+        .expect("public type-definition request");
+        let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        let items = output
+            .pointer("/outcome/value/payload/items")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{name} type-definition items missing: {output:#}"));
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item["name"].as_str(), item["file"].as_str()))
+                .collect::<Vec<_>>(),
+            [(Some("Greeter"), Some("src/types.ts"))],
+            "{name} must resolve its imported annotation through the public query: {output:#}"
+        );
+    }
+
+    let result = call_production_tool(
+        &graph.harness,
+        &graph.project_root,
+        "tracedecay_code_references",
+        request(&greeter_id),
+    )
+    .await
+    .expect("public references request");
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let mut typed_variables = output
+        .pointer("/outcome/value/payload/items")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("reference items missing: {output:#}"))
+        .iter()
+        .filter(|item| item["edge_kind"] == "typeof")
+        .filter_map(|item| item.pointer("/symbol/name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    typed_variables.sort_unstable();
+    assert_eq!(typed_variables, ["fallback", "primary"], "{output:#}");
+
+    close_test_graph(graph).await;
+}
+
+#[tokio::test]
+async fn typescript_interface_extends_drives_hierarchy_and_depth() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/settings.ts"),
+        r#"
+interface SettingsEditable { draft: string }
+interface SettingsUnderReview extends SettingsEditable { review: string }
+interface GenericEditable<T> { draft: T }
+interface GenericReview extends GenericEditable<string> { review: string }
+namespace left { export interface Base { left: string } }
+namespace right { export interface Base { right: string } }
+interface ScopedReview extends right.Base { review: string }
+interface Renderer<T> { render(value: T): void }
+class Screen implements Renderer<string> { render(value: string) {} }
+const unrelated = 1;
+function helper() { return unrelated; }
+"#,
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(&project_root).await;
+    let parent_id = find_node_id(&cg, "SettingsEditable").await;
+
+    let hierarchy = handle_tool_call(
+        &cg,
+        "tracedecay_type_hierarchy",
+        json!({"node_id": parent_id, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+    assert!(
+        hierarchy["tree"]
+            .as_str()
+            .unwrap()
+            .contains("extends SettingsUnderReview"),
+        "interface child missing from hierarchy: {hierarchy}"
+    );
+
+    let depth = handle_tool_call(
+        &cg,
+        "tracedecay_inheritance_depth",
+        json!({"path": "src", "limit": 10}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let depth: Value = serde_json::from_str(extract_text(&depth.value)).unwrap();
+    let ranking = depth["ranking"].as_array().unwrap();
+    assert_eq!(
+        ranking
+            .iter()
+            .find(|item| item["name"] == "SettingsUnderReview")
+            .and_then(|item| item["depth"].as_u64()),
+        Some(1),
+        "unexpected interface depth ranking: {ranking:?}"
+    );
+    assert!(
+        ranking
+            .iter()
+            .all(|item| item["name"] != "helper" && item["name"] != "unrelated"),
+        "non-hierarchy symbols leaked into inheritance depth: {ranking:?}"
+    );
+
+    for (parent, relation, child) in [
+        ("GenericEditable", "extends", "GenericReview"),
+        ("Renderer", "implements", "Screen"),
+    ] {
+        let parent_id = find_node_id(&cg, parent).await;
+        let hierarchy = handle_tool_call(
+            &cg,
+            "tracedecay_type_hierarchy",
+            json!({"node_id": parent_id, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+        let expected = format!("{relation} {child}");
+        assert!(
+            hierarchy["tree"].as_str().unwrap().contains(&expected),
+            "{expected} missing from hierarchy: {hierarchy}"
+        );
+    }
+
+    let exact = handle_tool_call(
+        &cg,
+        "tracedecay_find_exact_symbol",
+        json!({"name": "Base", "limit": 20}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let exact: Value = serde_json::from_str(extract_text(&exact.value)).unwrap();
+    let matches = exact["matches"].as_array().unwrap();
+    let namespace_id = |namespace: &str| {
+        matches
+            .iter()
+            .find(|item| {
+                item["qualified_name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with(&format!("::{namespace}::Base")))
+            })
+            .and_then(|item| item["id"].as_str())
+            .unwrap_or_else(|| panic!("{namespace}.Base missing from exact symbols: {exact}"))
+    };
+    for (namespace, contains_child) in [("left", false), ("right", true)] {
+        let hierarchy = handle_tool_call(
+            &cg,
+            "tracedecay_type_hierarchy",
+            json!({"node_id": namespace_id(namespace), "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
+        assert_eq!(
+            hierarchy["tree"]
+                .as_str()
+                .unwrap()
+                .contains("extends ScopedReview"),
+            contains_child,
+            "qualified parent bound to the wrong namespace: {hierarchy}"
+        );
+    }
+}
+
 /// `tracedecay_circular` must emit *disjoint* SCCs — no file should appear
 /// in more than one cycle entry. Cycles "sharing long tails" mean the SCC
 /// condensation step is broken. This stress test wires up many disjoint
@@ -2955,63 +3294,6 @@ async fn pr_context_collapses_cargo_toml_keys() {
     );
 }
 
-/// `tracedecay_unused_imports` must flag genuinely unused identifiers
-/// inside grouped `use foo::{A, B}` imports. Without per-identifier
-/// splitting, the heuristic never flags anything from a grouped import
-/// (`use std::collections::{HashMap, HashSet, BTreeMap};`).
-#[tokio::test]
-async fn unused_imports_handles_grouped_use() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    fs::create_dir_all(&project_root).unwrap();
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-use std::collections::{HashMap, HashSet};
-
-pub fn used() -> HashMap<u32, u32> { HashMap::new() }
-"#,
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(project).await;
-    let result = handle_tool_call(&cg, "tracedecay_unused_imports", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    let imports = output["imports"].as_array().unwrap();
-    let payloads: Vec<String> = imports
-        .iter()
-        .map(|u| {
-            format!(
-                "{}::{}",
-                u["name"].as_str().unwrap_or(""),
-                u["unused"].as_str().unwrap_or("")
-            )
-        })
-        .collect();
-    let mentions_hashset = imports.iter().any(|u| {
-        u["unused"].as_str().is_some_and(|s| s.contains("HashSet"))
-            || u["name"].as_str().is_some_and(|n| n.contains("HashSet"))
-    });
-    assert!(
-        mentions_hashset,
-        "HashSet from grouped use should be reported as unused; got {payloads:?}"
-    );
-    // Critically, the *used* identifier HashMap must NOT be reported. If the
-    // handler treats the whole grouped use as one opaque identifier it'll
-    // either flag both or neither — both modes are wrong.
-    let any_falsely_flags_hashmap = imports
-        .iter()
-        .any(|u| u["unused"].as_str().is_some_and(|s| s == "HashMap"));
-    assert!(
-        !any_falsely_flags_hashmap,
-        "HashMap is used (HashMap::new()) and must not appear in `unused`; got {payloads:?}"
-    );
-}
-
 /// `tracedecay_dead_code` must not treat non-reference edges like
 /// `annotates` or `derives_macro` as "this function is alive" evidence. A
 /// private helper with no callers but an `#[inline]` (or any other
@@ -3124,4 +3406,159 @@ async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
         !text.contains("safe_add"),
         "safe code should produce no findings: {text}"
     );
+}
+
+#[tokio::test]
+async fn field_sites_applies_the_qualified_field_owner() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        r#"
+pub struct Target { pub value: u32, pub enabled: bool }
+pub struct Other { pub value: u32 }
+
+impl Target {
+    pub fn read_both(&self, other: &Other) -> u32 {
+        let target_value = self.value;
+        let other_value = other.value;
+        target_value + other_value
+    }
+}
+
+pub fn read_both(target: &Target, other: &Other) -> u32 {
+    let target_value = target.value;
+    let other_value = other.value;
+    target_value + other_value
+}
+pub fn read_when_enabled(target: &Target) -> u32 {
+    if target.enabled { target.value } else { 0 }
+}
+pub fn write_both(target: &mut Target, other: &mut Other) {
+    target.value = 7;
+    other.value = 9;
+}
+"#,
+    )
+    .unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_field_sites",
+        json!({"field": "Target::value", "limit": 20, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(output["qualifier_applied"], true, "payload: {output}");
+    assert_eq!(output["read_count"], 3, "payload: {output}");
+    assert_eq!(output["write_count"], 1, "payload: {output}");
+    assert!(
+        output["read_sites"]
+            .as_array()
+            .is_some_and(|sites| sites.iter().all(|site| site["snippet"]
+                .as_str()
+                .is_some_and(|snippet| !snippet.contains("other.value")))),
+        "payload: {output}"
+    );
+    assert!(
+        output["write_sites"][0]["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.contains("target.value")),
+        "payload: {output}"
+    );
+
+    for shadow_source in [
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn closure_then_sibling(target: &Target) -> u32 {
+    let read_other = |target: Other| target.value;
+    read_other(Other { value: 3 }) + target.value
+}
+"#,
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn if_let_then_sibling(target: &Target, other: Option<Other>) -> u32 {
+    let read_other = if let Some(target) = other { target.value } else { 0 };
+    read_other + target.value
+}
+"#,
+        r#"
+pub struct Target { pub value: u32 }
+pub struct Other { pub value: u32 }
+
+pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 {
+    let mut read_other = 0;
+    while let Some(target) = other.take() { read_other += target.value; }
+    read_other + target.value
+}
+"#,
+    ] {
+        let shadow_dir = test_temp_dir();
+        let shadow_root = shadow_dir.path().join("project");
+        fs::create_dir_all(shadow_root.join("src")).unwrap();
+        fs::write(shadow_root.join("src/lib.rs"), shadow_source).unwrap();
+        let (shadow_host, _shadow_env) = init_test_project(&shadow_root).await;
+        let error = expect_tool_error(
+            handle_tool_call(
+                &shadow_host,
+                "tracedecay_field_sites",
+                json!({"field": "Target::value", "format": "json"}),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            error.contains("verified-field-qualifier-unavailable"),
+            "shadowed receiver must not be attributed to the parameter owner: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn field_sites_ignores_field_text_in_real_rust_literals() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tracedecay-session-memory/src/monitor_ring.rs"
+        )),
+    )
+    .unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_field_sites",
+        json!({"field": "MmapReader::mmap", "limit": 100, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(output["qualifier_applied"], true, "payload: {output}");
+    assert_eq!(output["read_count"], 9, "payload: {output}");
+    assert_eq!(output["write_count"], 1, "payload: {output}");
+    assert!(
+        output["read_sites"]
+            .as_array()
+            .is_some_and(|sites| sites.iter().all(|site| site["line"] != 38)),
+        "string literal was reported as a field site: {output}"
+    );
+    assert_eq!(output["write_sites"][0]["line"], 256, "payload: {output}");
 }

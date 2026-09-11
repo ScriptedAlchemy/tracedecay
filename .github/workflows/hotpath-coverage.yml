@@ -32,6 +32,10 @@ on:
       - ".cargo/**"
       - ".config/nextest.toml"
       - ".github/workflows/hotpath-coverage.yml"
+      - "scripts/check-rust-cache-lineage.py"
+      - "scripts/drop-prefix-restored-rust-artifacts.sh"
+      - "scripts/rust_cache_lineage.py"
+      - "scripts/test-rust-cache-lineage.py"
   workflow_dispatch:
 
 concurrency:
@@ -46,6 +50,9 @@ env:
   # themselves before building a guard, and this makes that explicit at the
   # job boundary too.
   HOTPATH_METRICS_SERVER_OFF: "1"
+  # rustc writes .rmeta read-only and updates them in place when incremental
+  # compilation is on. A restored rust-cache blob then fails the compile.
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   slice-tests:
@@ -55,22 +62,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
 
-      - name: kache compiler cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        shell: bash
+      - name: Check rust-cache restore lineage
         run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+          python3 scripts/test-rust-cache-lineage.py
+          python3 scripts/check-rust-cache-lineage.py
+
+      # Unique v1-rust shared-key so this job never prefix-restores another
+      # lane's (or a kache-era v0-rust) compiler tree. rustc writes .rmeta
+      # read-only; a lockfile-prefix restore of those files fails the compile.
+      - name: Cache Rust dependency artifacts
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: hotpath-coverage-slice
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Discard prefix-restored compiler artifacts
+        run: scripts/drop-prefix-restored-rust-artifacts.sh "${{ steps.rust-cache.outputs.cache-hit }}"
 
       # `test-helpers` only unlocks the registered-store harness the
       # coverage test drives; it gates no production code.
@@ -92,22 +103,18 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
 
-      - name: kache compiler cache
-        uses: actions/cache@v4
+      - name: Cache Rust dependency artifacts
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        shell: bash
-        run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+          prefix-key: v1-rust
+          shared-key: hotpath-coverage-sessions
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Discard prefix-restored compiler artifacts
+        run: scripts/drop-prefix-restored-rust-artifacts.sh "${{ steps.rust-cache.outputs.cache-hit }}"
 
       - name: Sessions slice tests (hotpath off)
         run: |

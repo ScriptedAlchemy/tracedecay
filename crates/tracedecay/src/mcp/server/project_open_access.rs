@@ -1,24 +1,12 @@
 //! Project-open authority accessors installed on an MCP server.
 
-use super::{
-    CodeGraphProjectionReadPort, CodeIndexIgnoredDependencyAdmissionPort, McpServer,
-    SourceEditExecutor, SourceEditReconciliationExecutor, SourceEditRollbackExecutor,
-};
+use super::{CodeGraphProjectionReadPort, CodeIndexIgnoredDependencyAdmissionPort, McpServer};
 
 impl McpServer {
-    /// Installs the sole source-edit invocation owner resolved during
-    /// project-open admission. Reinstallation is rejected so a later caller
-    /// cannot replace the authority behind an already-serving MCP instance.
-    pub(crate) fn install_source_edit_executor(
+    pub(crate) fn daemon_invocation_service(
         &self,
-        executor: SourceEditExecutor,
-    ) -> std::result::Result<(), SourceEditExecutor> {
-        self.source_edit_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
+    ) -> Option<&tracedecay_daemon_service::DaemonInvocationService> {
+        self.daemon_invocation_service.as_ref()
     }
 
     pub(crate) fn code_graph_projection_read_port(&self) -> Option<CodeGraphProjectionReadPort> {
@@ -48,29 +36,5 @@ impl McpServer {
         &self,
     ) -> Option<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader> {
         self.generation_census_reader.get().cloned()
-    }
-
-    pub(crate) fn install_source_edit_reconciliation_executor(
-        &self,
-        executor: SourceEditReconciliationExecutor,
-    ) -> std::result::Result<(), SourceEditReconciliationExecutor> {
-        self.source_edit_reconciliation_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
-    }
-
-    pub(crate) fn install_source_edit_rollback_executor(
-        &self,
-        executor: SourceEditRollbackExecutor,
-    ) -> std::result::Result<(), SourceEditRollbackExecutor> {
-        self.source_edit_rollback_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
     }
 }

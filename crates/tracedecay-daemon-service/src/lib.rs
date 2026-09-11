@@ -5,6 +5,12 @@
 //! usecases, application, agent-hosts, and code-index-runtime, and below the
 //! composition root. OS lifecycle management (install/start/stop/probe) lives
 //! in `tracedecay-daemon-control`.
+//!
+//! [`application_surface`] is the transport adaptation shared by HTTP, MCP,
+//! and the CLI: it resolves catalog bindings, normalizes request controls, and
+//! projects canonical application envelopes. Route descriptors and encoding
+//! stay in `tracedecay-api`; the composition root only injects the
+//! authenticated executor into the routers assembled here.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -50,12 +56,27 @@
 /// crate remains the cycle-free owner shared with code-index runtime.
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
 
+pub mod application_surface;
+pub mod callable_code_authorization;
 pub mod invocation;
+mod mcp_project_registry;
+mod mcp_workflow_index;
+pub mod profile_host_admission_replay;
+pub mod project_owner_registration;
 pub mod project_runtime;
+pub mod query_authority_provider;
+pub mod query_mcp_admission;
+pub mod remote_http_transport;
+mod remote_protocol;
 pub mod request_cancellation;
+mod shutdown_coordination;
 
 mod multi_root;
 
+pub use callable_code_authorization::{
+    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission, GRANT_HORIZON,
+    daemon_owned_project_source_access_at, project_open_source_access_authority,
+};
 pub use invocation::semantic_evaluation::SemanticInvocationControlV1;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use invocation::{
@@ -66,27 +87,36 @@ pub use invocation::{
     retain_lsp_delivery_attempt,
 };
 pub use invocation::{
-    BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
-    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
-    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrar,
-    DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationGrantAuthority,
-    DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,
-    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackInvocationOwner,
-    DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationService, DaemonLspInvocationOwner, DaemonLspOwnerRegistrar,
-    DaemonNativeIntegrationRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrar,
-    DaemonPrimitiveRuntimeRegistrationError, DaemonRetainedRuntimeRegistrar,
-    DaemonSemanticOwnerRuntimeRegistrar, DaemonSemanticRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrationError, DaemonWorkProposalRoutingAuthorityV1,
-    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, HookOrchestrationRequestV1,
-    HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1, LSP_WORKSPACE_CAPABILITY_ID_V1,
-    LSP_WORKSPACE_USE_CASE_ID_V1, LspDeliverySettlementAdmissionV1, MAX_COALESCED_HOOK_COMPLETIONS,
-    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredRetainedRequestContextError, RegisteredRetainedRuntime, RegisteredWorkRuntime,
-    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    BoundedHookOrchestratorV1, ConfigurationRuntimeRefreshFuture, ConfigurationRuntimeRefreshPort,
+    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
+    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
+    DaemonConfigurationGrantAuthority, DaemonConfigurationRuntimeRegistrar,
+    DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
+    DaemonFeedbackInvocationOwner, DaemonFeedbackRuntimeRegistrar,
+    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspInvocationOwner,
+    DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
+    DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
+    DaemonRetainedRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
+    DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
+    DaemonSourceEditOwnerRegistrationError, DaemonWorkProposalRoutingAuthorityV1,
+    DaemonWorkRuntimeRegistrar, FeedbackCycleRuntimeBuilderV1, HookOrchestrationAdmissionV1,
+    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
+    LSP_WORKSPACE_CAPABILITY_ID_V1, LSP_WORKSPACE_USE_CASE_ID_V1, LspDeliverySettlementAdmissionV1,
+    MAX_COALESCED_HOOK_COMPLETIONS, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
+    RegisteredFeedbackRuntime, RegisteredRetainedRequestContextError, RegisteredRetainedRuntime,
+    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
     callable_code_request_context, daemon_operation_event_authority,
     register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
+};
+pub use mcp_project_registry::DaemonProjectRegistryReadService;
+pub use mcp_workflow_index::DaemonWorkflowIndexReadService;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use profile_host_admission_replay::BootstrapCompletion;
+pub use profile_host_admission_replay::{
+    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
+    ProfileHostAdmissionReplayPass, ProfileHostAdmissionReplayRegistry,
 };
 pub use project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
@@ -97,7 +127,17 @@ pub use project_runtime::{
     SemanticOwnerRegistrationSignalsV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
     StoreObservabilityRegistryV1,
 };
+pub use query_authority_provider::{
+    DaemonQueryActivationRegistrarV1, DaemonQueryAuthorityProviderV1,
+    QueryAuthorityProviderStatusV1, QueryAuthorityUpdateErrorV1,
+};
+pub use query_mcp_admission::{
+    QUERY_MCP_READ_CAPABILITY_V1, QueryMcpAdmissionUnavailableV1, QueryMcpReadAdmissionProviderV1,
+    QueryMcpReadAdmissionV1, admit_query_mcp_read,
+};
+pub use remote_protocol::build_daemon_remote_protocol_router;
 pub use request_cancellation::{Lease, RequestCancellationRegistryV1};
+pub use shutdown_coordination::ShutdownCoordinatorV1;
 pub use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonFeedbackResult,
     DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,

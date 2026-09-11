@@ -12,18 +12,21 @@ use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, CallableCodeSurfaceMeta,
-    CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest, parse_application_surface_request,
-    resolve_http_application_surface,
-};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_contracts::retrieval::SymbolGraphScope;
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
     ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
 };
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    parse_application_surface_request,
+};
 use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay_daemon_service::application_surface::{
+    CallableCodeSurfaceMeta, CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest,
+    resolve_http_application_surface,
+};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Every surface pins its page size to ten rows, so a query with more matches
@@ -1205,7 +1208,6 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                 serde_json::json!({
                     "node_id": anchors.sink,
                     "maximum_depth": 1,
-                    "resolve_trait_dispatch": false,
                     "scope": symbol_graph_scope(),
                     "meta": callable_code_meta(cursor),
                 })

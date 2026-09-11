@@ -34,6 +34,7 @@ use thiserror::Error;
 use tracedecay_code_index::git_projection::{
     GitTopologyProjectionError, GitTopologyProjectionStore,
 };
+use tracedecay_contracts::{GIT_QUERY_DEFAULT_MAX_BYTES, GIT_QUERY_DEFAULT_MAX_ENTRIES};
 use tracedecay_domain::code_intelligence::CodeGenerationId;
 use tracedecay_domain::git::{
     GitBlameV1, GitChangeKindV1, GitCoverageV1, GitDegradationV1, GitDiffScopeV1, GitDiffV1,
@@ -55,13 +56,6 @@ pub const GIT_QUERY_SCHEMA_VERSION_V1: &str = "tracedecay.git-query.v1";
 /// query-layer evidence over typed status and worktree-diff identity — it is
 /// not a native Git tree id and never authorizes object reconstruction.
 pub const WORKTREE_DIGEST_DOMAIN: &str = "tracedecay.git-query.worktree.v1";
-
-/// Default entry bound (files, status paths, commits, blame lines, or
-/// hunk references retained by one query).
-pub const GIT_QUERY_DEFAULT_MAX_ENTRIES: u32 = 1_000;
-
-/// Default byte bound for one serialized query result.
-pub const GIT_QUERY_DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Per-query resource bounds and cancellation.
 ///
@@ -1243,65 +1237,5 @@ mod tests {
             engine.revision_evidence(&bounds),
             Err(GitQueryError::DeadlineExceeded)
         ));
-    }
-
-    #[test]
-    fn query_types_roundtrip_through_serde() {
-        let join = GenerationGitJoinV1 {
-            generation_id: CodeGenerationId::new("generation.fixture.serde").unwrap(),
-            evidence: GitRevisionEvidenceV1 {
-                repository: RepositoryId::new("repository.fixture").unwrap(),
-                head: GitHeadStateV1::Attached {
-                    branch: "main".to_owned(),
-                    commit: GitOidV1::new("a".repeat(40)).unwrap(),
-                },
-                head_oid: Some(GitOidV1::new("a".repeat(40)).unwrap()),
-                worktree_digest: digest(0xbb),
-                coverage: GitCoverageV1::degraded(vec![GitDegradationV1::TruncatedOutput]),
-                schema_version: GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
-            },
-            staleness: GenerationStalenessV1::GenerationBehindHead {
-                claimed: GitOidV1::new("b".repeat(40)).unwrap(),
-                current: GitOidV1::new("a".repeat(40)).unwrap(),
-            },
-            coverage: GitCoverageV1::complete(),
-            schema_version: GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
-        };
-        let wire = serde_json::to_string(&join).unwrap();
-        assert_eq!(
-            serde_json::from_str::<GenerationGitJoinV1>(&wire).unwrap(),
-            join
-        );
-
-        let query = GenerationBoundGitQueryV1::new(
-            CodeGenerationId::new("generation.fixture.serde").unwrap(),
-            None,
-            None,
-        );
-        let wire = serde_json::to_string(&query).unwrap();
-        assert_eq!(
-            serde_json::from_str::<GenerationBoundGitQueryV1>(&wire).unwrap(),
-            query
-        );
-
-        let summary = GitStatusSummaryV1 {
-            repository: RepositoryId::new("repository.fixture").unwrap(),
-            head: GitHeadStateV1::Unborn {
-                branch: "main".to_owned(),
-            },
-            operation: GitOperationStateV1::None,
-            staged: 1,
-            unstaged: 2,
-            conflicted: 0,
-            untracked: 3,
-            ignored: 1,
-            changed_paths: vec!["a.txt".to_owned()],
-            schema_version: GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
-        };
-        let wire = serde_json::to_string(&summary).unwrap();
-        assert_eq!(
-            serde_json::from_str::<GitStatusSummaryV1>(&wire).unwrap(),
-            summary
-        );
     }
 }

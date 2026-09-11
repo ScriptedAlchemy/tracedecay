@@ -6,6 +6,7 @@
 //! composition lives here — above global-db — rather than inside it.
 
 mod registered;
+pub mod work_evidence_retrieval;
 pub mod work_topology;
 pub mod workflow_topology;
 
@@ -13,4 +14,11 @@ pub use registered::{
     RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1, RegisteredWorkTopologyV1,
     RegisteredWorkflowApplicationServicesV1, RegisteredWorkflowTopologyV1,
     work_intelligence_service,
+};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use work_evidence_retrieval::tests::{StaticFederatedAuthority, federated_authority};
+pub use work_evidence_retrieval::{
+    WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
+    WorkTaskSessionAdmittedRetrievalFutureV1, WorkTaskSessionAdmittedRetrievalPortV1,
+    WorkTaskSessionEvidenceRetrievalV1,
 };

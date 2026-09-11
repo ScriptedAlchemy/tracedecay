@@ -18,6 +18,30 @@ type SchemaInventory = BTreeMap<String, SchemaObject>;
 static EXPECTED_FINAL_SHAPE: LazyLock<std::result::Result<SchemaInventory, String>> =
     LazyLock::new(build_expected_final_shape);
 
+pub(super) const SHIPPED_V35_ALIAS_UPDATE_TRIGGER: &str = "
+    CREATE TRIGGER retrieval_anchor_aliases_immutable_update
+    BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+    END;
+";
+
+static SHIPPED_V35_ALIAS_UPDATE_OBJECT: LazyLock<std::result::Result<SchemaObject, String>> =
+    LazyLock::new(build_shipped_v35_alias_update_object);
+
+fn build_shipped_v35_alias_update_object() -> std::result::Result<SchemaObject, String> {
+    let connection = rusqlite::Connection::open_in_memory()
+        .map_err(|error| format!("failed to open shipped-v35 trigger fixture: {error}"))?;
+    connection
+        .execute_batch("CREATE TABLE retrieval_anchor_aliases(anchor_id TEXT);")
+        .map_err(|error| format!("failed to create shipped-v35 trigger table: {error}"))?;
+    connection
+        .execute_batch(SHIPPED_V35_ALIAS_UPDATE_TRIGGER)
+        .map_err(|error| format!("failed to create shipped-v35 trigger: {error}"))?;
+    read_rusqlite_inventory(&connection)?
+        .remove("retrieval_anchor_aliases_immutable_update")
+        .ok_or_else(|| "shipped-v35 trigger fixture did not create its trigger".to_owned())
+}
+
 fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> {
     let connection = rusqlite::Connection::open_in_memory()
         .map_err(|error| format!("failed to open canonical in-memory schema: {error}"))?;
@@ -42,6 +66,7 @@ fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> 
             .map_err(|error| format!("failed to install canonical memory schema: {error}"))?;
     }
     for schema in [
+        tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL,
         crate::db::evidence_assembly::EVIDENCE_ASSEMBLY_SCHEMA,
         crate::db::evidence_assembly::EVIDENCE_ASSEMBLY_IMMUTABILITY,
         tracedecay_rusqlite_runtime::repository::EXTERNAL_SOURCE_SCHEMA_V1,
@@ -97,6 +122,16 @@ fn read_rusqlite_inventory(
         }
     }
     Ok(inventory)
+}
+
+pub(super) fn require_admissible_final_shape_rusqlite(
+    connection: &rusqlite::Connection,
+) -> Result<()> {
+    let actual = read_rusqlite_inventory(connection).map_err(database_error)?;
+    let shipped = SHIPPED_V35_ALIAS_UPDATE_OBJECT
+        .as_ref()
+        .map_err(|error| database_error(error.clone()))?;
+    require_final_shape_inventory(&actual, Some(shipped)).map(|_| ())
 }
 
 async fn read_inventory(conn: &impl QueryExecutor) -> Result<SchemaInventory> {
@@ -159,7 +194,8 @@ fn reset_required(reason: impl Into<String>) -> TraceDecayError {
     TraceDecayError::reset_required(
         "SQLite store",
         format!(
-            "{}; remove the store directory and let this binary create the exact final shape",
+            "{}; run `tracedecay storage reset-project-store` with this store's \
+             `--project-root` or `--project-id`, then let this binary create the exact final shape",
             reason.into()
         ),
     )
@@ -215,9 +251,36 @@ pub(super) async fn require_final_shape_except_payload_digests(
 
 pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Result<()> {
     let actual = read_inventory(conn).await?;
+    require_final_shape_inventory(&actual, None)?;
+    Ok(())
+}
+
+/// Admits only the exact current shape or the exact shape emitted by the
+/// shipped v35 binary before alias-target correction was supported.
+///
+/// The returned flag identifies the one known trigger replacement the writer
+/// may perform. Every other missing, additional, or byte-different schema
+/// object remains reset-required.
+pub(super) async fn require_exact_final_shape_or_shipped_v35_alias_trigger(
+    conn: &impl QueryExecutor,
+) -> Result<bool> {
+    let actual = read_inventory(conn).await?;
+    let shipped = SHIPPED_V35_ALIAS_UPDATE_OBJECT
+        .as_ref()
+        .map_err(|error| database_error(error.clone()))?;
+    require_final_shape_inventory(&actual, Some(shipped))
+}
+
+fn require_final_shape_inventory(
+    actual: &SchemaInventory,
+    shipped_v35_alias_trigger: Option<&SchemaObject>,
+) -> Result<bool> {
+    const TRIGGER: &str = "retrieval_anchor_aliases_immutable_update";
+
     let expected = EXPECTED_FINAL_SHAPE
         .as_ref()
         .map_err(|error| database_error(error.clone()))?;
+    let mut shipped_trigger_found = false;
 
     for (name, expected_object) in expected {
         let Some(actual_object) = actual.get(name) else {
@@ -227,10 +290,14 @@ pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Resu
             )));
         };
         if actual_object != expected_object {
-            return Err(reset_required(format!(
-                "database schema has incompatible {} '{name}'",
-                expected_object.object_type
-            )));
+            if name == TRIGGER && shipped_v35_alias_trigger == Some(actual_object) {
+                shipped_trigger_found = true;
+            } else {
+                return Err(reset_required(format!(
+                    "database schema has incompatible {} '{name}'",
+                    expected_object.object_type
+                )));
+            }
         }
     }
     if let Some((name, object)) = actual
@@ -242,5 +309,5 @@ pub(super) async fn require_exact_final_shape(conn: &impl QueryExecutor) -> Resu
             object.object_type
         )));
     }
-    Ok(())
+    Ok(shipped_trigger_found)
 }

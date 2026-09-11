@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tracedecay_code_extraction::{LanguageExtractor, TypeScriptExtractor};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tree_sitter::Node;
 
 use super::{
@@ -116,12 +117,15 @@ impl AliasRule {
 
 /// Walks every discovered npm package's import graph and reports the source
 /// files no entry point reaches.
-pub(super) fn audit(files: &ProjectFiles) -> EcosystemAudit {
+pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     let project_root = files.root();
     let manifest_paths = files.named("package.json");
     let source_files = files.with_extensions(&SOURCE_EXTENSIONS);
     if manifest_paths.is_empty() && source_files.is_empty() {
-        return EcosystemAudit::not_present("typescript", TYPESCRIPT_VERDICT);
+        return Ok(EcosystemAudit::not_present(
+            "typescript",
+            TYPESCRIPT_VERDICT,
+        ));
     }
 
     let owned_files = source_files.iter().copied().collect::<HashSet<&Path>>();
@@ -133,7 +137,7 @@ pub(super) fn audit(files: &ProjectFiles) -> EcosystemAudit {
     let packages = package_dirs
         .iter()
         .map(|dir| node_package(project_root, dir, &owned_files, &package_dirs))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     let mut mounted: HashSet<PathBuf> = HashSet::new();
     let mut entry_point_count = 0usize;
@@ -170,7 +174,7 @@ pub(super) fn audit(files: &ProjectFiles) -> EcosystemAudit {
     }
 
     unmounted.sort_by(|left, right| left.file.cmp(&right.file));
-    EcosystemAudit {
+    Ok(EcosystemAudit {
         ecosystem: "typescript",
         status: EcosystemStatus::Audited,
         package_count: packages.len(),
@@ -183,7 +187,7 @@ pub(super) fn audit(files: &ProjectFiles) -> EcosystemAudit {
         note: None,
         excluded_globs: Vec::new(),
         unmounted,
-    }
+    })
 }
 
 /// The manifest directory that owns `file`: the deepest one above it.
@@ -206,7 +210,7 @@ fn node_package(
     dir: &Path,
     owned: &HashSet<&Path>,
     package_dirs: &[PathBuf],
-) -> NodePackage {
+) -> Result<NodePackage> {
     let manifest_path = dir.join("package.json");
     let manifest = std::fs::read_to_string(&manifest_path)
         .ok()
@@ -281,10 +285,18 @@ fn node_package(
         .filter(|file| deepest_package_dir(package_dirs, file) == Some(dir))
     {
         entries.insert((*candidate).to_path_buf());
-        let Ok(source) = std::fs::read_to_string(candidate) else {
-            continue;
-        };
-        for literal in string_literals(&source) {
+        let source = std::fs::read_to_string(candidate).map_err(|error| TraceDecayError::File {
+            message: format!("failed to read TypeScript config: {error}"),
+            path: relative_display(project_root, candidate),
+        })?;
+        let literals =
+            config_string_literals(candidate, &source).ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "TypeScript config {} could not be parsed without syntax errors",
+                    relative_display(project_root, candidate)
+                ),
+            })?;
+        for literal in literals {
             for resolved in resolve_relative(dir, &literal) {
                 if owned.contains(resolved.as_path()) {
                     entries.insert(resolved);
@@ -303,14 +315,14 @@ fn node_package(
         entries.insert((*candidate).to_path_buf());
     }
 
-    NodePackage {
+    Ok(NodePackage {
         name,
         dir: dir.to_path_buf(),
         manifest: relative_display(project_root, &manifest_path),
         entries: entries.into_iter().collect(),
         aliases,
         base_urls,
-    }
+    })
 }
 
 /// Every string value anywhere inside a JSON value — how `exports` and `bin`
@@ -519,38 +531,44 @@ fn strip_json_comments(text: &str) -> String {
     out
 }
 
-/// Every quoted literal in a source file.
-///
-/// Used only on config files, where the alternative is executing someone's
-/// build configuration to learn which file it names as an entry.
-fn string_literals(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut chars = source.chars().peekable();
-    while let Some(current) = chars.next() {
-        if !matches!(current, '"' | '\'' | '`') {
-            continue;
-        }
-        let mut literal = String::new();
-        let mut terminated = false;
-        while let Some(inner) = chars.next() {
-            match inner {
-                '\\' => {
-                    if let Some(escaped) = chars.next() {
-                        literal.push(escaped);
-                    }
-                }
-                other if other == current => {
-                    terminated = true;
-                    break;
-                }
-                other => literal.push(other),
-            }
-        }
-        if terminated && !literal.is_empty() {
-            out.push(literal);
-        }
+/// Every static string literal in a config file's syntax tree.
+fn config_string_literals(file: &Path, source: &str) -> Option<Vec<String>> {
+    let tree = parse_typescript(file, source)?;
+    if tree.root_node().has_error() {
+        return None;
     }
-    out
+    let mut out = Vec::new();
+    collect_config_string_literals(source, tree.root_node(), &mut out);
+    Some(out)
+}
+
+fn collect_config_string_literals(source: &str, node: Node<'_>, out: &mut Vec<String>) {
+    match node.kind() {
+        "string" => {
+            if let Some(literal) = node.utf8_text(source.as_bytes()).ok().and_then(unquote) {
+                out.push(literal);
+            }
+            return;
+        }
+        "template_string" => {
+            let mut cursor = node.walk();
+            let is_static = node
+                .named_children(&mut cursor)
+                .all(|child| child.kind() != "template_substitution");
+            if is_static
+                && let Some(literal) = node.utf8_text(source.as_bytes()).ok().and_then(unquote)
+            {
+                out.push(literal);
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_config_string_literals(source, child, out);
+    }
 }
 
 /// Breadth-first traversal of one package's import graph from its entry points.
@@ -781,7 +799,7 @@ mod tests {
     use super::{AliasRule, EcosystemAudit, audit, strip_json_comments};
 
     fn audit_typescript(root: &Path) -> EcosystemAudit {
-        audit(&project(root))
+        audit(&project(root)).expect("TypeScript audit")
     }
 
     fn unmounted_paths(audit: &EcosystemAudit) -> Vec<&str> {
@@ -875,6 +893,29 @@ mod tests {
         assert_eq!(
             unmounted_paths(&audit_typescript(root)),
             vec!["src/app/stale.ts"]
+        );
+    }
+
+    #[test]
+    fn malformed_config_does_not_produce_authoritative_findings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        write(root, "package.json", "{\"name\":\"web\",\"private\":true}");
+        write(
+            root,
+            "rsbuild.config.ts",
+            "export default { source: { entry: './src/index.ts' };\n",
+        );
+        write(root, "src/index.ts", "export const app = 1;\n");
+
+        let Err(error) = audit(&project(root)) else {
+            panic!("malformed config must make the audit unavailable");
+        };
+        assert!(
+            error.to_string().contains(
+                "TypeScript config rsbuild.config.ts could not be parsed without syntax errors"
+            ),
+            "{error}"
         );
     }
 

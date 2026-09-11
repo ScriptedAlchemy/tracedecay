@@ -200,6 +200,7 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
         position: 0,
         generation: 0,
         max_new_bytes: Some(1024),
+        max_frames: None,
         resume: None,
         preparation: false.into(),
     };
@@ -829,6 +830,7 @@ fn speculative_capacity_is_one_global_quota_across_prefetch_generations() {
         position: 0,
         generation: 0,
         max_new_bytes: Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
+        max_frames: None,
         resume: None,
         preparation: true.into(),
     };

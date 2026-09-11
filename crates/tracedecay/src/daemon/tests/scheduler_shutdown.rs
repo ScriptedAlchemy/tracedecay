@@ -6,6 +6,152 @@ const MAINTENANCE_TEST_DEADLINE: std::time::Duration = std::time::Duration::from
 
 #[cfg(unix)]
 #[tokio::test]
+async fn pr_autotrack_is_cancelled_before_invocation_join() {
+    let engine = DaemonEngine::default();
+    let task = crate::daemon::pr_autotrack::spawn_with_administration(
+        engine.store_administration.clone(),
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+    );
+    let cancellation = task.cancellation();
+    let engine = engine.with_pr_autotrack_task(task).await;
+
+    let owner_phases = engine.shutdown_owner_phases().await;
+    assert!(!cancellation.is_cancelled());
+
+    let prepared =
+        crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(owner_phases);
+    assert!(
+        cancellation.is_cancelled(),
+        "PR auto-track must be cancelled before invocation join begins"
+    );
+
+    let _ = prepared
+        .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
+    let engine = DaemonEngine::default();
+    let administration = engine.store_administration.clone();
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+    let admission = administration
+        .admit_manual_branch_publication(|_, admitted| async move {
+            let _ = admitted.send(());
+            let _ = started_sender.send(());
+            let _ = release_receiver.await;
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
+        })
+        .await
+        .expect("manual branch publication is admitted");
+    assert_eq!(
+        admission,
+        tracedecay_runtime_core::branch::BranchAddOutcome::Deferred,
+        "branch add must return while exact publication continues"
+    );
+    started_receiver
+        .await
+        .expect("manual branch publication starts");
+
+    let mut owner_phases = engine.shutdown_owner_phases().await;
+    let manual_branch_phase = owner_phases.remove(0);
+    let prepared = crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(vec![
+        manual_branch_phase,
+    ]);
+    let denied = engine
+        .store_administration
+        .run_manual_branch_publication(|_| async {
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked)
+        })
+        .await
+        .expect_err("shutdown closes manual branch publication admission");
+    assert_eq!(
+        denied.project_route_context().map(|(reason, _, _)| reason),
+        Some("branch_tracking_failed")
+    );
+
+    let shutdown = tokio::spawn(async move {
+        prepared
+            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "daemon shutdown must retain the active manual branch publication"
+    );
+
+    let _ = release_sender.send(());
+    let receipt = shutdown.await.expect("daemon shutdown task joins");
+    assert!(
+        receipt.unfinished().is_empty(),
+        "manual branch publication shutdown must complete cleanly"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn stalled_manual_branch_publication_settles_before_shutdown_receipt() {
+    let engine = DaemonEngine::default();
+    let administration = engine.store_administration.clone();
+    let mutation_after_terminal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mutation = std::sync::Arc::clone(&mutation_after_terminal);
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let request = tokio::spawn(async move {
+        administration
+            .run_manual_branch_publication(
+                move |cancellation: tracedecay_runtime_core::cancellation::CancellationToken| async move {
+                let _ = started_sender.send(());
+                tokio::select! {
+                    () = cancellation.cancelled() => {
+                        Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                            "branch_tracking_failed",
+                            true,
+                            "manual branch publication cancelled by daemon shutdown",
+                        ))
+                    }
+                    () = tokio::time::sleep(std::time::Duration::from_mins(1)) => {
+                        mutation.store(true, std::sync::atomic::Ordering::Release);
+                        Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
+                    }
+                }
+            },
+            )
+            .await
+    });
+    started_receiver
+        .await
+        .expect("manual branch publication starts");
+
+    let prepared = crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(
+        engine.shutdown_owner_phases().await,
+    );
+    let shutdown = tokio::spawn(async move {
+        prepared
+            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(15))
+            .await
+    });
+    tokio::time::advance(std::time::Duration::from_secs(16)).await;
+    let receipt = shutdown.await.expect("shutdown joins");
+    assert!(
+        receipt.unfinished().is_empty(),
+        "cooperative cancellation must settle before the terminal receipt"
+    );
+    assert!(
+        request.await.expect("publication request joins").is_err(),
+        "cancelled publication must report failure"
+    );
+    tokio::time::advance(std::time::Duration::from_mins(1)).await;
+    assert!(
+        !mutation_after_terminal.load(std::sync::atomic::Ordering::Acquire),
+        "manual publication mutated state after shutdown terminal receipt"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
     let engine = DaemonEngine::default();
     let key = ProjectServerKey {
@@ -28,6 +174,7 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
         .insert(key, test_automation_scheduler_handle(task));
 
     engine.lifecycle.begin_draining();
+    engine.cancel_automation_schedulers();
     tokio::time::timeout(
         tokio::time::Duration::from_secs(1),
         engine.shutdown_automation_schedulers(),
@@ -89,7 +236,7 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
         "shutdown must transfer scheduler-map ownership to the tracked reaper"
     );
     assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
+        engine.store_administration.retirement_reaper_count(),
         1,
         "timed-out automation shutdown must retain one tracked join reaper"
     );
@@ -107,7 +254,7 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
                 .lock()
                 .await
                 .is_empty()
-                && engine.store_administration.retirement_reaper_count().await == 0
+                && engine.store_administration.retirement_reaper_count() == 0
             {
                 break;
             }
@@ -278,7 +425,7 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
         .await
         .expect("repeated automation retirement must reuse the tombstone");
     assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
+        engine.store_administration.retirement_reaper_count(),
         1,
         "repeated retirement must not add a second reaper"
     );
@@ -322,7 +469,7 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
         "the first reaper shutdown must be cancelled at its wait point"
     );
     assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
+        engine.store_administration.retirement_reaper_count(),
         1,
         "cancelled shutdown must leave registry ownership intact"
     );
@@ -356,10 +503,7 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
     tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, repeated.wait())
         .await
         .expect("repeated automation retirement did not complete");
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        0
-    );
+    assert_eq!(engine.store_administration.retirement_reaper_count(), 0);
     assert!(
         engine
             .store_administration
@@ -415,10 +559,7 @@ async fn deletion_drain_retains_already_transferred_maintenance_reaper_until_ret
             .await,
         "deletion must remain settling while a transferred owner can still write"
     );
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        1
-    );
+    assert_eq!(engine.store_administration.retirement_reaper_count(), 1);
     release.release();
     completed_rx.await.expect("maintenance owner completed");
     assert!(
@@ -429,10 +570,7 @@ async fn deletion_drain_retains_already_transferred_maintenance_reaper_until_ret
         "retry must join the retained retirement reaper"
     );
     retirement.wait().await;
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        0
-    );
+    assert_eq!(engine.store_administration.retirement_reaper_count(), 0);
 }
 
 #[cfg(unix)]
@@ -611,5 +749,105 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
     assert!(
         completed_without_gate,
         "normal scheduler shutdown must not queue behind unrelated writer administration"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_branch_publication_panic_survives_reaping_in_shutdown_receipt() {
+    let engine = DaemonEngine::default();
+    let failure = engine
+        .store_administration
+        .run_manual_branch_publication(|_| async { panic!("publication owner failed") })
+        .await;
+    assert!(failure.is_err());
+    engine
+        .store_administration
+        .run_manual_branch_publication(|_| async {
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::AlreadyTracked)
+        })
+        .await
+        .unwrap();
+    let mut phases = engine.shutdown_owner_phases().await;
+    let receipt =
+        crate::daemon::shutdown_coordination::prepare_shutdown_owner_phases(vec![phases.remove(0)])
+            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await;
+    assert!(
+        matches!(&receipt.owners[0].status, crate::daemon::shutdown_coordination::ShutdownStatus::Failed(reason) if reason.contains("failed to join"))
+    );
+}
+
+/// The dogfood supervisor gives the daemon a 5 s TERM grace. A background
+/// code-index reconcile that is still sealing when shutdown starts must be
+/// cancelled through its fence and joined inside that grace, not abandoned
+/// at the task-abort deadline and then waited for again at runtime teardown.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_grace() {
+    let home = TempDir::new().expect("isolated home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let repository = home.join("repository");
+    std::fs::create_dir_all(repository.join("src")).expect("create repository");
+    super::bootstrap::run_git(&repository, &["init", "-b", "main", "--quiet"]);
+    for file in 0..24 {
+        std::fs::write(
+            repository.join(format!("src/module_{file}.rs")),
+            format!("pub fn sealed_{file}() -> u32 {{ {file} }}\n"),
+        )
+        .expect("fixture source");
+    }
+    super::bootstrap::run_git(&repository, &["add", "."]);
+    super::bootstrap::run_git(&repository, &["commit", "-m", "fixture", "--quiet"]);
+
+    let handshake = DaemonHandshake {
+        project_path: Some(repository.clone()),
+        allow_init: true,
+        client_identity: test_client_identity_for(home.join("client")),
+        ..test_handshake_defaults()
+    };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "shutdown-term-grace-test",
+    );
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("project open must publish a server");
+    let project_id = server
+        .cg()
+        .await
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("registered project identity");
+    let project_id = tracedecay_domain::ProjectId::new(project_id).expect("project id");
+    let canonical_repository = repository.canonicalize().expect("canonical repository");
+    let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+        &canonical_repository,
+        &project_id,
+    )
+    .expect("code-index scope");
+    // Demand-driven activation mounts the background worker and wakes its
+    // first reconcile pass; shutdown follows without waiting for it.
+    let _warming = engine
+        .invocation
+        .code_index_schedulers
+        .latest_complete_ready_for_scope(&scope)
+        .await;
+
+    let started = std::time::Instant::now();
+    let receipt = engine.shutdown_all().await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "engine shutdown must finish inside the 5 s TERM grace, took {elapsed:?}"
+    );
+    assert!(
+        receipt.background.unfinished().is_empty(),
+        "every background owner must join cleanly: {:?}",
+        receipt.background.unfinished()
     );
 }

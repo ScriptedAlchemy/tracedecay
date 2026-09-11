@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use serde_json::json;
@@ -28,12 +28,12 @@ use tracedecay_store::{
     SessionRecord, SessionTemporalSnapshotRequestV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
-use tracedecay_temporal_query::context::CompactContext;
+use tracedecay_temporal_query::context::{CompactContext, ContextBudget};
 use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, TemporalAuthorizedRoot, TemporalSnapshotRequest,
     TemporalWatermarks,
 };
-use tracedecay_temporal_query::ranking::{RankedCandidate, RetrieverContribution};
+use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate, RetrieverContribution};
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
@@ -171,6 +171,17 @@ async fn seed_real_page_fixture(
     }
     .to_owned();
     let session_id = format!("session.page.{rank:02}");
+    seed_real_page_fixture_in_session(database, root, rank, provider, session_id, true).await
+}
+
+async fn seed_real_page_fixture_in_session(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    root: &TemporalAuthorizedRoot,
+    rank: usize,
+    provider: String,
+    session_id: String,
+    finalize: bool,
+) -> RealPageFixture {
     let message_id = format!("message.page.{rank:02}");
     let text = format!("canonical content {rank}");
     assert!(
@@ -266,9 +277,11 @@ async fn seed_real_page_fixture(
         .expect("observation write");
     let projection_generation =
         ProjectionGenerationId::new("projection.page-fixture.v1").expect("projection generation");
-    let authorization =
-        build_observation_resolution_authorization_v1(write.observation(), "session-page-fixture")
-            .expect("resolution authorization");
+    let authorization = build_observation_resolution_authorization_v1(
+        write.observation(),
+        tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
+    )
+    .expect("resolution authorization");
     let anchor = build_observation_retrieval_anchor_v2(
         write.observation(),
         projection_generation.clone(),
@@ -287,25 +300,29 @@ async fn seed_real_page_fixture(
         .project_observation(observation.observation_id())
         .await
         .expect("project canonical observation");
-    database
-        .lcm_protect_session_raw_messages(&provider, &session_id)
-        .await
-        .expect("protect canonical raw message");
-    tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(database)
-        .materialize_pending_session_refresh_for_test(
-            &SessionId::new(session_id.clone()).expect("refresh session"),
-        )
-        .await
-        .expect("materialize canonical temporal occurrence");
-    let active_generation = database
-        .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(
-            SessionId::new(session_id.clone()).expect("frozen session"),
-        ))
-        .await
-        .expect("freeze materialized temporal snapshot")
-        .watermarks()
-        .active_generation()
-        .value();
+    let active_generation = if finalize {
+        database
+            .lcm_protect_session_raw_messages(&provider, &session_id)
+            .await
+            .expect("protect canonical raw message");
+        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(database)
+            .materialize_pending_session_refresh_for_test(
+                &SessionId::new(session_id.clone()).expect("refresh session"),
+            )
+            .await
+            .expect("materialize canonical temporal occurrence");
+        database
+            .freeze_session_temporal_snapshot_result(SessionTemporalSnapshotRequestV1::new(
+                SessionId::new(session_id.clone()).expect("frozen session"),
+            ))
+            .await
+            .expect("freeze materialized temporal snapshot")
+            .watermarks()
+            .active_generation()
+            .value()
+    } else {
+        0
+    };
 
     RealPageFixture {
         provider,
@@ -1150,6 +1167,104 @@ async fn advertised_minimum_session_lookup_request_passes_budget_admission() {
     );
 }
 
+#[tokio::test]
+async fn one_item_lookup_reads_a_session_larger_than_the_response_budget() {
+    const RECORDS: usize = 182;
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-large-candidate-workspace",
+    )
+    .await;
+    let root = real_page_root("root.page");
+    let session_id = "session.page.large".to_owned();
+    let mut expected_messages = BTreeMap::new();
+    for rank in 0..RECORDS {
+        let fixture = seed_real_page_fixture_in_session(
+            harness.registered.as_ref(),
+            &root,
+            rank,
+            "codex".to_owned(),
+            session_id.clone(),
+            rank + 1 == RECORDS,
+        )
+        .await;
+        expected_messages.insert(fixture.projected_message_id, fixture.text);
+    }
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
+        .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let query = SessionTemporalQuery::new(
+        SessionId::new(session_id).expect("large session identity"),
+        None,
+        "",
+        None,
+        TemporalModeV1::Current,
+        tracedecay_domain::RetrievalGrainV1::Occurrence,
+        1,
+        DiversityLimits::unbounded(),
+        ContextBudget {
+            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+            estimator_version: "words-v1".to_owned(),
+        },
+    )
+    .expect("large-session temporal query")
+    .with_execution_limits(admitted_execution_limits(1));
+
+    let mut candidate_limits = admitted_execution_limits(1);
+    candidate_limits.candidate_total_bytes = ExecutionLimits::default().candidate_total_bytes + 1;
+    let mut record_limits = admitted_execution_limits(1);
+    record_limits.record_total_bytes = ExecutionLimits::default().record_total_bytes + 1;
+    for (limits, expected_stage) in [
+        (
+            candidate_limits,
+            SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+        ),
+        (
+            record_limits,
+            SessionRetrievalBudgetStageV1::RequestRecordBytes,
+        ),
+    ] {
+        assert_eq!(
+            service
+                .retrieve_admitted(&context, query.clone().with_execution_limits(limits))
+                .await,
+            SessionRetrievalServiceOutcome::BudgetExhausted {
+                stage: expected_stage,
+            },
+        );
+    }
+
+    let outcome = service.retrieve_admitted(&context, query).await;
+    let page = match outcome {
+        SessionRetrievalServiceOutcome::Partial {
+            page,
+            freshness: SessionDataFreshness::Fresh,
+            omitted,
+        } if omitted == RECORDS as u64 => page,
+        other => panic!("large session must return a bounded hydrated page: {other:?}"),
+    };
+    assert_eq!(page.temporal.anchors.len(), 1);
+    assert_eq!(page.results.len(), 1);
+    let message = &page.results[0].message;
+    assert_eq!(
+        expected_messages.get(&message.message_id),
+        Some(&message.text),
+        "hydration must return the exact retained message bytes",
+    );
+    assert!(message.text.len() <= 80);
+    assert!(
+        page.temporal.cursor.is_some(),
+        "the remaining rows must yield"
+    );
+    assert!(page.temporal.omissions.is_empty());
+    assert_eq!(page.temporal.watermarks.source, RECORDS as u64);
+}
+
 /// Sizing the limits for the admitted budget must not admit a page the
 /// binding's result budget genuinely refuses: the schema maximum page is
 /// still refused as an oversized request, with the stage naming the limit.
@@ -1167,5 +1282,108 @@ async fn oversized_session_lookup_page_remains_a_typed_budget_refusal() {
                 stage: SessionRetrievalBudgetStageV1::RequestResultLimit,
             }
         ))
+    );
+}
+
+#[tokio::test]
+async fn project_retrieval_mounts_each_branch_of_a_shared_graph_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("profile");
+    let project = temp.path().join("project");
+    let project_id = typed::<tracedecay_domain::ProjectId>("project.shared-graph");
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        &profile,
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+        &project,
+        &profile,
+        &tracedecay_runtime_core::storage::EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let mut branches = tracedecay_runtime_core::branch_meta::BranchMeta::new("master");
+    branches.add_branch(
+        "refs/heads/feature",
+        tracedecay_runtime_core::config::DB_FILENAME,
+        "master",
+    );
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branches).unwrap();
+    let registry = runtime.profile_database();
+    tracedecay_global_db::register_project_store(registry, &project, &layout)
+        .await
+        .unwrap();
+    let database = runtime.project_database_arc().unwrap();
+    let shard = &database.binding().shard_id;
+    let mut roots = Vec::new();
+    for branch in ["master", "refs/heads/feature"] {
+        let serving = SessionRetrievalServingIdentityV1::resolve_project(
+            project_id.as_str(),
+            &layout.graph_db_path,
+            Some(branch),
+            &project,
+            &shard.profile_id,
+            shard,
+            registry,
+        )
+        .await
+        .expect("tracked branch must retain a mounted retrieval authority");
+        let root = DaemonSessionRetrievalRoot::project(serving, registry)
+            .await
+            .unwrap();
+        assert_eq!(
+            root.identity().git_route().unwrap().branch_id().as_str(),
+            branch
+        );
+        roots.push(root.identity().root_id().clone());
+        assert!(
+            crate::lcm_authority::mount_registered_lcm_authority(
+                database.clone(),
+                root.identity().clone(),
+                shard,
+            )
+            .is_some()
+        );
+        assert!(DaemonSessionRetrievalService::new(database.clone(), root, None).is_some());
+    }
+    assert_ne!(
+        roots[0], roots[1],
+        "shared storage must not alias branch authority"
+    );
+    for branch in [None, Some("untracked")] {
+        assert!(
+            SessionRetrievalServingIdentityV1::resolve_project(
+                project_id.as_str(),
+                &layout.graph_db_path,
+                branch,
+                &project,
+                &shard.profile_id,
+                shard,
+                registry,
+            )
+            .await
+            .is_none(),
+            "missing or unknown branch must not pick another branch"
+        );
+    }
+    let foreign = &registry.binding().shard_id;
+    assert!(
+        SessionRetrievalServingIdentityV1::resolve_project(
+            project_id.as_str(),
+            &layout.graph_db_path,
+            Some("master"),
+            &project,
+            &shard.profile_id,
+            foreign,
+            registry,
+        )
+        .await
+        .is_none(),
+        "a profile shard cannot serve project retrieval"
     );
 }

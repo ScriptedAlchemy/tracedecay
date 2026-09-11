@@ -6,8 +6,8 @@ use tracedecay_policy::routing::{
     TruthSourceStateV1,
 };
 use tracedecay_tool_catalog::{
-    ApplicationHandlerDescriptorV1 as CatalogHandlerDescriptor, CapabilityId,
-    CatalogContributionV1, SchemaRef, UseCaseId,
+    ApplicationHandlerDescriptorV1 as CatalogHandlerDescriptor, ApplicationSurfaceOperation,
+    CapabilityId, CatalogContributionV1, SchemaRef, ServiceId, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
@@ -111,8 +111,8 @@ pub trait CanonicalApplicationDispatcher<Request> {
     fn invoke(&self, operation: &ApplicationOperation, request: Request) -> Self::Output;
 }
 
-/// A resolved application handler bound to the one dispatcher retained by
-/// root composition.
+/// A resolved application handler bound to the one canonical dispatcher
+/// retained by `tracedecay-daemon-service`.
 pub struct BoundApplicationHandler<'a, Dispatcher> {
     descriptor: &'a ApplicationHandlerDescriptor,
     dispatcher: &'a Dispatcher,
@@ -150,9 +150,16 @@ impl<'a, Dispatcher> BoundApplicationHandler<'a, Dispatcher> {
 }
 
 /// Proof that one concrete application use case owns a request/result schema
-/// pair and can be bound to root composition's canonical dispatcher.
+/// pair and can be bound to the canonical dispatcher that
+/// `tracedecay-daemon-service` binds and the composition root mounts.
+///
+/// Canonical public operations also retain their typed surface identity and
+/// execution service here so MCP, HTTP, SDK, and dispatch projections do not
+/// restate those facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptor {
+    surface_operation: Option<ApplicationSurfaceOperation>,
+    service_id: Option<ServiceId>,
     operation: ApplicationOperation,
     request_schema: SchemaRef,
     result_schema: SchemaRef,
@@ -170,10 +177,36 @@ impl ApplicationHandlerDescriptor {
             });
         }
         Ok(Self {
+            surface_operation: None,
+            service_id: None,
             operation,
             request_schema,
             result_schema,
         })
+    }
+
+    pub fn for_catalog_operation(
+        catalog_operation: &str,
+        service_id: &str,
+        operation: ApplicationOperation,
+        request_schema: SchemaRef,
+        result_schema: SchemaRef,
+    ) -> Result<Self, ApplicationContractError> {
+        let mut descriptor = Self::new(operation, request_schema, result_schema)?;
+        descriptor.surface_operation =
+            ApplicationSurfaceOperation::from_catalog_name(catalog_operation);
+        if descriptor.surface_operation.is_some() {
+            descriptor.service_id = Some(ServiceId::new(service_id)?);
+        }
+        Ok(descriptor)
+    }
+
+    pub const fn surface_operation(&self) -> Option<ApplicationSurfaceOperation> {
+        self.surface_operation
+    }
+
+    pub fn service_id(&self) -> Option<&ServiceId> {
+        self.service_id.as_ref()
     }
 
     pub fn operation(&self) -> &ApplicationOperation {
@@ -205,10 +238,11 @@ impl ApplicationHandlerDescriptor {
     }
 }
 
-/// Closed set of handler descriptors supplied to root catalog composition.
+/// Closed set of handler descriptors supplied to [`crate::catalog_composition`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptors {
     descriptors: BTreeMap<UseCaseId, ApplicationHandlerDescriptor>,
+    surface_operations: BTreeMap<ApplicationSurfaceOperation, UseCaseId>,
 }
 
 impl ApplicationHandlerDescriptors {
@@ -216,8 +250,18 @@ impl ApplicationHandlerDescriptors {
         descriptors: impl IntoIterator<Item = ApplicationHandlerDescriptor>,
     ) -> Result<Self, ApplicationContractError> {
         let mut indexed = BTreeMap::new();
+        let mut surface_operations = BTreeMap::new();
         for descriptor in descriptors {
             let use_case_id = descriptor.operation.use_case_id().clone();
+            if let Some(surface_operation) = descriptor.surface_operation()
+                && surface_operations
+                    .insert(surface_operation, use_case_id.clone())
+                    .is_some()
+            {
+                return Err(ApplicationContractError::Duplicate {
+                    field: "application surface operation",
+                });
+            }
             if indexed.insert(use_case_id, descriptor).is_some() {
                 return Err(ApplicationContractError::Duplicate {
                     field: "application handler use case",
@@ -226,6 +270,7 @@ impl ApplicationHandlerDescriptors {
         }
         Ok(Self {
             descriptors: indexed,
+            surface_operations,
         })
     }
 
@@ -235,6 +280,27 @@ impl ApplicationHandlerDescriptors {
 
     pub fn iter(&self) -> impl Iterator<Item = &ApplicationHandlerDescriptor> {
         self.descriptors.values()
+    }
+
+    pub fn for_surface_operation(
+        &self,
+        operation: ApplicationSurfaceOperation,
+    ) -> Option<&ApplicationHandlerDescriptor> {
+        self.surface_operations
+            .get(&operation)
+            .and_then(|use_case_id| self.descriptors.get(use_case_id))
+    }
+
+    pub fn surface_operations(
+        &self,
+    ) -> impl Iterator<Item = (ApplicationSurfaceOperation, &ApplicationHandlerDescriptor)> {
+        self.surface_operations
+            .iter()
+            .filter_map(|(operation, use_case_id)| {
+                self.descriptors
+                    .get(use_case_id)
+                    .map(|descriptor| (*operation, descriptor))
+            })
     }
 
     pub fn catalog_descriptors(
@@ -316,8 +382,10 @@ fn validate_descriptor_mapping(
     Ok(())
 }
 
-/// Application-owned descriptor source. Root catalog composition remains
-/// intentionally outside this crate and is introduced by its owning packet.
+/// Application-owned descriptor source. [`crate::catalog_composition`]
+/// validates these descriptors against the catalog contributions;
+/// `tracedecay-daemon-service` binds the canonical dispatcher and the
+/// composition root mounts the result.
 pub fn application_handler_descriptors()
 -> Result<ApplicationHandlerDescriptors, ApplicationContractError> {
     let mut descriptors = vec![crate::retrieval::catalog::symbol_search_handler_descriptor()?];
@@ -333,5 +401,14 @@ pub fn application_handler_descriptors()
     descriptors.push(crate::observatory_surface::observatory_read_handler_descriptor()?);
     descriptors.extend(crate::retained_surfaces::retained_surface_handler_descriptors()?);
     descriptors.extend(crate::source_edit::source_edit_handler_descriptors()?);
-    ApplicationHandlerDescriptors::new(descriptors)
+    let descriptors = ApplicationHandlerDescriptors::new(descriptors)?;
+    if ApplicationSurfaceOperation::ALL
+        .into_iter()
+        .any(|operation| descriptors.for_surface_operation(operation).is_none())
+    {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "application surface handler set",
+        });
+    }
+    Ok(descriptors)
 }

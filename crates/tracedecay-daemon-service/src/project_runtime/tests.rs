@@ -1459,3 +1459,48 @@ async fn semantic_owner_registration_task_is_cancelled_and_joined() {
         "joining must release the task handle"
     );
 }
+
+/// Test-only component whose drop parks until the test releases it: a stand-in
+/// for a generation-sized owner whose deallocation takes seconds.
+struct BlockingDropComponent {
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    dropped: std::sync::mpsc::SyncSender<()>,
+}
+
+impl Drop for BlockingDropComponent {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.lock().unwrap().take() {
+            let _ = release.recv();
+        }
+        let _ = self.dropped.send(());
+    }
+}
+
+#[tokio::test]
+async fn daemon_shutdown_does_not_wait_for_drained_runtime_deallocation() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let (dropped_tx, dropped) = std::sync::mpsc::sync_channel::<()>(1);
+    let component: Component = Arc::new(BlockingDropComponent {
+        release: std::sync::Mutex::new(Some(release_rx)),
+        dropped: dropped_tx,
+    });
+    registry
+        .publish(root("slow-drop"), component)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), registry.shut_down_all())
+        .await
+        .expect("shutdown must not park behind a drained runtime's deallocation");
+    assert!(registry.is_empty().await);
+    assert!(
+        dropped.try_recv().is_err(),
+        "the drained runtime is still being released off the shutdown path"
+    );
+
+    release.send(()).expect("blocked drop receiver");
+    dropped
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the detached release must still free the drained runtime");
+}

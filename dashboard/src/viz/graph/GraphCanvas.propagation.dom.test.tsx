@@ -22,10 +22,11 @@ const sigmaState = vi.hoisted(() => ({
   graph: undefined as Graph | undefined,
   edgeReducer: undefined as Reducer | undefined,
   refreshes: 0,
+  handlers: new Map<string, (event: { node: string }) => void>(),
 }));
 
-vi.mock('graphology-layout-forceatlas2', () => ({
-  default: { inferSettings: () => ({ gravity: 1 }), assign: () => undefined },
+vi.mock('./emergentLayout.ts', () => ({
+  settleEmergentOffThread: async () => true,
 }));
 
 vi.mock('sigma', () => ({
@@ -50,7 +51,9 @@ vi.mock('sigma', () => ({
     }
 
     resize() {}
-    on() {}
+    on(name: string, handler: (event: { node: string }) => void) {
+      sigmaState.handlers.set(name, handler);
+    }
     refresh() {
       sigmaState.refreshes += 1;
     }
@@ -94,6 +97,7 @@ describe('GraphCanvas travelling activation', () => {
     sigmaState.graph = undefined;
     sigmaState.edgeReducer = undefined;
     sigmaState.refreshes = 0;
+    sigmaState.handlers.clear();
     frames.length = 0;
     nextFrameId = 1;
     Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
@@ -124,8 +128,42 @@ describe('GraphCanvas travelling activation', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     localStorage.removeItem('td.motion-preference');
+  });
+
+  it('selects and hovers measured projects and repository hubs without creating activity', async () => {
+    const field = new ActivationField({ halfLifeMs: 4200 });
+    const onSelect = vi.fn();
+    const nodes = [
+      ...NODES,
+      { id: 'p2', label: 'sibling checkout', kind: 'checkout', degree: 1 },
+    ].map((node, index) => ({ ...node, x: index * 100, y: index * 20 }));
+    const edges = [...EDGES, { source: 'repo:r', target: 'p2', kind: 'checkout' }];
+    render(<GraphCanvas nodes={nodes} edges={edges} activation={field} onSelect={onSelect} />);
+    await waitFor(() => expect(sigmaState.graph).toBeDefined());
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const graph = sigmaState.graph!;
+    const click = sigmaState.handlers.get('clickNode')!;
+    const hover = sigmaState.handlers.get('enterNode')!;
+    expect(click).toBeTypeOf('function');
+    expect(hover).toBeTypeOf('function');
+
+    let now = 0;
+    for (const node of ['p1', 'repo:r']) {
+      const refreshes = sigmaState.refreshes;
+      hover({ node });
+      pump(now += 200);
+      expect(sigmaState.refreshes).toBeGreaterThan(refreshes);
+      click({ node });
+      expect(onSelect).toHaveBeenLastCalledWith(node);
+      vi.advanceTimersByTime(200);
+      pump(now += 200);
+      expect(field.warm).toBe(false);
+      expect(nodes.map(({ id }) => field.heatOf(id))).toEqual([0, 0, 0]);
+      expect(pulseNodes(graph)).toEqual([]);
+    }
   });
 
   it('carries an externally delivered strike along the real edge and then sleeps', async () => {

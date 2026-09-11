@@ -5,7 +5,7 @@
 //! path resolves that route by walking up from the working directory, so
 //! `tracedecay tool circular` works from a checkout without `--project`. The
 //! typed application-surface path must present the same authenticated route:
-//! otherwise `storage_status`, `source_outline`, `file_metadata`, and the git
+//! otherwise `storage_status`, `source_outline`, and the git
 //! reads answer `application.surface.unavailable` /
 //! `not_found_or_not_authorized` from a checkout the operator is standing in.
 
@@ -115,6 +115,36 @@ fn tool_dry_run_reads_piped_args_in_either_order() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+    }
+}
+
+/// The diagnostics read is the one operation whose CLI/MCP spelling differs
+/// from its canonical identity. Both spellings must select the same advertised
+/// definition, so per-key flags parse against one schema whichever name the
+/// operator typed.
+#[test]
+fn tool_dry_run_resolves_diagnostics_by_identity_and_cli_spelling() {
+    let home = TempDir::new().expect("isolated home");
+    let project = TempDir::new().expect("working directory");
+    for name in ["diagnostics_read", "diagnostics", "tracedecay_diagnostics"] {
+        let output = tracedecay_command_with_home(home.path())
+            .current_dir(project.path())
+            .args(["tool", name, "--scope", "workspace", "--dry-run"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|error| panic!("tool {name} dry-run should run: {error}"));
+        assert!(
+            output.status.success(),
+            "tool {name} dry-run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let parsed: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("tool {name} dry-run must print JSON: {error}"));
+        assert_eq!(
+            parsed,
+            serde_json::json!({ "scope": "workspace" }),
+            "{name}"
+        );
     }
 }
 
@@ -254,12 +284,6 @@ fn application_surface_primitive_tools_resolve_the_working_directory_project() {
         &project_path,
         "source_outline",
         r#"{"file":"src/lib.rs","format":"json"}"#,
-    );
-    assert_surface_resolves_project(
-        &home_path,
-        &project_path,
-        "file_metadata",
-        r#"{"files":["src/lib.rs"],"format":"json"}"#,
     );
 }
 

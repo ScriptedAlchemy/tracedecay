@@ -6,13 +6,13 @@
 //! identity from that canonical evidence.
 
 use tracedecay_application::stack_coordinator::{
-    StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalKindV1, StackSignalV1,
+    StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalV1,
 };
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     BranchStackRevisionV1, ManifestDigest, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
-    NativeIntegrationTerminalOutcomeV1, UtcMicros,
+    NativeIntegrationTerminalOutcomeV1, StackSignalKindV1, UtcMicros,
 };
 
 /// Produces the one truthful transition represented by a sealed preflight.
@@ -74,9 +74,6 @@ pub fn signal_from_receipt(
     }
     let kind = match receipt.status.terminal_outcome {
         Some(NativeIntegrationTerminalOutcomeV1::Committed) => {
-            if receipt.status.candidate_tip.as_ref() != Some(&receipt.final_ref_tip) {
-                return Err(StackCoordinatorErrorV1::Stale);
-            }
             StackSignalKindV1::IntegrationCommitted
         }
         Some(NativeIntegrationTerminalOutcomeV1::NeedsInspection) => {
@@ -111,21 +108,19 @@ fn declared_revision_for_scope<'a>(
         return Ok(None);
     };
     let destination = selection.destination().map_err(invalid)?;
+    let destination_occupancy = destination.worktree_id.as_ref();
     if destination.project_id != scope.project_id
         || destination.repository_id != scope.repository_id
         || scope.reference.as_ref() != Some(&destination.reference)
         || preview.repository_snapshot.project_id != scope.project_id
         || preview.repository_snapshot.repository_id != scope.repository_id
         || preview.repository_snapshot.destination_ref != destination.reference
-        || preview.repository_snapshot.destination_worktree_id.as_ref() != Some(&scope.worktree_id)
+        || preview.repository_snapshot.destination_worktree_id.as_ref() != destination_occupancy
         || preview.selection.source_tip().map_err(invalid)?
             != preview.repository_snapshot.source_tip
         || preview.selection.destination_tip().map_err(invalid)?
             != preview.repository_snapshot.destination_tip
-        || destination
-            .worktree_id
-            .as_ref()
-            .is_some_and(|worktree| worktree != &scope.worktree_id)
+        || destination_occupancy.is_some_and(|worktree| worktree != &scope.worktree_id)
     {
         return Err(StackCoordinatorErrorV1::Stale);
     }
@@ -161,12 +156,15 @@ mod tests {
     use super::*;
     use tracedecay_domain::{
         BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
-        BranchStackSourceV1, CommitId, FrozenBranchStackSnapshotV1, GitHeadStateV1,
-        GitObjectFormatV1, GitOidV1, GitOperationStateV1, MechanicalIntegrationModeV1,
-        NativeIntegrationApprovalId, NativeIntegrationDirectionV1, NativeIntegrationPhaseV1,
-        NativeIntegrationPreviewId, NativeIntegrationRepositorySnapshotV1,
-        NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
-        RepositoryId, StackNodeId, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+        BranchStackSourceV1, CodeGenerationId, CommitId, ContentDigest,
+        FrozenBranchStackSnapshotV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
+        GitOperationStateV1, MechanicalIntegrationModeV1, NativeIntegrationAnalysisCoverageV1,
+        NativeIntegrationAnalysisLaneV1, NativeIntegrationAnalysisReportV1,
+        NativeIntegrationApprovalId, NativeIntegrationDirectionV1,
+        NativeIntegrationGenerationBindingV1, NativeIntegrationPhaseV1, NativeIntegrationPreviewId,
+        NativeIntegrationRepositorySnapshotV1, NativeIntegrationTransactionId,
+        NativeIntegrationTransactionStatusV1, ProjectId, RefId, RepositoryId, StackNodeId,
+        WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
     };
 
     fn digest(byte: char) -> ManifestDigest {
@@ -272,19 +270,89 @@ mod tests {
         .seal()
         .expect("repository snapshot");
         let eligible = matches!(
-            disposition,
+            &disposition,
             NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
         );
+        let analysis = eligible.then(|| {
+            let binding = |name: &str,
+                           worktree_id: Option<WorktreeId>,
+                           reference: Option<RefId>,
+                           revision: Option<GitOidV1>,
+                           tree: GitOidV1| {
+                NativeIntegrationGenerationBindingV1 {
+                    generation_id: CodeGenerationId::new(format!(
+                        "generation.stack-producer.{name}"
+                    ))
+                    .expect("generation"),
+                    project_id: scope.project_id.clone(),
+                    repository_id: scope.repository_id.clone(),
+                    worktree_id,
+                    reference,
+                    snapshot_digest: digest('7'),
+                    content_identity: ContentDigest::new(digest('8').as_str().to_owned())
+                        .expect("content identity"),
+                    source_revision: revision,
+                    source_tree: tree,
+                    seal_digest: digest('9'),
+                }
+            };
+            let complete = NativeIntegrationAnalysisLaneV1 {
+                coverage: NativeIntegrationAnalysisCoverageV1::Complete,
+                gaps: Vec::new(),
+            };
+            NativeIntegrationAnalysisReportV1 {
+                merge_base: binding(
+                    "merge-base",
+                    selection
+                        .source_worktree_id()
+                        .expect("source worktree")
+                        .cloned(),
+                    Some(selection.source_ref().expect("source ref").clone()),
+                    Some(repository_snapshot.merge_base.clone()),
+                    oid('a'),
+                ),
+                source: binding(
+                    "source",
+                    selection
+                        .source_worktree_id()
+                        .expect("source worktree")
+                        .cloned(),
+                    Some(repository_snapshot.source_ref.clone()),
+                    Some(repository_snapshot.source_tip.clone()),
+                    repository_snapshot.source_tree.clone(),
+                ),
+                destination: binding(
+                    "destination",
+                    repository_snapshot.destination_worktree_id.clone(),
+                    Some(repository_snapshot.destination_ref.clone()),
+                    Some(repository_snapshot.destination_tip.clone()),
+                    repository_snapshot.destination_tree.clone(),
+                ),
+                candidate: binding(
+                    "candidate",
+                    repository_snapshot.destination_worktree_id.clone(),
+                    Some(repository_snapshot.destination_ref.clone()),
+                    None,
+                    oid('6'),
+                ),
+                graph: complete.clone(),
+                tests: complete.clone(),
+                schema: complete.clone(),
+                migrations: complete,
+                conflicts: Vec::new(),
+                analyzer_revision: "native-stack-signal-test.v1".to_owned(),
+                digest: digest('0'),
+            }
+            .seal()
+            .expect("analysis report")
+        });
         let preview = NativeIntegrationPreviewV1 {
             preview_id: NativeIntegrationPreviewId::new("preview.stack-producer").expect("preview"),
             selection,
             repository_snapshot,
             grant_digest: digest('f'),
             policy_digest: digest('1'),
-            graph_revision_digest: digest('2'),
-            test_revision_digest: digest('3'),
-            schema_revision_digest: digest('4'),
-            migration_revision_digest: digest('5'),
+            analysis,
             disposition,
             candidate_tree: eligible.then(|| oid('6')),
             ordered_commits: vec![oid('1')],
@@ -374,7 +442,7 @@ mod tests {
         assert_eq!(signal.state_digest, committed.receipt_digest);
 
         let mut mismatched_commit = committed.clone();
-        mismatched_commit.final_ref_tip = oid('9');
+        mismatched_commit.status.preview_digest = digest('9');
         mismatched_commit = mismatched_commit.seal().expect("mismatched receipt");
         assert_eq!(
             signal_from_receipt(&scope, &preview, &mismatched_commit),

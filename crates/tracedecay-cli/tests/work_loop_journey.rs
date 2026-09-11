@@ -1,3 +1,5 @@
+// Its own test-transport binary, not a host_journeys_suite module: the journey
+// sets and restores process environment variables in-process.
 //! The production Work-loop journey, end to end, through the real daemon.
 //!
 //! Plans 09 and 24 both name one direct acceptance journey — seven steps that
@@ -1026,6 +1028,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
                         },
                         "canonical_path": fast_path,
                         "capabilities": ["claude_code_stream_json"],
+                        "routes": [],
                     },
                     {
                         "executable": {
@@ -1034,6 +1037,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
                         },
                         "canonical_path": slow_path,
                         "capabilities": ["claude_code_stream_json"],
+                        "routes": [],
                     },
                 ],
             },

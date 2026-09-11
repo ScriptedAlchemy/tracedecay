@@ -33,6 +33,8 @@ fn identity() -> LspCodeIndexProjectionIdentity {
         repository: id("repository.lsp-scope"),
         worktree: Some(id("worktree.lsp-scope")),
         reference: Some(id("ref.main")),
+        freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+        head_commit_id: Some(id("commit.lsp-scope")),
         source_revision: Some(id("commit.lsp-scope")),
         code_generation_id: id::<CodeGenerationId>("generation.lsp.scope.7"),
         snapshot_digest: id::<ManifestDigest>(&digest('a')),
@@ -156,4 +158,19 @@ fn projection_scope_requires_and_uses_the_sealed_generation_identity() {
         Some(id::<FileOccurrenceId>("file.lsp-scope"))
     );
     assert_eq!(admitted.generation, 7);
+}
+
+#[test]
+fn read_only_scope_preserves_stale_generation_freshness() {
+    let mut stale = identity();
+    let freshness = tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+        sealed_at: tracedecay_domain::UtcMicros(10),
+        rebuild_in_flight: false,
+    };
+    stale.freshness = freshness;
+
+    let admitted = stale
+        .admit_worktree_scope(&scope())
+        .expect("stale retained generation remains admissible for read-only queries");
+    assert_eq!(admitted.freshness, freshness);
 }

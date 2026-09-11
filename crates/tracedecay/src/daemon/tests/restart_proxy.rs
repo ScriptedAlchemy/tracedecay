@@ -495,9 +495,10 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     let project_b = TempDir::new().expect("project b temp dir");
     let project_a = project_a.path().canonicalize().expect("project a path");
     let project_b = project_b.path().canonicalize().expect("project b path");
-    let registry = crate::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
-        .await
-        .expect("open retained profile runtime");
+    let registry =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open retained profile runtime");
     let global_db_path = profile.path().join("global.db");
     registry
         .upsert_code_project("project-a", &project_a, None, None, None)
@@ -596,9 +597,10 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     let alias = alias.path().canonicalize().expect("canonical alias");
     let nested = alias.join("nested");
     std::fs::create_dir_all(&nested).expect("nested alias path");
-    let registry = crate::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
-        .await
-        .expect("open retained profile runtime");
+    let registry =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open retained profile runtime");
     let global_db_path = profile.path().join("global.db");
     registry
         .upsert_code_project("project-registry-only", &canonical, None, None, None)
@@ -675,11 +677,11 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     })
     .to_string();
 
-    let config = crate::config::TraceDecayConfig {
+    let config = tracedecay_configuration::TraceDecayConfig {
         root_dir: project.display().to_string(),
-        ..crate::config::TraceDecayConfig::default()
+        ..tracedecay_configuration::TraceDecayConfig::default()
     };
-    let config_path = crate::config::get_config_path(&project);
+    let config_path = tracedecay_configuration::get_config_path(&project);
     std::fs::create_dir_all(config_path.parent().expect("legacy config parent"))
         .expect("create legacy config parent");
     let legacy_input = serde_json::to_string_pretty(&config).expect("serialize legacy config");

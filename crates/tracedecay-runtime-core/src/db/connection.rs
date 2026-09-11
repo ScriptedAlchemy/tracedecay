@@ -32,7 +32,8 @@ mod test_runtime;
 pub use graph_binding::{MemoryGraphRuntimeOperationErrorV1, MemoryGraphRuntimeOperationV1};
 pub use memory_graph_reconciliation::MemoryGraphReconciliationTaskScheduleV1;
 pub use memory_graph_reconciliation::{
-    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationRetirementReservationV1,
+    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationInlinePassV1,
+    MemoryGraphReconciliationRetirementReservationV1,
     MemoryGraphReconciliationRetirementStartErrorV1, MemoryGraphReconciliationRetirementTerminalV1,
     MemoryGraphReconciliationTaskOwnerV1, ProjectMemoryReconciliationTelemetryObserverV1,
     ProjectMemoryReconciliationTelemetrySnapshotV1,

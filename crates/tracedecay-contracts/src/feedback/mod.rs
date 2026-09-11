@@ -15,15 +15,14 @@ mod read;
 mod service;
 
 pub use catalog::{
-    feedback_http_executable_binding_registry, feedback_read_operations,
-    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
-    feedback_surface_operation,
+    feedback_read_operations, feedback_surface_catalog_contribution,
+    feedback_surface_handler_descriptors, feedback_surface_operation,
 };
 
 pub use adapters::GenerationBoundFeedbackDiagnosticsAdapter;
 pub use advisory_surface::{
     FeedbackAdvisoryCycleSurfaceRequestV1, FeedbackAdvisoryCycleSurfaceResultV1,
-    FeedbackAdvisoryCycleWireV1, FeedbackAdvisoryFindingHandleV1,
+    FeedbackAdvisoryCycleWireV1, FeedbackAdvisoryFindingHandleV1, FeedbackAdvisoryReadHandlesV1,
 };
 pub use github_ci_proximity::{
     ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,
@@ -35,11 +34,12 @@ pub use github_ci_proximity::{
     ProximityCandidatesPortOutcomeV1, ProximityDedupeOutcomeV1, ProximityEvaluationRequestV1,
 };
 pub use ports::{
-    FeedbackCompletedPublicationReadPort, FeedbackCompletedPublicationV1, FeedbackCycleDedupePort,
-    FeedbackCycleDedupePublicationState, FeedbackCycleDedupeState, FeedbackDiagnosticsPort,
+    FeedbackCycleDedupePort, FeedbackCycleDedupeState, FeedbackDiagnosticsPort,
     FeedbackDiagnosticsRequest, FeedbackImpactPort, FeedbackImpactPortOutcome,
-    FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture, FeedbackRouteAdmission,
-    FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
+    FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture,
+    FeedbackPublicationReadPort, FeedbackPublicationRecordState, FeedbackPublicationV1,
+    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
+    FeedbackRuntimeStateV1,
 };
 pub use read::{
     CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,

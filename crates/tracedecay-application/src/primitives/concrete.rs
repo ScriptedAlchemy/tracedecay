@@ -16,7 +16,7 @@ use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_runtime_core::db::Database;
 
 use super::symbol_graph::{SymbolGraphCursorFuture, SymbolGraphCursorPort, SymbolGraphPageClaim};
-use tracedecay_graph_query::SourceReadRuntime;
+use tracedecay_graph_query::SourceReadContext;
 use tracedecay_graph_query::context::read_modes::{LineRange, ReadMode};
 use tracedecay_graph_query::context::source_read::{SourceReadRequest, read_source};
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
@@ -38,7 +38,7 @@ pub struct SourceReadAdapter {
 impl SourceReadAdapter {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn new(
-        source_runtime: Arc<SourceReadRuntime>,
+        source_runtime: Arc<SourceReadContext>,
         code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
         scope: ResolvedScope,
     ) -> Result<Self, ApplicationContractError> {
@@ -47,7 +47,7 @@ impl SourceReadAdapter {
     }
 
     pub fn new_bound(
-        source_runtime: Arc<SourceReadRuntime>,
+        source_runtime: Arc<SourceReadContext>,
         code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
         scope: ResolvedScope,
         admitted_project_root: &Path,
@@ -185,13 +185,19 @@ fn source_read_failed(observed_at: UtcMicros) -> SourceReadPortOutcome {
 pub struct SymbolGraphCursorSnapshot {
     temporal: TemporalExecutionSnapshot,
     code_generation_id: CodeGenerationId,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
 impl SymbolGraphCursorSnapshot {
-    pub fn new(temporal: TemporalExecutionSnapshot, code_generation_id: CodeGenerationId) -> Self {
+    pub fn new(
+        temporal: TemporalExecutionSnapshot,
+        code_generation_id: CodeGenerationId,
+        freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+    ) -> Self {
         Self {
             temporal,
             code_generation_id,
+            freshness,
         }
     }
 
@@ -201,6 +207,10 @@ impl SymbolGraphCursorSnapshot {
 
     pub const fn code_generation_id(&self) -> &CodeGenerationId {
         &self.code_generation_id
+    }
+
+    pub const fn freshness(&self) -> tracedecay_graph_query::CodeGraphReadFreshnessV1 {
+        self.freshness
     }
 }
 
@@ -449,9 +459,7 @@ fn primitive_failure(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tracedecay_contracts::{
         ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
@@ -463,8 +471,7 @@ mod tests {
         SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, WorktreeId, canonical_sha256,
     };
     use tracedecay_graph_query::{
-        CodeGraphProjectionReadPort, CodeGraphReadFuture, CodeGraphReadRequest,
-        SourceReadRuntimePort,
+        CodeGraphProjectionReadPort, CodeGraphReadFuture, CodeGraphReadRequest, SourceReadContext,
     };
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
@@ -483,34 +490,6 @@ mod tests {
 
     const NOW: UtcMicros = UtcMicros(1_000);
 
-    struct RecordingSourceRuntime {
-        project_root: PathBuf,
-        project_id: String,
-        database: Database,
-        root_reads: AtomicUsize,
-        database_reads: AtomicUsize,
-    }
-
-    impl SourceReadRuntimePort for RecordingSourceRuntime {
-        fn project_root(&self) -> &Path {
-            self.root_reads.fetch_add(1, Ordering::SeqCst);
-            &self.project_root
-        }
-
-        fn db(&self) -> &Database {
-            self.database_reads.fetch_add(1, Ordering::SeqCst);
-            &self.database
-        }
-
-        fn is_read_only(&self) -> bool {
-            true
-        }
-
-        fn project_id(&self) -> &str {
-            &self.project_id
-        }
-    }
-
     struct NeverOpenedProjection;
 
     impl CodeGraphProjectionReadPort for NeverOpenedProjection {
@@ -520,7 +499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_read_binding_rejects_mismatches_before_database_access() {
+    async fn source_read_binding_rejects_project_and_root_mismatches() {
         crate::register_test_schema_installer();
         let home = tempfile::tempdir().expect("temporary source binding root");
         let admitted_root = home.path().join("admitted");
@@ -540,62 +519,45 @@ mod tests {
         let (scope, _, _) = application_context("source-binding");
         let projection: Arc<dyn CodeGraphProjectionReadPort> = Arc::new(NeverOpenedProjection);
 
-        let wrong_project = Arc::new(RecordingSourceRuntime {
-            project_root: admitted_root.clone(),
-            project_id: "project.retrieval-primitives.other".to_owned(),
-            database: database.clone(),
-            root_reads: AtomicUsize::new(0),
-            database_reads: AtomicUsize::new(0),
-        });
+        let wrong_project = Arc::new(SourceReadContext::new(
+            admitted_root.clone(),
+            database.clone(),
+            true,
+            "project.retrieval-primitives.other".to_owned(),
+        ));
         assert!(
             SourceReadAdapter::new_bound(
-                Arc::clone(&wrong_project) as Arc<dyn SourceReadRuntimePort>,
+                wrong_project,
                 Arc::clone(&projection),
                 scope.clone(),
                 &admitted_root,
             )
             .is_err()
         );
-        assert_eq!(wrong_project.root_reads.load(Ordering::SeqCst), 0);
-        assert_eq!(wrong_project.database_reads.load(Ordering::SeqCst), 0);
 
-        let wrong_root = Arc::new(RecordingSourceRuntime {
-            project_root: foreign_root,
-            project_id: scope.project_id.as_str().to_owned(),
-            database: database.clone(),
-            root_reads: AtomicUsize::new(0),
-            database_reads: AtomicUsize::new(0),
-        });
+        let wrong_root = Arc::new(SourceReadContext::new(
+            foreign_root,
+            database.clone(),
+            true,
+            scope.project_id.as_str().to_owned(),
+        ));
         assert!(
             SourceReadAdapter::new_bound(
-                Arc::clone(&wrong_root) as Arc<dyn SourceReadRuntimePort>,
+                wrong_root,
                 Arc::clone(&projection),
                 scope.clone(),
                 &admitted_root,
             )
             .is_err()
         );
-        assert_eq!(wrong_root.root_reads.load(Ordering::SeqCst), 1);
-        assert_eq!(wrong_root.database_reads.load(Ordering::SeqCst), 0);
 
-        let matching = Arc::new(RecordingSourceRuntime {
-            project_root: admitted_root.clone(),
-            project_id: scope.project_id.as_str().to_owned(),
+        let matching = Arc::new(SourceReadContext::new(
+            admitted_root.clone(),
             database,
-            root_reads: AtomicUsize::new(0),
-            database_reads: AtomicUsize::new(0),
-        });
-        assert!(
-            SourceReadAdapter::new_bound(
-                Arc::clone(&matching) as Arc<dyn SourceReadRuntimePort>,
-                projection,
-                scope,
-                &admitted_root,
-            )
-            .is_ok()
-        );
-        assert_eq!(matching.root_reads.load(Ordering::SeqCst), 1);
-        assert_eq!(matching.database_reads.load(Ordering::SeqCst), 1);
+            true,
+            scope.project_id.as_str().to_owned(),
+        ));
+        assert!(SourceReadAdapter::new_bound(matching, projection, scope, &admitted_root,).is_ok());
     }
 
     struct FixedSnapshotAuthority {
@@ -798,7 +760,11 @@ mod tests {
             ValidatedAuthorization::Authorized,
         )
         .expect("execution snapshot");
-        SymbolGraphCursorSnapshot::new(temporal, code_generation_id)
+        SymbolGraphCursorSnapshot::new(
+            temporal,
+            code_generation_id,
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+        )
     }
 
     fn application_context(suffix: &str) -> (ResolvedScope, RequestContext, ApplicationOperation) {

@@ -7,15 +7,21 @@ use std::sync::{
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::semantic_runtime::SavedCodeGenerationScheduleHookV1;
+use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
+use tracedecay_application::semantic_runtime::{
+    SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleOutcomeV1,
+};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::CodeGenerationId;
 
 use super::super::CodeIndexGenerationPublishedV1;
 use super::{
-    CodeIndexSchedulerRegistryV1, GitFixture, test_project_id, wait_for_generation_change,
-    wait_for_initial_generation, wait_for_live_complete_generation,
+    CodeIndexSchedulerRegistryV1, GitFixture, ResolvedScope, test_project_id,
+    wait_for_generation_change, wait_for_initial_generation, wait_for_live_complete_generation,
+    wait_for_quiescent_owner_pass,
 };
+use crate::code_index_scheduler::CodeGraphActivationPolicyV1;
+use crate::code_index_scheduler::registry::SemanticEvaluationGenerationRefusalV1;
 
 async fn published_generation_for_root(
     publications: &mut tokio::sync::broadcast::Receiver<CodeIndexGenerationPublishedV1>,
@@ -51,7 +57,7 @@ fn recording_semantic_hook(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(generation.manifest().generation_id.clone());
-        true
+        SavedGenerationScheduleOutcomeV1::Scheduled
     })
 }
 
@@ -182,7 +188,7 @@ async fn semantic_schedule_reuses_the_serving_generation_handle() {
             *scheduled_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(generation);
-            true
+            SavedGenerationScheduleOutcomeV1::Scheduled
         }) as SavedCodeGenerationScheduleHookV1
     };
     assert!(
@@ -236,12 +242,12 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
         Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
             attempts.fetch_add(1, Ordering::AcqRel);
             if !lifecycle_ready.load(Ordering::Acquire) {
-                return false;
+                return SavedGenerationScheduleOutcomeV1::QueueRefused;
             }
             *scheduled_generation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(generation);
-            true
+            SavedGenerationScheduleOutcomeV1::Scheduled
         }) as SavedCodeGenerationScheduleHookV1
     };
     assert!(
@@ -256,6 +262,10 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
             .expect("mount scheduler")
     );
     wait_for_live_complete_generation(&registry, fixture.path()).await;
+    // The serving seat is published from inside the pass that also runs the
+    // semantic schedule hook, so the seat alone does not prove the hook was
+    // reached. Let that pass finish before reading its attempt count.
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
     let attempts_before_selection = attempts.load(Ordering::Acquire);
     assert!(
         attempts_before_selection > 0,
@@ -263,10 +273,11 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
     );
 
     lifecycle_ready.store(true, Ordering::Release);
-    assert!(
+    assert_eq!(
         registry
             .reschedule_semantic_generation(fixture.path())
             .await,
+        SavedGenerationScheduleOutcomeV1::Scheduled,
         "selection completion must re-offer the already-serving generation"
     );
 
@@ -294,8 +305,220 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_partitioned_generation_reaches_semantics_after_source_proof_expires() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn retained_semantic_alpha() -> u32 { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let seeded_registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        seeded_registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("seed scheduler")
+    );
+    let retained_generation = wait_for_live_complete_generation(&seeded_registry, fixture.path())
+        .await
+        .generation()
+        .manifest()
+        .generation_id
+        .clone();
+    seeded_registry.shutdown().await;
+    drop(seeded_registry);
+
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        registry
+            .mount_worktree_with_graph_policy(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+                CodeGraphActivationPolicyV1::RefusedByConfiguration,
+            )
+            .await
+            .expect("reopen retained scheduler")
+    );
+
+    let retained_text = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(text) = registry.latest_text_serving_for_root(fixture.path()).await
+                && registry
+                    .dashboard_freshness(fixture.path())
+                    .await
+                    .is_some_and(|freshness| freshness.staleness_state.as_deref() == Some("fresh"))
+            {
+                break text;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retained text owner becomes ready");
+    let snapshot = retained_text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("retained scope");
+    let projection_identity = LspCodeIndexProjectionIdentityPort::current_identity(
+        &registry,
+        fixture.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("retained generation provides the current query identity");
+    assert_eq!(
+        projection_identity.code_generation_id, retained_generation,
+        "query identity must use the retained generation"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none(),
+        "identity demand must not fabricate or install a decoded graph seat"
+    );
+    registry
+        .expire_source_freshness_for_test(fixture.path())
+        .await;
+    assert_eq!(
+        registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .and_then(|freshness| freshness.staleness_state),
+        Some("fresh".to_owned()),
+        "status retains the last verified owner while its bounded source proof ages out"
+    );
+    let unverified_identity = LspCodeIndexProjectionIdentityPort::current_identity(
+        &registry,
+        fixture.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("an expired source proof must retain the read-only query identity");
+    assert_eq!(
+        unverified_identity.code_generation_id, retained_generation,
+        "source verification must keep serving the retained generation"
+    );
+    assert!(
+        matches!(
+            unverified_identity.freshness,
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale { .. }
+        ),
+        "an expired source proof must be reported as stale"
+    );
+    let (candidate, code) = registry
+        .semantic_evaluation_generation_for_scope(fixture.path(), &scope)
+        .await
+        .expect("retained generation is eligible for semantic evaluation");
+    assert_eq!(candidate.source_generation, retained_generation);
+    assert_eq!(code.manifest().generation_id, retained_generation);
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none(),
+        "semantic demand must not fabricate or install a decoded graph seat"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(retained_generation.clone()),
+        "the partitioned text owner remains the serving identity"
+    );
+    let reconcile_admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold stale-source reconcile");
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn retained_semantic_beta() -> u32 { 2 }\n",
+    );
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        "source edit reaches the mounted freshness authority"
+    );
+    assert!(
+        matches!(
+            registry
+                .semantic_evaluation_generation_for_scope(fixture.path(), &scope)
+                .await,
+            Err(SemanticEvaluationGenerationRefusalV1::SourceChanged)
+        ),
+        "source drift must refuse the retained semantic evaluation candidate"
+    );
+    let projection_identity = LspCodeIndexProjectionIdentityPort::current_identity(
+        &registry,
+        fixture.path().to_path_buf(),
+        None,
+    )
+    .await
+    .expect("source drift must retain the read-only query identity");
+    assert_eq!(
+        projection_identity.code_generation_id, retained_generation,
+        "read-only query identity must keep serving the retained generation"
+    );
+    assert!(
+        matches!(
+            projection_identity.freshness,
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                rebuild_in_flight: true,
+                ..
+            }
+        ),
+        "read-only query identity must report the pending source refresh"
+    );
+    drop(reconcile_admission);
+    registry.shutdown().await;
+
+    let refreshed_deliveries: SemanticDeliveryLogV1 = Arc::new(Mutex::new(Vec::new()));
+    let refreshed_registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        refreshed_registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                Some(recording_semantic_hook(&refreshed_deliveries)),
+            )
+            .await
+            .expect("reopen stale retained scheduler")
+    );
+    let refreshed_generation =
+        wait_for_generation_change(&refreshed_registry, fixture.path(), &retained_generation).await;
+    wait_for_semantic_delivery(&refreshed_deliveries, &refreshed_generation).await;
+    assert!(
+        !delivered_generations(&refreshed_deliveries).contains(&retained_generation),
+        "the superseded retained generation must not cross semantic admission"
+    );
+    let wrong_generation_witness = super::super::ServingSourceWitnessV1 {
+        generation_id: refreshed_generation,
+    };
+    assert!(
+        !super::super::registry::semantic_handoff_has_exact_witness(
+            true,
+            Some(&wrong_generation_witness),
+            &retained_generation,
+        ),
+        "an incumbent witness cannot authorize a discarded superseded generation"
+    );
+    refreshed_registry.shutdown().await;
+}
+
 struct BlockingSemanticScheduleProbeV1 {
-    entered: Arc<Mutex<Receiver<CodeGenerationId>>>,
+    entered: Arc<Mutex<Receiver<Arc<CodeIndexPublishedGenerationV1>>>>,
     release: Sender<()>,
     hook: SavedCodeGenerationScheduleHookV1,
 }
@@ -307,14 +530,14 @@ impl BlockingSemanticScheduleProbeV1 {
         let release_rx = Arc::new(Mutex::new(release_rx));
         let hook = Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
             entered_tx
-                .send(generation.manifest().generation_id.clone())
+                .send(Arc::clone(&generation))
                 .expect("report scheduled semantic generation");
             release_rx
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .recv_timeout(Duration::from_secs(3))
                 .expect("release blocked semantic schedule");
-            true
+            SavedGenerationScheduleOutcomeV1::Scheduled
         }) as SavedCodeGenerationScheduleHookV1;
         Self {
             entered: Arc::new(Mutex::new(entered_rx)),
@@ -323,7 +546,7 @@ impl BlockingSemanticScheduleProbeV1 {
         }
     }
 
-    async fn entered_generation(&self) -> CodeGenerationId {
+    async fn entered_generation(&self) -> Arc<CodeIndexPublishedGenerationV1> {
         let entered = Arc::clone(&self.entered);
         tokio::task::spawn_blocking(move || {
             entered
@@ -348,6 +571,7 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let mut serving_seats = registry.subscribe_serving_seats();
     let probe = BlockingSemanticScheduleProbeV1::new();
     assert!(
         registry
@@ -360,8 +584,41 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
             .await
             .expect("mount scheduler")
     );
+    let mut serving_changes = registry
+        .subscribe_serving_generation_changes(fixture.path())
+        .await
+        .expect("subscribe to advisory serving changes");
+    assert!(
+        registry.request_complete_generation(fixture.path()).await,
+        "mounted worktree admits complete-generation demand"
+    );
 
     let first_scheduled = probe.entered_generation().await;
+    let first_scheduled_id = first_scheduled.manifest().generation_id.clone();
+    let snapshot = first_scheduled.snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    tokio::time::timeout(Duration::from_secs(1), serving_seats.changed())
+        .await
+        .expect("serving-seat wake while semantic handoff is blocked")
+        .expect("serving-seat authority stays open");
+    tokio::time::timeout(Duration::from_secs(1), serving_changes.changed())
+        .await
+        .expect("advisory wake while semantic handoff is blocked")
+        .expect("advisory serving authority stays open");
+    let ready_while_hook_runs = registry
+        .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        .await
+        .expect("exact ready reader advances while semantic handoff is blocked");
+    let feedback_while_hook_runs = registry
+        .latest_feedback_generation_for_scope(fixture.path(), &scope)
+        .await
+        .expect("advisory reader advances while semantic handoff is blocked");
     let first_serving_while_hook_runs = registry.latest_generation_id(fixture.path()).await;
     probe.release();
     let first_published = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -373,23 +630,40 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
             .await
     );
     let second_scheduled = probe.entered_generation().await;
+    let second_scheduled_id = second_scheduled.manifest().generation_id.clone();
+    tokio::time::timeout(Duration::from_secs(1), serving_seats.changed())
+        .await
+        .expect("edited serving-seat wake while semantic handoff is blocked")
+        .expect("serving-seat authority stays open");
+    tokio::time::timeout(Duration::from_secs(1), serving_changes.changed())
+        .await
+        .expect("edited advisory wake while semantic handoff is blocked")
+        .expect("advisory serving authority stays open");
     let second_serving_while_hook_runs = registry.latest_generation_id(fixture.path()).await;
     probe.release();
     let second_published =
         wait_for_generation_change(&registry, fixture.path(), &first_published).await;
     registry.shutdown().await;
 
-    assert_eq!(first_scheduled, first_published);
+    assert_eq!(first_scheduled_id, first_published);
+    assert_eq!(
+        ready_while_hook_runs.generation().manifest().generation_id,
+        first_scheduled_id,
+    );
+    assert_eq!(
+        feedback_while_hook_runs.metadata().manifest().generation_id,
+        first_scheduled_id,
+    );
     assert_eq!(
         first_serving_while_hook_runs,
-        Some(first_scheduled),
+        Some(first_scheduled_id),
         "cold-mount semantics must not start before its exact code generation is serving"
     );
-    assert_ne!(second_scheduled, first_published);
-    assert_eq!(second_scheduled, second_published);
+    assert_ne!(second_scheduled_id, first_published);
+    assert_eq!(second_scheduled_id, second_published);
     assert_eq!(
         second_serving_while_hook_runs,
-        Some(second_scheduled),
+        Some(second_scheduled_id),
         "edited-generation semantics must not start while the prior code generation is serving"
     );
 }
@@ -407,10 +681,12 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
     let panic_calls = Arc::new(AtomicUsize::new(0));
     let panicking_hook = {
         let calls = Arc::clone(&panic_calls);
-        Arc::new(move |_: Arc<CodeIndexPublishedGenerationV1>| -> bool {
-            calls.fetch_add(1, Ordering::SeqCst);
-            panic!("semantic schedule panic fixture");
-        }) as SavedCodeGenerationScheduleHookV1
+        Arc::new(
+            move |_: Arc<CodeIndexPublishedGenerationV1>| -> SavedGenerationScheduleOutcomeV1 {
+                calls.fetch_add(1, Ordering::SeqCst);
+                panic!("semantic schedule panic fixture");
+            },
+        ) as SavedCodeGenerationScheduleHookV1
     };
     assert!(
         registry
@@ -477,4 +753,60 @@ async fn panicking_semantic_hook_does_not_retire_later_reconciliation() {
 
     assert_ne!(first_generation, second_generation);
     assert_eq!(second_publication, second_generation);
+}
+
+/// A sealed generation offered while no semantic runtime is mounted must name
+/// the reason it was not scheduled.
+///
+/// Issue #753: after an aborted projection the daemon kept sealing
+/// generations and none of them re-triggered projection, while the runtime sat
+/// at `installed`. The handoff returned a bare `false` that every caller
+/// discarded, so an operator could not tell "no runtime is mounted" from
+/// "nothing needed doing". Both the direct handoff and the reconciler's
+/// re-offer must answer with the typed decline.
+#[tokio::test]
+async fn a_generation_offered_without_a_mounted_semantic_runtime_names_the_decline() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount scheduler")
+    );
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
+
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let generation = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_complete()
+        .expect("serving generation")
+        .generation_handle();
+    let handoff = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .schedule_semantic_generation(generation);
+    assert_eq!(
+        handoff,
+        SavedGenerationScheduleOutcomeV1::RuntimeNotMounted,
+        "the handoff boundary must name an absent semantic runtime"
+    );
+
+    assert_eq!(
+        registry
+            .reschedule_semantic_generation(fixture.path())
+            .await,
+        SavedGenerationScheduleOutcomeV1::RuntimeNotMounted,
+        "the reconciler's re-offer must carry the same typed decline"
+    );
 }

@@ -32,10 +32,10 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OmissionReason, OpaqueCursor,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor, PageRequest,
-    PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
-    RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, OmissionReason,
+    OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
+    PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId,
+    ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
@@ -51,7 +51,7 @@ use crate::ProjectSourceAccessSnapshot;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
-    ManagedTestRunStaleReason, OperationEventAuthority,
+    ManagedTestRunStaleReason, OperationEventAuthority, current_managed_test_run,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -139,8 +139,7 @@ pub trait ManagedTestRunCurrentScopePort: Send + Sync {
 pub use tracedecay_contracts::retrieval::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, DiagnosticsPrimitiveScope,
-    FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult, FileMetadataPrimitiveRequest,
-    FileMetadataPrimitiveResult, FileMetadataRecord, ModuleApiPrimitiveRequest,
+    FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult, ModuleApiPrimitiveRequest,
     ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
     SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest,
     SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
@@ -186,12 +185,6 @@ pub trait ExtendedPrimitivePort: Send + Sync {
         context: RetrievalPortContext<'a>,
         request: &'a ModuleApiPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult>;
-
-    fn file_metadata<'a>(
-        &'a self,
-        context: RetrievalPortContext<'a>,
-        request: &'a FileMetadataPrimitiveRequest,
-    ) -> ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult>;
 
     fn health_delta<'a>(
         &'a self,
@@ -513,7 +506,7 @@ fn transport_context(
 #[hotpath::measure(label = "usecases.primitives.open_runtime")]
 pub fn open_primitive_project_runtime(
     database: Database,
-    source_runtime: Arc<tracedecay_graph_query::SourceReadRuntime>,
+    source_runtime: Arc<tracedecay_graph_query::SourceReadContext>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     symbol_graph_cursors: Arc<dyn SymbolGraphCursorPort>,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
@@ -559,9 +552,7 @@ pub fn open_primitive_project_runtime(
             Arc::clone(&source_runtime),
             Arc::clone(&code_graph),
         )),
-        Arc::new(TraceDecayComplexityAuthorityV1::new(Arc::clone(
-            &code_graph,
-        ))),
+        Arc::new(TraceDecayComplexityAuthorityV1),
         redundancy,
         Arc::new(TraceDecayDependencyDepthAuthorityV1::new(Arc::clone(
             &code_graph,
@@ -916,7 +907,8 @@ async fn dispatch_admitted(
             let outcome = runtime
                 .project_runtime
                 .source_lines
-                .source_lines(&retrieval_context(&context, &operation), &request);
+                .source_lines(retrieval_context(&context, &operation), &request)
+                .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
         PrimitiveRequest::SourceBody(request) => dispatch_extended!(
@@ -942,14 +934,6 @@ async fn dispatch_admitted(
             observed_at,
             request,
             module_api
-        ),
-        PrimitiveRequest::FileMetadata(request) => dispatch_extended!(
-            runtime,
-            &context,
-            &operation,
-            observed_at,
-            request,
-            file_metadata
         ),
         PrimitiveRequest::HealthRead(request) => {
             let outcome = runtime
@@ -1270,6 +1254,7 @@ fn symbol_page<T: Serialize>(
     let returned = page.items.len() as u64;
     let total = page.total;
     let continuation = page.next_cursor.clone();
+    let temporal = symbol_temporal_state(&page, finished_at);
     let payload = value_or_problem!(serde_json::to_value(page), context, operation);
     evidence_result(
         access,
@@ -1291,8 +1276,20 @@ fn symbol_page<T: Serialize>(
         continuation,
         finished_at,
         budget,
+        temporal,
         partial,
     )
+}
+
+fn symbol_temporal_state<T>(page: &SymbolGraphPage<T>, finished_at: UtcMicros) -> TemporalState {
+    let mut temporal = TemporalState::current(finished_at);
+    temporal.source_generation = Some(page.generation.clone());
+    temporal.freshness = if page.freshness.is_stale() {
+        FreshnessState::Stale
+    } else {
+        FreshnessState::Current
+    };
+    temporal
 }
 
 fn source_outcome(
@@ -1318,6 +1315,7 @@ fn source_outcome(
                 None,
                 finished_at,
                 budget,
+                TemporalState::current(finished_at),
                 false,
             )
         }
@@ -1337,6 +1335,7 @@ fn source_outcome(
                 None,
                 finished_at,
                 budget,
+                TemporalState::current(finished_at),
                 true,
             )
         }
@@ -1454,6 +1453,7 @@ fn typed_result<T: Serialize>(
         continuation,
         finished_at,
         budget,
+        TemporalState::current(finished_at),
         partial,
     )
 }
@@ -1500,6 +1500,7 @@ fn grep_page<T: Serialize>(
         continuation,
         finished_at,
         OperationBudgetUsage::default(),
+        TemporalState::current(finished_at),
         partial,
     )
 }
@@ -1546,6 +1547,7 @@ fn evidence_result(
     continuation: Option<OpaqueCursor>,
     finished_at: UtcMicros,
     budget: OperationBudgetUsage,
+    temporal: TemporalState,
     partial: bool,
 ) -> Result<ApplicationResult<Value>, ApplicationContractError> {
     let mut output = CountingSink {
@@ -1614,7 +1616,7 @@ fn evidence_result(
         context.request_id().clone(),
         context.scope().clone(),
         EvidencePacket {
-            temporal: TemporalState::current(finished_at),
+            temporal,
             authority,
             evidence_authorities: Vec::new(),
             coverage: evidence_coverage,
@@ -1636,6 +1638,14 @@ async fn recent_test_results(
     page: &PageRequest,
     observed_at: UtcMicros,
 ) -> Result<ApplicationResult<Value>, ApplicationContractError> {
+    let snapshot = match runtime
+        .test_runs
+        .latest_page(&runtime.admitted_root_uri, page)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(_) => return unavailable(context, operation),
+    };
     let current = match runtime.test_run_scope.current_identity().await {
         Ok(identity) => ManagedTestRunCurrentScope {
             root_uri: runtime.admitted_root_uri.clone(),
@@ -1646,7 +1656,7 @@ async fn recent_test_results(
         },
         Err(_) => return unavailable(context, operation),
     };
-    let snapshot = match runtime.test_runs.latest_current_page(&current, page).await {
+    let snapshot = match current_managed_test_run(snapshot, &current) {
         ManagedTestRunReadOutcome::Current(snapshot) => snapshot,
         ManagedTestRunReadOutcome::Stale(
             ManagedTestRunStaleReason::SourceIdentity | ManagedTestRunStaleReason::DocumentContent,
@@ -1712,6 +1722,7 @@ async fn recent_test_results(
         next_cursor,
         observed_at,
         OperationBudgetUsage::default(),
+        TemporalState::current(observed_at),
         partial,
     )
 }
@@ -1953,21 +1964,22 @@ mod tests {
     use super::{
         ExtendedPrimitivePort, OmissionReason, PrimitiveCapacity, PrimitiveDispatch,
         PrimitiveRequest, StorageStatusPrimitiveRequest, diagnostics_absence_problem,
-        pre_admission_problem, session_structural_refusal_problem, valid_owned_primitive_request,
-        validate_admitted_root_uri,
+        pre_admission_problem, session_structural_refusal_problem, symbol_temporal_state,
+        valid_owned_primitive_request, validate_admitted_root_uri,
     };
     use tracedecay_contracts::retrieval::{
-        GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,
-        RetrievalOrder, RetrievalRequestMeta, SessionRetrievalBudgetStageV1,
-        SessionRetrievalStructuralRefusalV1, SignatureSearchRequest, SymbolGraphScope,
-        SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
+        CodeGraphReadFreshnessV1, GraphRelationRequest, ImplementationSelector,
+        ImplementationsRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
+        SessionRetrievalBudgetStageV1, SessionRetrievalStructuralRefusalV1, SignatureSearchRequest,
+        SymbolGraphPage, SymbolGraphScope, SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
     };
     use tracedecay_contracts::{
-        ApplicationProblemKind, CancellationContext, Deadline, LegalAction, PageRequest, RequestId,
-        RetryDirective,
+        ApplicationProblemKind, CancellationContext, Deadline, FreshnessState, LegalAction,
+        PageRequest, RequestId, RetryDirective,
     };
     use tracedecay_domain::{
-        EphemeralSanitizedQueryViewV1, QueryNormalizationRevision, SanitizerRevision, UtcMicros,
+        CodeGenerationId, EphemeralSanitizedQueryViewV1, QueryNormalizationRevision,
+        SanitizerRevision, UtcMicros,
     };
     use url::Url;
 
@@ -1976,6 +1988,28 @@ mod tests {
     // object safe, without adding runtime tests or unused helper items.
     const _: fn(&dyn PrimitiveDispatch) = |_| {};
     const _: fn(&dyn ExtendedPrimitivePort) = |_| {};
+
+    #[test]
+    fn stale_symbol_page_carries_items_and_generation_freshness() {
+        let generation =
+            CodeGenerationId::new("generation.symbol-page.stale.1").expect("generation");
+        let page = SymbolGraphPage::complete(
+            generation.clone(),
+            CodeGraphReadFreshnessV1::LastCompleteStale {
+                sealed_at: UtcMicros(10),
+                rebuild_in_flight: true,
+            },
+            vec!["symbol"],
+            Some(1),
+            None,
+        );
+        let temporal = symbol_temporal_state(&page, UtcMicros(20));
+
+        assert_eq!(page.items, vec!["symbol"]);
+        assert_eq!(page.generation, generation.clone());
+        assert_eq!(temporal.source_generation, Some(generation));
+        assert_eq!(temporal.freshness, FreshnessState::Stale);
+    }
 
     #[test]
     fn transport_pre_admission_problems_are_canonical() {

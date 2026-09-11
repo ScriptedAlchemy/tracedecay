@@ -2,7 +2,7 @@
 //!
 //! The read service consumes one daemon-route admission receipt and owns result
 //! envelopes and payload validation. The injected port owns the durable
-//! completed-publication ledger, existing opaque-handle/cursor authority, and
+//! publication ledger, existing opaque-handle/cursor authority, and
 //! anchor hydration.
 
 use std::future::Future;
@@ -251,7 +251,7 @@ pub struct FeedbackReadPortContext<'a> {
     pub operation: &'a ApplicationOperation,
 }
 
-/// Four explicit reads over the canonical completed-publication and anchor
+/// Four explicit reads over the canonical publication and anchor
 /// owners. Implementations reuse authenticated `PageRequest` cursors and exact
 /// `RetrievalAnchorId` expansion; they may not reconstruct findings from
 /// advisory provider payloads.

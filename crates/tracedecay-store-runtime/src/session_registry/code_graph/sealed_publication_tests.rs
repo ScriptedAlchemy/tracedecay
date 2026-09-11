@@ -22,14 +22,16 @@ use tracedecay_domain::{
     CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
+    GraphCancellation, GraphDbError, GraphGenerationManifestProvider, GraphGenerationReplaySource,
+    GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
 };
 use tracedecay_store::{
     GraphGenerationIdV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
     GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationStoreV1,
-    GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
+    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationReplayV1,
+    GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1,
+    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+    RuntimeRequestControlV1,
 };
 
 use super::super::DaemonSessionRuntimeRegistryV1;
@@ -252,6 +254,237 @@ fn journal_publication_without_head(
                 .append_replay(&replay, context)
                 .expect("append sealed publication replay"),
             GraphReplayAppendOutcomeV1::Appended(_)
+        ));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_pending_replay_without_source_commitments_is_discarded_before_fresh_publication()
+ {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn fresh_publication_value() -> usize { 41 }\n",
+    )
+    .expect("project source");
+    git(&project_root, &["add", "."]);
+    git(
+        &project_root,
+        &["commit", "-qm", "fresh publication fixture"],
+    );
+    let project_id = ProjectId::new("project.historical-pending-replay").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let canonical_project = project_root.canonicalize().expect("canonical project root");
+    let scoped_store =
+        scoped_code_index_store_root(&root.join("code-index-store"), &canonical_project);
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &canonical_project,
+        scoped_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler");
+    scheduler.reconcile_now().expect("seal fresh generation");
+    let latest = scheduler
+        .latest_complete()
+        .expect("fresh complete generation");
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("active generation pointer"),
+    )
+    .expect("decode active generation pointer");
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        49,
+        "historical pending replay",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(project_id.clone(), [canonical_project.clone()])
+        .await
+        .expect("project graph database");
+    let runtime = registry
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            latest.generation().snapshot().repository.clone(),
+            scheduler.identity().worktree_id().clone(),
+            latest.generation().snapshot().reference.clone(),
+            latest.generation().manifest().generation_id.clone(),
+            project_database,
+            CodeGraphReplayBindingV1 {
+                generations_root: scoped_store.join("code-generations-v1"),
+                sealed_state_digest: SealedGraphStateDigest::try_from(pointer.state_digest)
+                    .expect("fresh sealed state digest"),
+            },
+            None,
+        )
+        .await
+        .expect("retain fresh code graph runtime");
+
+    let historical_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tracedecay-code-index/tests/fixtures/partitioned_pre_paging");
+    let historical_digest = "6fece830a4b12904018853a467e404edc60ea76e2cab48d4645fbbb4132bd6af";
+    let generations_root = scoped_store.join("code-generations-v1");
+    let segments_root = scoped_store.join("code-generation-segments-v1");
+    std::fs::create_dir_all(&segments_root).expect("historical segment root");
+    std::fs::copy(
+        historical_fixture.join("manifest.json"),
+        generations_root.join(format!("generation-{historical_digest}.json")),
+    )
+    .expect("install historical partitioned manifest");
+    for digest in [
+        "462ca12853ede4c82969ef6cc161dedc0952b5b7ef85dcf23b125adddb25ecf8",
+        "5cea7a47c6160776faa037dc1a530e5cecd38440d4833f8ebaf60a86e7535ea7",
+        "cc82022dad2a1bfc50f483df6a1433962ffd454b70d63a73b6ddd7ebaee2cf12",
+        "d1b83239d4010ac53b635c2d7c4bef3d1be9aa2e59d8f09d0404d28c1d00e8ab",
+    ] {
+        std::fs::copy(
+            historical_fixture
+                .join("segments")
+                .join(format!("{digest}.json")),
+            segments_root.join(format!("segment-{digest}.json")),
+        )
+        .expect("install historical partitioned segment");
+    }
+    let historical_repository =
+        RepositoryId::new("repository.production").expect("historical repository id");
+    let _historical_route = runtime
+        .graph_manifest_provider
+        .bind(
+            runtime.authority.binding().shard_id.clone(),
+            project_id,
+            historical_repository.clone(),
+            generations_root,
+            runtime.replay_root.clone(),
+        )
+        .expect("bind historical generation source");
+
+    let (_, fresh_key, fresh_replay) = publication_replay(&runtime, latest.generation());
+    let historical_generation = CodeGenerationId::new(
+        "generation.v1.d7eb9547.00000002.c221a7303ac5f89c1b1a553f26217136fda771a17cc1578d4cb232ef7a5f32c2",
+    )
+    .expect("historical generation id");
+    let projector_revision = GraphProjectorRevision::try_from(
+        tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+    )
+    .expect("projector revision");
+    let historical_key = GraphPublicationKeyV1::new(
+        fresh_key.projection.clone(),
+        GraphGenerationIdV1::new(
+            tracedecay_code_index::graph_projection::code_graph_generation_id(
+                &historical_generation,
+                &projector_revision,
+            )
+            .expect("historical graph generation")
+            .as_str(),
+        )
+        .expect("relational historical graph generation"),
+        GraphPublicationIdempotencyKeyV1::new(
+            tracedecay_code_index::graph_projection::code_graph_idempotency_key(
+                &historical_generation,
+                &projector_revision,
+            )
+            .expect("historical idempotency key")
+            .as_str(),
+        )
+        .expect("relational historical idempotency key"),
+    );
+    let historical_sealed_source = SealedCodeGenerationReplay {
+        repository: historical_repository,
+        generation: historical_generation,
+        sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+            "sha256:{historical_digest}"
+        ))
+        .expect("historical sealed state digest"),
+        projector_revision,
+    };
+    // The historical fixture predates required documentation evidence, so the
+    // current reader refuses its rows by name before the source-commitment
+    // check can run (69df412d2 pins the same refusal in the code-index suite).
+    let refused = runtime
+        .graph_manifest_provider
+        .hydrate_sealed_code_generation(
+            &fresh_key.projection,
+            &historical_sealed_source,
+            &|| Ok(()),
+        )
+        .expect_err("historical seal must remain unavailable to current readers");
+    assert!(
+        matches!(
+            &refused,
+            GraphDbError::SealedRevisionIncompatible { sealed_state_digest, message }
+                if sealed_state_digest == &format!("sha256:{historical_digest}")
+                    && message.contains("missing field `docstring`")
+        ),
+        "unexpected error: {refused}"
+    );
+    let historical_source =
+        GraphGenerationReplaySource::SealedCodeGeneration(historical_sealed_source);
+    let historical_replay = GraphPublicationReplayV1::new(
+        historical_key.clone(),
+        fresh_replay.input_digest.clone(),
+        fresh_replay.dependency_generation_closure_digest.clone(),
+        fresh_replay.direct_dependency_generations.clone(),
+        None,
+        fresh_replay.expected_recovered_digest.clone(),
+        serde_json::to_vec(&historical_source).expect("historical replay source"),
+    )
+    .expect("historical replay");
+    with_publication_context("journal-historical-pending-replay", |context| {
+        let mut storage = runtime
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .append_replay(&historical_replay, context)
+                .expect("append historical replay"),
+            GraphReplayAppendOutcomeV1::Appended(_)
+        ));
+    });
+
+    let snapshot = runtime
+        .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        .expect("fresh publication discards the permanently incompatible predecessor");
+    assert_eq!(snapshot.verified_head().key, fresh_key);
+    with_publication_context("inspect-historical-pending-replay", |context| {
+        let mut storage = runtime
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .replay(&historical_key, context)
+                .expect("historical replay lookup"),
+            GraphPublicationReplayLookupV1::Missing
+        ));
+        assert!(matches!(
+            storage
+                .replay(&fresh_key, context)
+                .expect("fresh replay lookup"),
+            GraphPublicationReplayLookupV1::Active(_)
         ));
     });
 }

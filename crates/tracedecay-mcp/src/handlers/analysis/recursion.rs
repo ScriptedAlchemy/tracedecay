@@ -73,7 +73,7 @@ pub async fn handle_recursion(
                         "name": symbol.metadata.simple_name,
                         "kind": symbol.metadata.kind,
                         "file": symbol.path,
-                        "line": symbol.metadata.start_line,
+                        "line": user_line(symbol.metadata.start_line),
                     }));
                 } else {
                     return Err(verified_analysis_unavailable(

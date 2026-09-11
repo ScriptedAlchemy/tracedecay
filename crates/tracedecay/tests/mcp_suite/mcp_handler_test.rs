@@ -28,8 +28,13 @@ mod rename_symbol_test;
 mod retrieve_truncation_test;
 mod schema_test;
 mod session_search_test;
+#[cfg(feature = "test-transport")]
+mod shell_dead_code_test;
 mod skills_automation_test;
 mod status_runtime_test;
+mod unsafe_patterns_test;
+#[cfg(feature = "test-transport")]
+mod work_test;
 
 // Shared lock used by sibling transport suites.
 #[cfg(feature = "test-transport")]

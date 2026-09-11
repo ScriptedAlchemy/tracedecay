@@ -18,6 +18,11 @@ use crate::{
 
 pub const HOOK_SYNCHRONOUS_BUDGET_MICROS: u64 = 100_000;
 
+/// The same budget as a bounded lock wait: how long one spool writer admission
+/// may wait for a held lease, measured from the lock attempt.
+pub const HOOK_SYNCHRONOUS_BUDGET: std::time::Duration =
+    std::time::Duration::from_micros(HOOK_SYNCHRONOUS_BUDGET_MICROS);
+
 /// Non-widenable deadline token furnished to admission and replay ports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HookSynchronousDeadlineV1 {

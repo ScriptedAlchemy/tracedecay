@@ -28,6 +28,10 @@ on:
       - ".cargo/**"
       - "benchmark_data/index-bench/**"
       - ".github/workflows/hotpath-profile.yml"
+      - "scripts/check-rust-cache-lineage.py"
+      - "scripts/drop-prefix-restored-rust-artifacts.sh"
+      - "scripts/rust_cache_lineage.py"
+      - "scripts/test-rust-cache-lineage.py"
   workflow_dispatch:
 
 concurrency:
@@ -49,6 +53,9 @@ env:
   # Hotpath binds a localhost metrics server by default; the benchmark turns
   # it off itself, and this makes that explicit at the job boundary too.
   HOTPATH_METRICS_SERVER_OFF: "1"
+  # rustc writes .rmeta read-only and updates them in place when incremental
+  # compilation is on. A restored rust-cache blob then fails the compile.
+  CARGO_INCREMENTAL: "0"
   # The file whose presence marks a checkout as carrying the benchmark.
   INDEX_BENCH_SOURCE: crates/tracedecay-query/src/bin/tracedecay_index_bench.rs
 
@@ -62,24 +69,27 @@ jobs:
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
 
-      - name: kache compiler cache
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/kache
-            ~/.cache/kache
-          key: kache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: kache-${{ runner.os }}-
-      - name: Enable kache
-        if: runner.os != 'Windows'
-        shell: bash
+      - name: Check rust-cache restore lineage
         run: |
-          command -v kache >/dev/null 2>&1 || cargo install kache --locked
-          kache init --no-service
-          echo "RUSTC_WRAPPER=kache" >> "$GITHUB_ENV"
+          python3 scripts/test-rust-cache-lineage.py
+          python3 scripts/check-rust-cache-lineage.py
+
+      # Isolated v1-rust lineage: this job used to restore a job-name key
+      # that prefix-matched other Linux rust-cache blobs, then rustc could
+      # not overwrite the restored read-only .rmeta files.
+      - name: Cache Rust dependency artifacts
+        id: rust-cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: hotpath-profile
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Discard prefix-restored compiler artifacts
+        run: scripts/drop-prefix-restored-rust-artifacts.sh "${{ steps.rust-cache.outputs.cache-hit }}"
+
       - name: Create metrics directory
         run: mkdir -p /tmp/metrics
 
@@ -137,11 +147,14 @@ jobs:
           HOTPATH_OUTPUT_FORMAT: json
           HOTPATH_OUTPUT_PATH: /tmp/metrics/base_timing.json
           HOTPATH_REPORT: functions-timing
+          # A separate tree from HEAD's restored/compiled target/: rustc
+          # cannot overwrite the read-only .rmeta files that compile left.
+          CARGO_TARGET_DIR: target-base
         run: |
           cargo build --locked -p tracedecay-query --bin tracedecay-index-bench \
             --no-default-features --features production,hotpath
           timeout "${INDEX_BENCH_TIMEOUT_SECONDS}" \
-            target/debug/tracedecay-index-bench | tee /tmp/metrics/base_workload.json
+            target-base/debug/tracedecay-index-bench | tee /tmp/metrics/base_workload.json
 
       # A timing delta only means something if both sides indexed the same
       # bytes. The sealed state digest is a function of the admitted corpus

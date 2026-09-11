@@ -82,6 +82,16 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         Ok(records)
     }
 
+    async fn diagnostics_for_publication(
+        &self,
+        generation: &CodeGenerationId,
+        publication_revision: u64,
+    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
+        DiagnosticsStore::new(self.database.clone())
+            .diagnostics_for_publication(generation, publication_revision)
+            .await
+    }
+
     #[hotpath::measure(label = "usecases.diagnostics.current", future = true)]
     async fn current_diagnostics(
         &self,
@@ -157,6 +167,59 @@ impl<S> DiagnosticStoreFeedbackProvider<S> {
     }
 }
 
+impl<S> DiagnosticStoreFeedbackProvider<S>
+where
+    S: DiagnosticStore,
+{
+    /// Selects the admitted provider identities represented by the exact
+    /// current stored publication for this document. An empty result means no
+    /// publication has yet established producer provenance.
+    pub(crate) async fn current_publication_providers(
+        &self,
+        providers: &[tracedecay_contracts::DiagnosticProviderIdentity],
+        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+    ) -> Result<Vec<tracedecay_contracts::DiagnosticProviderIdentity>, ()> {
+        let Some(first) = providers.first() else {
+            return Ok(Vec::new());
+        };
+        let ProviderSourceIdentity::CleanGeneration { generation } = &first.source else {
+            return Ok(Vec::new());
+        };
+        let current = self
+            .store
+            .current_diagnostic_generation()
+            .await
+            .map_err(|_| ())?;
+        if current.as_ref() != Some(generation) {
+            return Ok(Vec::new());
+        }
+        let records = self
+            .store
+            .current_diagnostics_for_file(generation, &first.document.file)
+            .await
+            .map_err(|_| ())?;
+        let selected = providers
+            .iter()
+            .filter(|provider| {
+                records.iter().any(|record| {
+                    record_matches_provider(record, provider)
+                        && record.repository == provider.scope.repository_id
+                        && record.worktree.as_ref() == Some(&provider.scope.worktree_id)
+                        && record.reference.as_ref() == provider.scope.reference.as_ref()
+                        && record.file_occurrence_id == provider.document.file
+                        && record.content_digest == provider.document.content_digest
+                        && record
+                            .source_revision
+                            .as_ref()
+                            .is_none_or(|revision| revision == &input.request.scope.head_commit_id)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(selected)
+    }
+}
+
 impl<S> DiagnosticProviderPort for DiagnosticStoreFeedbackProvider<S>
 where
     S: DiagnosticStore,
@@ -204,11 +267,25 @@ where
                 .current_diagnostics_for_file(&current, &request.identity.document.file)
                 .await
             {
-                Ok(records) => provider_result(
-                    request.identity.clone(),
-                    DiagnosticProviderState::SupportedComplete,
-                    Some(records),
-                ),
+                Ok(records) => {
+                    let records = records
+                        .into_iter()
+                        .filter(|record| record_matches_provider(record, &request.identity))
+                        .collect::<Vec<_>>();
+                    if records.is_empty() {
+                        provider_result(
+                            request.identity.clone(),
+                            DiagnosticProviderState::Unavailable,
+                            None,
+                        )
+                    } else {
+                        provider_result(
+                            request.identity.clone(),
+                            DiagnosticProviderState::SupportedComplete,
+                            Some(records),
+                        )
+                    }
+                }
                 Err(_) => provider_result(
                     request.identity.clone(),
                     DiagnosticProviderState::Unavailable,
@@ -241,16 +318,28 @@ where
                 .diagnostics_for_generation(&request.generation)
                 .await
             {
-                Ok(records) => provider_result(
-                    request.identity.clone(),
-                    DiagnosticProviderState::SupportedComplete,
-                    Some(
-                        records
-                            .into_iter()
-                            .filter(|record| record.file_occurrence_id == request.file)
-                            .collect(),
-                    ),
-                ),
+                Ok(records) => {
+                    let records = records
+                        .into_iter()
+                        .filter(|record| {
+                            record.file_occurrence_id == request.file
+                                && record_matches_provider(record, &request.identity)
+                        })
+                        .collect::<Vec<_>>();
+                    if records.is_empty() {
+                        provider_result(
+                            request.identity.clone(),
+                            DiagnosticProviderState::Unavailable,
+                            None,
+                        )
+                    } else {
+                        provider_result(
+                            request.identity.clone(),
+                            DiagnosticProviderState::SupportedComplete,
+                            Some(records),
+                        )
+                    }
+                }
                 Err(_) => provider_result(
                     request.identity.clone(),
                     DiagnosticProviderState::Unavailable,
@@ -259,6 +348,15 @@ where
             }
         })
     }
+}
+
+fn record_matches_provider(
+    record: &GenerationDiagnosticV1,
+    identity: &tracedecay_contracts::DiagnosticProviderIdentity,
+) -> bool {
+    record.provenance.producer == identity.producer.provider
+        && record.provenance.analyzer_revision == identity.producer.analyzer_revision
+        && record.provenance.configuration_revision == identity.configuration.revision
 }
 
 fn provider_result<T>(

@@ -21,8 +21,8 @@ crates/tracedecay-agent-hosts/src/agents/hermes/templates/** text eol=lf
 crates/tracedecay/src/sessions/claude_observation_benchmark.rs text eol=lf
 crates/tracedecay/src/sessions/claude_observation_benchmark/** text eol=lf
 benchmark_data/claude-observation/** text eol=lf
-# Vendored, patched tree-sitter grammars: generated parser sources are
-# reviewed upstream-of-generation (grammar.js + patches), not line-by-line.
+# Vendored tree-sitter grammar sources retain their upstream bytes;
+# provenance and the import revision are documented beside the sources.
 # Collapse them out of PR diffs and language stats.
 crates/tracedecay-code-extraction/vendor/** linguist-generated=true
 # Vendored serde_json closure for source-provenance integration tests: Cargo

@@ -1,6 +1,6 @@
 // Compiled twice on purpose: `build.rs` mounts this file as a `#[path]`
 // module to resolve the provenance it bakes into the binary, and
-// `tests/source_provenance_test.rs` mounts the same file so the code the tests
+// `tests/core_cli_suite/source_provenance_test.rs` mounts the same file so the code the tests
 // exercise is the code the build script runs rather than a copy that can
 // drift. Items are fully qualified instead of imported so the file stays
 // self-contained in both hosts.

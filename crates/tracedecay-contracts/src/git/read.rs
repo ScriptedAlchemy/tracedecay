@@ -12,6 +12,13 @@ use tracedecay_domain::{
 /// Upper bound for bounded history requests.
 pub const GIT_HISTORY_MAX_COUNT_LIMIT: u32 = 1_000;
 
+/// Default entry bound for one Git query or Git-read surface request
+/// (files, status paths, commits, blame lines, or hunk references).
+pub const GIT_QUERY_DEFAULT_MAX_ENTRIES: u32 = 1_000;
+
+/// Default byte bound for one serialized Git query or Git-read surface result.
+pub const GIT_QUERY_DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Hard ceiling for one historical blob materialized by a Git adapter.
 pub const GIT_HISTORICAL_BLOB_MAX_BYTES: u64 = 8 * 1024 * 1024;
 

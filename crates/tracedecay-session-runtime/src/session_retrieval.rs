@@ -49,23 +49,19 @@ const MESSAGE_SEARCH_RANKING_VERSION: u32 = 1;
 mod serving_status;
 const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Byte ceiling every admitted application retrieval request is bound by.
-///
-/// `SessionRetrievalService::retrieve` refuses — terminally, as
-/// `BudgetExhausted` — any query whose context budget or execution limits
-/// exceed the binding's budgets, so every query built for the admitted path
-/// must be sized against this constant rather than the multi-MiB
-/// `ExecutionLimits::default()` or [`MESSAGE_SEARCH_MAX_BYTES`].
+/// Byte ceiling for an admitted application's returned context and hydrated
+/// payload. Candidate and temporal-record workspaces retain their separate,
+/// finite kernel bounds.
 pub const APPLICATION_RETRIEVAL_MAX_BYTES: u64 = 64 * 1024;
 
 /// Execution limits an admitted application retrieval of `limit` items may ask
 /// for.
 ///
-/// The admitted binding checks exactly four things: the three *total* byte
-/// limits against [`APPLICATION_RETRIEVAL_MAX_BYTES`], and that the hydration
-/// item count covers the requested page. The defaults are multi-MiB and are
-/// rejected outright as a non-retryable structural refusal rather than a
-/// smaller answer, so those four are the ones this sizes.
+/// The admitted binding checks the response context and hydrated payload
+/// against [`APPLICATION_RETRIEVAL_MAX_BYTES`]. Candidate and temporal-record
+/// bytes are bounded kernel workspaces; charging them to the response budget
+/// makes a one-item request fail solely because its session has enough retained
+/// records to fill the ranker's input pages.
 ///
 /// Nothing else is narrowed. Candidate and record item counts are the pool the
 /// ranker draws from, not the page it returns: clamping them to `limit` would
@@ -75,8 +71,6 @@ pub fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
     let bytes = usize::try_from(APPLICATION_RETRIEVAL_MAX_BYTES).unwrap_or(usize::MAX);
     let defaults = ExecutionLimits::default();
     ExecutionLimits {
-        candidate_total_bytes: bytes.min(defaults.candidate_total_bytes),
-        record_total_bytes: bytes.min(defaults.record_total_bytes),
         hydration_total_bytes: bytes.min(defaults.hydration_total_bytes),
         hydration_limit: defaults.hydration_limit.max(limit),
         ..defaults
@@ -101,7 +95,7 @@ mod admitted;
 mod contract;
 mod primitive;
 pub use admitted::{
-    SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
+    LcmRawStoreIdsFutureV1, SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
     UnavailableSessionApplicationRetrievalV1,
 };
 pub use contract::{
@@ -132,6 +126,7 @@ impl SessionRetrievalServingIdentityV1 {
     pub async fn resolve_project(
         project_id: &str,
         serving_db: &Path,
+        serving_branch: Option<&str>,
         project_root: &Path,
         profile_id: &tracedecay_domain::UserProfileId,
         expected_runtime_shard: &StoreShardIdV1,
@@ -139,7 +134,8 @@ impl SessionRetrievalServingIdentityV1 {
     ) -> Option<Self> {
         let project_id = ProjectId::new(project_id.to_owned()).ok()?;
         let profile_id = ProfileId::new(profile_id.as_str().to_owned()).ok()?;
-        let (store_id, root_id) = project_store_and_root(registry, &project_id, serving_db).await?;
+        let (store_id, root_id) =
+            project_store_and_root(registry, &project_id, serving_db, serving_branch).await?;
         let serving = Self {
             project_id: Some(project_id),
             profile_id,
@@ -285,6 +281,8 @@ impl DaemonSessionRetrievalRoot {
                 if scope.writable
                     && scope.project_id == context.project.project_id
                     && scope.store_id == store.store.store_id
+                    && scope.store_id == serving.store_id.as_str()
+                    && scope.graph_scope_id == serving.root_id.as_str()
                     && profile_root.join(&scope.db_relpath) == serving.serving_db
                 {
                     if selected.is_some() {
@@ -391,6 +389,7 @@ async fn project_store_and_root(
     registry: &RegisteredGlobalDb,
     project_id: &ProjectId,
     serving_db: &Path,
+    serving_branch: Option<&str>,
 ) -> Option<(SessionStoreId, SessionRootId)> {
     let context = registry
         .project_registry_context_by_id(project_id.as_str())
@@ -403,7 +402,16 @@ async fn project_store_and_root(
             if scope.writable
                 && scope.project_id == context.project.project_id
                 && scope.store_id == store.store.store_id
-                && profile_root.join(&scope.db_relpath) == serving_db
+                // Branches share a physical graph; the serving branch owns the root.
+                && serving_branch.is_none_or(|branch| scope.branch_name == branch)
+                // The registry's profile root has been through `canonicalize`
+                // while the serving path is the one its caller built, so the
+                // two name one file in two spellings wherever an ancestor is
+                // an alias (macOS `/var` -> `/private/var`, Windows `\\?\`).
+                && tracedecay_runtime_core::path_safety::same_canonical_path(
+                    &profile_root.join(&scope.db_relpath),
+                    serving_db,
+                )
             {
                 if selected.is_some() {
                     return None;

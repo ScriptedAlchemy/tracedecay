@@ -53,7 +53,7 @@ mod embedding_backend;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use embedding_backend::EmbeddingRuntimeFamilyV1;
 pub mod embedding_parallelism;
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 mod execution_provider;
 mod fastembed_adapter;
 pub use fastembed_adapter::{SemanticExecutionAuthority, SemanticExecutionInterruptionV1};
@@ -158,7 +158,11 @@ impl<'a> LoadableLifecycleArtifactV1<'a> {
     fn resolve(
         lifecycle: &'a SemanticModelLifecycleOwnerV1,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
-        Self::from_state(lifecycle.status().state, lifecycle.catalog())
+        let artifact = Self::from_state(lifecycle.status().state, lifecycle.catalog())?;
+        if !artifact.model.backend.runtime_family().is_compiled() {
+            return Err(SemanticRuntimeScheduleFailureV1::Runtime);
+        }
+        Ok(artifact)
     }
 
     fn from_state(
@@ -776,7 +780,11 @@ impl DaemonSemanticRuntimeHandleV1 {
     /// Requires `semantic-fastembed`: the handle's query runtime is concretely
     /// the FastEmbed runtime, and without that feature the compiled-out stub
     /// fails compatibility verification by design, so no binding can exist.
-    #[cfg(all(any(test, feature = "test-helpers"), feature = "semantic-fastembed"))]
+    #[cfg(all(
+        any(test, feature = "test-helpers"),
+        feature = "semantic-fastembed",
+        not(windows)
+    ))]
     pub fn bind_query_runtime_for_current(
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
@@ -1553,6 +1561,9 @@ mod document_composition_tests {
             line_span: 1,
             start_line: 0,
             signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: FileIdentityDigest::new(digest('f')).expect("file identity fixture"),
             content_digest: ContentDigest::new(digest('d')).expect("content fixture"),
@@ -2054,7 +2065,7 @@ mod scheduling_tests {
     /// Falsifiable in `semantic-fastembed` builds: without the pre-install
     /// warm, the structural-only authority would stage and publish Current
     /// over digest-mismatched bytes.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[tokio::test]
     async fn already_published_resume_with_digest_mismatched_model_never_becomes_current() {
         let mismatched = digest_mismatched_lifecycle_authority();
@@ -2189,7 +2200,7 @@ mod scheduling_tests {
         );
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn exact_unbind_clears_pointer_and_factory_but_preserves_newer_generation() {
         let handle =

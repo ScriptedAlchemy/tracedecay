@@ -86,11 +86,42 @@ async fn daemon_impact_adapter_reports_missing_identity_without_minting_paths() 
 fn uses_only_predecessor_contributes_a_file_but_not_an_affected_caller() {
     let reader = impact_reader();
     let target = SymbolOccurrenceId::new("symbol.feedback.target").unwrap();
+    let file = FileOccurrenceId::new("file.feedback.target").unwrap();
 
-    let evidence = read_verified_impact_evidence_v1(&reader, &target, Arc::new(NeverCancelled))
+    let evidence =
+        read_verified_impact_evidence_v1(&reader, &file, Some(&target), Arc::new(NeverCancelled))
+            .expect("verified impact")
+            .expect("target symbol");
+
+    assert!(evidence.file_paths.contains(&"src/uses.rs".to_owned()));
+    assert_eq!(
+        evidence.affected_callers,
+        vec![SymbolOccurrenceId::new("symbol.feedback.caller").unwrap()]
+    );
+    assert!(evidence.complete);
+}
+
+#[test]
+fn document_impact_uses_every_symbol_in_the_exact_file() {
+    let reader = impact_reader();
+    let file = FileOccurrenceId::new("file.feedback.target").unwrap();
+
+    let evidence = read_verified_impact_evidence_v1(&reader, &file, None, Arc::new(NeverCancelled))
         .expect("verified impact")
-        .expect("target symbol");
+        .expect("document symbols");
 
+    assert_eq!(
+        evidence.seed_symbols,
+        vec![
+            SymbolOccurrenceId::new("symbol.feedback.sibling").unwrap(),
+            SymbolOccurrenceId::new("symbol.feedback.target").unwrap(),
+        ]
+    );
+    assert!(
+        evidence
+            .file_paths
+            .contains(&"src/sibling_user.rs".to_owned())
+    );
     assert!(evidence.file_paths.contains(&"src/uses.rs".to_owned()));
     assert_eq!(
         evidence.affected_callers,
@@ -102,23 +133,55 @@ fn uses_only_predecessor_contributes_a_file_but_not_an_affected_caller() {
 fn impact_reader() -> CodeGraphInteractiveReader {
     let generation = CodeGenerationId::new("generation.feedback.impact").unwrap();
     let symbols = [
-        ("symbol.feedback.target", "src/target.rs", '1'),
-        ("symbol.feedback.uses", "src/uses.rs", '2'),
-        ("symbol.feedback.caller", "src/caller.rs", '3'),
+        (
+            "symbol.feedback.target",
+            "src/target.rs",
+            "file.feedback.target",
+            '1',
+        ),
+        (
+            "symbol.feedback.sibling",
+            "src/target.rs",
+            "file.feedback.target",
+            '4',
+        ),
+        (
+            "symbol.feedback.uses",
+            "src/uses.rs",
+            "file.feedback.uses",
+            '2',
+        ),
+        (
+            "symbol.feedback.caller",
+            "src/caller.rs",
+            "file.feedback.caller",
+            '3',
+        ),
+        (
+            "symbol.feedback.sibling-user",
+            "src/sibling_user.rs",
+            "file.feedback.sibling-user",
+            '5',
+        ),
     ];
-    let files = symbols
-        .iter()
-        .map(|(symbol, path, digest)| SanitizedCodeFileV1 {
-            file_occurrence_id: FileOccurrenceId::new(format!("file.{symbol}")).unwrap(),
-            logical_path: (*path).to_owned(),
-            language: Some(LanguageId::new("rust").unwrap()),
-            content_digest: digest_value::<ContentDigest>(*digest),
-            disposition: SnapshotFileDispositionV1::Present,
-        })
-        .collect::<Vec<_>>();
+    let files = [
+        ("file.feedback.target", "src/target.rs", '1'),
+        ("file.feedback.uses", "src/uses.rs", '2'),
+        ("file.feedback.caller", "src/caller.rs", '3'),
+        ("file.feedback.sibling-user", "src/sibling_user.rs", '5'),
+    ]
+    .into_iter()
+    .map(|(file, path, digest)| SanitizedCodeFileV1 {
+        file_occurrence_id: FileOccurrenceId::new(file).unwrap(),
+        logical_path: path.to_owned(),
+        language: Some(LanguageId::new("rust").unwrap()),
+        content_digest: digest_value::<ContentDigest>(digest),
+        disposition: SnapshotFileDispositionV1::Present,
+    })
+    .collect::<Vec<_>>();
     let records = symbols
         .iter()
-        .map(|(symbol, _, digest)| {
+        .map(|(symbol, _, _, digest)| {
             Arc::new(LineageSymbolRecordV1 {
                 occurrence: SymbolOccurrenceId::new(*symbol).unwrap(),
                 identity: digest_value::<SymbolIdentityDigest>(*digest),
@@ -133,6 +196,9 @@ fn impact_reader() -> CodeGraphInteractiveReader {
                 line_span: 1,
                 start_line: 1,
                 signature: None,
+                docstring: None,
+                is_async: false,
+                derives: Vec::new(),
                 skip_test_coverage: false,
                 file_identity: FileIdentityDigest::new(format!(
                     "sha256:{}",
@@ -150,12 +216,12 @@ fn impact_reader() -> CodeGraphInteractiveReader {
     let chunks = symbols
         .iter()
         .enumerate()
-        .map(|(ordinal, (symbol, _, digest))| {
+        .map(|(ordinal, (symbol, _, file, digest))| {
             Arc::new(CodeSearchChunkV1 {
                 id: CodeSearchChunkId::new(format!("chunk.{symbol}")).unwrap(),
                 anchor: CodeSearchChunkAnchorV1 {
                     generation_id: generation.clone(),
-                    file_occurrence_id: FileOccurrenceId::new(format!("file.{symbol}")).unwrap(),
+                    file_occurrence_id: FileOccurrenceId::new(*file).unwrap(),
                     symbol_occurrence_id: Some(SymbolOccurrenceId::new(*symbol).unwrap()),
                     parent_chunk_id: None,
                     source_span: SourceSpan {
@@ -186,6 +252,11 @@ fn impact_reader() -> CodeGraphInteractiveReader {
     let edges = vec![
         relation("symbol.feedback.uses", &target, RelationEdgeKindV1::Uses),
         relation("symbol.feedback.caller", &target, RelationEdgeKindV1::Calls),
+        relation(
+            "symbol.feedback.sibling-user",
+            &SymbolOccurrenceId::new("symbol.feedback.sibling").unwrap(),
+            RelationEdgeKindV1::Uses,
+        ),
     ];
     let index = GenerationSymbolIndexV1::new(generation.clone(), records).unwrap();
     let cancellation = CancellationSignal::active("cancel.feedback-impact-fixture").unwrap();
@@ -276,14 +347,14 @@ fn dirty_overlay_result_cannot_gain_durable_outputs_or_handles() {
     .unwrap();
     let execution = execution(cycle);
     assert!(
-        CanonicalFeedbackResultV1::new(execution.clone(), Vec::new()).is_ok(),
+        CanonicalFeedbackResultV1::new(execution.clone(), None, Vec::new()).is_ok(),
         "session-only results remain usable in their owner session"
     );
 
     let mut leaked = execution;
     leaked.dedupe_key =
         Some(tracedecay_domain::feedback::FeedbackDedupeKeyV1::new("dedupe.overlay").unwrap());
-    assert!(CanonicalFeedbackResultV1::new(leaked, Vec::new()).is_err());
+    assert!(CanonicalFeedbackResultV1::new(leaked, None, Vec::new()).is_err());
 }
 
 #[test]

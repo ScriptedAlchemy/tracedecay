@@ -70,13 +70,17 @@ pub fn record_workflow_settlement(
         .values()
         .flat_map(|plan| plan.children.iter().map(|child| &child.attempt_identity))
         .collect::<std::collections::BTreeSet<_>>();
+    let active_attempts = planned_attempts
+        .iter()
+        .map(|planned| projection.active_fan_out_attempt(planned))
+        .collect::<std::collections::BTreeSet<_>>();
     let observed_attempt_identities = attempts
         .iter()
         .map(WorkAttemptV1::identity)
         .collect::<std::collections::BTreeSet<_>>();
     if planned_attempts.len() != planned_child_count
         || observed_attempt_identities.len() != attempts.len()
-        || !observed_attempt_identities.is_subset(&planned_attempts)
+        || !observed_attempt_identities.is_subset(&active_attempts)
         || census
             .attempt_frontiers
             .iter()

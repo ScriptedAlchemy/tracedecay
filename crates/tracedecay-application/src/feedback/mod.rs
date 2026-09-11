@@ -21,7 +21,7 @@ pub use cycle_production::{
 };
 pub use cycle_runtime::{
     CanonicalFeedbackResultV1, FeedbackCycleInvocation, FeedbackCycleLspInput,
-    FeedbackCycleRuntime, FeedbackCycleRuntimeError, FeedbackFindingHandlesV1,
-    open_feedback_cycle_runtime,
+    FeedbackCycleReadHandlesV1, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
+    FeedbackFindingHandlesV1, open_feedback_cycle_runtime,
 };
 pub use production::ProductionFeedbackRuntimeStateV1;

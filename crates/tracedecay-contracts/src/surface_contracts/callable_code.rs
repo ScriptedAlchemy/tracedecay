@@ -1,5 +1,6 @@
 //! Transport-neutral callable-code and primitive-code surface request DTOs.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{ExactTechnicalTermKindV1, QueryNormalizationRevision, SanitizerRevision};
 
@@ -16,12 +17,13 @@ use crate::retrieval::{
 /// Surface-owned query semantics. Page size remains an invocation control, but
 /// continuation is a request field so CLI, MCP, and HTTP callers all have the
 /// same channel for spending a `next_cursor`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CallableCodeSurfaceMeta {
     pub projection: ResultProjection,
     pub order: RetrievalOrder,
     #[serde(default)]
+    #[schemars(with = "Option<String>")]
     pub cursor: Option<OpaqueCursor>,
 }
 
@@ -43,7 +45,7 @@ impl CallableCodeSurfaceMeta {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeExactOccurrenceSurfaceRequest {
     pub literal: String,
@@ -71,7 +73,7 @@ impl CodeExactOccurrenceSurfaceRequest {
 /// The callable application request deliberately keeps its sanitized query
 /// non-serializable. The owning runtime supplies the exact sanitizer
 /// revisions when converting this transport DTO.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodePhraseSearchSurfaceRequest {
     pub query: String,
@@ -107,7 +109,7 @@ impl CodePhraseSearchSurfaceRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSymbolSearchSurfaceRequest {
     pub query: String,
@@ -116,7 +118,7 @@ pub struct CodeSymbolSearchSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSignatureSearchSurfaceRequest {
     pub returns: Option<String>,
@@ -126,7 +128,7 @@ pub struct CodeSignatureSearchSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeImplementationsSurfaceRequest {
     pub selector: ImplementationSelector,
@@ -134,7 +136,7 @@ pub struct CodeImplementationsSurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeTypeHierarchySurfaceRequest {
     pub node_id: String,
@@ -143,12 +145,11 @@ pub struct CodeTypeHierarchySurfaceRequest {
     pub meta: CallableCodeSurfaceMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeCallersSurfaceRequest {
     pub node_id: String,
     pub maximum_depth: u32,
-    pub resolve_trait_dispatch: bool,
     pub scope: SymbolGraphScope,
     pub meta: CallableCodeSurfaceMeta,
 }
@@ -200,7 +201,7 @@ pub fn primitive_code_into_primitive(
             PrimitiveRequest::Callers(GraphRelationRequest {
                 node_id: request.node_id,
                 maximum_depth: request.maximum_depth,
-                resolve_trait_dispatch: request.resolve_trait_dispatch,
+                resolve_trait_dispatch: false,
                 scope: request.scope,
                 meta: request.meta.into_application(page),
             })
@@ -229,7 +230,7 @@ impl CodeSymbolSearchSurfaceRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeCalleesSurfaceRequest {
     pub node_id: String,
@@ -251,7 +252,7 @@ impl CodeCalleesSurfaceRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeFacetSurfaceRequest {
     pub dimension: CodeFacetDimension,
@@ -269,7 +270,7 @@ impl CodeFacetSurfaceRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeTimelineSurfaceRequest {
     pub scope: CodeQueryScope,
@@ -285,7 +286,7 @@ impl CodeTimelineSurfaceRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeNavigationSurfaceRequest {
     pub node_id: String,

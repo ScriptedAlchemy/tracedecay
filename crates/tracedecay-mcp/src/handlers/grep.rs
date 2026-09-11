@@ -381,7 +381,7 @@ fn render_grep_md(
     if hits.iter().any(|hit| hit.node_id.is_some()) {
         md.blank();
         md.line(
-            "_Use `tracedecay_body` with a result's `node_id` to read the verified enclosing symbol._",
+            "_Use `tracedecay_source_body` with a result's `node_id` to read the verified enclosing symbol._",
         );
     }
 

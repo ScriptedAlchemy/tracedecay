@@ -25,13 +25,12 @@ queries use a saved scope set and its returned identity; replacing the set is a
 compare-and-swap (`tracedecay_multi_root_scope_set_compare_and_swap`) against
 the identity a read returned.
 
-Configuration preview/apply and credential management have separate authorities.
+Configuration preview/apply has a separate authority.
 Ordinary mutation is `tracedecay_configuration_set`,
 `tracedecay_configuration_unset`, or `tracedecay_configuration_batch`; protected
 and rollback changes consume their returned preview identity through
 `tracedecay_configuration_protected_apply` and
-`tracedecay_configuration_rollback_apply`. Credential material crosses only
-`tracedecay_configuration_write_credential`; never turn a read or a display
+`tracedecay_configuration_rollback_apply`. Never turn a read or a display
 label into mutation authority.
 
 Context Scout generation is daemon-owned. Pause and resume

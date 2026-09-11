@@ -1,9 +1,9 @@
 //! Dashboard endpoints for project and user settings.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
@@ -32,9 +32,9 @@ use crate::application::settings_control::{
     TelemetrySettingsPatchV1, context_scout_settings_are_enabled, effective_context_scout_settings,
     preview_project_settings,
 };
-use crate::config::TraceDecayConfig;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
+use tracedecay_configuration::config::TraceDecayConfig;
 use tracedecay_configuration::{
     DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
     parse_duration_millis, plan_user_settings_mutation,
@@ -296,35 +296,34 @@ struct PrAutoTrackPayloadV1 {
     tracked: Vec<PrAutoTrackEntryV1>,
 }
 
-#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[derive(Clone, Debug, PartialEq, JsonSchema, Serialize)]
 struct PrAutoTrackEntryV1 {
     branch: String,
     pr: u64,
     head_branch: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct DashboardPrAutoTrackEntryV1 {
+/// One managed PR branch projected for dashboard settings payloads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrAutoTrackManagedSummaryEntryV1 {
     pub branch: String,
     pub pr: u64,
     pub head_branch: String,
 }
 
-pub trait DashboardPrAutoTrackReadPort: Send + Sync {
-    fn managed_summary(&self, store_root: &Path) -> Vec<DashboardPrAutoTrackEntryV1>;
-}
-
-static PR_AUTOTRACK_READ_PORT: OnceLock<Arc<dyn DashboardPrAutoTrackReadPort>> = OnceLock::new();
-
-pub fn install_dashboard_pr_autotrack_read_port(
-    port: Arc<dyn DashboardPrAutoTrackReadPort>,
-) -> Result<(), Arc<dyn DashboardPrAutoTrackReadPort>> {
-    PR_AUTOTRACK_READ_PORT.set(port)
-}
+/// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
+pub type PrAutoTrackManagedSummaryReader = Arc<
+    dyn Fn(PathBuf) -> tracedecay_domain::errors::Result<Vec<PrAutoTrackManagedSummaryEntryV1>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[hotpath::measure(label = "dashboard_api.settings.get", future = true)]
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
-    Ok(Json(settings_envelope(&state, None, None, None).await?))
+    Ok(Json(
+        settings_envelope(&state, None, None, None, pr_autotrack_payload(&state)?).await?,
+    ))
 }
 
 #[hotpath::measure(label = "dashboard_api.settings.patch_project", future = true)]
@@ -333,6 +332,7 @@ pub async fn patch_project_settings(
     Json(patch): Json<Value>,
 ) -> ProjectSettingsPatchResult {
     let patch = parse_project_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
             settings_validation_error(json!([{
@@ -408,7 +408,14 @@ pub async fn patch_project_settings(
 
     Ok(Json(ProjectSettingsPatchResponseV1 {
         application_outcome,
-        current: settings_envelope(&state, Some(preview.resync_recommended), None, None).await?,
+        current: settings_envelope(
+            &state,
+            Some(preview.resync_recommended),
+            None,
+            None,
+            pr_autotrack,
+        )
+        .await?,
     }))
 }
 
@@ -418,6 +425,7 @@ pub async fn patch_user_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_user_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     validate_user_settings_patch(&patch, |value| parse_duration_millis(value).is_some())?;
     let idempotency_key =
         ConfigurationIdempotencyKey::new(patch.idempotency_key.clone()).map_err(|_| {
@@ -473,7 +481,14 @@ pub async fn patch_user_settings(
     }
 
     Ok(Json(
-        settings_envelope(&state, None, Some(plan.restart_recommended), None).await?,
+        settings_envelope(
+            &state,
+            None,
+            Some(plan.restart_recommended),
+            None,
+            pr_autotrack,
+        )
+        .await?,
     ))
 }
 
@@ -486,6 +501,7 @@ pub async fn patch_code_index_worker_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = parse_code_index_worker_settings_patch(patch)?;
+    let pr_autotrack = pr_autotrack_payload(&state)?;
     validate_code_index_worker_settings_patch(&patch)?;
     let worker_admission_errors = code_index_worker_admission_errors(
         &patch.code_index_workers,
@@ -534,7 +550,14 @@ pub async fn patch_code_index_worker_settings(
     };
 
     Ok(Json(
-        settings_envelope(&state, None, Some(true), Some(&committed.current)).await?,
+        settings_envelope(
+            &state,
+            None,
+            Some(true),
+            Some(&committed.current),
+            pr_autotrack,
+        )
+        .await?,
     ))
 }
 
@@ -576,6 +599,7 @@ async fn settings_envelope(
     resync_recommended: Option<bool>,
     restart_recommended: Option<bool>,
     committed_worker_configuration: Option<&DashboardCodeIndexWorkerConfigurationV1>,
+    pr_autotrack: PrAutoTrackPayloadV1,
 ) -> std::result::Result<DashboardEnvelopeV1<SettingsPayloadV1>, DashboardConfigurationRouteErrorV1>
 {
     let project_configuration = crate::config::cached_runtime_configuration(&state.project_root)
@@ -610,7 +634,7 @@ async fn settings_envelope(
             configuration_revision_id: project_configuration.revision_id().as_str().to_owned(),
             config: project_editable_settings(&project_configuration),
             tracedecay_dir_gitignored: crate::config::is_in_gitignore(&state.project_root),
-            pr_autotrack: pr_autotrack_payload(state),
+            pr_autotrack,
         },
         user: user_settings_payload(&user, &worker_configuration),
         automation,
@@ -730,23 +754,32 @@ fn automation_settings_payload(
 }
 
 /// Lists the PR branches the daemon currently auto-tracks for this project, read
-/// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
-/// feature has tracked nothing yet.
-fn pr_autotrack_payload(state: &DashboardState) -> PrAutoTrackPayloadV1 {
-    let tracked = PR_AUTOTRACK_READ_PORT
-        .get()
-        .map(|port| {
-            port.managed_summary(&state.store_root)
-                .into_iter()
-                .map(|entry| PrAutoTrackEntryV1 {
-                    branch: entry.branch,
-                    pr: entry.pr,
-                    head_branch: entry.head_branch,
-                })
-                .collect()
+/// from the store's PR-autotrack state sidecar.
+fn pr_autotrack_payload(
+    state: &DashboardState,
+) -> std::result::Result<PrAutoTrackPayloadV1, DashboardConfigurationRouteErrorV1> {
+    let reader = state
+        .pr_autotrack_reader
+        .as_ref()
+        .ok_or_else(configuration_authority_unavailable_error)?;
+    let tracked = map_managed_pr_autotrack_entries(
+        reader(state.store_root.clone())
+            .map_err(|_| configuration_authority_unavailable_error())?,
+    );
+    Ok(PrAutoTrackPayloadV1 { tracked })
+}
+
+fn map_managed_pr_autotrack_entries(
+    entries: Vec<PrAutoTrackManagedSummaryEntryV1>,
+) -> Vec<PrAutoTrackEntryV1> {
+    entries
+        .into_iter()
+        .map(|entry| PrAutoTrackEntryV1 {
+            branch: entry.branch,
+            pr: entry.pr,
+            head_branch: entry.head_branch,
         })
-        .unwrap_or_default();
-    PrAutoTrackPayloadV1 { tracked }
+        .collect()
 }
 
 fn environment_payload() -> EnvironmentSettingsPayloadV1 {
@@ -911,6 +944,37 @@ mod tests {
                 "field": "code_index_workers",
                 "message": "code_index_workers exact mode must request no more than 4 available logical CPUs",
             })]
+        );
+    }
+
+    #[test]
+    fn managed_pr_autotrack_projection_preserves_payload_fields() {
+        let mapped = map_managed_pr_autotrack_entries(vec![
+            PrAutoTrackManagedSummaryEntryV1 {
+                branch: "tracedecay/autotrack/pr/1".into(),
+                pr: 1,
+                head_branch: "alpha".into(),
+            },
+            PrAutoTrackManagedSummaryEntryV1 {
+                branch: "tracedecay/autotrack/pr/3".into(),
+                pr: 3,
+                head_branch: "beta".into(),
+            },
+        ]);
+        assert_eq!(
+            mapped,
+            vec![
+                PrAutoTrackEntryV1 {
+                    branch: "tracedecay/autotrack/pr/1".into(),
+                    pr: 1,
+                    head_branch: "alpha".into(),
+                },
+                PrAutoTrackEntryV1 {
+                    branch: "tracedecay/autotrack/pr/3".into(),
+                    pr: 3,
+                    head_branch: "beta".into(),
+                },
+            ]
         );
     }
 

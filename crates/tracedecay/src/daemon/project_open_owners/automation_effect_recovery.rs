@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
+use tracedecay_automation_runtime::automation::effect_recovery::recovery_report_fields;
 use tracedecay_contracts::CancellationSignal;
 
-use crate::daemon::log_daemon_event;
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 #[hotpath::measure(label = "daemon.project.automation_recovery", future = true)]
 pub(crate) async fn reconcile_project_open_automation_effects(project: Arc<TraceDecay>) {
@@ -31,7 +32,7 @@ pub(crate) async fn reconcile_project_open_automation_effects(project: Arc<Trace
         }
     };
     let dashboard_root = project.hook_store_layout().dashboard_root.clone();
-    match crate::daemon::automation_effect::recovery_index::reconcile_reserved_automation_effects_for_project(
+    match crate::daemon::automation_effect::recovery_composition::reconcile_reserved_automation_effects_for_project(
         project.as_ref(),
         &dashboard_root,
         &cancellation,
@@ -40,23 +41,7 @@ pub(crate) async fn reconcile_project_open_automation_effects(project: Arc<Trace
     {
         Ok(report) => log_daemon_event(
             "automation_effect_recovery",
-            &[
-                (
-                    "outcome",
-                    if report.deferred == 0 {
-                        "completed"
-                    } else {
-                        "deferred"
-                    }
-                    .to_owned(),
-                ),
-                ("inspected", report.inspected.to_string()),
-                ("partial_effects", report.partial_effects.to_string()),
-                ("reset_required", report.reset_required.to_string()),
-                ("indeterminate", report.indeterminate.to_string()),
-                ("already_terminal", report.already_terminal.to_string()),
-                ("deferred", report.deferred.to_string()),
-            ],
+            &recovery_report_fields(&report),
         ),
         Err(error) => log_daemon_event(
             "automation_effect_recovery",

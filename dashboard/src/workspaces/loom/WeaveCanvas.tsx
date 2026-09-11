@@ -1,565 +1,327 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
+import { axisTicks, clampWindow, fittedWindow, formatMoment, zoomWindow, type LoomWindow } from './tracks.ts';
+import type { Weave } from './weave.ts';
+import type { LoomPlaybackFrame } from './playback.ts';
+import type { AnalyticsSubagentTreePayloadV1 } from '../../contracts/generated.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
-import { cn } from '../../ui/cn';
-import {
-  axisTicks,
-  clampWindow,
-  dayBands,
-  fittedWindow,
-  formatMoment,
-  isFitted,
-  zoomWindow,
-  type LoomWindow,
-} from './tracks.ts';
-import type { PlacedThread, Weave } from './weave.ts';
 
-/**
- * The weave, drawn.
- *
- * SVG rather than Canvas2D, deliberately. The track engine's canvas path earns
- * its complexity at thousands of spans; this surface draws one mark per session
- * in the served window — a hundred or so — and in exchange for staying in the
- * DOM it gets three things the honesty contract actually needs: real dashed
- * strokes for unmeasured extent, hue that flips with the theme through the same
- * CSS custom properties every other mark in the console uses, and marks an
- * accessibility tool can see. The canvas would have had to reimplement all
- * three, and the third one badly.
- *
- * Nothing in here decides anything. Positions, widths and solidity all arrive
- * from `composeWeave`; this file turns them into pixels and nothing more.
- */
+// Packing scale for the bounded session overview. This is presentation geometry,
+// not an event time or a claim that sessions have parent/child relations.
+export const PLOT_WIDTH = 832;
+export const MARK_PITCH_PX = 24;
+const WIDTH = 960;
+const RIGHT = 28;
 
-/** Left gutter for the printed time axis. */
-const GUTTER = 64;
-const RIGHT_PAD = 12;
-/** Header strip carrying the host column names. */
-const HEAD = 26;
-/** Vertical room for the field itself. Constant so a screenshot is stable and
- * the axis pitch does not change under the reader as data arrives. */
-const FIELD_HEIGHT = 520;
-const TOP_PAD = 10;
-const BOTTOM_PAD = 18;
-
-/** How far an unmeasured tail runs before it stops. Fixed, and short: the
- * length must not read as a duration, because it is not one. */
-const OPEN_TAIL = 15;
-/** The solid head every thread gets, so a thread with no measured end is still
- * a visible mark at the time it genuinely started. */
-const HEAD_CAP = 5;
-
-/** Vertical pixels the time axis actually spans. Exported because the caller
- * has to convert a mark's on-screen size into seconds before it can ask
- * `composeWeave` to pack: packing is a question about what OVERLAPS, and what
- * overlaps depends on the scale it is drawn at. */
-export const PLOT_HEIGHT = FIELD_HEIGHT - TOP_PAD - BOTTOM_PAD;
-/** Vertical room one mark occupies: its head plus its open tail plus a hair of
- * clearance. Two threads closer together than this collide on screen. */
-export const MARK_PITCH_PX = HEAD_CAP + OPEN_TAIL + 4;
-
-export function WeaveCanvas({
-  weave,
-  selectedId,
-  onSelect,
-  ariaLabel,
-}: {
+export function WeaveCanvas({ weave, selectedId, onSelect, ariaLabel, hierarchy, initialWindow, onWindowChange }: {
   weave: Weave;
+  hierarchy?: AnalyticsSubagentTreePayloadV1;
+  initialWindow?: LoomWindow | null;
+  onWindowChange?: (window: LoomWindow | null) => void;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   ariaLabel: string;
 }) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const [width, setWidth] = useState(880);
-
+  const clipId = useId();
+  const field = useRef<HTMLDivElement>(null);
+  const [vertical, setVertical] = useState({ start: 0, fraction: 1 });
+  const measureViewport = () => {
+    const element = field.current;
+    if (element && element.scrollHeight > 0) setVertical({ start: element.scrollTop / element.scrollHeight, fraction: element.clientHeight / element.scrollHeight });
+  };
+  const [zoomed, updateWindow] = useState<LoomWindow | null>(initialWindow ?? null);
+  const setZoomed = (window: LoomWindow | null) => { updateWindow(window); onWindowChange?.(window); };
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const extent = weave.extent;
+  const view = extent ? zoomed ? clampWindow(zoomed, extent) : fittedWindow(extent) : null;
+  const nodes = hierarchy?.available && !hierarchy.error ? hierarchy.nodes : [];
+  const nodeById = new Map(nodes.map((node) => [JSON.stringify([node.provider, node.session_id]), node]));
+  const threadById = new Map(weave.threads.map((thread) => [thread.id, thread]));
+  const parentById = new Map(nodes.flatMap((node) => {
+    const childId = JSON.stringify([node.provider, node.session_id]);
+    const parentId = JSON.stringify([node.provider, node.parent_session_id]);
+    return node.link === 'linked' && threadById.has(childId) && threadById.has(parentId)
+      ? [[childId, parentId] as const] : [];
+  }));
+  const ancestors = (id: string) => {
+    const visited = new Set<string>();
+    let parent = parentById.get(id);
+    while (parent && !visited.has(parent)) {
+      visited.add(parent);
+      parent = parentById.get(parent);
+    }
+    return [...visited];
+  };
+  // The canonical tree is already preorder. Retain it without changing any
+  // source timestamp; unrelated sessions keep the temporal read's ordering.
+  const ordered = [...new Set([...nodeById.keys(), ...threadById.keys()])]
+    .flatMap((id) => { const thread = threadById.get(id); return thread ? [thread] : []; });
+  const ancestorsById = new Map(ordered.map((thread) => [thread.id, ancestors(thread.id)]));
+  const visible = ordered.filter((thread) => !ancestorsById.get(thread.id)?.some((id) => collapsed.has(id)));
+  const descendantCounts = new Map<string, number>();
+  for (const parents of ancestorsById.values()) {
+    for (const parent of parents) descendantCounts.set(parent, (descendantCounts.get(parent) ?? 0) + 1);
+  }
+  const height = Math.max(440, visible.length * 42 + 70);
   useEffect(() => {
-    const element = hostRef.current;
+    measureViewport();
+    const element = field.current;
     if (!element || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver((entries) => {
-      const next = entries[0]?.contentRect.width;
-      if (next && next > 0) setWidth(next);
-    });
+    const observer = new ResizeObserver(measureViewport);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
-
-  const height = HEAD + FIELD_HEIGHT;
-  const fieldWidth = Math.max(width - GUTTER - RIGHT_PAD, 80);
-  const extent = weave.extent;
-
-  // The viewport over time. `null` means fitted — the whole extent with its
-  // margin — so new data keeps refitting until the reader deliberately zooms.
-  const [zoomed, setZoomed] = useState<LoomWindow | null>(null);
-  useEffect(() => {
-    setZoomed(null);
-  }, [extent?.start, extent?.end]);
-  const view = extent ? (zoomed ?? fittedWindow(extent)) : null;
-
-  const applyZoom = (factor: number) => {
-    if (!extent || !view) return;
-    const next = zoomWindow(view, extent, factor, (view.start + view.end) / 2);
-    setZoomed(isFitted(next, extent) ? null : next);
+  }, [height]);
+  const rowById = new Map(visible.map((thread, index) => [thread.id, index]));
+  const left = 240, span = WIDTH - left - RIGHT;
+  const x = (time: number) => left + (time - view!.start) / (view!.end - view!.start) * span;
+  const y = (id: string) => 65 + (rowById.get(id) ?? 0) * Math.min(42, (height - 90) / Math.max(visible.length, 1));
+  const links = visible.flatMap((child) => {
+    const parentId = parentById.get(child.id);
+    const parent = parentId && rowById.has(parentId) ? threadById.get(parentId) : undefined;
+    return parent ? [{ parent, child }] : [];
+  });
+  const linkPath = (parent: typeof visible[number], child: typeof visible[number], projectX: (time: number) => number, projectY: (id: string) => number) => {
+    const px = projectX(parent.start), cx = projectX(child.start), bend = (px + cx) / 2;
+    return `M ${px} ${projectY(parent.id)} C ${bend} ${projectY(parent.id)}, ${bend} ${projectY(child.id)}, ${cx} ${projectY(child.id)}`;
   };
-  const pan = (direction: 1 | -1) => {
-    if (!extent || !view) return;
-    const shift = direction * (view.end - view.start) * 0.25;
-    const next = clampWindow(
-      { start: view.start + shift, end: view.end + shift },
-      extent,
-    );
-    setZoomed(isFitted(next, extent) ? null : next);
+  const zoom = (factor: number) => {
+    if (extent && view) setZoomed(zoomWindow(view, extent, factor, (view.start + view.end) / 2));
   };
-
-  const geometry = useMemo(() => {
-    if (!extent || !view) return null;
-    const span = Math.max(view.end - view.start, 1);
-    const plotTop = HEAD + TOP_PAD;
-    const plotHeight = Math.max(FIELD_HEIGHT - TOP_PAD - BOTTOM_PAD, 1);
-    const y = (time: number) =>
-      plotTop + ((time - view.start) / span) * plotHeight;
-
-    // Every host column gets the same share of the field; inside it, each
-    // packed sub-column gets an equal slice of that share. A column with one
-    // lane therefore draws a wide, calm thread and a busy column draws several
-    // narrow ones, which is the packing telling the truth about congestion.
-    const columnWidth = fieldWidth / Math.max(weave.hosts.length, 1);
-    const centerOf = (thread: PlacedThread) => {
-      const host = weave.hosts[thread.column];
-      const lanes = Math.max(host?.lanes ?? 1, 1);
-      const laneWidth = columnWidth / lanes;
-      return (
-        GUTTER + thread.column * columnWidth + (thread.lane + 0.5) * laneWidth
-      );
-    };
-    const maxThickness = (thread: PlacedThread) => {
-      const host = weave.hosts[thread.column];
-      const lanes = Math.max(host?.lanes ?? 1, 1);
-      return Math.max(columnWidth / lanes - 8, 2);
-    };
-    return { y, columnWidth, centerOf, maxThickness, plotTop, plotHeight, span };
-  }, [extent, view, fieldWidth, weave.hosts]);
-
-  // The axis helpers are written for a horizontal track engine, so they are
-  // handed the field's HEIGHT as their length and their `x` output is read as
-  // a `y`. The arithmetic is orientation-free; only the name is horizontal.
-  const ticks = useMemo(
-    () =>
-      geometry && view
-        ? axisTicks({ start: view.start, end: view.end }, geometry.plotHeight)
-        : [],
-    [geometry, view],
-  );
-  const bands = useMemo(
-    () =>
-      geometry && view
-        ? dayBands({ start: view.start, end: view.end }, geometry.plotHeight)
-        : [],
-    [geometry, view],
-  );
-
-  return (
-    // The toolbar is shell chrome; the weave itself is projected light on the
-    // night optical window, inside either shell theme, so its marks draw in
-    // the graph palette rather than shell ink.
-    <div ref={hostRef} className="relative w-full">
-      {extent && view ? (
-        <div
-          role="toolbar"
-          aria-label="Time window"
-          className="flex flex-wrap items-center gap-1 border border-b-0 border-edge-subtle bg-surface-1 px-2 py-1"
-        >
-          <ZoomButton label="Zoom in" onClick={() => applyZoom(0.5)}>
-            +
-          </ZoomButton>
-          <ZoomButton label="Zoom out" onClick={() => applyZoom(2)}>
-            −
-          </ZoomButton>
-          <ZoomButton
-            label="Pan to earlier sessions"
-            disabled={zoomed == null}
-            onClick={() => pan(-1)}
-          >
-            ↑
-          </ZoomButton>
-          <ZoomButton
-            label="Pan to later sessions"
-            disabled={zoomed == null}
-            onClick={() => pan(1)}
-          >
-            ↓
-          </ZoomButton>
-          <ZoomButton
-            label="Fit the whole extent"
-            disabled={zoomed == null}
-            onClick={() => setZoomed(null)}
-          >
-            fit
-          </ZoomButton>
-          <span className="min-w-0 truncate pl-1 text-3xs tabular-nums text-text-muted">
-            {zoomed == null
-              ? 'whole extent'
-              : `${formatMoment(view.start)} – ${formatMoment(view.end)}`}
-          </span>
-        </div>
-      ) : null}
-      <div className="td-optic td-grain td-scanlines">
-      <svg
-        role="img"
-        aria-label={ariaLabel}
-        width="100%"
-        height={height}
-        viewBox={`0 0 ${Math.max(width, 1)} ${height}`}
-        className="relative block"
-      >
-        {/* Calendar bands: the weave's warp. Alternating tint only, no label
-          * inside the field — the axis gutter carries the words. */}
-        {geometry
-          ? bands
-              .filter((band) => band.odd)
-              .map((band) => (
-                <rect
-                  key={`band-${band.time}`}
-                  x={GUTTER}
-                  y={geometry.plotTop + band.x0}
-                  width={fieldWidth}
-                  height={Math.max(band.x1 - band.x0, 0)}
-                  className="fill-[var(--raw-graph-dim)]"
-                  fillOpacity={0.22}
-                />
-              ))
-          : null}
-
-        {/* Host column dividers and names. */}
-        {geometry
-          ? weave.hosts.map((host, index) => {
-              const x = GUTTER + index * geometry.columnWidth;
-              return (
-                <g key={host.id}>
-                  {index > 0 ? (
-                    <line
-                      x1={x}
-                      y1={HEAD}
-                      x2={x}
-                      y2={height}
-                      className="stroke-[var(--raw-graph-edge)]"
-                      strokeOpacity={0.55}
-                      strokeWidth={1}
-                    />
-                  ) : null}
-                  {/* Label and count in ONE text run: the count rides a tspan
-                    * whose dx is measured from the end of the label's last
-                    * glyph, so it cannot collide with it. Positioning the two
-                    * as separate elements meant guessing the label's rendered
-                    * width from its character count, and letterspaced small
-                    * caps do not have the width that guess assumed — every
-                    * column header printed as "CLAUDE12". */}
-                  {/* At 320px a column is ~78px wide and three full host names
-                    * ran into each other ("CLAUDE 12CODEX 11CURSOR"). The name
-                    * is truncated to what its own column can hold rather than
-                    * being allowed to trespass on its neighbour's — a header
-                    * that overlaps the next column mislabels it. */}
-                  {/* Below ~96px a column cannot hold a host name and its
-                    * count without one of them being cut, and a clipped count
-                    * ("12" rendered as "1") is worse than no count: it is a
-                    * wrong number. The header is simply omitted there. Nothing
-                    * is lost — the per-host readout row directly beneath the
-                    * canvas names every host with its thread and message
-                    * totals, and it wraps rather than truncating. */}
-                  {geometry.columnWidth >= HEADER_MIN_WIDTH ? (
-                    <>
-                      <clipPath id={`weave-head-${index}`}>
-                        <rect
-                          x={x}
-                          y={0}
-                          width={Math.max(geometry.columnWidth - 2, 1)}
-                          height={HEAD}
-                        />
-                      </clipPath>
-                      {/* Truncation trims the label to an ESTIMATE of the room
-                        * its column has; the clip guarantees it. Font metrics
-                        * are not knowable here, so the estimate alone kept
-                        * letting a count graze the column next door and
-                        * mislabel it. */}
-                      <text
-                        x={x + 6}
-                        y={HEAD - 9}
-                        clipPath={`url(#weave-head-${index})`}
-                        className="fill-[var(--raw-graph-text)] text-[9px] uppercase tracking-[0.18em]"
-                      >
-                        {truncateLabel(host.label, geometry.columnWidth)}
-                        <tspan dx={7} fillOpacity={0.7} className="tracking-normal">
-                          {host.count}
-                        </tspan>
-                      </text>
-                    </>
-                  ) : null}
-                </g>
-              );
-            })
-          : null}
-        <line
-          x1={GUTTER}
-          y1={HEAD}
-          x2={Math.max(width - RIGHT_PAD, GUTTER)}
-          y2={HEAD}
-          className="stroke-[var(--raw-graph-edge)]"
-          strokeWidth={1}
-        />
-
-        {/* The printed time axis: real labels at real times, running down. */}
-        {geometry
-          ? ticks.map((tick) => (
-              <g key={`tick-${tick.time}`}>
-                <line
-                  x1={GUTTER - 4}
-                  y1={geometry.plotTop + tick.x}
-                  x2={Math.max(width - RIGHT_PAD, GUTTER)}
-                  y2={geometry.plotTop + tick.x}
-                  className="stroke-[var(--raw-graph-edge)]"
-                  strokeWidth={1}
-                  strokeOpacity={0.4}
-                />
-                <text
-                  x={GUTTER - 8}
-                  y={geometry.plotTop + tick.x + 3}
-                  textAnchor="end"
-                  className="fill-[var(--raw-graph-text)] text-[9px] tabular-nums"
-                  fillOpacity={0.75}
-                >
-                  {tick.label}
-                </text>
-              </g>
-            ))
-          : null}
-
-        {/* The threads, clipped to the field: a zoomed window puts some
-          * threads outside the visible span of time, and a mark escaping into
-          * the header would claim a time the axis does not show. */}
-        <clipPath id="weave-plot">
-          <rect x={GUTTER} y={HEAD} width={fieldWidth} height={FIELD_HEIGHT} />
-        </clipPath>
-        {geometry && view ? (
-          <g clipPath="url(#weave-plot)">
-            {weave.threads
-              .filter(
-                (thread) =>
-                  thread.start <= view.end && (thread.end ?? thread.start) >= view.start,
-              )
-              .map((thread) => (
-                <Thread
-                  key={thread.id}
-                  thread={thread}
-                  x={geometry.centerOf(thread)}
-                  y0={geometry.y(thread.start)}
-                  y1={thread.end != null ? geometry.y(thread.end) : null}
-                  maxThickness={geometry.maxThickness(thread)}
-                  selected={selectedId === thread.id}
-                  dimmed={selectedId != null && selectedId !== thread.id}
-                  onSelect={onSelect}
-                />
-              ))}
-          </g>
-        ) : null}
+  const pan = (direction: number) => {
+    if (!extent || !view) return;
+    const delta = (view.end - view.start) * .25 * direction;
+    setZoomed(clampWindow({ start: view.start + delta, end: view.end + delta }, extent));
+  };
+  const pickKey = (event: KeyboardEvent, id: string) => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(id); }
+  };
+  const toggleBranch = (id: string) => setCollapsed((previous) => {
+    const next = new Set(previous);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const extentPattern = (thread: typeof visible[number]) => thread.endSource === 'session_end' ? undefined
+    : thread.endSource === 'last_message' ? '6 2' : '2 5';
+  const knownAgents = new Set(nodes.filter((node) => threadById.has(JSON.stringify([node.provider, node.session_id])) && node.agent != null).map((node) => node.agent));
+  const full = extent ? fittedWindow(extent) : null;
+  const miniX = (time: number) => left + (time - full!.start) / (full!.end - full!.start) * span;
+  const miniY = (id: string) => 8 + y(id) / height * 64;
+  return <div className="min-w-0">
+    <div role="toolbar" aria-label="Time window" className="flex min-h-10 flex-wrap items-center gap-2 border border-edge-subtle px-1 text-xs">
+      <button className="min-h-8 min-w-8" aria-label="Zoom in" onClick={() => zoom(.5)}>+</button>
+      <button className="min-h-8 min-w-8" aria-label="Zoom out" onClick={() => zoom(2)}>−</button>
+      <button className="min-h-8 min-w-8" aria-label="Pan to earlier sessions" disabled={!zoomed} onClick={() => pan(-1)}>←</button>
+      <button className="min-h-8 min-w-8" aria-label="Pan to later sessions" disabled={!zoomed} onClick={() => pan(1)}>→</button>
+      <button className="min-h-8 min-w-8" aria-label="Fit the whole extent" disabled={!zoomed} onClick={() => setZoomed(null)}>fit</button>
+      <span>{!zoomed ? 'whole extent' : `${formatMoment(view!.start)} – ${formatMoment(view!.end)}`}</span>
+      <span>{visible.length} / {ordered.length} loaded sessions · {links.length} visible parent links · {knownAgents.size} recorded agent labels</span>
+    </div>
+    <div ref={field} onScroll={measureViewport} className="td-optic max-h-[60vh] overflow-auto" role="region" aria-label="Session lane viewport" tabIndex={0}>
+      <svg aria-label="Session time axis" role="img" width="100%" style={{ minWidth: 720 }} className="sticky top-0 z-10 bg-surface-0" viewBox={`0 0 ${WIDTH} 32`}>
+        {view && axisTicks(view, span).map((tick) => <text key={tick.time} x={left + tick.x} y={22} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{tick.label}</text>)}
       </svg>
+      <svg role="group" aria-label={ariaLabel} width="100%" style={{ minWidth: 720 }} viewBox={`0 0 ${WIDTH} ${height}`}>
+        <defs><clipPath id={clipId}><rect x={left} y={35} width={span} height={height - 40} /></clipPath></defs>
+        {view && axisTicks(view, span).map((tick) => <g key={tick.time}>
+          <line x1={left + tick.x} x2={left + tick.x} y1={35} y2={height - 20} stroke="var(--raw-graph-edge)" opacity={.3} />
+        </g>)}
+        {visible.map((thread) => {
+          const depth = ancestorsById.get(thread.id)?.length ?? 0, count = descendantCounts.get(thread.id) ?? 0;
+          const node = nodeById.get(thread.id);
+          const quality = node?.link === 'linked' && !parentById.has(thread.id) ? 'parent outside loaded page' : node?.link ?? 'parentage unavailable';
+          return <g key={thread.id} style={kindColorVars(thread.host)}>
+            <g role="button" tabIndex={0} aria-label={`Open session ${thread.label}`} className="cursor-pointer" onClick={() => onSelect(thread.id)} onKeyDown={(event) => pickKey(event, thread.id)}>
+              <rect x={8} y={y(thread.id) - 18} width={192} height={36} fill="transparent" />
+              <text x={12 + Math.min(depth, 4) * 10} y={y(thread.id) - 3} fill="var(--kind-dark)" fontSize={11}>{thread.label.length > 26 ? `${thread.label.slice(0, 25)}…` : thread.label}</text>
+              <text x={12 + Math.min(depth, 4) * 10} y={y(thread.id) + 12} fill="var(--raw-graph-text)" fontSize={9}>{thread.host} · {quality}</text>
+            </g>
+            {count > 0 && <g role="button" tabIndex={0} aria-label={`${collapsed.has(thread.id) ? 'Expand' : 'Collapse'} branch ${thread.label}`} aria-expanded={!collapsed.has(thread.id)} className="cursor-pointer" onClick={() => toggleBranch(thread.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleBranch(thread.id); } }}>
+              <rect x={200} y={y(thread.id) - 18} width={36} height={36} fill="transparent" />
+              <text x={205} y={y(thread.id) + 4} fill="var(--raw-graph-text)" fontSize={11}>{collapsed.has(thread.id) ? '+' : '−'}{count}</text>
+            </g>}
+          </g>;
+        })}
+        <g clipPath={`url(#${clipId})`}>
+          {view && links.map(({ parent, child }) => {
+            const label = `Recorded parent ${parent.label} of ${child.label}`;
+            return <g key={child.id} role="button" tabIndex={0} aria-label={label} data-parent-session={parent.sessionId} data-child-session={child.sessionId} className="cursor-pointer" onClick={() => onSelect(parent.id)} onKeyDown={(event) => pickKey(event, parent.id)}>
+              <title>{label}. Session-bound placement; spawn time unavailable. Parent tool use: {nodeById.get(child.id)?.parent_tool_use_id ?? 'unrecorded'}.</title>
+              <path d={linkPath(parent, child, x, y)} fill="none" stroke="var(--raw-graph-text)" strokeDasharray="4 3" strokeWidth={1.5} />
+              <path d={linkPath(parent, child, x, y)} fill="none" stroke="transparent" strokeWidth={14} />
+            </g>;
+          })}
+          {view && visible.filter((thread) => thread.start <= view.end && (thread.end ?? thread.start) >= view.start).map((thread) => {
+            const start = x(thread.start), end = thread.end == null ? start + 18 : Math.max(start + 4, x(thread.end));
+            const middle = y(thread.id), thickness = .7 + thread.weight * 1.3;
+            return <g key={thread.id} data-thread={thread.id} role="button" tabIndex={0} aria-label={`Inspect session ${thread.label}`} style={kindColorVars(thread.host)} opacity={selectedId && selectedId !== thread.id ? .25 : 1} onClick={() => onSelect(thread.id)} onKeyDown={(event) => pickKey(event, thread.id)} className="cursor-pointer">
+              <title>{thread.host} · {formatMoment(thread.start)} · {thread.messages} messages · {thread.endSource ?? 'end unavailable'}</title>
+              <line x1={start} x2={end} y1={middle} y2={middle} stroke="var(--kind-dark)" strokeWidth={thickness + 7} opacity={.12} />
+              <line x1={start} x2={end} y1={middle} y2={middle} stroke="var(--kind-dark)" strokeWidth={thickness} strokeLinecap="round" strokeDasharray={extentPattern(thread)} />
+              <circle cx={start} cy={middle} r={4} fill={thread.hollow ? 'var(--raw-graph-bg)' : 'var(--kind-dark)'} stroke="var(--kind-dark)" />
+              <rect x={start - 8} y={middle - 14} width={Math.max(end - start + 16, 24)} height={28} fill="transparent" />
+            </g>;
+          })}
+        </g>
+      </svg>
+    </div>
+    {full && view && <div className="td-optic">
+      <svg role="group" aria-label="Session hierarchy minimap" tabIndex={0} width="100%" viewBox={`0 0 ${WIDTH} 80`}
+        onClick={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          const fraction = Math.max(0, Math.min(1, ((event.clientY - bounds.top) / bounds.height * 80 - 8) / 64));
+          field.current?.scrollTo({ top: fraction * field.current.scrollHeight - field.current.clientHeight / 2 });
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            field.current?.scrollBy({ top: (event.key === 'ArrowDown' ? 1 : -1) * field.current.clientHeight * .75 });
+          }
+        }}>
+        <title>Click to locate session lanes; Up and Down scroll the lane viewport.</title>
+        {links.map(({ parent, child }) => <path key={child.id} data-minimap-parent={parent.sessionId} d={linkPath(parent, child, miniX, miniY)} fill="none" stroke="var(--raw-graph-text)" strokeDasharray="4 3" strokeWidth={1} />)}
+        {visible.map((thread) => <line key={thread.id} data-minimap-session={thread.sessionId} style={kindColorVars(thread.host)} x1={miniX(thread.start)} x2={thread.end == null ? miniX(thread.start) + 3 : miniX(thread.end)} y1={miniY(thread.id)} y2={miniY(thread.id)} stroke="var(--kind-dark)" strokeDasharray={extentPattern(thread)} />)}
+        <rect data-session-viewport x={miniX(view.start)} y={8 + vertical.start * 64} width={miniX(view.end) - miniX(view.start)} height={Math.max(1, vertical.fraction * 64)} fill="none" stroke="var(--raw-graph-text)" />
+      </svg>
+      <label className="flex items-center gap-2 text-3xs text-text-muted">Session window
+        <input className="flex-1" aria-label="Session minimap viewport" type="range" min={full.start} max={Math.max(full.start, full.end - (view.end - view.start))} step="any" value={view.start} disabled={!zoomed} onChange={(event) => { const start = Number(event.currentTarget.value); setZoomed({ start, end: start + view.end - view.start }); }} />
+      </label>
+    </div>}
+  </div>;
+}
+
+/** Canonical source positions; both the field and minimap use this projection. */
+export function eventPositions(frames: readonly LoomPlaybackFrame[]) {
+  const times = frames.flatMap((frame) => frame.timestamp == null ? [] : [frame.timestamp]);
+  const start = times.length ? Math.min(...times) : null;
+  const end = times.length ? Math.max(...times) : null;
+  return {
+    start, end,
+    points: frames.map((frame, index) => ({
+      id: frame.id,
+      x: frame.timestamp != null && start != null && end != null
+        ? end === start ? .5 : (frame.timestamp - start) / (end - start)
+        : frames.length <= 1 ? .5 : index / (frames.length - 1),
+      y: frame.timestamp == null ? 350 : 200,
+      frame,
+    })),
+  };
+}
+
+export function LoadedEventCanvas({ frames, visible, activeId, onSelect, onInspect, toolbar, scrubber }: {
+  toolbar: ReactNode;
+  scrubber: ReactNode;
+  frames: readonly LoomPlaybackFrame[];
+  visible: readonly LoomPlaybackFrame[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onInspect: () => void;
+}) {
+  const clipId = useId();
+  const host = useRef<HTMLElement>(null);
+  const [width, setWidth] = useState(960);
+  useEffect(() => {
+    if (!host.current || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry && entry.contentRect.width > 0) setWidth(entry.contentRect.width);
+    });
+    observer.observe(host.current);
+    return () => observer.disconnect();
+  }, []);
+  const left = width < 480 ? 28 : 100;
+  const spanPx = Math.max(width - left - RIGHT, 1);
+  const [params, setParams] = useSearchParams();
+  const raw = params.get('loomWindow')?.split(',').map(Number);
+  const window = raw?.length === 2 && raw.every(Number.isFinite) && raw[0]! >= 0 && raw[1]! <= 1 && raw[1]! > raw[0]!
+    ? { start: raw[0]!, end: raw[1]! } : { start: 0, end: 1 };
+  const geometry = useMemo(() => eventPositions(frames), [frames]);
+  const ids = new Set(visible.map((frame) => frame.id));
+  const revealed = geometry.points.filter((point) => ids.has(point.id));
+  const sequences = geometry.points.slice(1).flatMap((point, index) => {
+    const previous = geometry.points[index]!;
+    return ids.has(previous.id) && ids.has(point.id) ? [{ previous, point }] : [];
+  });
+  const points = revealed.filter((point) => point.x >= window.start && point.x <= window.end);
+  const hasUndated = revealed.some((point) => point.frame.timestamp == null);
+  const laneY = hasUndated ? [200, 350] : [200];
+  const active = revealed.find((point) => point.id === activeId);
+  const x = (position: number) => left + (position - window.start) / (window.end - window.start) * spanPx;
+  // Partition hit regions at neighboring time positions. A dense page must
+  // not let a later SVG rectangle steal clicks from an earlier event.
+  const ordered = [...points].sort((a, b) => a.x - b.x);
+  const markSpacing = new Map(ordered.map((point, index) => {
+    const before = ordered[index - 1], after = ordered[index + 1];
+    const gap = Math.min(before ? x(point.x) - x(before.x) : 44, after ? x(after.x) - x(point.x) : 44);
+    return [point.id, Math.max(.5, Math.min(22, gap / 2))];
+  }));
+  const move = (start: number, end: number) => {
+    // One URL update also suspends tail-follow; separate updates could race and
+    // lose either the cursor or the viewport under React Router batching.
+    const search = new URLSearchParams(params);
+    if (activeId) search.set('loomEvent', activeId);
+    search.set('loomWindow', `${Math.max(0, start)},${Math.min(1, end)}`);
+    setParams(search, { replace: true });
+    onInspect();
+  };
+  const span = window.end - window.start;
+  const orderPath = (previous: typeof geometry.points[number], point: typeof geometry.points[number], projectX: (position: number) => number, scaleY = 1) => {
+    const mid = (projectX(previous.x) + projectX(point.x)) / 2;
+    return `M ${projectX(previous.x)} ${previous.y * scaleY} C ${mid} ${previous.y * scaleY}, ${mid} ${point.y * scaleY}, ${projectX(point.x)} ${point.y * scaleY}`;
+  };
+  return <section ref={host} aria-label="Loaded execution field" className="min-w-0">
+    <div className="flex min-h-10 flex-wrap items-center gap-3 border border-edge-subtle px-1 text-xs">
+      {toolbar}
+      <div className="flex items-center gap-2" role="toolbar" aria-label="Execution viewport">
+      <button className="min-h-8 min-w-8" aria-label="Zoom into execution" disabled={span < .02} onClick={() => move(window.start + span / 4, window.end - span / 4)}>+ Zoom</button>
+      <button className="min-h-8 min-w-8" aria-label="Fit loaded execution" onClick={() => move(0, 1)}>Fit</button>
+      <button className="min-h-8 min-w-8" aria-label="Pan execution earlier" disabled={window.start === 0} onClick={() => { const start = Math.max(0, window.start - span / 4); move(start, start + span); }}>← Older</button>
+      <button className="min-h-8 min-w-8" aria-label="Pan execution later" disabled={window.end === 1} onClick={() => { const end = Math.min(1, window.end + span / 4); move(end - span, end); }}>Later →</button>
       </div>
     </div>
-  );
-}
-
-/** Narrowest column that can carry a host name and its count without cutting
- * either. Below this the header is dropped rather than clipped. */
-const HEADER_MIN_WIDTH = 96;
-
-/** One window-toolbar control: a real button, 44px hit target via `td-hit`,
- * named for a screen reader rather than by its glyph. */
-function ZoomButton({
-  label,
-  disabled,
-  onClick,
-  children,
-}: {
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      className="td-hit group"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      <span
-        className={cn(
-          'inline-flex min-w-6 items-center justify-center border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs',
-          disabled
-            ? 'text-text-muted'
-            : 'text-text-secondary group-hover:text-text-primary',
-        )}
-      >
-        {children}
-      </span>
-    </button>
-  );
-}
-
-/** Letterspaced 9px small caps run about 7.4px per character; the count and its
- * gap need roughly 42px more. Trimmed to at least three characters so a column
- * always carries some identity rather than an ellipsis alone. */
-function truncateLabel(label: string, columnWidth: number): string {
-  const room = Math.floor((columnWidth - 42) / 7.4);
-  if (room >= label.length) return label;
-  return `${label.slice(0, Math.max(room - 1, 3))}…`;
-}
-
-/**
- * One session.
- *
- * Two shapes, and which one is drawn is a statement about the DATA, not about
- * the session: a thread whose end the store served is a solid bar between two
- * measured times; a thread whose end it did not serve is a solid head at the
- * one time that WAS measured, followed by a dashed stub of fixed length that
- * says "and then, unrecorded". The stub never reaches a tick, so it cannot be
- * mistaken for a duration.
- *
- * A session the store reports at zero messages is drawn hollow — outline only,
- * at the same width the smallest real thread gets. Zero is a reading, and a
- * reading has to be visible; collapsing it to nothing would hide it among the
- * sessions that simply are not there.
- */
-function Thread({
-  thread,
-  x,
-  y0,
-  y1,
-  maxThickness,
-  selected,
-  dimmed,
-  onSelect,
-}: {
-  thread: PlacedThread;
-  x: number;
-  y0: number;
-  y1: number | null;
-  maxThickness: number;
-  selected: boolean;
-  dimmed: boolean;
-  onSelect: (id: string | null) => void;
-}) {
-  // The width channel gets real range. At a nine-pixel span every thread was
-  // within a few pixels of every other one, so the measurement it carries —
-  // message count — was drawn but not legible; a 998-turn session has to LOOK
-  // heavier than a 12-turn one from across the field. Still clamped to the
-  // sub-column, so a wide thread can never overlap its neighbour.
-  const thickness = Math.max(Math.min(2 + thread.weight * 26, maxThickness), 2);
-  const half = thickness / 2;
-  // Always the lit-body side of the kind hue: the weave draws on the night
-  // window in both shell themes, so the paper-ink variant never applies here.
-  const strokeClass = 'stroke-[var(--kind-dark)]';
-  const fillClass = 'fill-[var(--kind-dark)]';
-  const measuredEnd = y1 != null && y1 > y0;
-  const bodyEnd = measuredEnd ? y1 : y0 + HEAD_CAP;
-  const boundaryClass =
-    thread.endSource === 'session_end'
-      ? 'stroke-[var(--ev-measured)]'
-      : 'stroke-[var(--ev-associated)]';
-
-  return (
-    <g
-      data-thread={thread.id}
-      style={kindColorVars(thread.host)}
-      className={cn(
-        'cursor-pointer',
-        dimmed && 'opacity-25',
-        selected && 'opacity-100',
-      )}
-      onClick={() => onSelect(selected ? null : thread.id)}
-      // The table below is the keyboard and screen-reader path (plan 11a
-      // archetype 3), so these marks stay out of the tab order rather than
-      // duplicating every row as a second focus stop.
-      aria-hidden
-    >
-      {/* Generous invisible hit area: a two-pixel thread is not a click
-        * target, and widening the visible mark to make it one would inflate a
-        * measured quantity. */}
-      <rect
-        x={x - Math.max(half, 6)}
-        y={y0 - 3}
-        width={Math.max(thickness, 12)}
-        height={Math.max(bodyEnd - y0 + (measuredEnd ? 6 : OPEN_TAIL + 6), 12)}
-        fill="transparent"
-      />
-
-      {thread.hollow ? (
-        <rect
-          x={x - half}
-          y={y0}
-          width={thickness}
-          height={Math.max(bodyEnd - y0, 3)}
-          className={cn(strokeClass, 'fill-none')}
-          strokeWidth={1}
-        />
-      ) : (
-        <rect
-          x={x - half}
-          y={y0}
-          width={thickness}
-          height={Math.max(bodyEnd - y0, 3)}
-          className={fillClass}
-          fillOpacity={selected ? 1 : 0.82}
-        />
-      )}
-
-      {/* Boundary provenance is a separate visual channel from host hue:
-        * measured session end, associated last-message observation, or
-        * unknown open extent. */}
-      {measuredEnd ? (
-        <line
-          x1={x - half - 2}
-          y1={bodyEnd}
-          x2={x + half + 2}
-          y2={bodyEnd}
-          className={boundaryClass}
-          strokeWidth={2}
-        />
-      ) : (
-        <line
-          x1={x}
-          y1={bodyEnd + 1}
-          x2={x}
-          y2={bodyEnd + OPEN_TAIL}
-          className="stroke-[var(--ev-unknown)]"
-          strokeWidth={Math.min(thickness, 2)}
-          strokeDasharray="2 3"
-          strokeOpacity={0.7}
-        />
-      )}
-
-      {/* Subagent threads carry a real flag from the store, so they get a
-        * mark: a hairline crossbar at the head. Shape, not hue — the hue is
-        * already spent on the host. */}
-      {thread.isSubagent ? (
-        <line
-          x1={x - half - 3}
-          y1={y0}
-          x2={x + half + 3}
-          y2={y0}
-          className={strokeClass}
-          strokeWidth={1}
-        />
-      ) : null}
-
-      {selected ? (
-        <rect
-          x={x - half - 3}
-          y={y0 - 3}
-          width={thickness + 6}
-          height={Math.max(bodyEnd - y0, 3) + 6}
-          className="fill-none stroke-[var(--raw-graph-accent)]"
-          strokeWidth={1}
-        />
-      ) : null}
-    </g>
-  );
+    {width < 480 && <p className="text-xs text-text-muted">{geometry.start == null ? 'No source timestamps' : formatMoment(geometry.start)} → {geometry.end == null ? 'loaded source order' : `${formatMoment(geometry.end)} · loaded end`}</p>}
+    <div className="td-optic">
+      <svg role="group" aria-label="Revealed execution events" width="100%" viewBox={`0 0 ${width} 460`}>
+        <defs><clipPath id={clipId}><rect x={left - 12} y={40} width={spanPx + 24} height={400} /></clipPath></defs>
+        <text visibility={width < 480 ? "hidden" : "visible"} x={left} y={24} fill="var(--raw-graph-text)" fontSize={12}>{geometry.start == null ? 'No source timestamps' : formatMoment(geometry.start)}</text>
+        <text visibility={width < 480 ? "hidden" : "visible"} x={width - RIGHT} y={24} textAnchor="end" fill="var(--raw-graph-text)" fontSize={12}>{geometry.end == null ? 'Loaded source order' : `${formatMoment(geometry.end)} · LOADED END`}</text>
+        <text x={12} y={170} fill="var(--raw-graph-text)" fontSize={11}>Recorded time</text>
+        {hasUndated && <text x={12} y={320} fill="var(--raw-graph-text)" fontSize={11}>Undated</text>}
+        {hasUndated && <text x={12} y={335} fill="var(--raw-graph-text)" fontSize={10}>source order</text>}
+        {laneY.map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y} y2={y} stroke="var(--raw-graph-edge)" strokeDasharray="2 5" />)}
+        <g clipPath={`url(#${clipId})`}>
+          {sequences.map(({ previous, point }) => {
+            const path = orderPath(previous, point, x);
+            return <g key={`${previous.id}:${point.id}`} aria-label="Recorded message order">
+              <path d={path} fill="none" stroke="#58daec" strokeWidth={8} opacity={.08} />
+              <path d={path} fill="none" stroke="#58daec" strokeWidth={1} opacity={.6} />
+            </g>;
+          })}
+          {active && <line x1={x(active.x)} x2={x(active.x)} y1={42} y2={430} stroke="var(--raw-graph-text)" strokeWidth={1} opacity={.55} />}
+          {points.map((point) => {
+            const halfHit = markSpacing.get(point.id) ?? 22;
+            const radius = Math.min(6, Math.max(1.5, halfHit * .6));
+            return <g key={point.id} data-event={point.id} role="button" tabIndex={0} aria-label={`Select stored event ${point.id}`} aria-pressed={point.id === activeId} onClick={() => onSelect(point.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(point.id); } }} className="cursor-pointer outline-none [&:focus>rect]:stroke-white">
+            <rect x={x(point.x) - halfHit} y={point.y - 22} width={halfHit * 2} height={70} fill="transparent" />
+            <title>{point.frame.role} · {point.frame.tool ?? 'message'} · {point.id}</title>
+            <circle pointerEvents="none" cx={x(point.x)} cy={point.y} r={point.id === activeId ? 19 : radius * 2} fill="#35d6ee" opacity={.08} />
+            <circle pointerEvents="none" cx={x(point.x)} cy={point.y} r={point.id === activeId ? 10 : radius} fill="var(--raw-graph-bg)" stroke="#58daec" strokeWidth={point.id === activeId ? 2 : 1} />
+            <circle pointerEvents="none" cx={x(point.x)} cy={point.y} r={Math.min(2, radius / 2)} fill="#c1f8ff" />
+            <text pointerEvents="none" x={x(point.x)} y={point.y + 35} textAnchor="middle" fill="var(--raw-graph-text)" fontSize={11}>{points.length <= 12 || point.id === activeId ? point.frame.tool ?? point.frame.role : ''}</text>
+          </g>;
+          })}
+        </g>
+      </svg>
+      <svg role="group" aria-label="Execution minimap" width="100%" viewBox={`0 0 ${width} 64`}>
+        {laneY.map((y) => <line key={y} x1={left} x2={width - RIGHT} y1={y / 8} y2={y / 8} stroke="var(--raw-graph-edge)" />)}
+        {sequences.map(({ previous, point }) => <path key={`${previous.id}:${point.id}`} d={orderPath(previous, point, (position) => left + position * spanPx, .125)} fill="none" stroke="#58daec" opacity={.5} />)}
+        {revealed.map((point) => <circle key={point.id} data-minimap-event={point.id} cx={left + point.x * spanPx} cy={point.y / 8} r={point.id === activeId ? 4 : 2} fill="#58daec" />)}
+        <rect x={left + window.start * spanPx} y={8} width={span * spanPx} height={48} fill="none" stroke="var(--raw-graph-text)" />
+      </svg>
+    </div>
+    <label className="flex flex-wrap items-center gap-2 text-xs text-text-muted">Minimap position
+      <input type="range" aria-label="Minimap viewport" min={0} max={1 - span} step={.001} value={window.start} disabled={span === 1} onChange={(event) => move(Number(event.currentTarget.value), Number(event.currentTarget.value) + span)} />
+    </label>
+    {scrubber}
+    <details><summary className="text-3xs text-text-muted">Recorded message order · causality unavailable</summary><p className="text-3xs text-text-muted">Each dot is a stored message. Placement measures time, or explicitly undated source order; thin connections show canonical message order, not causal attribution. Proximity is not a causal edge. Exact source selection remains available in the sequence below.</p></details>
+  </section>;
 }

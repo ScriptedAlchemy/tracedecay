@@ -129,7 +129,7 @@ pub(crate) struct DashboardTestRuntimeV1 {
     profile_database: RegisteredGlobalDbLeaseV1,
     profile_sessions_database: RegisteredGlobalDbLeaseV1,
     project_database: RegisteredGlobalDbLeaseV1,
-    graph: dashboard::DashboardGraphTestRuntimeV1,
+    graph: dashboard::dashboard_graph_test_runtime::DashboardGraphTestRuntimeV1,
     project_id: ProjectId,
 }
 
@@ -154,7 +154,10 @@ impl DashboardTestRuntimeV1 {
         let graph_profile_root = profile_root
             .join("dashboard-test-graphs")
             .join(project_id.as_str());
-        let graph = dashboard::DashboardGraphTestRuntimeV1::open(&graph_profile_root).await?;
+        let graph = dashboard::dashboard_graph_test_runtime::DashboardGraphTestRuntimeV1::open(
+            &graph_profile_root,
+        )
+        .await?;
         let profile_database = graph.profile_database();
         let profile_sessions_database = graph.profile_sessions_database();
         let project_database = graph
@@ -226,7 +229,21 @@ impl DashboardTestRuntimeV1 {
             Arc::clone(self),
             self.profile_database.clone(),
             self.project_database.clone(),
-        ))
+        )
+        .with_pr_autotrack_reader(Arc::new(|root| {
+            tracedecay_application::pr_tracking::managed_summary(&root).map(|entries| {
+                entries
+                    .into_iter()
+                    .map(
+                        |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                            branch: entry.branch,
+                            pr: entry.pr,
+                            head_branch: entry.head_branch,
+                        },
+                    )
+                    .collect()
+            })
+        })))
     }
 
     /// The dashboard authority plus the daemon-owned LCM and verified graph

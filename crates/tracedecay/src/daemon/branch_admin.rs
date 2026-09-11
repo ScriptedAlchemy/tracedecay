@@ -7,29 +7,41 @@ use std::sync::{
 };
 
 use serde_json::json;
-
+use tracedecay_application::pr_tracking::{
+    ManualBranchLifecycleLeaseV1, manual_branch_source_owns_artifacts,
+    try_acquire_manual_branch_lifecycle,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+#[cfg(unix)]
+use tracedecay_runtime_core::branch::BranchAddOutcome;
+#[cfg(unix)]
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
-use super::profile_host_admission_replay::{
-    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
-    ProfileHostAdmissionReplayRegistry,
-};
 #[cfg(unix)]
-use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
-use super::store_writer_gate::StoreWriterGates;
-pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
+use super::scheduler::AutomationSchedulerHandle;
 use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
+use crate::mcp::tools::replay_projectless_hermes_host_admission;
+#[cfg(unix)]
+use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_daemon_identity::{authority, profile_identity};
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
+use tracedecay_daemon_service::{
+    ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
+    ProfileHostAdmissionReplayRegistry,
+};
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
+use tracedecay_store_runtime::StoreWriterGates;
+pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
+pub(crate) use project_retirement::retire_registered_context_scout_owner;
 mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
@@ -428,7 +440,7 @@ impl ProfileHostAdmissionBootstrapContext {
 /// administration cannot prove ownership against stale daemon state.
 ///
 /// Writer admission itself is *per store* — see
-/// [`store_writer_gate`](super::store_writer_gate) for the hierarchy and the
+/// [`tracedecay_store_runtime::writer_gate`] for the hierarchy and the
 /// exclusivity argument. The proof branch administration performs is computed
 /// from one store family's database paths, so a writer on another store can
 /// never invalidate it; a single daemon-wide gate only meant a sync of project
@@ -452,10 +464,12 @@ pub(super) struct StoreAdministration {
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     profile_session_refresh_services: ProfileSessionRefreshServices,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
-    store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry,
+    store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
+    #[cfg(unix)]
+    manual_branch_publications: Arc<ManualBranchPublicationTasks>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
     native_integration_services: Arc<DaemonNativeIntegrationRuntimeRegistrar>,
@@ -469,6 +483,26 @@ pub(super) struct StoreAdministration {
     /// remainder of the deletion.
     remote_account_deletion_tombstone_persist:
         Arc<tokio::sync::watch::Sender<Option<tracedecay_global_db::RemoteDeletionTombstone>>>,
+}
+
+#[cfg(unix)]
+struct ManualBranchPublicationTasks {
+    closed: AtomicBool,
+    join_failed: AtomicBool,
+    cancellation: CancellationToken,
+    tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
+}
+
+#[cfg(unix)]
+impl Default for ManualBranchPublicationTasks {
+    fn default() -> Self {
+        Self {
+            closed: AtomicBool::new(false),
+            join_failed: AtomicBool::new(false),
+            cancellation: CancellationToken::new(),
+            tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+        }
+    }
 }
 
 /// Waitable receipt for the durable account-deletion tombstone persist.
@@ -529,7 +563,15 @@ impl Default for StoreAdministration {
                 tokio::sync::Mutex::new(()),
                 label = "daemon.branch_admin.host_admission_broker.gate"
             )),
-            profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
+            profile_host_admission_replay: Arc::new(
+                ProfileHostAdmissionReplayRegistry::with_replay_pass(Arc::new(
+                    |broker, profile_root| {
+                        Box::pin(async move {
+                            replay_projectless_hermes_host_admission(&broker, &profile_root).await
+                        })
+                    },
+                )),
+            ),
             profile_session_refresh_services: Arc::new(hotpath::mutex!(
                 tokio::sync::Mutex::new(HashMap::new()),
                 label = "daemon.branch_admin.profile_session_refresh_services"
@@ -537,17 +579,18 @@ impl Default for StoreAdministration {
             session_sync_service: Arc::new(
                 tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default(),
             ),
-            store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry::default(),
+            store_telemetry_sampling:
+                tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            #[cfg(unix)]
+            manual_branch_publications: Arc::new(ManualBranchPublicationTasks::default()),
             session_temporal_refresh_schedulers: Arc::new(
                 SessionTemporalRefreshSchedulerRegistry::default(),
             ),
             git_index_transaction_services: Arc::new(
                 DaemonGitIndexTransactionServiceRegistry::new(
-                    tracedecay_code_index_runtime::ApplicationCatalogProviderV1::new(
-                        crate::runtime_ports::compose_application_catalog_snapshot,
-                    ),
+                    crate::runtime_ports::compose_application_catalog_snapshot,
                 ),
             ),
             native_integration_services: Arc::new(
@@ -565,6 +608,158 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
+    #[cfg(unix)]
+    async fn spawn_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<BranchAddOutcome>>>
+    where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        if self
+            .manual_branch_publications
+            .closed
+            .load(Ordering::Acquire)
+        {
+            return Err(TraceDecayError::project_route(
+                "branch_tracking_failed",
+                true,
+                "manual branch publication admission is closed",
+            ));
+        }
+        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+        {
+            let mut tasks = self.manual_branch_publications.tasks.lock().await;
+            if self
+                .manual_branch_publications
+                .closed
+                .load(Ordering::Acquire)
+            {
+                return Err(TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    "manual branch publication admission is closed",
+                ));
+            }
+            while let Some(result) = tasks.try_join_next() {
+                if let Err(error) = result {
+                    self.manual_branch_publications
+                        .join_failed
+                        .store(true, Ordering::Release);
+                    log_daemon_event(
+                        "manual_branch_publication",
+                        &[
+                            ("action", "reap".to_owned()),
+                            ("outcome", "task_join_failed".to_owned()),
+                            ("reason", error.to_string()),
+                        ],
+                    );
+                }
+            }
+            let cancellation = self.manual_branch_publications.cancellation.clone();
+            tasks.spawn(async move {
+                let _ = result_sender.send(publication(cancellation).await);
+            });
+        }
+        Ok(result_receiver)
+    }
+
+    #[cfg(all(unix, any(test, feature = "test-transport")))]
+    pub(super) async fn run_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication: FnOnce(CancellationToken) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        self.spawn_manual_branch_publication(publication)
+            .await?
+            .await
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before completion: {error}"),
+                )
+            })?
+    }
+
+    /// Admit exact branch publication to the daemon-owned task set. The
+    /// caller returns while activation and indexing continue under shutdown
+    /// ownership.
+    #[cfg(unix)]
+    pub(super) async fn admit_manual_branch_publication<Publication, Task>(
+        &self,
+        publication: Publication,
+    ) -> Result<BranchAddOutcome>
+    where
+        Publication:
+            FnOnce(CancellationToken, tokio::sync::oneshot::Sender<()>) -> Task + Send + 'static,
+        Task: Future<Output = Result<BranchAddOutcome>> + Send + 'static,
+    {
+        let (admitted_sender, admitted_receiver) = tokio::sync::oneshot::channel();
+        let completion = self
+            .spawn_manual_branch_publication(move |cancellation| {
+                publication(cancellation, admitted_sender)
+            })
+            .await?;
+        match admitted_receiver.await {
+            Ok(()) => Ok(BranchAddOutcome::Deferred),
+            Err(_) => completion.await.map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication owner stopped before admission: {error}"),
+                )
+            })?,
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn cancel_manual_branch_publications(&self) {
+        self.manual_branch_publications
+            .closed
+            .store(true, Ordering::Release);
+        self.manual_branch_publications.cancellation.cancel();
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn shutdown_manual_branch_publications(
+        &self,
+    ) -> std::result::Result<(), String> {
+        self.cancel_manual_branch_publications();
+        let mut tasks = {
+            let mut owned = self.manual_branch_publications.tasks.lock().await;
+            std::mem::take(&mut *owned)
+        };
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                self.manual_branch_publications
+                    .join_failed
+                    .store(true, Ordering::Release);
+                log_daemon_event(
+                    "manual_branch_publication",
+                    &[
+                        ("action", "shutdown".to_owned()),
+                        ("outcome", "task_join_failed".to_owned()),
+                        ("reason", error.to_string()),
+                    ],
+                );
+            }
+        }
+        if self
+            .manual_branch_publications
+            .join_failed
+            .load(Ordering::Acquire)
+        {
+            Err("manual branch publication task failed to join".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
     pub(super) fn configure_codex_preparation_resources(
         &self,
         memory: Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
@@ -576,7 +771,7 @@ impl StoreAdministration {
 
     pub(super) fn store_telemetry_sampling(
         &self,
-    ) -> super::maintenance::StoreTelemetrySamplingRegistry {
+    ) -> tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry {
         self.store_telemetry_sampling.clone()
     }
 
@@ -821,14 +1016,13 @@ impl StoreAdministration {
         if let Some(database) = registry.mounted_project_sessions(&project_id).await {
             return Ok(database);
         }
-        let enrollment_roots =
-            Box::pin(crate::tracedecay::TraceDecay::registered_enrollment_roots(
-                project_root,
-                store_layout,
-                &project_id,
-                profile_database.as_ref(),
-            ))
-            .await?;
+        let enrollment_roots = Box::pin(tracedecay_global_db::registered_enrollment_roots(
+            profile_database.as_ref(),
+            project_root,
+            store_layout,
+            &project_id,
+        ))
+        .await?;
         Box::pin(registry.project_sessions(project_id, enrollment_roots)).await
     }
 
@@ -1051,6 +1245,10 @@ impl StoreAdministration {
         self.profile_host_admission_replay
             .wait_idle(broker_path, timeout)
             .await
+    }
+
+    pub(super) fn cancel_host_admission_replay(&self) {
+        self.profile_host_admission_replay.cancel();
     }
 
     #[hotpath::measure(
@@ -1345,7 +1543,7 @@ impl StoreAdministration {
 
     #[cfg(all(test, unix))]
     #[hotpath::skip]
-    pub(super) async fn retirement_reaper_count(&self) -> usize {
+    pub(super) fn retirement_reaper_count(&self) -> usize {
         self.retirement_reapers.state().reapers.len()
     }
 
@@ -1567,7 +1765,7 @@ impl StoreAdministration {
             .single_store_retirements()
             .iter()
             .filter(|retirement| {
-                super::pr_autotrack::manual_branch_source_owns_artifacts(
+                manual_branch_source_owns_artifacts(
                     data_root,
                     &retirement.branch,
                     &retirement.source,
@@ -1652,17 +1850,18 @@ impl StoreAdministration {
 fn acquire_manual_branch_retirement_leases(
     data_root: &Path,
     retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
-) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
+) -> Result<Vec<ManualBranchLifecycleLeaseV1>> {
     retirements
         .iter()
         .map(|retirement| {
-            super::pr_autotrack::try_acquire_manual_branch_lifecycle(data_root, &retirement.branch)
-                .map_err(|error| TraceDecayError::Config {
+            try_acquire_manual_branch_lifecycle(data_root, &retirement.branch).map_err(|error| {
+                TraceDecayError::Config {
                     message: format!(
                         "branch removal for '{}' is contended or unavailable: {error}",
                         retirement.branch
                     ),
-                })
+                }
+            })
         })
         .collect()
 }
@@ -1673,8 +1872,8 @@ async fn cleanup_manual_branch_retirements(
     data_root: &Path,
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     retirements: &[tracedecay_runtime_core::branch::SingleStoreBranchRetirementV1],
-    lifecycle_leases: Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>,
-) -> Result<Vec<super::pr_autotrack::ManualBranchLifecycleLeaseV1>> {
+    lifecycle_leases: Vec<ManualBranchLifecycleLeaseV1>,
+) -> Result<Vec<ManualBranchLifecycleLeaseV1>> {
     if retirements.len() != lifecycle_leases.len() {
         return Err(TraceDecayError::Config {
             message: "branch retirement lifecycle ownership did not match metadata selection"
@@ -1837,10 +2036,10 @@ pub(super) async fn write_branch_admin_response(
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::super::profile_host_admission_replay::BootstrapCompletion;
     use super::super::{AuthenticatedFirstRequest, ProjectRouteKey, StoreOwnerKey};
     use super::*;
     use std::time::Duration;
+    use tracedecay_daemon_service::BootstrapCompletion;
 
     fn parsed_branch_admin_request(line: String) -> Option<BranchAdminRequest> {
         let request = AuthenticatedFirstRequest::new(line);
@@ -1967,6 +2166,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_replay_uses_installed_hermes_callback_to_commit_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let database_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let (runtime, _) =
+            tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
+                .unwrap();
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        let event = serde_json::json!({
+            "agent": "hermes", "event": "turnCompleted",
+            "route": { "session_id": "installed-replay" },
+            "receipt": { "status": "success", "transcript_watermark": "replay-watermark" }
+        });
+        let event = tracedecay_mcp::hook_events::parse_hook_event(Some(&event)).unwrap();
+        let plan = tracedecay_mcp::hook_events::plan_hook_event(&event, &profile_root, None);
+        let payload = tracedecay_mcp::hook_events::encode_durable_hook_event_plan(&plan).unwrap();
+        broker
+            .admit(&event.admission_source(), &payload)
+            .await
+            .unwrap();
+        assert_eq!(broker.pending_count().await, 1);
+
+        let administration = StoreAdministration::default();
+        administration
+            .ensure_user_profile_host_admission_replay(&profile_root, &broker, &database_path)
+            .await;
+        assert!(
+            administration
+                .profile_host_admission_replay
+                .wait_idle(&database_path, Duration::from_secs(5))
+                .await
+        );
+        assert_eq!(broker.pending_count().await, 0);
+        let automation_root =
+            tracedecay_automation_runtime::automation::runner::user_automation_root(&profile_root);
+        let receipts = std::fs::read_to_string(automation_root.join("host_receipts.json")).unwrap();
+        assert!(receipts.contains("installed-replay"), "{receipts}");
+        assert!(receipts.contains("replay-watermark"), "{receipts}");
+        administration.shutdown_host_admission_replay().await;
+    }
+
+    #[tokio::test]
     async fn future_spool_version_reaches_branch_admin_as_typed_reset_without_mutation() {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("future.db");
@@ -1994,6 +2235,15 @@ mod tests {
     #[tokio::test]
     async fn profile_bootstrap_preserves_future_spool_reset_without_retry_mapping() {
         let temp = tempfile::tempdir().unwrap();
+        let log_path = temp.path().join("bootstrap.log");
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(Arc::new(std::fs::File::create(&log_path).unwrap()))
+            .finish();
+        // This current-thread runtime also polls the spawned bootstrap worker
+        // under the ordinary daemon WARN filter.
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         // The profile identity root must be a directory `load_or_create`
         // creates (and restricts to 0700) itself; a umask-default tempdir
         // trips the fail-closed private-root validation.
@@ -2048,6 +2298,12 @@ mod tests {
         );
         assert!(error.project_route_context().is_none());
         assert_eq!(std::fs::read(meta_path).unwrap(), bytes_before);
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            log.contains("profile_host_admission_bootstrap_stopped"),
+            "{log}"
+        );
+        assert!(log.contains("reason_code="), "{log}");
 
         let client_identity = tracedecay_daemon_protocol::DaemonClientIdentity {
             profile_root: profile_root.clone(),

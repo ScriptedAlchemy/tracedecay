@@ -3,7 +3,7 @@
 use super::*;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 
-use super::super::read_coalescing::{ReadFlightClaim, tool_allows_identical_read_coalescing};
+use tracedecay_mcp::server::{ReadFlightClaim, tool_allows_identical_read_coalescing};
 
 impl McpServer {
     #[hotpath::skip]
@@ -242,6 +242,10 @@ impl McpServer {
 
     #[allow(clippy::too_many_arguments)]
     #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Tool dispatch is one registry match onto the owning handler future."
+    )]
     pub(super) async fn execute_tool_dispatch(
         &self,
         cg: &TraceDecay,
@@ -258,7 +262,11 @@ impl McpServer {
         application_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
-        let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
+        let read_flight = tool_allows_identical_read_coalescing(tool_name, |tool_name| {
+            crate::mcp::tools::mcp_dispatch_contract(tool_name)
+                .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
+        })
+        .then(|| {
             self.identical_read_coalescer.claim(
                 engine_identity.to_string_lossy().as_ref(),
                 tool_name,
@@ -306,8 +314,7 @@ impl McpServer {
                 code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
                 explorer_semantic_reader: self.dashboard_explorer_semantic_reader.clone(),
                 feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
-                diagnostics_cache: Some(&self.diagnostics_cache),
-                diagnostics_change_generation: self.diagnostics_change_generation.clone(),
+                pr_autotrack_reader: self.dashboard_pr_autotrack_reader.clone(),
                 diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_executor,
                 application_invocation_target,
@@ -323,13 +330,8 @@ impl McpServer {
                 code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
                 code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
-                source_edit_executor: self.source_edit_executor.get().cloned(),
-                source_edit_reconciliation_executor: self
-                    .source_edit_reconciliation_executor
-                    .get()
-                    .cloned(),
-                source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
+                admitted_project_scope: self.admitted_project_scope.clone(),
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
                 code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
                 verified_graph_query_port: self.verified_graph_query_port.clone(),

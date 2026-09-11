@@ -5,6 +5,9 @@
 //! integer built into `SQLite`; a store carrying any other value was written by
 //! an incompatible binary and is refused at open with a fresh-start remedy.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::db::connection::DatabaseEngineWriteConnection;
 use crate::db::engine::{Connection, Executor, QueryExecutor, params};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -42,6 +45,13 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// content. A current-stamped store containing a retired projection fails
 /// closed before interpretation.
 pub const SCHEMA_VERSION: u32 = 35;
+
+/// Verifies that a rusqlite connection sees the final relational shape this
+/// binary admits, including the one shipped-v35 trigger shape it repairs on a
+/// writer open. This is query-only and shares the daemon's schema authority.
+pub fn verify_admissible_final_shape_rusqlite(conn: &rusqlite::Connection) -> Result<()> {
+    final_shape::require_admissible_final_shape_rusqlite(conn)
+}
 
 /// The one prior shape this binary steps forward in place: v34 is v35 minus
 /// the persisted payload-digest objects (#834). Every other stamp is still
@@ -183,6 +193,12 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
     super::memory_v2::create_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
+    conn.execute_batch(tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create generation diagnostics schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
     conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -306,22 +322,30 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
 ///
 /// This binary has no upgrade ladder: a store stamped with any other version is
 /// refused with the fresh-start remedy rather than stepped forward.
+///
+/// The schema ladder is awaited through a `dyn Future` so its concrete future
+/// type stops at this phase boundary: with the `hotpath` wrappers compiled in,
+/// the un-erased chain (retrieval-anchor schema -> memory baseline -> this
+/// ladder -> store mount -> lifecycle -> project open) overflows rustc's
+/// `Send` query depth in the root crate's lib test.
 pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()> {
     let writer = database.writer_connection("ensure schema current").await?;
     let connection = writer.engine_connection();
-    ensure_schema_current_engine_connection(&connection).await
+    let ladder: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+        Box::pin(ensure_schema_current_engine_connection(&connection));
+    ladder.await
 }
 
-/// Steps a store that is exactly one sanctioned step behind the final shape
-/// (v34 -> v35) and reports whether a step ran. Any other stamp is left for
-/// [`verify_final_schema_connection`] to judge. This is the writer-side
-/// remedy the read-only verifier names for a pending step.
-pub(crate) async fn step_schema_if_pending<C: Executor>(conn: &C) -> Result<bool> {
-    if get_version(conn).await? != PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
-        return Ok(false);
+/// Applies either sanctioned writer-side repair before read-only admission:
+/// the v34 -> v35 payload-digest step, or the exact shipped-v35 alias-trigger
+/// replacement. Every other stamp or shape remains for
+/// [`verify_final_schema_connection`] to refuse.
+pub(crate) async fn step_schema_if_pending(conn: &Connection) -> Result<bool> {
+    if get_version(conn).await? == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
+        step_payload_digests(conn).await?;
+        return Ok(true);
     }
-    step_payload_digests(conn).await?;
-    Ok(true)
+    repair_shipped_v35_alias_trigger_connection(conn).await
 }
 
 async fn ensure_schema_current_engine_connection(
@@ -334,7 +358,123 @@ async fn ensure_schema_current_engine_connection(
     if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
         step_payload_digests(conn).await?;
     }
+    repair_shipped_v35_alias_trigger_engine_connection(conn).await?;
     verify_final_schema_connection(conn).await
+}
+
+async fn repair_shipped_v35_alias_trigger(conn: &(impl Executor + Sync)) -> Result<bool> {
+    if !final_shape::require_exact_final_shape_or_shipped_v35_alias_trigger(conn).await? {
+        return Ok(false);
+    }
+    crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
+        conn,
+        "repair shipped v35 retrieval-anchor alias trigger",
+    )
+    .await?;
+    final_shape::require_exact_final_shape(conn).await?;
+    Ok(true)
+}
+
+async fn repair_shipped_v35_alias_trigger_engine_connection(
+    conn: &DatabaseEngineWriteConnection,
+) -> Result<()> {
+    if get_version(conn).await? != SCHEMA_VERSION
+        || !final_shape::require_exact_final_shape_or_shipped_v35_alias_trigger(conn).await?
+    {
+        return Ok(());
+    }
+    let transaction = conn
+        .authorized_long_lease_transaction()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to acquire shipped-v35 trigger repair lock: {error}"),
+            operation: "repair shipped v35 retrieval-anchor alias trigger".to_owned(),
+        })?;
+    let result = repair_shipped_v35_alias_trigger(&transaction).await;
+    match result {
+        Ok(true) => transaction
+            .commit()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to commit shipped-v35 trigger repair: {error}"),
+                operation: "repair shipped v35 retrieval-anchor alias trigger".to_owned(),
+            }),
+        Ok(false) => transaction
+            .rollback()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!(
+                    "failed to roll back redundant shipped-v35 trigger repair: {error}"
+                ),
+                operation: "repair shipped v35 retrieval-anchor alias trigger".to_owned(),
+            }),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(trigger_repair_rollback_failure(error, rollback_error)),
+        },
+    }
+}
+
+async fn repair_shipped_v35_alias_trigger_connection(conn: &Connection) -> Result<bool> {
+    if get_version(conn).await? != SCHEMA_VERSION
+        || !final_shape::require_exact_final_shape_or_shipped_v35_alias_trigger(conn).await?
+    {
+        return Ok(false);
+    }
+    let transaction = conn
+        .authorized_long_lease_transaction()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to acquire shipped-v35 trigger repair lock: {error}"),
+            operation: "repair shipped v35 retrieval-anchor alias trigger".to_owned(),
+        })?;
+    let result = repair_shipped_v35_alias_trigger(&transaction).await;
+    match result {
+        Ok(true) => {
+            transaction
+                .commit()
+                .await
+                .map(|()| true)
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to commit shipped-v35 trigger repair: {error}"),
+                    operation: "repair shipped v35 retrieval-anchor alias trigger".to_owned(),
+                })
+        }
+        Ok(false) => transaction
+            .rollback()
+            .await
+            .map(|()| false)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!(
+                    "failed to roll back redundant shipped-v35 trigger repair: {error}"
+                ),
+                operation: "repair shipped v35 retrieval-anchor alias trigger".to_owned(),
+            }),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(trigger_repair_rollback_failure(error, rollback_error)),
+        },
+    }
+}
+
+fn trigger_repair_rollback_failure(
+    error: TraceDecayError,
+    rollback_error: impl std::fmt::Display,
+) -> TraceDecayError {
+    match error {
+        TraceDecayError::ResetRequired { authority, reason } => TraceDecayError::ResetRequired {
+            authority,
+            reason: format!("{reason}; trigger-repair rollback also failed: {rollback_error}"),
+        },
+        TraceDecayError::Database { message, operation } => TraceDecayError::Database {
+            message: format!("{message}; trigger-repair rollback also failed: {rollback_error}"),
+            operation,
+        },
+        error => TraceDecayError::Database {
+            message: format!("{error}; trigger-repair rollback also failed: {rollback_error}"),
+            operation: "repair shipped v35 retrieval-anchor alias trigger".to_owned(),
+        },
+    }
 }
 
 /// Steps a v34 store to v35: creates the payload-digest objects (idempotent)
@@ -516,6 +656,7 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     if current == PAYLOAD_DIGEST_STEP_SOURCE_VERSION {
         step_payload_digests(conn).await?;
     }
+    repair_shipped_v35_alias_trigger_connection(conn).await?;
     verify_final_schema_connection(conn).await
 }
 

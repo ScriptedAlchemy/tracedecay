@@ -3,9 +3,10 @@
 //!
 //! Request, result, and authorization contracts come from
 //! `tracedecay-contracts`. Graph evidence is admitted through
-//! `tracedecay_graph_query`. The composition root injects the edit
-//! primitives and diagnostics through [`SourceEditRuntimePort`] and is this
-//! crate's only consumer; nothing here depends on the use-case spine.
+//! `tracedecay_graph_query`. The composition root injects worktree identity
+//! and optional diagnostics through [`SourceEditRuntimePort`]; planning,
+//! primitives, journaling, rollback, recovery, and reconciliation are owned
+//! here. This crate's only consumer is the composition root.
 //!
 //! Hotpath labels stay `usecases.edit.*` for dashboard continuity. A later
 //! dual-rename to `source_edit.*` can land with the dashboard cutover.
@@ -26,9 +27,11 @@ const SOURCE_EDIT_RECOVERY_DIGEST_DOMAIN_V1: &str = "tracedecay.source-edit-reco
 mod control;
 mod digest;
 mod dispatch;
+mod edits;
 mod execute;
 mod file_authority;
 mod journal;
+mod move_symbol;
 mod outcome;
 mod plan;
 mod port;

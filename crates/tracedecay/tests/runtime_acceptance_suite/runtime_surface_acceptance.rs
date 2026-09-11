@@ -13,13 +13,6 @@ use axum::response::IntoResponse;
 use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use tracedecay::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
-    execute_application_surface, http_application_router, parse_application_surface_request,
-    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
-};
-#[cfg(all(unix, feature = "test-transport"))]
-use tracedecay::application_surface::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay::daemon::call_default_tool;
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_api::sse_response;
@@ -47,8 +40,20 @@ use tracedecay_contracts::{
     OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_daemon_protocol::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, FeedbackSurfaceRequest,
+    parse_application_surface_request,
+};
+use tracedecay_daemon_protocol::{
     DaemonHandshake, DaemonInvocationClient, DaemonLspSessionClient, FramePoll, FrameSend,
     RequestedOutputFormat,
+};
+#[cfg(all(unix, feature = "test-transport"))]
+use tracedecay_daemon_service::application_surface::{
+    GitApplySurfaceRequest, GitPreviewSurfaceRequest,
+};
+use tracedecay_daemon_service::application_surface::{
+    execute_application_surface, http_application_router,
+    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
@@ -653,6 +658,29 @@ fn run_application_tool(
         .expect("run application tool")
 }
 
+fn run_application_tool_markdown(
+    home: &Path,
+    project: &Path,
+    operation: ApplicationSurfaceOperation,
+    arguments: &Value,
+) -> Output {
+    let project_arg = project.to_string_lossy().into_owned();
+    let arguments = arguments.to_string();
+    common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            operation.as_str(),
+            "--args",
+            arguments.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run application tool with Markdown output")
+}
+
 #[cfg(all(unix, feature = "test-transport"))]
 async fn preview_commit_via_mcp(
     fixture: &RuntimeFixture,
@@ -751,6 +779,8 @@ async fn assert_application_transport_parity(
     );
     let expected_contract = if operation == ApplicationSurfaceOperation::TestResults {
         "schema.application.feedback.test-results.result".to_owned()
+    } else if operation == ApplicationSurfaceOperation::CodeExactOccurrence {
+        "schema.application.code-query.exact-occurrence.result".to_owned()
     } else {
         format!(
             "schema.application.primitive.{}.result",
@@ -1399,7 +1429,7 @@ async fn project_open_application_boundary() {
 #[tokio::test(flavor = "multi_thread")]
 async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     let fixture = lsp_runtime_fixture().await;
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    let generation = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             let result = call_default_tool(
                 &fixture.handshake,
@@ -1421,7 +1451,12 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
                 serving["state"].as_str(),
                 serving["reason"].as_str(),
             ) {
-                (Some("current"), Some("ready"), _) => break,
+                (Some("current"), Some("ready"), _) => {
+                    break freshness["worktree"]["latest_generation_id"]
+                        .as_str()
+                        .expect("current code-index generation")
+                        .to_owned();
+                }
                 (_, Some("refused"), _) | (_, _, Some("activation_disabled")) => {
                     panic!("graph readiness refused: {status}")
                 }
@@ -1510,17 +1545,67 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     assert_eq!(dependents["file"], "src/auth/session.rs");
     assert!(dependents["dependent_files"].as_array().is_some());
 
-    let source_path = fixture.project.join("src/auth/login.rs");
-    let source_len = std::fs::metadata(source_path)
-        .expect("fixture source metadata")
-        .len();
+    let exact = assert_application_transport_parity(
+        &fixture,
+        "exact-occurrence-authenticate",
+        ApplicationSurfaceOperation::CodeExactOccurrence,
+        serde_json::json!({
+            "literal": "authenticate",
+            "kind": "whole_symbol",
+            "scope": {
+                "generation": generation,
+                "path_prefix": "src/auth/login.rs",
+            },
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "cursor": null,
+            },
+        }),
+    )
+    .await;
+    let occurrence = &exact["items"][0]["occurrence"];
+    assert_eq!(occurrence["path"], "src/auth/login.rs");
+    let source_lines_arguments = serde_json::json!({
+        "file": occurrence["file"],
+        "span": occurrence["span"],
+        "meta": {
+            "temporal": { "kind": "current" },
+            "page": { "page_size": 10, "cursor": null },
+            "projection": "evidence",
+            "order": "source_position",
+        },
+    });
     let source_lines = assert_application_transport_parity(
         &fixture,
         "source-lines",
         ApplicationSurfaceOperation::SourceLines,
+        source_lines_arguments,
+    )
+    .await;
+    assert_eq!(source_lines["file"], "src/auth/login.rs");
+    let source = std::fs::read(fixture.project.join("src/auth/login.rs"))
+        .expect("read source-lines fixture");
+    let start = occurrence["span"]["start_byte"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("source-lines start byte");
+    let end = occurrence["span"]["end_byte"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .expect("source-lines end byte");
+    assert_eq!(
+        source_lines["body"],
+        std::str::from_utf8(&source[start..end]).expect("UTF-8 fixture span")
+    );
+    assert_eq!(source_lines["references"][0]["span"], occurrence["span"]);
+    let references_only = assert_application_transport_parity(
+        &fixture,
+        "source-lines-references-only",
+        ApplicationSurfaceOperation::SourceLines,
         serde_json::json!({
-            "file": "src/auth/login.rs",
-            "span": { "start_byte": 0, "end_byte": source_len },
+            "file": occurrence["file"],
+            "span": occurrence["span"],
             "meta": {
                 "temporal": { "kind": "current" },
                 "page": { "page_size": 10, "cursor": null },
@@ -1530,16 +1615,16 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
         }),
     )
     .await;
-    assert_eq!(
-        source_lines["references"][0]["span"],
-        serde_json::json!({ "start_byte": 0, "end_byte": source_len })
-    );
+    assert!(references_only.get("file").is_none());
+    assert!(references_only.get("body").is_none());
+    assert_eq!(references_only["references"][0]["span"], occurrence["span"]);
 
+    let source_body_arguments = serde_json::json!({ "node_id": authenticate_id });
     let source_body = assert_application_transport_parity(
         &fixture,
         "source-body",
         ApplicationSurfaceOperation::SourceBody,
-        serde_json::json!({ "node_id": authenticate_id }),
+        source_body_arguments.clone(),
     )
     .await;
     assert_eq!(source_body["file"], "src/auth/login.rs");
@@ -1548,6 +1633,24 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             .as_str()
             .expect("authenticate source body")
             .contains("create_session(username)")
+    );
+    let source_body_markdown = run_application_tool_markdown(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::SourceBody,
+        &source_body_arguments,
+    );
+    assert_command_success("CLI source_body Markdown", &source_body_markdown);
+    let source_body_markdown =
+        String::from_utf8(source_body_markdown.stdout).expect("CLI source_body Markdown is UTF-8");
+    assert!(
+        source_body_markdown
+            .starts_with("## source\\_body\n\n### Payload\n\n    src/auth/login.rs:"),
+        "source payload must be the first rendered field: {source_body_markdown}"
+    );
+    assert!(
+        source_body_markdown.contains("        Ok(create_session(username))"),
+        "source payload must contain the retrieved body: {source_body_markdown}"
     );
 }
 
@@ -2228,15 +2331,19 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     let projected_root = projection["result"]["rootUri"]
         .as_str()
         .expect("projected root URI");
+    // The expectation is the root's identity, not `canonicalize`: a file URL
+    // never carries the `\\?\` verbatim prefix Windows canonicalization
+    // returns, so comparing against that spelling would refuse the very root
+    // the daemon published. The alias the client spelled is still refused —
+    // it is a different name for this directory, not this name.
+    let projected_path = url::Url::parse(projected_root)
+        .ok()
+        .and_then(|url| url.to_file_path().ok());
     assert_eq!(
-        url::Url::parse(projected_root)
-            .ok()
-            .and_then(|url| url.to_file_path().ok()),
+        projected_path.as_deref(),
         Some(
-            fixture
-                .project
-                .canonicalize()
-                .expect("canonical admitted project root")
+            tracedecay_runtime_core::path_safety::canonical_root_identity(&fixture.project)
+                .as_path()
         ),
         "the projection must name the admitted root, got {projected_root}"
     );
@@ -2997,16 +3104,8 @@ async fn feedback_handle_bootstrap_reads() {
     ));
 }
 
-fn assert_exact_markdown_field(markdown: &str, label: &str, expected: &str) {
-    let expected = format!("- {label}: `{expected}`");
-    assert!(
-        markdown.lines().any(|line| line == expected),
-        "missing exact Markdown field {expected:?}\n{markdown}"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn primitive_config_markdown_json_parity() {
+async fn application_markdown_is_payload_first_and_json_stays_exact() {
     let fixture = runtime_fixture().await;
     let mounted = admitted_mcp_invocation(
         &fixture.client,
@@ -3105,116 +3204,50 @@ async fn primitive_config_markdown_json_parity() {
         Some("## storage\\_status"),
         "the operation heading uses the canonical Markdown escaping contract"
     );
-    assert_exact_markdown_field(&markdown, "Operation", "storage_status");
-    assert_exact_markdown_field(&markdown, "Binding", "binding.cli.storage_status.v1");
-    assert_exact_markdown_field(
-        &markdown,
-        "Contract",
-        "schema.application.primitive.storage-status.result@1",
-    );
-    assert_exact_markdown_field(&markdown, "Status", "success");
-    assert_exact_markdown_field(&markdown, "Outcome", "evidence");
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope project",
-        json["scope"]["project_id"]
-            .as_str()
-            .expect("JSON project scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope repository",
-        json["scope"]["repository_id"]
-            .as_str()
-            .expect("JSON repository scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope worktree",
-        json["scope"]["worktree_id"]
-            .as_str()
-            .expect("JSON worktree scope"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope reference",
-        json["scope"]["reference"].as_str().unwrap_or("none"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Scope digest",
-        json["scope"]["scope_digest"]
-            .as_str()
-            .expect("JSON scope digest"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Freshness",
-        json["outcome"]["value"]["temporal"]["freshness"]
-            .as_str()
-            .expect("JSON freshness"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Coverage",
-        json["outcome"]["value"]["coverage"]["completeness"]
-            .as_str()
-            .expect("JSON coverage"),
-    );
-    assert_exact_markdown_field(
-        &markdown,
-        "Page returned",
-        &json["outcome"]["value"]["page"]["returned"].to_string(),
-    );
-    let page_total = json["outcome"]["value"]["page"]["total"]
-        .as_u64()
-        .map_or_else(|| "unknown".to_owned(), |total| total.to_string());
-    assert_exact_markdown_field(&markdown, "Page total", &page_total);
-    let cursor = json["outcome"]["value"]["page"]["cursor"]
-        .as_str()
-        .unwrap_or("none");
-    assert_exact_markdown_field(&markdown, "Cursor", cursor);
-    assert_exact_markdown_field(&markdown, "Termination", "completed");
-    assert_exact_markdown_field(&markdown, "Cancellation stage", "none");
-
-    // The key list is derived from the payload rather than pinned to a literal,
-    // so it tracks the contract instead of going stale the next time the
-    // payload gains a field. The human view lists the first eight sorted keys
-    // and elides the rest behind its `--json` pointer, so the expectation
-    // reproduces that rule instead of assuming the payload stays small.
-    const HUMAN_VIEW_VISIBLE_KEYS: usize = 8;
     let payload = &json["outcome"]["value"]["payload"];
-    let payload_fields = payload
-        .as_object()
-        .expect("storage_status payload is an object");
-    assert!(
-        !payload_fields.is_empty(),
-        "an empty payload would make the key parity assertion vacuous"
-    );
-    let payload_bytes = serde_json::to_vec(payload)
-        .expect("serialize JSON payload")
-        .len();
-    let mut payload_keys = payload_fields.keys().cloned().collect::<Vec<_>>();
-    payload_keys.sort_unstable();
-    let visible_keys = &payload_keys[..payload_keys.len().min(HUMAN_VIEW_VISIBLE_KEYS)];
-    let elision = if payload_keys.len() > visible_keys.len() {
-        ", …"
-    } else {
-        ""
-    };
-    let rendered_keys = visible_keys.join(",").replace('_', "\\_");
-    let payload_summary = format!(
-        "- Payload: object(keys={rendered_keys}{elision}; json\\_bytes={payload_bytes}); complete: --json"
+    let payload_markdown = format!(
+        "    {}",
+        serde_json::to_string_pretty(payload)
+            .expect("serialize storage status payload")
+            .replace('\n', "\n    ")
     );
     assert!(
-        markdown.lines().any(|line| line == payload_summary),
-        "missing exact Markdown payload summary {payload_summary:?}\n{markdown}"
+        markdown.starts_with("## storage\\_status\n\n### Payload\n\n"),
+        "the payload must be the first Markdown field: {markdown}"
     );
+    assert!(markdown.contains(&payload_markdown));
+    assert!(markdown.contains("\n- Status: `success`"));
+    assert!(markdown.contains("\n- Evidence: `freshness="));
+    assert!(markdown.contains("\n- Provenance: `binding=binding.cli.storage_status.v1;"));
+    assert!(!markdown.contains("Scope digest"));
+    assert!(!markdown.contains("\n- Receipt:"));
     assert_eq!(json["outcome"]["outcome"], "evidence");
     assert_eq!(
         &json["outcome"]["value"]["payload"],
         successful_application(&cli_result),
         "the JSON renderer must emit its own invocation's payload verbatim"
+    );
+
+    let health = run_application_tool_markdown(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::HealthRead,
+        &serde_json::json!({}),
+    );
+    assert_command_success("CLI health_read Markdown", &health);
+    let health = String::from_utf8(health.stdout).expect("CLI health_read Markdown is UTF-8");
+    // Same pretty-printed payload block the storage_status half of this test
+    // already grades: the Markdown renderer is `to_string_pretty`, not compact.
+    assert!(
+        health.starts_with("## health\\_read\n\n### Payload\n\n    {\n      \"status\": \""),
+        "health status must be the first rendered field: {health}"
+    );
+    assert!(health.contains("\n- Evidence: `freshness="));
+    assert!(health.contains("\n- Provenance: `binding=binding.cli.health_read.v1;"));
+    assert_eq!(
+        health.lines().count(),
+        11,
+        "health output is not the compact pretty-printed payload: {health}"
     );
 }
 

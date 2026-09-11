@@ -12,6 +12,8 @@
 //! callers use the bounded CLI fallback here for native Git writes, signing,
 //! recovery, and reads where exact porcelain semantics remain the authority.
 
+pub mod churn;
+
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -84,7 +86,7 @@ impl From<GitProgramUnavailable> for GitCommandError {
 
 /// Returns the resolved absolute `git` program to spawn.
 ///
-/// Resolution order (performed once, then cached):
+/// Resolution order (cached once it succeeds):
 ///   1. The `GIT` environment variable, if it names an absolute executable.
 ///   2. An absolute path found by a which-style walk of `PATH` (+ `PATHEXT` on
 ///      Windows).
@@ -92,12 +94,23 @@ impl From<GitProgramUnavailable> for GitCommandError {
 ///      bare-program fallback because that delegates identity back to ambient
 ///      `PATH` at spawn time.
 pub fn try_git_program() -> Result<&'static OsStr, GitProgramUnavailable> {
-    static PROGRAM: OnceLock<Result<OsString, GitProgramUnavailable>> = OnceLock::new();
-    PROGRAM
-        .get_or_init(resolve_git_program)
-        .as_ref()
-        .map(OsString::as_os_str)
-        .map_err(|error| *error)
+    static PROGRAM: OnceLock<OsString> = OnceLock::new();
+    cached_program(&PROGRAM, resolve_git_program).map(OsString::as_os_str)
+}
+
+/// Memoises only a successful resolution. A failed lookup (for example while
+/// `PATH` is momentarily wrong at first call) is returned but not cached, so a
+/// later call with a working environment recovers instead of reporting
+/// [`GitProgramUnavailable`] for the rest of the process.
+fn cached_program(
+    cache: &OnceLock<OsString>,
+    resolve: impl FnOnce() -> Result<OsString, GitProgramUnavailable>,
+) -> Result<&OsString, GitProgramUnavailable> {
+    if let Some(program) = cache.get() {
+        return Ok(program);
+    }
+    let program = resolve()?;
+    Ok(cache.get_or_init(|| program))
 }
 
 fn resolve_git_program() -> Result<OsString, GitProgramUnavailable> {
@@ -465,6 +478,26 @@ pub fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Reads `remote.origin.url` from the repository at `project_root`.
+///
+/// Prefers an in-process gix config snapshot (repo-local + global) and
+/// falls back to a bounded `git config --get` when gix cannot discover
+/// the repository but git still may.
+pub fn git_remote_url(project_root: &Path) -> Option<String> {
+    if let Ok(repo) = gix::discover(project_root) {
+        let url = repo
+            .config_snapshot()
+            .string("remote.origin.url")?
+            .to_string();
+        let url = url.trim();
+        return (!url.is_empty()).then(|| url.to_string());
+    }
+    if !crate::worktree::git_may_resolve_repo(project_root) {
+        return None;
+    }
+    git_capture(project_root, &["config", "--get", "remote.origin.url"])
+}
+
 /// Outcome of the bounded `git -C` capture used by repository identity lookup.
 #[derive(Debug)]
 pub enum GitCaptureAtResult {
@@ -644,6 +677,22 @@ mod tests {
         .expect_err("a relative override must not become an ambient PATH lookup");
 
         assert_eq!(error, GitProgramUnavailable);
+    }
+
+    #[test]
+    fn failed_lookup_is_not_memoised_and_later_success_is() {
+        let cache = OnceLock::new();
+
+        assert_eq!(
+            cached_program(&cache, || Err(GitProgramUnavailable)),
+            Err(GitProgramUnavailable)
+        );
+        let resolved = cached_program(&cache, || Ok(OsString::from("/fixture/git")))
+            .expect("a working lookup after a failed one must resolve");
+        assert_eq!(resolved, "/fixture/git");
+        let cached = cached_program(&cache, || panic!("a cached success must not re-resolve"))
+            .expect("cached program");
+        assert_eq!(cached, resolved);
     }
 
     #[test]

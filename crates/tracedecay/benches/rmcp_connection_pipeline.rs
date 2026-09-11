@@ -16,6 +16,7 @@
 //!   --no-default-features --features production,rmcp-benchmark,hotpath-alloc
 //! ```
 
+#![allow(clippy::too_many_lines)]
 #[cfg(feature = "hotpath")]
 use std::path::PathBuf;
 

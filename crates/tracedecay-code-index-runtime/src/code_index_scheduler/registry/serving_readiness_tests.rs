@@ -1,14 +1,48 @@
 //! Serving notifications cover installation and renewed source admission.
 
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
 
 use super::super::graph_activation::install_injected_activation_gate;
 use super::{CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1};
+
+/// Failure bound on an owner pass finishing once the worker is parked. Nothing
+/// here passes because time elapsed; a pass that never ends fails loudly.
+const OWNER_PASS_QUIESCENCE_CEILING: Duration = Duration::from_mins(2);
+
+/// Park the background worker and wait out whatever pass is already in flight.
+///
+/// The worker releases its admission permit after source reconciliation but
+/// keeps its owner-pass guard through text seating, so winning the permit only
+/// proves that no *new* pass can start. A pass still running past that point
+/// installs a serving generation and signals `serving_generation_changed`,
+/// which a test sampling that watch would then attribute to its own next step.
+async fn quiesced_background_reconcile_admission(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> tokio::sync::OwnedSemaphorePermit {
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the background worker at its dequeue point");
+    let deadline = Instant::now() + OWNER_PASS_QUIESCENCE_CEILING;
+    while registry.reconcile_in_progress_for_test(project_root).await {
+        assert!(
+            Instant::now() <= deadline,
+            "the owner pass for {} never finished",
+            project_root.display()
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    admission
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serving_waiter_tracks_installation_freshness_and_retirement() {
@@ -64,6 +98,10 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         .subscribe_serving_generation_changes(&project)
         .await
         .expect("serving subscription");
+    assert!(
+        registry.request_complete_generation(&project).await,
+        "mounted worktree admits complete-generation demand"
+    );
     drop(admission);
     let published = tokio::time::timeout(Duration::from_secs(5), publications.recv())
         .await
@@ -102,6 +140,13 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
     .await
     .expect("serving installation must wake the waiter without another seal");
     assert_eq!(generation.manifest().generation_id, published.generation_id);
+    let resolved_scope = ResolvedScope::new(
+        generation.manifest().project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        generation.snapshot().reference.clone(),
+    )
+    .expect("resolved serving scope");
     assert!(
         generation
             .symbols()
@@ -123,22 +168,54 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         state.last_reconciled_at = std::time::Instant::now()
             .checked_sub(state.staleness_threshold + Duration::from_secs(1))
             .expect("age the readiness proof");
-        state.busy_witness_memo = None;
     }
-    let ready = registry
-        .latest_complete_ready(&project)
+    let admission = quiesced_background_reconcile_admission(&registry, &project).await;
+    changes.borrow_and_update();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            registry.latest_complete_ready(&project)
+        )
         .await
-        .expect("an expired cheap proof must revalidate the unchanged source");
+        .expect("expired readiness returns without walking source")
+        .is_none(),
+        "an expired proof cannot be promoted current before the worker renews it"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&resolved_scope)
+            .await
+            .is_some(),
+        "the retained immutable generation remains available to stale reads"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&resolved_scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "the read coalesces one verification wake on the retained worker"
+    );
+    assert!(
+        !changes.has_changed().expect("live serving subscription"),
+        "admission cannot fabricate a renewed source proof"
+    );
+    drop(admission);
+    let ready = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            changes.changed().await.expect("source proof renewal");
+            if let Some(ready) = registry.latest_complete_ready(&project).await {
+                break ready;
+            }
+        }
+    })
+    .await
+    .expect("the worker renews the unchanged source proof");
     assert_eq!(
         ready.generation().manifest().generation_id,
         published.generation_id
     );
 
-    let admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
-        .await
-        .expect("hold unchanged-source revalidation");
+    let admission = quiesced_background_reconcile_admission(&registry, &project).await;
     changes.borrow_and_update();
     let seat_epoch = {
         let mounted = registry.mounted.lock().await;
@@ -223,7 +300,6 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         state.last_reconciled_at = std::time::Instant::now()
             .checked_sub(state.staleness_threshold + Duration::from_secs(1))
             .expect("age the readiness proof");
-        state.busy_witness_memo = None;
     }
     assert!(
         registry.latest_complete_ready(&project).await.is_none(),
@@ -237,8 +313,8 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             .lock()
             .expect("scheduler lock")
             .pending_hint_count(),
-        None,
-        "rejected source proof must request the canonical authoritative scan"
+        Some(0),
+        "the read must leave source verification to the canonical worker without fabricating an overflow"
     );
     drop(admission);
     changes.borrow_and_update();

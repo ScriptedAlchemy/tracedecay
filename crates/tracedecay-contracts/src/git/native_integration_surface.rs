@@ -24,27 +24,27 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ActorId, CapabilityId as DomainCapabilityId, ManifestDigest, MechanicalIntegrationModeV1,
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
-    NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
-    NativeIntegrationReceiptV1, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
-    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
-    RepositoryId, UtcMicros, WorktreeInventoryEpoch,
+    NativeIntegrationAnalysisReportV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationPhaseV1, NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
+    NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
+    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
+    NativeIntegrationTransactionStatusV1, ProjectId, RefId, RepositoryId, UtcMicros,
+    WorktreeInventoryEpoch,
 };
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableSchemaAuthority, IdempotencyContract, InverseContract, InverseUnavailableReason,
-    LifecycleClass, OperationId, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract, TerminalState,
-    TerminalStateContract, UseCaseId,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
+    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
+    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
+    InverseContract, InverseUnavailableReason, LifecycleClass, PrivacyClass, ProfileId,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
+    TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::CancellationSignal;
-use crate::current_bindings;
+use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::git::native_integration::{
     NativeIntegrationCancelDispositionV1, NativeIntegrationPortError,
@@ -61,7 +61,10 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 mod stack_snapshot;
 
-pub use stack_snapshot::NativeIntegrationStackSnapshotSurfaceRequest;
+pub use stack_snapshot::{
+    NativeIntegrationSealedStackSnapshotV1, NativeIntegrationSelectionDeclarationV1,
+    NativeIntegrationStackSnapshotSurfaceRequest,
+};
 
 /// Canonical wire operation names for the native-integration journey.
 pub const NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION: &str = "stack_snapshot";
@@ -110,32 +113,6 @@ impl<P: NativeIntegrationStackResolutionPort> NativeIntegrationStackSnapshotServ
     }
 }
 
-/// Exact semantic evidence revisions joined to native conflict evidence.
-///
-/// Mirrors [`super::NativeIntegrationEvidenceRevisionsV1`] on the wire; the
-/// application type stays the single validation authority.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct NativeIntegrationEvidenceRevisionsWireV1 {
-    pub graph_revision_digest: ManifestDigest,
-    pub test_revision_digest: ManifestDigest,
-    pub schema_revision_digest: ManifestDigest,
-    pub migration_revision_digest: ManifestDigest,
-}
-
-impl From<NativeIntegrationEvidenceRevisionsWireV1>
-    for super::NativeIntegrationEvidenceRevisionsV1
-{
-    fn from(value: NativeIntegrationEvidenceRevisionsWireV1) -> Self {
-        Self {
-            graph_revision_digest: value.graph_revision_digest,
-            test_revision_digest: value.test_revision_digest,
-            schema_revision_digest: value.schema_revision_digest,
-            migration_revision_digest: value.migration_revision_digest,
-        }
-    }
-}
-
 /// Read-only preflight over one frozen snapshot identity.
 ///
 /// `preferred_mode` selects only one of the three fixed mechanical encodings.
@@ -143,8 +120,7 @@ impl From<NativeIntegrationEvidenceRevisionsWireV1>
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeIntegrationPreflightSurfaceRequest {
-    pub snapshot: NativeIntegrationStackSnapshotSurfaceRequest,
-    pub evidence: NativeIntegrationEvidenceRevisionsWireV1,
+    pub snapshot: NativeIntegrationSealedStackSnapshotV1,
     #[serde(default)]
     pub preferred_mode: Option<MechanicalIntegrationModeV1>,
 }
@@ -273,6 +249,14 @@ impl NativeIntegrationSnapshotProjectionV1 {
     }
 }
 
+/// Frozen selection summary plus the exact sealed proof preflight accepts.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationSealedStackSnapshotProjectionV1 {
+    pub selection: NativeIntegrationSnapshotProjectionV1,
+    pub sealed_snapshot: NativeIntegrationSealedStackSnapshotV1,
+}
+
 /// Bounded projection of one immutable preview.
 ///
 /// Candidate trees, conflict bodies, and ordered commit objects stay behind the
@@ -285,6 +269,7 @@ pub struct NativeIntegrationPreviewProjectionV1 {
     pub preview_digest: ManifestDigest,
     pub selection: NativeIntegrationSnapshotProjectionV1,
     pub disposition: NativeIntegrationPreviewDispositionV1,
+    pub analysis: Option<NativeIntegrationAnalysisReportV1>,
     pub ordered_commit_count: u32,
     pub created_at: UtcMicros,
     pub expires_at: UtcMicros,
@@ -297,6 +282,7 @@ impl NativeIntegrationPreviewProjectionV1 {
             preview_digest: preview.preview_digest.clone(),
             selection: NativeIntegrationSnapshotProjectionV1::project(&preview.selection)?,
             disposition: preview.disposition.clone(),
+            analysis: preview.analysis.clone(),
             ordered_commit_count: u32::try_from(preview.ordered_commits.len()).map_err(|_| {
                 ApplicationContractError::Inconsistent {
                     field: "native integration ordered commit count",
@@ -423,8 +409,8 @@ pub enum NativeIntegrationCancellationProjectionV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum NativeIntegrationSurfaceResultV1 {
-    StackSnapshot(NativeIntegrationSnapshotProjectionV1),
-    Preview(NativeIntegrationPreviewProjectionV1),
+    StackSnapshot(Box<NativeIntegrationSealedStackSnapshotProjectionV1>),
+    Preview(Box<NativeIntegrationPreviewProjectionV1>),
     Approval(NativeIntegrationApprovalProjectionV1),
     Receipt(NativeIntegrationReceiptProjectionV1),
     Status(NativeIntegrationStatusProjectionV1),
@@ -456,10 +442,14 @@ impl NativeIntegrationSurfaceResultV1 {
 
     pub fn from_stack_resolution(
         outcome: &NativeIntegrationStackResolutionOutcomeV1,
+        sealed_snapshot: NativeIntegrationSealedStackSnapshotV1,
     ) -> Result<Self, ApplicationContractError> {
         Ok(match outcome {
             NativeIntegrationStackResolutionOutcomeV1::Complete(selection) => {
-                Self::StackSnapshot(NativeIntegrationSnapshotProjectionV1::project(selection)?)
+                Self::StackSnapshot(Box::new(NativeIntegrationSealedStackSnapshotProjectionV1 {
+                    selection: NativeIntegrationSnapshotProjectionV1::project(selection)?,
+                    sealed_snapshot,
+                }))
             }
             NativeIntegrationStackResolutionOutcomeV1::Partial => {
                 Self::unavailable(NativeIntegrationSurfaceUnavailableV1::Partial)
@@ -486,9 +476,9 @@ impl NativeIntegrationSurfaceResultV1 {
         outcome: &NativeIntegrationPreflightOutcomeV1,
     ) -> Result<Self, ApplicationContractError> {
         Ok(match outcome {
-            NativeIntegrationPreflightOutcomeV1::Preview(preview) => {
-                Self::Preview(NativeIntegrationPreviewProjectionV1::project(preview)?)
-            }
+            NativeIntegrationPreflightOutcomeV1::Preview(preview) => Self::Preview(Box::new(
+                NativeIntegrationPreviewProjectionV1::project(preview)?,
+            )),
             NativeIntegrationPreflightOutcomeV1::Partial => {
                 Self::unavailable(NativeIntegrationSurfaceUnavailableV1::Partial)
             }
@@ -714,11 +704,13 @@ pub fn native_integration_surface_catalog_contribution()
 
     for spec in &NATIVE_INTEGRATION_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
-        let (spec_bindings, binding_ids) = current_bindings(
-            &capability_id,
-            spec.operation,
-            spec.surfaces.iter().copied(),
+        let operation = ApplicationSurfaceOperation::from_catalog_name(spec.operation).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "native integration surface operation",
+            },
         )?;
+        let (spec_bindings, binding_ids) =
+            current_application_bindings(&capability_id, operation, spec.surfaces.iter().copied())?;
         bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
@@ -734,66 +726,6 @@ pub fn native_integration_surface_catalog_contribution()
     })?;
     let schemas = native_integration_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
-}
-
-/// Daemon-owned public HTTP bindings for native worktree administration.
-///
-/// Native integration stack mutation remains CLI/MCP-only. Only worktree
-/// operations whose canonical surface includes HTTP are projected here, so
-/// the API router and official SDKs consume the same catalog authority.
-pub fn native_worktree_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contribution = native_integration_surface_catalog_contribution()?;
-    let service_id = ServiceId::new("service.application.native-integration")?;
-    let mut bindings = Vec::new();
-
-    for spec in NATIVE_INTEGRATION_SPECS
-        .iter()
-        .filter(|spec| spec.surfaces.contains(&BindingSurface::Http))
-    {
-        let capability_id = CapabilityId::new(spec.capability)?;
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| manifest.capability_id() == &capability_id)
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "native worktree executable capability",
-            })?;
-        let executable_schema = contribution.executable_schema(&capability_id).ok_or(
-            ApplicationContractError::Inconsistent {
-                field: "native worktree executable schema",
-            },
-        )?;
-        let http_binding = contribution
-            .bindings()
-            .iter()
-            .find(|binding| {
-                binding.capability_id() == &capability_id
-                    && binding.surface() == BindingSurface::Http
-            })
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "native worktree HTTP binding",
-            })?;
-        bindings.push(ExecutableBindingAvailabilityV1::available(
-            ExecutableBindingV1::daemon_owned(
-                manifest,
-                OperationId::new(format!("operation.application.{}", spec.operation))?,
-                service_id.clone(),
-                executable_schema.request_schema().clone(),
-                executable_schema.result_schema().clone(),
-                CodecBindingKey::new(format!(
-                    "codec.application.native-integration.{}.json.v1",
-                    spec.operation
-                ))?,
-                RouteExposureV1::Public {
-                    binding_id: http_binding.binding_id().clone(),
-                    route_path: format!("/application/native-integration/{}", spec.operation),
-                },
-            )?,
-        ));
-    }
-
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
 }
 
 /// Resolve one native-integration wire operation to its canonical application
@@ -1049,7 +981,9 @@ fn handler_descriptor(
     spec: &NativeIntegrationSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
     let result_schema = schema(spec.result_schema)?;
-    ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        spec.operation,
+        "service.application.native-integration",
         ApplicationOperation::new(
             CapabilityId::new(spec.capability)?,
             UseCaseId::new(spec.use_case)?,

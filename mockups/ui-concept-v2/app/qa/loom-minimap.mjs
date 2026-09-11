@@ -1,0 +1,127 @@
+import assert from 'node:assert/strict';
+import { chromium } from 'playwright';
+
+const browser = await chromium.launch();
+const base = process.env.BASE_URL ?? 'http://127.0.0.1:5195';
+try {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, reducedMotion: 'reduce' });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const params = () => new URL(page.url()).searchParams;
+  const minimap = page.getByRole('group', { name: 'Loaded snapshot minimap', exact: true });
+  const windowControl = minimap.getByRole('button', { name: 'Move visible time window; use left and right arrows', exact: true });
+  const seek = minimap.getByRole('slider', { name: 'Seek loaded snapshot', exact: true });
+
+  await page.goto(`${base}/?surface=loom&loom_source=design&state=05&loom_replay=1`);
+  await page.getByRole('button', { name: 'BACK TO WEAVE', exact: true }).click();
+  await page.getByRole('button', { name: 'WORKSTREAM', exact: true }).click();
+  await minimap.locator('.journey-map-event').first().waitFor();
+  const selected = params().get('loom_event'), cursor = params().get('loom_time');
+  assert.ok(selected, 'the exercise starts with an actual selected event');
+  const originalFrom = Number(params().get('loom_from')), originalTo = Number(params().get('loom_to'));
+  await windowControl.press('ArrowLeft');
+  assert.ok(Number(params().get('loom_from')) < originalFrom, 'left arrow moves the visible window');
+  await windowControl.press('ArrowRight');
+  assert.ok(Math.abs(Number(params().get('loom_from')) - originalFrom) < .001);
+  assert.ok(Math.abs(Number(params().get('loom_to')) - originalTo) < .001);
+  await windowControl.scrollIntoViewIfNeeded();
+  const viewport = await minimap.locator('.journey-map-viewport').boundingBox();
+  assert.ok(viewport && viewport.width > 0 && viewport.height > 0);
+  const start = { x: viewport.x + viewport.width / 2, y: viewport.y + viewport.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x - 24, start.y, { steps: 4 });
+  await page.mouse.up();
+  assert.ok(Number(params().get('loom_from')) < originalFrom, 'dragging changes the visible window');
+  assert.equal(params().get('loom_event'), selected, 'window navigation retains exact selected identity');
+  assert.equal(params().get('loom_time'), cursor, 'window navigation does not seek the replay cursor');
+  assert.equal(params().get('loom_replay'), '1');
+  const beforeStartResize = params();
+  await minimap.getByRole('button', { name: 'Resize visible window start; use left and right arrows', exact: true }).press('ArrowRight');
+  assert.ok(Number(params().get('loom_from')) > Number(beforeStartResize.get('loom_from')), 'start handle narrows the left edge');
+  assert.equal(params().get('loom_to'), beforeStartResize.get('loom_to'), 'start resize leaves the right edge unchanged');
+  const beforeEndResize = params();
+  await minimap.getByRole('button', { name: 'Resize visible window end; use left and right arrows', exact: true }).press('ArrowLeft');
+  assert.ok(Number(params().get('loom_to')) < Number(beforeEndResize.get('loom_to')), 'end handle narrows the right edge');
+  assert.equal(params().get('loom_from'), beforeEndResize.get('loom_from'), 'end resize leaves the left edge unchanged');
+  assert.equal(params().get('loom_event'), selected, 'resizing preserves selected identity');
+  assert.equal(params().get('loom_time'), cursor, 'resizing does not seek the replay cursor');
+  const beforePointerResize = params();
+  const handle = minimap.getByRole('button', { name: 'Resize visible window end; use left and right arrows', exact: true });
+  await handle.scrollIntoViewIfNeeded();
+  const handleBounds = await handle.boundingBox();
+  assert.ok(handleBounds);
+  await page.mouse.move(handleBounds.x + handleBounds.width / 2, handleBounds.y + handleBounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleBounds.x + handleBounds.width / 2 - 12, handleBounds.y + handleBounds.height / 2, { steps: 4 });
+  await page.mouse.up();
+  assert.ok(Number(params().get('loom_to')) < Number(beforePointerResize.get('loom_to')), 'dragging the end handle changes the right edge');
+  assert.equal(params().get('loom_from'), beforePointerResize.get('loom_from'), 'pointer resize leaves the opposite edge unchanged');
+  assert.equal(params().get('loom_event'), selected);
+  assert.equal(params().get('loom_time'), cursor);
+  console.log('PASS minimap keyboard pan, pointer drag and edge resize preserve event identity and replay cursor');
+
+  const beforeSeek = await minimap.locator('.journey-map-event').count();
+  await seek.fill(String(Date.parse('2025-05-12T14:20:00Z') / 1000));
+  const cutoff = Number(params().get('loom_time'));
+  assert.equal(params().get('loom_replay'), '1');
+  assert.equal(params().get('loom_follow'), '0');
+  const marks = await minimap.locator('.journey-map-event').evaluateAll(nodes => nodes.map(node => ({ id: node.getAttribute('data-event-id'), time: Number(node.getAttribute('data-time')) })));
+  assert.ok(marks.length > 0 && marks.length < beforeSeek, 'seeking earlier withholds later event marks');
+  assert.ok(marks.every(mark => mark.id && Number.isFinite(mark.time) && mark.time <= cutoff), 'every revealed mark has an exact identity at or before replay time');
+  console.log('PASS minimap seeking enters replay and withholds future event marks');
+
+  await page.goto(`${base}/?surface=loom&loom_source=design&state=01`);
+  for (const title of ['Refactor', 'Auth Flow', 'Add Tests']) await page.getByRole('button', { name: `Expand episode ${title}, 6 revealed events`, exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Expand episode Refactor, 6 revealed events', exact: true }).click();
+  assert.equal(await page.locator('.journey-event').count(), 6, 'expanding the episode presents its six actual event records');
+  await page.locator('.journey-event').first().click();
+  const episodeRecord = JSON.parse(await page.getByTestId('loom-event-source').textContent());
+  assert.equal(episodeRecord.id, 'design:event:episode-142-task');
+  assert.equal(episodeRecord.sessionId, 'design:session:agent-095');
+  assert.equal(params().get('loom_event'), episodeRecord.id);
+  assert.equal(Number(params().get('loom_time')), episodeRecord.ts);
+  await page.goto(`${base}/?surface=loom&loom_source=design&state=01`);
+  await seek.press('Home');
+  const firstTime = Number(await seek.getAttribute('min'));
+  assert.equal(Number(params().get('loom_time')), firstTime);
+  await page.getByRole('button', { name: 'Expand episode Refactor, 1 revealed events', exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: /^Expand episode Auth Flow/ }).count(), 0, 'episode starting later remains unrevealed');
+  assert.equal(await page.getByRole('button', { name: /^Expand episode Add Tests/ }).count(), 0);
+  const firstMarks = await minimap.locator('.journey-map-event').evaluateAll(nodes => nodes.map(node => ({ id: node.getAttribute('data-event-id'), time: Number(node.getAttribute('data-time')) })));
+  assert.deepEqual(firstMarks, [{ id: 'design:event:episode-142-task', time: firstTime }], 'only the first source event is revealed at the loaded-page boundary');
+  console.log('PASS three source-backed episodes expand to exact event evidence and withhold future episodes during replay');
+
+  await page.goto(`${base}/?surface=loom&loom_source=design&state=01`);
+  await page.locator('.journey-event').first().click();
+  if (await page.locator('#loom-event-cluster').isVisible()) await page.locator('#loom-event-cluster button').first().click();
+  await page.getByRole('button', { name: 'BACK TO WEAVE', exact: true }).click();
+  const paused = params();
+  const oldEnd = Number(await seek.getAttribute('max'));
+  await page.getByRole('button', { name: 'Load remaining example events →', exact: true }).click();
+  await page.waitForURL(/loom_page=full/);
+  await minimap.locator('.journey-map-event').first().waitFor();
+  for (const key of ['loom_source', 'loom_session', 'loom_project', 'loom_event', 'loom_time', 'loom_from', 'loom_to']) assert.equal(params().get(key), paused.get(key), `${key} remains scoped to the paused selection after loading`);
+  assert.ok(Number(await seek.getAttribute('max')) > oldEnd, 'minimap covers the newly loaded page extent');
+  console.log('PASS loading more events preserves source, scope, selected event and paused viewport');
+
+  for (const width of [1280, 640]) {
+    await page.setViewportSize({ width, height: width === 1280 ? 720 : 426 });
+    await page.goto(`${base}/?surface=loom&loom_source=design&state=04`);
+    await minimap.locator('.journey-map-event').first().waitFor();
+    await minimap.scrollIntoViewIfNeeded();
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}: no document overflow`);
+    const mapBounds = await minimap.boundingBox(), svgBounds = await minimap.locator('svg').boundingBox();
+    assert.ok(mapBounds && svgBounds && svgBounds.width >= 140 && svgBounds.height >= 35, `${width}: map has a readable drawing area`);
+    assert.ok(mapBounds.x >= 0 && mapBounds.x + mapBounds.width <= width + 1, `${width}: minimap stays inside the viewport`);
+    await minimap.getByText('MINIMAP', { exact: true }).waitFor();
+    await windowControl.focus();
+    assert.ok(await windowControl.evaluate(element => element === document.activeElement));
+    await seek.press('ArrowLeft');
+    assert.equal(params().get('loom_replay'), '1', `${width}: narrow and dense controls remain keyboard operable`);
+  }
+  assert.deepEqual(errors, []);
+  console.log('PASS minimap labeling, bounded drawing area and keyboard controls at 1280px and 200% reflow; no page errors');
+} finally {
+  await browser.close();
+}

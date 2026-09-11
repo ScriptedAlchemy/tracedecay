@@ -4,70 +4,11 @@ use tracedecay_application::observability::{
     BoundedObservabilityProducerV1, WorkOwnerObservationResultV1,
     record_automation_funnel_observation,
 };
-use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus, canonical_record_completion_micros,
-};
-use tracedecay_domain::{
-    AutomationFunnelObservedV1, AutomationTerminalV1, CoverageStateV1, ObservedTernaryV1, UtcMicros,
-};
+use tracedecay_automation_runtime::automation::observation::automation_funnel_observation_from_record;
+use tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord;
 
-use super::log_daemon_event;
 use tracedecay_daemon_service::DaemonInvocationService;
-
-pub(in crate::daemon) fn automation_funnel_observation_from_record(
-    record: &AutomationRunLedgerRecord,
-) -> Result<(AutomationFunnelObservedV1, UtcMicros), &'static str> {
-    if record.run_id.is_empty() {
-        return Err("missing_run_id");
-    }
-    let observed_at =
-        UtcMicros(canonical_record_completion_micros(record).map_err(|_| "invalid_completed_at")?);
-    let terminal = match record.status {
-        AutomationRunStatus::Succeeded => AutomationTerminalV1::Succeeded,
-        AutomationRunStatus::Failed => AutomationTerminalV1::Failed,
-        AutomationRunStatus::Skipped => AutomationTerminalV1::Skipped,
-        AutomationRunStatus::Running => AutomationTerminalV1::Running,
-        AutomationRunStatus::Queued => AutomationTerminalV1::Queued,
-    };
-    let executed = if record.backend_attempt_count > 0 {
-        ObservedTernaryV1::Yes
-    } else {
-        ObservedTernaryV1::Unknown
-    };
-    let useful_work = if record.accepted_count > 0 {
-        ObservedTernaryV1::Yes
-    } else if record.reviewed_count > 0 {
-        ObservedTernaryV1::No
-    } else {
-        ObservedTernaryV1::Unknown
-    };
-    let effect = match record.applied_ops.as_ref() {
-        Some(serde_json::Value::Array(values)) if values.is_empty() => ObservedTernaryV1::No,
-        Some(serde_json::Value::Array(_)) => ObservedTernaryV1::Yes,
-        Some(serde_json::Value::Object(values)) if values.is_empty() => ObservedTernaryV1::No,
-        Some(serde_json::Value::Object(_)) => ObservedTernaryV1::Yes,
-        Some(serde_json::Value::Null) => ObservedTernaryV1::No,
-        Some(_) | None => ObservedTernaryV1::Unknown,
-    };
-    Ok((
-        AutomationFunnelObservedV1 {
-            run_ref: record.run_id.clone(),
-            // The ledger proves terminal status and selected downstream
-            // evidence, but does not encode eligibility or admission.
-            ledger_coverage: CoverageStateV1::Partial,
-            eligible: ObservedTernaryV1::Unknown,
-            admitted: ObservedTernaryV1::Unknown,
-            executed,
-            useful_work,
-            effect,
-            // A fallback status records how execution degraded, not whether
-            // a later recovery restored the intended result.
-            recovery: ObservedTernaryV1::Unknown,
-            terminal,
-        },
-        observed_at,
-    ))
-}
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub(crate) async fn project_run_observation_producer(
     service: &DaemonInvocationService,

@@ -21,7 +21,8 @@ use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
     GitHubStackSignalExpandPort, GitHubStackSignalExpandPortError,
     GitHubStackSignalExpandRequestV1, GitHubStackSignalExpandSurfaceResultV1,
-    git_surface_operation,
+    GitHubStackSignalNativePreviewV1, GitHubStackSignalNativeSourceV1,
+    GitHubStackSignalNativeTerminalV1, git_surface_operation,
 };
 use tracedecay_contracts::{
     CancellationSignal, NativeIntegrationContractError, NativeIntegrationPortError,
@@ -29,8 +30,9 @@ use tracedecay_contracts::{
     RequestContext, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, NativeIntegrationApprovalV1, ProjectId, StackDeliveryWatermarkId,
-    StackSignalId, UtcMicros, canonical_sha256,
+    ActorId, ManifestDigest, NativeIntegrationApprovalV1, NativeIntegrationSelectionV1,
+    NativeIntegrationTerminalOutcomeV1, ProjectId, StackDeliveryWatermarkId, StackSignalId,
+    StackSignalKindV1, UtcMicros, canonical_sha256,
 };
 
 use tracedecay_global_db::{
@@ -40,6 +42,7 @@ use tracedecay_global_db::{
 };
 
 use super::registry::DaemonProjectNativeIntegrationService;
+use super::store::SharedDaemonNativeIntegrationStore;
 
 const STACK_DELIVERY_STORE_ACTOR_CAPACITY: usize = 64;
 const STACK_DELIVERY_STORE_ACTOR_TIMEOUT: Duration = Duration::from_secs(5);
@@ -59,6 +62,11 @@ enum StoreCommand {
     Publish(String, Vec<GitHubStackDeliveryKeyV1>, StoreReply<()>),
     Acknowledge(String, Vec<GitHubStackDeliveryKeyV1>, StoreReply<()>),
     Signal(String, StoreReply<Option<GitHubStackSignalRecordV1>>),
+    OldestPending(
+        String,
+        String,
+        StoreReply<Option<GitHubStackDeliveryRecordV1>>,
+    ),
     RecipientState(
         String,
         String,
@@ -177,6 +185,20 @@ impl DaemonStackDeliveryStoreV1 {
         self.submit(|reply| StoreCommand::Signal(signal_id.as_str().to_owned(), reply))
     }
 
+    fn oldest_pending(
+        &self,
+        scope: &ResolvedScope,
+        recipient: &ActorId,
+    ) -> Result<Option<GitHubStackDeliveryRecordV1>, String> {
+        self.submit(|reply| {
+            StoreCommand::OldestPending(
+                scope.scope_digest.as_str().to_owned(),
+                recipient.as_str().to_owned(),
+                reply,
+            )
+        })
+    }
+
     fn recipient_state(
         &self,
         signal_id: &StackSignalId,
@@ -285,6 +307,15 @@ fn run_delivery_store_actor(
                 let _ = reply
                     .send(runtime.block_on(database.github_stack_signal(project_id, &signal_id)));
             }
+            StoreCommand::OldestPending(scope_digest, recipient, reply) => {
+                let _ = reply.send(runtime.block_on(
+                    database.oldest_host_pending_github_stack_delivery(
+                        project_id,
+                        &scope_digest,
+                        &recipient,
+                    ),
+                ));
+            }
             StoreCommand::RecipientState(signal_id, recipient, reply) => {
                 let _ = reply.send(runtime.block_on(
                     database.github_stack_recipient_state(project_id, &signal_id, &recipient),
@@ -330,6 +361,7 @@ struct StackRuntimePortsV1 {
     access: Arc<Mutex<ProjectSourceAccessSnapshot>>,
     store: Arc<DaemonStackDeliveryStoreV1>,
     native_service: Arc<DaemonProjectNativeIntegrationService>,
+    native_store: SharedDaemonNativeIntegrationStore,
     authorizations: Arc<Mutex<BTreeMap<StackSignalId, DeliveryAuthorizationEvidenceV1>>>,
     preflight_outcomes: Arc<Mutex<BTreeMap<ManifestDigest, NativeIntegrationPreflightOutcomeV1>>>,
 }
@@ -762,6 +794,7 @@ impl DaemonGitHubStackRuntimeV1 {
         database: RegisteredGlobalDbLeaseV1,
         coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
         native_service: Arc<DaemonProjectNativeIntegrationService>,
+        native_store: SharedDaemonNativeIntegrationStore,
     ) -> Result<Arc<Self>, StackCoordinatorErrorV1> {
         if project_id != scope.project_id || access.scope != scope {
             return Err(StackCoordinatorErrorV1::Stale);
@@ -784,6 +817,7 @@ impl DaemonGitHubStackRuntimeV1 {
             access: Arc::new(Mutex::new(access)),
             store,
             native_service,
+            native_store,
             authorizations: Arc::new(Mutex::new(BTreeMap::new())),
             preflight_outcomes: Arc::new(Mutex::new(BTreeMap::new())),
         };
@@ -950,13 +984,25 @@ impl DaemonGitHubStackRuntimeV1 {
         if request.context().scope() != &self.scope || !self.ports.access_is_current(now) {
             return Err(GitHubStackSignalExpandPortError::Stale);
         }
+        let selected_signal_id = match request.signal_id() {
+            Some(signal_id) => signal_id.clone(),
+            None => self
+                .ports
+                .store
+                .oldest_pending(&self.scope, request.context().actor())
+                .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?
+                .map(|delivery| StackSignalId::new(delivery.signal.signal_id))
+                .transpose()
+                .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?
+                .ok_or(GitHubStackSignalExpandPortError::Concealed)?,
+        };
         let signal = self
             .coordinator
             .expand_transition(
                 &self.ports,
                 &self.ports,
                 request.context().actor(),
-                request.signal_id(),
+                &selected_signal_id,
             )
             .map_err(map_expand_error)?
             .ok_or(GitHubStackSignalExpandPortError::Concealed)?;
@@ -966,20 +1012,129 @@ impl DaemonGitHubStackRuntimeV1 {
         {
             return Err(GitHubStackSignalExpandPortError::Stale);
         }
-        self.ports
-            .store
-            .host_acknowledge(&signal.signal_id, request.context().actor())
+        let preview_by_state = self
+            .ports
+            .native_store
+            .read_preview_by_digest(&signal.state_digest)
             .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?;
+        let (preview, terminal) = match preview_by_state {
+            Some(preview) => (preview, None),
+            None => {
+                let receipt = self
+                    .ports
+                    .native_store
+                    .read_receipt_by_digest(&signal.state_digest)
+                    .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?
+                    .ok_or(GitHubStackSignalExpandPortError::NativeEvidenceUnavailable)?;
+                let preview = self
+                    .ports
+                    .native_store
+                    .read_preview_by_digest(&receipt.status.preview_digest)
+                    .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?
+                    .ok_or(GitHubStackSignalExpandPortError::NativeEvidenceUnavailable)?;
+                if preview.preview_id != receipt.status.preview_id
+                    || preview.preview_digest != receipt.status.preview_digest
+                    || receipt.receipt_digest != signal.state_digest
+                {
+                    return Err(GitHubStackSignalExpandPortError::Stale);
+                }
+                (preview, Some(receipt))
+            }
+        };
+        let NativeIntegrationSelectionV1::DeclaredStackEdge(selection) = &preview.selection else {
+            return Err(GitHubStackSignalExpandPortError::NativeEvidenceUnavailable);
+        };
+        if selection.revision.revision_id != signal.stack_revision_id
+            || selection.revision.digest != signal.stack_revision_digest
+            || preview.repository_snapshot.repository_id != signal.repository_id
+            || preview.repository_snapshot.project_id != self.scope.project_id
+            || preview.repository_snapshot.destination_ref
+                != *preview
+                    .selection
+                    .destination_ref()
+                    .map_err(|_| GitHubStackSignalExpandPortError::Stale)?
+            || self.scope.reference.as_ref() != Some(&preview.repository_snapshot.destination_ref)
+        {
+            return Err(GitHubStackSignalExpandPortError::Stale);
+        }
+        let native_preview = GitHubStackSignalNativePreviewV1 {
+            preview_id: preview.preview_id.clone(),
+            preview_digest: preview.preview_digest.clone(),
+            direction: selection.direction,
+            source_ref: preview.repository_snapshot.source_ref.clone(),
+            destination_ref: preview.repository_snapshot.destination_ref.clone(),
+            source_tip: preview.repository_snapshot.source_tip.clone(),
+            destination_tip: preview.repository_snapshot.destination_tip.clone(),
+            disposition: preview.disposition.clone(),
+        };
+        let native_source = match terminal {
+            None => {
+                if preview.preview_digest != signal.state_digest
+                    || !matches!(
+                        (signal.kind, &preview.disposition),
+                        (
+                            StackSignalKindV1::DependencyReady,
+                            tracedecay_domain::NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
+                        ) | (
+                            StackSignalKindV1::ActualConflict,
+                            tracedecay_domain::NativeIntegrationPreviewDispositionV1::NativeConflict { .. }
+                        )
+                    )
+                {
+                    return Err(GitHubStackSignalExpandPortError::Stale);
+                }
+                GitHubStackSignalNativeSourceV1::Preflight {
+                    preview: native_preview,
+                }
+            }
+            Some(receipt) => {
+                let outcome = receipt
+                    .status
+                    .terminal_outcome
+                    .ok_or(GitHubStackSignalExpandPortError::Stale)?;
+                if !matches!(
+                    (signal.kind, outcome),
+                    (
+                        StackSignalKindV1::IntegrationCommitted,
+                        NativeIntegrationTerminalOutcomeV1::Committed
+                    ) | (
+                        StackSignalKindV1::IntegrationNeedsInspection,
+                        NativeIntegrationTerminalOutcomeV1::NeedsInspection
+                    )
+                ) {
+                    return Err(GitHubStackSignalExpandPortError::Stale);
+                }
+                GitHubStackSignalNativeSourceV1::Terminal {
+                    preview: native_preview,
+                    terminal: GitHubStackSignalNativeTerminalV1 {
+                        transaction_id: receipt.status.transaction_id,
+                        receipt_digest: receipt.receipt_digest,
+                        outcome,
+                        final_ref_tip: receipt.final_ref_tip,
+                        completed_at: receipt.completed_at,
+                    },
+                }
+            }
+        };
         let evidence = GitHubStackSignalEvidenceRefV1::new(
-            signal.signal_id,
+            signal.signal_id.clone(),
             signal.watermark_id,
+            signal.kind,
+            signal.stack_revision_id,
             signal.stack_revision_digest,
             signal.state_digest,
             signal.github_stack_digest,
             signal.observed_at,
+            native_source,
         )
         .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?;
-        Ok(GitHubStackSignalExpandSurfaceResultV1::Expanded { evidence })
+        self.ports
+            .store
+            .host_acknowledge(&signal.signal_id, request.context().actor())
+            .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?;
+        Ok(GitHubStackSignalExpandSurfaceResultV1::Expanded {
+            evidence: Box::new(evidence),
+        })
     }
 }
 

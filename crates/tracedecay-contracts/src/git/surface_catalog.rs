@@ -8,18 +8,18 @@
 use schemars::JsonSchema;
 use tracedecay_domain::{GitIndexPreviewV1, GitIndexTransactionReceiptV1};
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OperationId, PrivacyClass,
-    ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RouteExposureV1, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
-    ServiceId, StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
+    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
+    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
+    LifecycleClass, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
-use crate::current_bindings;
+use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitApplySurfaceRequest, GitBlameSurfaceRequest,
@@ -145,7 +145,7 @@ const SURFACE_SPECS: [SurfaceSpec; 8] = [
         operation: GITHUB_STACK_SIGNAL_EXPAND_OPERATION,
         effect: EffectClass::Read,
         summary: "Expand one admitted GitHub stack signal",
-        description: "Authorize and expand one durable GitHub stack signal through its exact signal identity and optional delivery-watermark guard.",
+        description: "Authorize and expand an exact durable GitHub stack signal, or select the oldest pending signal for the admitted actor and scope, with an optional delivery-watermark guard.",
         example: "Expand this admitted GitHub stack signal",
         surfaces: &TRANSPORT_SURFACES,
     },
@@ -159,11 +159,13 @@ pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, Appli
 
     for spec in &SURFACE_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
-        let (spec_bindings, binding_ids) = current_bindings(
-            &capability_id,
-            spec.operation,
-            spec.surfaces.iter().copied(),
+        let operation = ApplicationSurfaceOperation::from_catalog_name(spec.operation).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "Git surface operation",
+            },
         )?;
+        let (spec_bindings, binding_ids) =
+            current_application_bindings(&capability_id, operation, spec.surfaces.iter().copied())?;
         bindings.extend(spec_bindings);
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
@@ -177,72 +179,6 @@ pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, Appli
     })?;
     let schemas = git_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
-}
-
-/// Daemon-owned public HTTP bindings for the independently callable Git
-/// reads and opaque GitHub stack-signal expansion. Preview and apply remain
-/// MCP/CLI-only because they require their separate mutation journeys.
-pub fn git_surface_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contribution = git_surface_catalog_contribution()?;
-    let service_id = ServiceId::new("service.application.git")?;
-    let mut bindings = Vec::with_capacity(SURFACE_SPECS.len());
-
-    for spec in &SURFACE_SPECS {
-        let Some(route_segment) = git_surface_http_route(spec.operation) else {
-            continue;
-        };
-        let capability_id = CapabilityId::new(spec.capability)?;
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| manifest.capability_id() == &capability_id)
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "Git executable capability",
-            })?;
-        let schema = contribution.executable_schema(&capability_id).ok_or(
-            ApplicationContractError::Inconsistent {
-                field: "Git executable schema",
-            },
-        )?;
-        let http_binding = contribution
-            .bindings()
-            .iter()
-            .find(|binding| {
-                binding.capability_id() == &capability_id
-                    && binding.surface() == BindingSurface::Http
-            })
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "Git HTTP binding",
-            })?;
-        bindings.push(ExecutableBindingAvailabilityV1::available(
-            ExecutableBindingV1::daemon_owned(
-                manifest,
-                OperationId::new(format!("operation.application.{}", spec.operation))?,
-                service_id.clone(),
-                schema.request_schema().clone(),
-                schema.result_schema().clone(),
-                CodecBindingKey::new(format!("codec.application.git.{}.json.v1", spec.operation))?,
-                RouteExposureV1::Public {
-                    binding_id: http_binding.binding_id().clone(),
-                    route_path: format!("/application/{route_segment}"),
-                },
-            )?,
-        ));
-    }
-    ExecutableBindingRegistryV1::new(bindings).map_err(Into::into)
-}
-
-fn git_surface_http_route(operation: &str) -> Option<&'static str> {
-    match operation {
-        "git_status" => Some("git/status"),
-        "git_diff" => Some("git/diff"),
-        "git_history" => Some("git/history"),
-        "git_blame" => Some("git/blame"),
-        "git_hunks" => Some("git/hunks"),
-        GITHUB_STACK_SIGNAL_EXPAND_OPERATION => Some("github-stack/signal-expand"),
-        _ => None,
-    }
 }
 
 /// Rust-owned request/result schema bodies for every public Git surface.
@@ -475,7 +411,9 @@ fn handler_descriptor(
     spec: &SurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
     let result_schema = schema(spec.result_schema)?;
-    ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        spec.operation,
+        "service.application.git",
         ApplicationOperation::new(
             CapabilityId::new(spec.capability)?,
             UseCaseId::new(spec.use_case)?,

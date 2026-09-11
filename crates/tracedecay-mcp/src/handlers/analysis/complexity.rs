@@ -61,7 +61,7 @@ pub async fn handle_complexity(
                     "name": metadata.simple_name,
                     "kind": metadata.kind,
                     "file": symbol.path,
-                    "line": metadata.start_line,
+                    "line": user_line(metadata.start_line),
                     "lines": metadata.line_span,
                     "cyclomatic_complexity": complexity.map(|complexity| complexity.branches.saturating_add(1)),
                     "branches": complexity.map(|complexity| complexity.branches),
@@ -106,15 +106,118 @@ fn analysis_score(
         .saturating_add(fan_in.get(&symbol.occurrence).copied().unwrap_or(0))
 }
 
+pub fn is_documentable_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function"
+            | "method"
+            | "class"
+            | "interface"
+            | "trait"
+            | "struct"
+            | "enum"
+            | "module"
+            | "field"
+            | "enum_variant"
+            | "const"
+            | "static"
+            | "type_alias"
+            | "property"
+            | "csharp_property"
+            | "record"
+            | "data_class"
+            | "sealed_class"
+            | "object"
+            | "case_class"
+            | "kotlin_object"
+            | "inner_class"
+            | "abstract_method"
+            | "constructor"
+            | "struct_method"
+            | "val"
+            | "var"
+            | "mixin"
+            | "extension"
+            | "union"
+            | "typedef"
+    )
+}
+
 #[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
 pub async fn handle_doc_coverage(
-    _graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    _args: Value,
-    _scope_prefix: Option<&str>,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    args: Value,
+    scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    Err(verified_analysis_unavailable(
-        "doc-coverage",
-        "the admitted graph generation does not publish documentation evidence",
+    let path_prefix = effective_path(&args, scope_prefix);
+    let limit = args
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(50, |value| value.min(500) as usize);
+    let mut symbols = verified_analysis_symbols(graph, path_prefix)?
+        .into_iter()
+        .filter(|symbol| {
+            symbol.metadata.visibility == "public"
+                && symbol
+                    .metadata
+                    .docstring
+                    .as_deref()
+                    .is_none_or(|docstring| docstring.trim().is_empty())
+                && is_documentable_kind(&symbol.metadata.kind)
+        })
+        .collect::<Vec<_>>();
+    symbols.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.metadata.start_line.cmp(&right.metadata.start_line))
+            .then(left.occurrence.cmp(&right.occurrence))
+    });
+    let total_undocumented = symbols.len();
+    symbols.truncate(limit);
+    let returned_count = symbols.len();
+
+    let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
+    let mut by_file = HashMap::<String, Vec<Value>>::new();
+    for symbol in &symbols {
+        by_file.entry(symbol.path.clone()).or_default().push(json!({
+            "id": symbol.occurrence.as_str(),
+            "name": symbol.metadata.simple_name,
+            "kind": symbol.metadata.kind,
+            "line": user_line(symbol.metadata.start_line),
+            "signature": symbol.metadata.signature,
+        }));
+    }
+    let mut files = by_file
+        .into_iter()
+        .map(|(file, symbols)| {
+            json!({
+                "file": file,
+                "count": symbols.len(),
+                "symbols": symbols,
+            })
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| {
+        right["count"]
+            .as_u64()
+            .cmp(&left["count"].as_u64())
+            .then_with(|| left["file"].as_str().cmp(&right["file"].as_str()))
+    });
+    let output = json!({
+        "path_filter": path_prefix,
+        "total_undocumented": total_undocumented,
+        "returned_count": returned_count,
+        "omitted_count": total_undocumented.saturating_sub(returned_count),
+        "complete": returned_count == total_undocumented,
+        "limit": limit,
+        "file_count": files.len(),
+        "files": files,
+    });
+    Ok(generic_tool_result(
+        Some(graph.project_root()?),
+        &args,
+        &output,
+        touched_files,
     ))
 }
 
@@ -180,7 +283,7 @@ pub async fn handle_god_class(
                     "name": symbol.metadata.simple_name,
                     "kind": symbol.metadata.kind,
                     "file": symbol.path,
-                    "line": symbol.metadata.start_line,
+                    "line": user_line(symbol.metadata.start_line),
                     "methods": methods,
                     "fields": fields,
                     "total_members": methods.saturating_add(fields),

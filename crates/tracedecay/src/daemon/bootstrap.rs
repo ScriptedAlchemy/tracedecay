@@ -13,8 +13,10 @@ use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+use tracedecay_store_runtime::spawn_semantic_artifact_gc_maintenance;
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Slice of the shutdown budget reserved for writing the terminal shutdown
 /// receipts to the daemon log after the coordinator returns.
@@ -166,7 +168,7 @@ async fn run_foreground_loopback(
     );
 
     let lifecycle = DaemonLifecycle::default();
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
     let profile_database = store_administration.registered_profile_database().await?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
@@ -302,24 +304,29 @@ async fn run_foreground_loopback(
                     session_refresh.shutdown().await;
                 },
             ),
-            shutdown_coordination::ShutdownOwner::new("host_admission_replay", || {}, async move {
-                replay_join.shutdown_host_admission_replay().await;
-            }),
+            shutdown_coordination::ShutdownOwner::new(
+                "host_admission_replay",
+                {
+                    let replay_cancel = store_administration.clone();
+                    move || replay_cancel.cancel_host_admission_replay()
+                },
+                async move {
+                    replay_join.shutdown_host_admission_replay().await;
+                },
+            ),
         ],
         // Client setup and in-flight requests may create schedulers, project
         // servers, or provider executions. Sweep the invocation registry only
         // after the producer owners settle, so nothing can admit a provider
         // process after the execution registry is emptied and leave it
         // running past shutdown.
-        vec![shutdown_coordination::ShutdownOwner::new(
+        vec![shutdown_coordination::ShutdownOwner::with_deadline_status(
             "invocation",
             {
                 let invocation_cancel = invocation.clone();
                 move || invocation_cancel.cancel_admissions()
             },
-            async move {
-                invocation_join.shutdown().await;
-            },
+            move |_| async move { invocation_join.shutdown().await },
         )],
         vec![shutdown_coordination::ShutdownOwner::new(
             "session_sync",
@@ -447,7 +454,7 @@ fn log_background_shutdown_receipt(receipt: &shutdown_coordination::ShutdownRece
     }
 }
 
-fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskReceipt) {
+fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::ShutdownTaskReceipt) {
     if receipt.is_clean() {
         return;
     }
@@ -461,9 +468,9 @@ fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskRec
     );
     for outcome in &receipt.outcomes {
         let status = match outcome.status {
-            store_shutdown::ShutdownTaskStatus::Clean => continue,
-            store_shutdown::ShutdownTaskStatus::Failed(_) => "failed",
-            store_shutdown::ShutdownTaskStatus::TimedOut => "timed_out",
+            tracedecay_store_runtime::ShutdownTaskStatus::Clean => continue,
+            tracedecay_store_runtime::ShutdownTaskStatus::Failed(_) => "failed",
+            tracedecay_store_runtime::ShutdownTaskStatus::TimedOut => "timed_out",
         };
         log_daemon_event(
             "daemon_shutdown",
@@ -489,6 +496,10 @@ fn hosted_dashboard_shutdown_owner() -> shutdown_coordination::ShutdownOwner {
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Foreground Unix bootstrap is one ordered authority-acquire, engine-wire, and serve sequence."
+)]
 async fn run_foreground_unix(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
@@ -629,7 +640,7 @@ async fn run_foreground_unix(
             .session_runtime_registry()
             .await?,
     );
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
     let profile_database = engine
         .store_administration
         .registered_profile_database()

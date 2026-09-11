@@ -80,6 +80,16 @@ impl Database {
         self.inner.memory_graph_reconciliation.pending()
     }
 
+    /// Admits one post-write reconciliation pass that runs in the caller's
+    /// task. The daemon's terminal shutdown owner joins admitted passes after
+    /// cancellation, so the pass never outlives the retained graph owner it
+    /// publishes through. `None` means the coordinator is closed or fenced.
+    pub fn begin_inline_memory_graph_reconciliation_pass(
+        &self,
+    ) -> Option<super::MemoryGraphReconciliationInlinePassV1> {
+        self.inner.memory_graph_reconciliation.begin_inline_pass()
+    }
+
     /// Canonical path held by this database's verified runtime locator.
     pub fn canonical_database_path(&self) -> &Path {
         &self.inner.canonical_path

@@ -1,17 +1,17 @@
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::common::{
     MessageRecordBuilder, canonical_existing_path as canonical_temp_path, create_runtime,
     global_session,
 };
-#[path = "../../build-support/provision_host_cli_fixture.rs"]
-mod provision_host_cli_fixture;
+use crate::provision_host_cli_fixture;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_agent_hosts::PRODUCT_VERSION;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
@@ -669,31 +669,34 @@ fn write_branch_meta(
     .unwrap();
 }
 
-fn child_output(mut child: Child, status: ExitStatus) -> Output {
-    let stdout = child
-        .stdout
-        .take()
-        .map(|mut out| {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut out, &mut buf)
-                .unwrap_or_else(|e| panic!("failed to read stdout: {e}"));
-            buf
-        })
-        .unwrap_or_default();
-    let stderr = child
-        .stderr
-        .take()
-        .map(|mut err| {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut err, &mut buf)
-                .unwrap_or_else(|e| panic!("failed to read stderr: {e}"));
-            buf
-        })
-        .unwrap_or_default();
+/// Drains one child pipe on its own thread so the child can never block on a
+/// full pipe: `branch list` alone writes hundreds of stderr lines, and a child
+/// stalled in `eprintln!` never exits, so polling `try_wait` without readers
+/// turned machine-wide pipe pressure into a 90 s "hang" with the daemon's
+/// answer already written.
+fn drain_pipe<R: std::io::Read + Send + 'static>(mut pipe: R) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        pipe.read_to_end(&mut buf)
+            .unwrap_or_else(|e| panic!("failed to drain child pipe: {e}"));
+        buf
+    })
+}
+
+fn child_output(
+    status: ExitStatus,
+    stdout: Option<JoinHandle<Vec<u8>>>,
+    stderr: Option<JoinHandle<Vec<u8>>>,
+) -> Output {
+    let join = |handle: Option<JoinHandle<Vec<u8>>>| {
+        handle
+            .map(|handle| handle.join().expect("child pipe drain thread panicked"))
+            .unwrap_or_default()
+    };
     Output {
         status,
-        stdout,
-        stderr,
+        stdout: join(stdout),
+        stderr: join(stderr),
     }
 }
 
@@ -701,20 +704,22 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
     let mut child = command
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn tracedecay: {e}"));
+    let stdout = child.stdout.take().map(drain_pipe);
+    let stderr = child.stderr.take().map(drain_pipe);
     let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
             .unwrap_or_else(|e| panic!("failed to poll child: {e}"))
         {
-            return child_output(child, status);
+            return child_output(status, stdout, stderr);
         }
         if started.elapsed() >= timeout {
             let _ = child.kill();
             let status = child
                 .wait()
                 .unwrap_or_else(|e| panic!("failed to wait for timed out child: {e}"));
-            let output = child_output(child, status);
+            let output = child_output(status, stdout, stderr);
             panic!(
                 "tracedecay hung with stdin closed after {:?}\nstdout:\n{}\nstderr:\n{}",
                 started.elapsed(),
@@ -798,25 +803,6 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
             .is_file()
     );
     assert!(!kimi_home.join("plugins/installed.json").exists());
-}
-
-/// Drives the Codex activation journey non-interactively: install stages the
-/// plugin source and marketplace entry, then drives `codex plugin add` through
-/// a host-CLI shim that emulates Codex 0.147's non-interactive registry.
-#[test]
-fn codex_plugin_cli_shim_is_a_native_executable() {
-    let home = TempDir::new().unwrap();
-    let mut command = Command::new("true");
-    add_codex_plugin_cli_shim(&mut command, home.path());
-    let shim = home
-        .path()
-        .join(format!("bin/codex{}", std::env::consts::EXE_SUFFIX));
-    let bytes = std::fs::read(&shim).unwrap();
-    assert!(
-        provision_host_cli_fixture::looks_like_native_executable(&bytes),
-        "Codex host-CLI fixture must be a compiled executable, not a script (Windows os error 216); first bytes: {:?}",
-        &bytes[..bytes.len().min(8)]
-    );
 }
 
 fn run_codex_automation_install(home: &TempDir, project_root: &Path) -> Output {
@@ -943,7 +929,7 @@ fn install_codex_automation_enables_daemon_owned_project_configuration_nonintera
     assert_eq!(config["effective"]["enabled"], true);
     assert_eq!(config["effective"]["backend"], "codex_app_server");
     assert_eq!(config["effective"]["host_mode"], "standalone");
-    assert!(config["effective"]["model_id"].is_null());
+    assert_eq!(config["effective"]["model_id"], "gpt-5.6-sol");
     assert_eq!(
         config["effective"]["tasks"]["memory_curator"]["enabled"],
         true
@@ -1028,7 +1014,7 @@ fn automation_config_enable_writes_canonical_project_setting_noninteractively() 
         .expect("automation config enable should print JSON");
     assert_eq!(payload["effective"]["enabled"], true);
     assert_eq!(payload["effective"]["backend"], "codex_app_server");
-    assert!(payload["effective"]["model_id"].is_null());
+    assert_eq!(payload["effective"]["model_id"], "gpt-5.6-sol");
     assert_eq!(payload["source"], "daemon_pinned_snapshot");
     assert_eq!(payload["explanation"]["automatic_memory_apply"], true);
     assert_eq!(payload["explanation"]["automatic_skill_activation"], true);
@@ -1173,7 +1159,7 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
     let payload: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("project set should print JSON");
     assert_eq!(payload["effective"]["backend"], "codex_app_server");
-    assert!(payload["effective"]["model_id"].is_null());
+    assert_eq!(payload["effective"]["model_id"], "gpt-5.6-sol");
     assert_eq!(payload["explanation"]["automatic_memory_apply"], true);
     assert_eq!(payload["explanation"]["automatic_skill_activation"], true);
     assert_eq!(
@@ -1630,6 +1616,35 @@ async fn projects_list_json_reads_global_registry() {
         payload["project_tree"][0]["projects"][0]["branches"][0],
         "main"
     );
+}
+
+#[tokio::test]
+async fn projects_list_from_initialized_cwd_stays_projectless_and_marks_active() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
+    write_profile_sharded_fixture(home.path(), project.path());
+    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["projects", "list", "--json"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "projects list should use the projectless registry route\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(payload["projects"][0]["project_id"], "proj_cli");
+    assert_eq!(payload["projects"][0]["is_active"], true);
 }
 
 #[tokio::test]
@@ -2564,7 +2579,7 @@ async fn automation_facts_list_reports_terminal_receipt_collection() {
 /// rather than asserting a success the product does not offer there.
 #[cfg(unix)]
 #[test]
-fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifacts() {
+fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifacts() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
@@ -2575,19 +2590,52 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
     git(&project_root, &["checkout", "-b", "feature/new"]);
     let project_id = default_profile_project_id(&project_root);
     let shard_root = profile_sharded_data_root(&profile_root(home.path()), &project_id);
-    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["branch", "add", "feature/new"]);
     let output = run_with_timeout(command, cli_timeout());
 
     assert!(
         output.status.success(),
-        "branch add must complete the daemon's exact branch sealing journey\nstdout:\n{}\nstderr:\n{}",
+        "branch add must admit exact branch publication\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
-        .expect("branch add must publish tracking metadata in the profile shard");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("indexing continues in the background"),
+        "branch add must report truthful pending state"
+    );
+    let mut pending = tracedecay_command_without_daemon(home.path(), &project_root);
+    pending.args(["branch", "list"]);
+    let pending = run_with_timeout(pending, cli_timeout());
+    let pending_stderr = String::from_utf8_lossy(&pending.stderr);
+    assert!(
+        pending.status.success(),
+        "branch list must read durable admission\nstdout:\n{}\nstderr:\n{pending_stderr}",
+        String::from_utf8_lossy(&pending.stdout)
+    );
+    assert!(
+        pending_stderr
+            .lines()
+            .any(|line| line.contains("feature/new") && line.contains("indexing")),
+        "admitted branch must be durably visible as indexing: {pending_stderr}"
+    );
+    let started = Instant::now();
+    let meta = loop {
+        if let Some(meta) = tracedecay_runtime_core::branch_meta::load_branch_meta(&shard_root)
+            && meta
+                .branches
+                .get("feature/new")
+                .is_some_and(|entry| entry.graph_source.is_some())
+        {
+            break meta;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "background branch publication did not seal exact provenance"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     let entry = meta
         .branches
         .get("feature/new")
@@ -2600,7 +2648,7 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
     let source = entry
         .graph_source
         .as_ref()
-        .expect("branch add must seal exact branch provenance before replying");
+        .expect("background branch publication must seal exact provenance");
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(&project_root)
@@ -2652,6 +2700,26 @@ fn branch_add_seals_the_single_store_branch_and_remove_retires_its_exact_artifac
     assert!(
         !shard_root.join("branches").exists(),
         "branch add must not create a per-branch database"
+    );
+
+    drop(daemon);
+    let _restarted_daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let mut list = tracedecay_command_without_daemon(home.path(), &project_root);
+    list.args(["branch", "list"]);
+    let listed = run_with_timeout(list, cli_timeout());
+    let stderr = String::from_utf8_lossy(&listed.stderr);
+    assert!(
+        listed.status.success(),
+        "branch list must reopen persisted branch tracking\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    let branch = stderr
+        .lines()
+        .find(|line| line.contains("feature/new"))
+        .expect("reopened branch list must retain feature/new");
+    assert!(
+        !branch.contains("indexing") && !branch.contains("missing-db"),
+        "reopened branch must remain exact and ready: {branch}"
     );
 
     let mut remove = tracedecay_command_without_daemon(home.path(), &project_root);

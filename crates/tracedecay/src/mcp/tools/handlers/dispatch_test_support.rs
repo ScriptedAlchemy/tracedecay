@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
@@ -11,32 +11,6 @@ struct FixtureCodeGraphProjection {
     scope: tracedecay_contracts::ResolvedScope,
     store: Arc<tracedecay_code_index::graph_projection::CodeGraphProjectionStore>,
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
-}
-
-#[derive(Clone)]
-struct FixtureSourceReadRuntime {
-    project_root: PathBuf,
-    project_id: String,
-    database: tracedecay_runtime_core::db::Database,
-    read_only: bool,
-}
-
-impl tracedecay_graph_query::SourceReadRuntimePort for FixtureSourceReadRuntime {
-    fn project_root(&self) -> &Path {
-        &self.project_root
-    }
-
-    fn db(&self) -> &tracedecay_runtime_core::db::Database {
-        &self.database
-    }
-
-    fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-
-    fn project_id(&self) -> &str {
-        &self.project_id
-    }
 }
 
 #[derive(Clone)]
@@ -158,9 +132,8 @@ pub(super) fn verified_graph_stale_options<'a>(
     )
 }
 
-/// [`verified_graph_stale_options`] with no rebuild pass in flight: the seat
-/// is stale and nothing is progressing, the wedged-route shape the trailer
-/// must distinguish from a routine rebuild.
+/// [`verified_graph_stale_options`] with no source-moving rebuild proven. The
+/// seat remains stale while source currency is unverified.
 pub(super) fn verified_graph_wedged_options<'a>(
     cg: &TraceDecay,
     options: ToolCallRegistryOptions<'a>,
@@ -251,9 +224,10 @@ fn verified_graph_options_with_freshness<'a>(
         store,
         freshness,
     }));
+    options.admitted_project_scope = Some(scope.clone());
     options.code_graph_read_admission_port = Some(Arc::new(FixtureCodeGraphAdmission { scope }));
     options.verified_graph_query_port = Some(
-        crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
+        tracedecay_graph_query::admitted_verified_graph_query_port_with_source(
             options
                 .code_graph_read_admission_port
                 .clone()
@@ -262,12 +236,12 @@ fn verified_graph_options_with_freshness<'a>(
                 .code_graph_projection_read_port
                 .clone()
                 .expect("graph fixture projection"),
-            Some(Arc::new(FixtureSourceReadRuntime {
-                project_root: cg.project_root().to_path_buf(),
-                project_id: project_id.as_str().to_owned(),
-                database: cg.db().clone(),
-                read_only: cg.is_read_only(),
-            })),
+            Some(tracedecay_graph_query::SourceReadContext::new(
+                cg.project_root().to_path_buf(),
+                cg.db().clone(),
+                cg.is_read_only(),
+                project_id.as_str().to_owned(),
+            )),
         ),
     );
     options
@@ -281,8 +255,8 @@ pub(super) fn verified_graph_error_options<'a>(
     let mut options = verified_graph_options(cg, options);
     options.code_graph_projection_read_port =
         Some(Arc::new(FailingFixtureCodeGraphProjection { error }));
-    options.verified_graph_query_port = Some(
-        crate::tracedecay::queries::graph::admitted_verified_graph_query_port(
+    options.verified_graph_query_port =
+        Some(tracedecay_graph_query::admitted_verified_graph_query_port(
             options
                 .code_graph_read_admission_port
                 .clone()
@@ -291,8 +265,7 @@ pub(super) fn verified_graph_error_options<'a>(
                 .code_graph_projection_read_port
                 .clone()
                 .expect("graph fixture projection"),
-        ),
-    );
+        ));
     options
 }
 
@@ -302,12 +275,12 @@ pub(super) fn verified_graph_error_options<'a>(
 /// runtime's daemon session registry instead of constructing another runtime
 /// on the same profile.
 pub(super) async fn init_sibling_registered_fixture(
-    runtime: &crate::host_admission::HostAdmissionTestRuntimeV1,
+    runtime: &crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     project_root: &Path,
     project_id: &str,
 ) -> (
     TraceDecay,
-    Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
+    Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>,
 ) {
     let profile_root =
         tracedecay_runtime_core::storage::default_profile_root().expect("sibling profile root");
@@ -417,7 +390,7 @@ pub(super) async fn concrete_dispatch_group_accepts(
             owned(dispatch_admin_tools(tool_name, cg, invalid_args, options).await)
         }
         McpToolDispatchGroup::Analysis => {
-            owned(dispatch_analysis_tools(tool_name, cg, invalid_args, None, None, options).await)
+            owned(dispatch_analysis_tools(tool_name, cg, invalid_args, None, options).await)
         }
         McpToolDispatchGroup::Git => {
             owned(dispatch_git_tools(tool_name, cg, invalid_args, options).await)

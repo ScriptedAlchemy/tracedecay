@@ -85,6 +85,7 @@ impl GitHubStackObservabilityV1 {
     }
 }
 
+#[derive(Clone)]
 pub struct GitHubReviewRuntimeOwnerConfigV1 {
     pub database: Database,
     pub resolved_scope: ResolvedScope,
@@ -113,11 +114,9 @@ type RuntimeTransportV1<A> = GitHubReadOnlyRuntimeTransportV1<
     GitHubOfficialResponseDecoderV1<A>,
 >;
 
-type RuntimePortV1<R, A> = GitHubReadOnlyConnector<RuntimeTransportV1<A>, R>;
-
 pub struct GitHubReviewRuntimeOwnerV1<R, A> {
     coordinator: GitHubReviewRefreshCoordinatorV1<
-        RuntimePortV1<R, A>,
+        GitHubReadOnlyConnector<RuntimeTransportV1<A>, R>,
         ProjectGitHubReviewStoreV1,
         Arc<dyn GitHubSourceAccessAuthorityV1>,
     >,

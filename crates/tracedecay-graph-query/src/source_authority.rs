@@ -19,7 +19,7 @@ use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_runtime_core::db::Database;
 
 use super::CodeGraphReadError;
-use crate::SourceReadRuntimePort;
+use crate::SourceReadContext;
 
 /// Inputs handed to the source authority when one admitted graph query binds
 /// its exact project source. The context is the admitted context returned by
@@ -32,9 +32,7 @@ pub struct CodeGraphSourceBindRequest<'a> {
 
 pub type CodeGraphSourceBindFuture<'a> = Pin<
     Box<
-        dyn Future<Output = std::result::Result<Arc<dyn SourceReadRuntimePort>, CodeGraphReadError>>
-            + Send
-            + 'a,
+        dyn Future<Output = std::result::Result<SourceReadContext, CodeGraphReadError>> + Send + 'a,
     >,
 >;
 
@@ -59,6 +57,16 @@ where
     }
 }
 
+impl CodeGraphSourceAuthorityPort for SourceReadContext {
+    fn bind<'a>(
+        &'a self,
+        _request: CodeGraphSourceBindRequest<'a>,
+    ) -> CodeGraphSourceBindFuture<'a> {
+        let source = self.clone();
+        Box::pin(async move { Ok(source) })
+    }
+}
+
 /// Exact source authority frozen at admitted open.
 ///
 /// Construction is crate-private: nothing outside this crate can build or
@@ -75,17 +83,14 @@ impl AdmittedSourceAuthority {
     /// Freezes the runtime's answers after validating its claimed identity
     /// against the admitted scope. Identity is denied before any other
     /// runtime surface is consulted.
-    pub(crate) fn capture(
-        context: &RequestContext,
-        runtime: &dyn SourceReadRuntimePort,
-    ) -> Result<Self> {
-        if runtime.project_id() != context.scope().project_id.as_str() {
+    pub(crate) fn capture(context: &RequestContext, source: SourceReadContext) -> Result<Self> {
+        if source.project_id() != context.scope().project_id.as_str() {
             return Err(graph_source_scope_mismatch());
         }
         Ok(Self {
-            project_root: runtime.project_root().to_path_buf(),
-            db: runtime.db().clone(),
-            read_only: runtime.is_read_only(),
+            project_root: source.project_root,
+            db: source.db,
+            read_only: source.read_only,
             project_id: context.scope().project_id.clone(),
         })
     }

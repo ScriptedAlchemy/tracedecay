@@ -873,6 +873,7 @@ pub(super) enum MalformedJsonlPolicy {
 struct RawJsonlScanRequest {
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
+    max_frames: usize,
     oversized_policy: MalformedJsonlPolicy,
     max_record_bytes: usize,
     resume_state: Option<JsonlResumeState>,
@@ -1072,17 +1073,36 @@ pub fn try_stream_new_jsonl_raw_strict_with_resume(
     max_record_bytes: usize,
     resume_state: Option<JsonlResumeState>,
 ) -> TranscriptIngestResult<RawNewJsonl> {
+    try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
+        path,
+        prev,
+        max_new_bytes,
+        max_record_bytes,
+        resume_state,
+        MAX_JSONL_FRAMES_PER_BATCH,
+    )
+}
+
+pub(in crate::runtime) fn try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+    max_record_bytes: usize,
+    resume_state: Option<JsonlResumeState>,
+    max_frames: usize,
+) -> TranscriptIngestResult<RawNewJsonl> {
     let one_record_bytes = u64::try_from(max_record_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
     let recovery_batch_bytes = STRICT_JSONL_BATCH_BYTES.max(one_record_bytes);
-    try_stream_new_jsonl_raw_with_policy(
+    try_stream_new_jsonl_raw_with_policy_and_frame_limit(
         path,
         prev,
         Some(max_new_bytes.unwrap_or(recovery_batch_bytes)),
         MalformedJsonlPolicy::Defer,
         max_record_bytes,
         resume_state,
+        max_frames,
     )
 }
 
@@ -1093,6 +1113,26 @@ fn try_stream_new_jsonl_raw_with_policy(
     oversized_policy: MalformedJsonlPolicy,
     max_record_bytes: usize,
     resume_state: Option<JsonlResumeState>,
+) -> TranscriptIngestResult<RawNewJsonl> {
+    try_stream_new_jsonl_raw_with_policy_and_frame_limit(
+        path,
+        prev,
+        max_new_bytes,
+        oversized_policy,
+        max_record_bytes,
+        resume_state,
+        MAX_JSONL_FRAMES_PER_BATCH,
+    )
+}
+
+fn try_stream_new_jsonl_raw_with_policy_and_frame_limit(
+    path: &Path,
+    prev: StoredCursor,
+    max_new_bytes: Option<u64>,
+    oversized_policy: MalformedJsonlPolicy,
+    max_record_bytes: usize,
+    resume_state: Option<JsonlResumeState>,
+    max_frames: usize,
 ) -> TranscriptIngestResult<RawNewJsonl> {
     #[cfg(test)]
     isolate_unchanged_generation_cache_unless_held();
@@ -1107,6 +1147,7 @@ fn try_stream_new_jsonl_raw_with_policy(
         RawJsonlScanRequest {
             previous: prev,
             max_new_bytes,
+            max_frames: max_frames.clamp(1, MAX_JSONL_FRAMES_PER_BATCH),
             oversized_policy,
             max_record_bytes,
             resume_state,
@@ -1392,6 +1433,7 @@ struct RawJsonlBatchScanner<'a> {
     reader: RawJsonlFrameReader<BufReader<MeasuredJsonlFile<'a>>>,
     generation: JsonlScanGeneration,
     max_new_bytes: Option<u64>,
+    max_frames: usize,
     scan_end: Option<u64>,
     one_record_budget: u64,
     max_record_bytes: usize,
@@ -1409,6 +1451,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
         path: &Path,
         prepared: PreparedJsonlScan<'a>,
         max_new_bytes: Option<u64>,
+        max_frames: usize,
         max_record_bytes: usize,
         io: &mut JsonlIoAccounting,
     ) -> TranscriptIngestResult<Self> {
@@ -1443,6 +1486,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
             reader,
             generation,
             max_new_bytes,
+            max_frames,
             scan_end: max_new_bytes.map(|cap| {
                 generation
                     .seek_to
@@ -1543,7 +1587,7 @@ impl<'a> RawJsonlBatchScanner<'a> {
         let budget_exhausted = self
             .scan_end
             .is_some_and(|end| self.offset >= end && self.offset < self.generation.file_size);
-        if budget_exhausted || self.frame_count >= MAX_JSONL_FRAMES_PER_BATCH {
+        if budget_exhausted || self.frame_count >= self.max_frames {
             return Some(JsonlScanStep::Stop(self.backlog_at(self.offset)));
         }
         None
@@ -1815,6 +1859,7 @@ fn try_stream_new_jsonl_raw_from_file(
     let RawJsonlScanRequest {
         previous,
         max_new_bytes,
+        max_frames,
         oversized_policy,
         max_record_bytes,
         resume_state,
@@ -1836,9 +1881,16 @@ fn try_stream_new_jsonl_raw_from_file(
         if prepared.is_complete() {
             prepared.into_empty_outcome(path, &mut io)
         } else {
-            RawJsonlBatchScanner::start(path, prepared, max_new_bytes, max_record_bytes, &mut io)?
-                .scan(path, oversized_policy, &mut io)?
-                .revalidate(path, &mut io)
+            RawJsonlBatchScanner::start(
+                path,
+                prepared,
+                max_new_bytes,
+                max_frames,
+                max_record_bytes,
+                &mut io,
+            )?
+            .scan(path, oversized_policy, &mut io)?
+            .revalidate(path, &mut io)
         }
     })();
     io.scan_payload_read_bytes = scan_payload_reads.get();
@@ -1929,6 +1981,7 @@ mod tests {
             RawJsonlScanRequest {
                 previous: StoredCursor::default(),
                 max_new_bytes: None,
+                max_frames: MAX_JSONL_FRAMES_PER_BATCH,
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
@@ -1969,6 +2022,7 @@ mod tests {
             RawJsonlScanRequest {
                 previous: StoredCursor::default(),
                 max_new_bytes: None,
+                max_frames: MAX_JSONL_FRAMES_PER_BATCH,
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
@@ -2008,6 +2062,7 @@ mod tests {
             RawJsonlScanRequest {
                 previous: StoredCursor::default(),
                 max_new_bytes: None,
+                max_frames: MAX_JSONL_FRAMES_PER_BATCH,
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
@@ -2044,6 +2099,7 @@ mod tests {
             RawJsonlScanRequest {
                 previous: StoredCursor::default(),
                 max_new_bytes: None,
+                max_frames: MAX_JSONL_FRAMES_PER_BATCH,
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: None,
@@ -2272,6 +2328,7 @@ mod tests {
             RawJsonlScanRequest {
                 previous: first.new_cursor,
                 max_new_bytes: None,
+                max_frames: MAX_JSONL_FRAMES_PER_BATCH,
                 oversized_policy: MalformedJsonlPolicy::Defer,
                 max_record_bytes: MAX_JSONL_RECORD_BYTES,
                 resume_state: Some(checkpoint),

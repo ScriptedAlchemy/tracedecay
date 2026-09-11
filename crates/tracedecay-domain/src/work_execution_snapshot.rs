@@ -328,6 +328,18 @@ impl WorkExecutionSnapshot {
         &self.executable
     }
 
+    pub const fn approval(&self) -> WorkApprovalPolicy {
+        self.approval
+    }
+
+    pub const fn filesystem(&self) -> WorkFilesystemPolicy {
+        self.filesystem
+    }
+
+    pub const fn egress(&self) -> WorkEgressPolicy {
+        self.egress
+    }
+
     pub fn environment_allowlist(&self) -> &BTreeSet<String> {
         &self.environment_allowlist
     }

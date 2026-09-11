@@ -12,20 +12,18 @@ use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, RetrievalAnchorId, SanitizationReceiptId, UtcMicros,
 };
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
+    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OperationId,
-    PaginationContract, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract, TerminalState,
-    TerminalStateContract, UseCaseId,
+    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, PaginationContract,
+    PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract,
+    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
+    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::context::{DisclosureClass, ResolvedScope};
-use crate::current_bindings;
+use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::{
@@ -492,6 +490,13 @@ pub struct ContextScoutMutationResultV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct ContextScoutDeliveryResultV1 {
+    pub outcome: ContextScoutStoreOutcomeV1,
+    pub receipt: ContextScoutDeliveryReceiptV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ContextScoutExactAddressRequestV1 {
     pub address: ContextScoutAddressV1,
 }
@@ -537,7 +542,8 @@ pub struct ContextScoutClaimRequestV1 {
 pub struct ContextScoutDeliveryRequestV1 {
     pub address: ContextScoutAddressV1,
     pub claim: ContextScoutClaimHandleV1,
-    pub receipt: ContextScoutDeliveryReceiptV1,
+    pub delivered_at: UtcMicros,
+    pub outcome: ContextScoutDeliveryOutcomeV1,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -581,6 +587,47 @@ impl ContextScoutSurfaceRequestV1 {
             Self::Feedback(request) => request.address,
         }
     }
+
+    #[hotpath::skip]
+    pub const fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
+        matches!(
+            (self, operation),
+            (
+                Self::Status(_),
+                ApplicationSurfaceOperation::ContextScoutStatus
+            ) | (
+                Self::Recent(_),
+                ApplicationSurfaceOperation::ContextScoutRecent
+            ) | (
+                Self::Explain(_),
+                ApplicationSurfaceOperation::ContextScoutExplain
+            ) | (
+                Self::Capability(_),
+                ApplicationSurfaceOperation::ContextScoutCapability
+            ) | (
+                Self::Budget(_),
+                ApplicationSurfaceOperation::ContextScoutBudget
+            ) | (
+                Self::Pause(_),
+                ApplicationSurfaceOperation::ContextScoutPause
+            ) | (
+                Self::Resume(_),
+                ApplicationSurfaceOperation::ContextScoutResume
+            ) | (
+                Self::Cancel(_),
+                ApplicationSurfaceOperation::ContextScoutCancel
+            ) | (
+                Self::Claim(_),
+                ApplicationSurfaceOperation::ContextScoutClaim
+            ) | (
+                Self::Delivery(_),
+                ApplicationSurfaceOperation::ContextScoutDelivery
+            ) | (
+                Self::Feedback(_),
+                ApplicationSurfaceOperation::ContextScoutFeedback
+            )
+        )
+    }
 }
 
 const fn read_spec(operation: &'static str, summary: &'static str) -> ContextScoutOperationSpec {
@@ -623,8 +670,13 @@ pub fn context_scout_surface_catalog_contribution()
     for spec in &CONTEXT_SCOUT_SPECS {
         let is_effect = spec.effect.is_effect();
         let capability_id = capability_id(spec)?;
+        let operation = ApplicationSurfaceOperation::from_catalog_name(spec.operation).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "Context Scout surface operation",
+            },
+        )?;
         let (spec_bindings, binding_ids) =
-            current_bindings(&capability_id, spec.operation, SCOUT_SURFACES)?;
+            current_application_bindings(&capability_id, operation, SCOUT_SURFACES)?;
         bindings.extend(spec_bindings);
         capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
             capability_id,
@@ -736,57 +788,6 @@ pub fn context_scout_surface_catalog_contribution()
     Ok(contribution.with_executable_schemas(schemas)?)
 }
 
-/// Daemon-owned public HTTP bindings for every shipped Scout operation.
-pub fn context_scout_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contribution = context_scout_surface_catalog_contribution()?;
-    let service_id = ServiceId::new("service.application.context-scout")?;
-    let mut bindings = Vec::with_capacity(CONTEXT_SCOUT_SPECS.len());
-    for spec in &CONTEXT_SCOUT_SPECS {
-        let capability_id = capability_id(spec)?;
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| manifest.capability_id() == &capability_id)
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "Context Scout executable capability",
-            })?;
-        let schema = contribution.executable_schema(&capability_id).ok_or(
-            ApplicationContractError::Inconsistent {
-                field: "Context Scout executable schema",
-            },
-        )?;
-        let http_binding = contribution
-            .bindings()
-            .iter()
-            .find(|binding| {
-                binding.capability_id() == &capability_id
-                    && binding.surface() == BindingSurface::Http
-            })
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "Context Scout HTTP binding",
-            })?;
-        bindings.push(ExecutableBindingAvailabilityV1::available(
-            ExecutableBindingV1::daemon_owned(
-                manifest,
-                OperationId::new(format!("operation.application.{}", spec.operation))?,
-                service_id.clone(),
-                schema.request_schema().clone(),
-                schema.result_schema().clone(),
-                CodecBindingKey::new(format!(
-                    "codec.application.context-scout.{}.json.v1",
-                    spec.operation
-                ))?,
-                RouteExposureV1::Public {
-                    binding_id: http_binding.binding_id().clone(),
-                    route_path: format!("/application/context-scout/{}", spec.operation),
-                },
-            )?,
-        ));
-    }
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
-}
-
 fn context_scout_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -866,7 +867,7 @@ fn context_scout_executable_schemas(
     add!(
         "context_scout_delivery",
         ContextScoutDeliveryRequestV1,
-        ContextScoutMutationResultV1
+        ContextScoutDeliveryResultV1
     );
     add!(
         "context_scout_feedback",
@@ -913,7 +914,9 @@ pub fn context_scout_surface_handler_descriptors()
     CONTEXT_SCOUT_SPECS
         .iter()
         .map(|spec| {
-            ApplicationHandlerDescriptor::new(
+            ApplicationHandlerDescriptor::for_catalog_operation(
+                spec.operation,
+                "service.application.context-scout",
                 context_scout_surface_operation(spec.operation)?.ok_or(
                     ApplicationContractError::Inconsistent {
                         field: "Context Scout operation spec",

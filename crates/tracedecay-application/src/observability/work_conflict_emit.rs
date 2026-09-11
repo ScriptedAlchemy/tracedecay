@@ -310,12 +310,15 @@ mod tests {
     };
     use tracedecay_domain::{
         BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
-        BranchStackRevisionV1, BranchStackSourceV1, CommitId, FrozenBranchStackSnapshotV1,
-        GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1,
-        MechanicalIntegrationModeV1, NativeIntegrationDirectionV1, NativeIntegrationPhaseV1,
-        NativeIntegrationRepositorySnapshotV1, NativeIntegrationSelectionV1,
-        NativeIntegrationTransactionId, ProjectId, RefId, RepositoryId, StackNodeId, UtcMicros,
-        WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+        BranchStackRevisionV1, BranchStackSourceV1, CodeGenerationId, CommitId, ContentDigest,
+        FrozenBranchStackSnapshotV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
+        GitOperationStateV1, MechanicalIntegrationModeV1, NativeIntegrationAnalysisCoverageV1,
+        NativeIntegrationAnalysisLaneV1, NativeIntegrationAnalysisReportV1,
+        NativeIntegrationDirectionV1, NativeIntegrationGenerationBindingV1,
+        NativeIntegrationPhaseV1, NativeIntegrationRepositorySnapshotV1,
+        NativeIntegrationSelectionV1, NativeIntegrationTransactionId, ProjectId, RefId,
+        RepositoryId, StackNodeId, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
+        WorktreeInventorySnapshotId,
     };
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
@@ -420,19 +423,82 @@ mod tests {
         .seal()
         .unwrap();
         let eligible = matches!(
-            disposition,
+            &disposition,
             NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
         );
+        let analysis = eligible.then(|| {
+            let binding = |name: &str,
+                           worktree_id: Option<WorktreeId>,
+                           reference: Option<RefId>,
+                           revision: Option<GitOidV1>,
+                           tree: GitOidV1| {
+                NativeIntegrationGenerationBindingV1 {
+                    generation_id: CodeGenerationId::new(format!(
+                        "generation.work-conflict.{name}"
+                    ))
+                    .unwrap(),
+                    project_id: repository_snapshot.project_id.clone(),
+                    repository_id: repository_snapshot.repository_id.clone(),
+                    worktree_id,
+                    reference,
+                    snapshot_digest: digest('7'),
+                    content_identity: ContentDigest::new(digest('8').as_str().to_owned()).unwrap(),
+                    source_revision: revision,
+                    source_tree: tree,
+                    seal_digest: digest('9'),
+                }
+            };
+            let complete = NativeIntegrationAnalysisLaneV1 {
+                coverage: NativeIntegrationAnalysisCoverageV1::Complete,
+                gaps: Vec::new(),
+            };
+            NativeIntegrationAnalysisReportV1 {
+                merge_base: binding(
+                    "merge-base",
+                    selection.source_worktree_id().unwrap().cloned(),
+                    Some(repository_snapshot.source_ref.clone()),
+                    Some(repository_snapshot.merge_base.clone()),
+                    oid('a'),
+                ),
+                source: binding(
+                    "source",
+                    selection.source_worktree_id().unwrap().cloned(),
+                    Some(repository_snapshot.source_ref.clone()),
+                    Some(repository_snapshot.source_tip.clone()),
+                    repository_snapshot.source_tree.clone(),
+                ),
+                destination: binding(
+                    "destination",
+                    repository_snapshot.destination_worktree_id.clone(),
+                    Some(repository_snapshot.destination_ref.clone()),
+                    Some(repository_snapshot.destination_tip.clone()),
+                    repository_snapshot.destination_tree.clone(),
+                ),
+                candidate: binding(
+                    "candidate",
+                    repository_snapshot.destination_worktree_id.clone(),
+                    Some(repository_snapshot.destination_ref.clone()),
+                    None,
+                    oid('6'),
+                ),
+                graph: complete.clone(),
+                tests: complete.clone(),
+                schema: complete.clone(),
+                migrations: complete,
+                conflicts: Vec::new(),
+                analyzer_revision: "native-work-conflict-test.v1".to_owned(),
+                digest: digest('0'),
+            }
+            .seal()
+            .unwrap()
+        });
         NativeIntegrationPreviewV1 {
             preview_id: NativeIntegrationPreviewId::new("preview.work-conflict.fixture").unwrap(),
             selection,
             repository_snapshot,
             grant_digest: digest('f'),
             policy_digest: digest('1'),
-            graph_revision_digest: digest('2'),
-            test_revision_digest: digest('3'),
-            schema_revision_digest: digest('4'),
-            migration_revision_digest: digest('5'),
+            analysis,
             disposition,
             candidate_tree: eligible.then(|| oid('6')),
             ordered_commits: vec![oid('1')],
@@ -453,15 +519,15 @@ mod tests {
     }
 
     fn preview_result(preview: &NativeIntegrationPreviewV1) -> NativeIntegrationSurfaceResultV1 {
-        NativeIntegrationSurfaceResultV1::Preview(
+        NativeIntegrationSurfaceResultV1::Preview(Box::new(
             NativeIntegrationPreviewProjectionV1::project(preview).unwrap(),
-        )
+        ))
     }
 
     fn projection_result(
         disposition: NativeIntegrationPreviewDispositionV1,
     ) -> NativeIntegrationSurfaceResultV1 {
-        NativeIntegrationSurfaceResultV1::Preview(NativeIntegrationPreviewProjectionV1 {
+        NativeIntegrationSurfaceResultV1::Preview(Box::new(NativeIntegrationPreviewProjectionV1 {
             preview_id: NativeIntegrationPreviewId::new("preview.work-conflict.projection")
                 .unwrap(),
             preview_digest: digest('a'),
@@ -475,10 +541,11 @@ mod tests {
                 frozen_at: UtcMicros(10),
             },
             disposition,
+            analysis: None,
             ordered_commit_count: 1,
             created_at: UtcMicros(12),
             expires_at: UtcMicros(1_000),
-        })
+        }))
     }
 
     fn receipt_result(

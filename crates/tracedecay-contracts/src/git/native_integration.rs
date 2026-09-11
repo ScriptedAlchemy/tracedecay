@@ -4,6 +4,8 @@
 //! Filesystem paths, free-form object IDs, Git arguments, commit messages,
 //! remotes, and provider mutations are intentionally unrepresentable.
 
+use std::sync::Arc;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -12,7 +14,7 @@ use tracedecay_domain::{
     NativeIntegrationApprovalV1, NativeIntegrationDirectionV1, NativeIntegrationPreviewId,
     NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
     NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
-    NativeIntegrationTransactionStatusV1, StackNodeId, UtcMicros, WorktreeInventoryEpoch,
+    NativeIntegrationTransactionStatusV1, RefId, StackNodeId, UtcMicros, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId,
 };
 
@@ -21,8 +23,11 @@ use crate::{
     RequestContext, ResolvedScope,
 };
 
-/// Caller-visible selection proof. The topology authority resolves it into an
-/// immutable domain selection and never discovers roots or edges.
+/// Canonically sealed selection passed to the topology authority.
+///
+/// `stack_snapshot` requests carry declaration content; its boundary seals
+/// that declaration into this proof, and preflight accepts the proof verbatim.
+/// The topology authority never discovers roots or edges.
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "binding", rename_all = "snake_case")]
 pub enum NativeIntegrationSelectionBindingV1 {
@@ -37,6 +42,8 @@ pub enum NativeIntegrationSelectionBindingV1 {
     },
     IndependentBranch {
         proposal_digest: ManifestDigest,
+        source_ref: RefId,
+        destination_ref: RefId,
     },
 }
 
@@ -69,7 +76,20 @@ impl NativeIntegrationSelectionBindingV1 {
                     });
                 }
             }
-            Self::IndependentBranch { proposal_digest } => proposal_digest.validate()?,
+            Self::IndependentBranch {
+                proposal_digest,
+                source_ref,
+                destination_ref,
+            } => {
+                proposal_digest.validate()?;
+                source_ref.validate()?;
+                destination_ref.validate()?;
+                if source_ref == destination_ref {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "native integration independent refs",
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -106,10 +126,18 @@ impl NativeIntegrationStackResolutionRequestV1 {
         self.policy_digest.validate()?;
         if self.source.project_id != self.destination.project_id
             || self.source.repository_id != self.destination.repository_id
-            || self.source.worktree_id == self.destination.worktree_id
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "native integration exact root pair",
+            });
+        }
+        if matches!(
+            self.selection,
+            NativeIntegrationSelectionBindingV1::DeclaredStackEdge { .. }
+        ) && (self.source.worktree_id == self.destination.worktree_id
             || self.source.reference.is_none()
             || self.destination.reference.is_none()
-            || self.source.reference == self.destination.reference
+            || self.source.reference == self.destination.reference)
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "native integration exact root pair",
@@ -163,7 +191,10 @@ fn declared_node_matches_scope(
             && node.project_id == scope.project_id
             && node.repository_id == scope.repository_id
             && scope.reference.as_ref() == Some(&node.reference)
-            && node.worktree_id.as_ref() == Some(&scope.worktree_id)
+            && node
+                .worktree_id
+                .as_ref()
+                .is_none_or(|worktree_id| worktree_id == &scope.worktree_id)
     })
 }
 
@@ -190,23 +221,15 @@ pub trait NativeIntegrationStackResolutionPort: Send + Sync {
     ) -> Result<NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationPortError>;
 }
 
-/// Exact semantic evidence revisions joined to native conflict evidence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct NativeIntegrationEvidenceRevisionsV1 {
-    pub graph_revision_digest: ManifestDigest,
-    pub test_revision_digest: ManifestDigest,
-    pub schema_revision_digest: ManifestDigest,
-    pub migration_revision_digest: ManifestDigest,
-}
-
-impl NativeIntegrationEvidenceRevisionsV1 {
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        self.graph_revision_digest.validate()?;
-        self.test_revision_digest.validate()?;
-        self.schema_revision_digest.validate()?;
-        self.migration_revision_digest.validate()?;
-        Ok(())
+impl<T: NativeIntegrationStackResolutionPort + ?Sized> NativeIntegrationStackResolutionPort
+    for Arc<T>
+{
+    fn resolve(
+        &self,
+        request: &NativeIntegrationStackResolutionRequestV1,
+        cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationPortError> {
+        self.as_ref().resolve(request, cancellation)
     }
 }
 
@@ -217,7 +240,6 @@ impl NativeIntegrationEvidenceRevisionsV1 {
 pub struct NativeIntegrationPreflightRequestV1 {
     pub context: RequestContext,
     pub topology: NativeIntegrationStackResolutionRequestV1,
-    pub evidence: NativeIntegrationEvidenceRevisionsV1,
     pub preview_id: NativeIntegrationPreviewId,
     pub preferred_mode: Option<tracedecay_domain::MechanicalIntegrationModeV1>,
     pub preview_expires_at: UtcMicros,
@@ -246,7 +268,6 @@ impl NativeIntegrationPreflightRequestV1 {
             });
         }
         self.topology.validate()?;
-        self.evidence.validate()?;
         self.preview_id.validate()?;
         if self.context.scope().project_id != self.topology.destination.project_id
             || self.context.scope().repository_id != self.topology.destination.repository_id
@@ -288,8 +309,6 @@ impl NativeIntegrationApplyRequestV1 {
             || self.context.actor() != &self.approval.principal
             || self.context.scope().project_id != self.preview.repository_snapshot.project_id
             || self.context.scope().repository_id != self.preview.repository_snapshot.repository_id
-            || self.context.scope().reference.as_ref()
-                != Some(&self.preview.repository_snapshot.destination_ref)
             || self.preview.expires_at.0 <= self.observed_at.0
             || self.approval.expires_at.0 <= self.observed_at.0
             || !matches!(
