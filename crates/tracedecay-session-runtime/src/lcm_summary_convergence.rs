@@ -41,6 +41,7 @@ pub(crate) struct LcmSummaryConvergencePage {
     pub(crate) has_more: bool,
     pub(crate) next_retry_delay: Option<Duration>,
     pub(crate) backfill_rows_scanned: usize,
+    pub(crate) predecessor_range_rows_rewritten: usize,
     pub(crate) relation_receipts_processed: usize,
 }
 
@@ -57,6 +58,7 @@ pub(crate) async fn run_summary_convergence_page(
             .recover_retained_relation_projection_page()
             .await?;
     let backfill = backfill_queue(&database).await?;
+    let predecessor_range_rewrite = rewrite_predecessor_ranges(&database).await?;
     let now_unix_ms = unix_millis()?;
     let page_limit = page_limit.max(1);
     let mut sessions = Vec::with_capacity(page_limit);
@@ -83,12 +85,16 @@ pub(crate) async fn run_summary_convergence_page(
                 .map_err(|error| LcmError::Db(format!("invalid retry delay: {error}")))
         })
         .transpose()?;
-    let has_more = backfill.has_more || !sessions.is_empty() || relation_recovery.has_more;
+    let has_more = backfill.has_more
+        || predecessor_range_rewrite.has_more
+        || !sessions.is_empty()
+        || relation_recovery.has_more;
     Ok(LcmSummaryConvergencePage {
         sessions,
         has_more,
         next_retry_delay,
         backfill_rows_scanned: backfill.rows_scanned,
+        predecessor_range_rows_rewritten: predecessor_range_rewrite.rows_rewritten,
         relation_receipts_processed: relation_recovery.processed,
     })
 }
@@ -112,6 +118,42 @@ async fn backfill_queue(
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let page = tracedecay_lcm::summary_convergence::backfill_queue_page(
+        &transaction,
+        tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    Ok(page)
+}
+
+/// Repairs predecessor ranges persisted before the policy-anchor role filter.
+///
+/// This is historical convergence over the whole retained corpus, so it runs
+/// here as bounded background work rather than during store open: admission
+/// and exact, lexical, graph, and ordinary retrieval must not wait behind it,
+/// and a mid-rewrite failure must not roll back the schema transaction that
+/// opens the profile.
+async fn rewrite_predecessor_ranges(
+    database: &RegisteredGlobalDbLeaseV1,
+) -> Result<tracedecay_lcm::summary_convergence::LcmPredecessorRangeRewritePage, LcmError> {
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let has_work =
+        tracedecay_lcm::summary_convergence::predecessor_range_rewrite_has_work(&snapshot).await?;
+    drop(snapshot);
+    if !has_work {
+        return Ok(tracedecay_lcm::summary_convergence::LcmPredecessorRangeRewritePage::default());
+    }
+    let transaction = database
+        .begin_write_transaction()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let page = tracedecay_lcm::summary_convergence::predecessor_range_rewrite_page(
         &transaction,
         tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize,
     )

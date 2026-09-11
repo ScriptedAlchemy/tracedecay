@@ -206,6 +206,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     (
                         !page.sessions.is_empty()
                             || page.backfill_rows_scanned > 0
+                            || page.predecessor_range_rows_rewritten > 0
                             || page.relation_receipts_processed > 0,
                         page.has_more,
                         page.next_retry_delay,
