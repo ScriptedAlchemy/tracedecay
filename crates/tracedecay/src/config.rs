@@ -448,6 +448,10 @@ pub(crate) async fn read_or_initialize_profile_code_index_worker_configuration(
         .map_err(map_configuration_error)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Runtime configuration is opened, validated, and bound from one store snapshot."
+)]
 async fn open_runtime_configuration_from_store(
     target: RuntimeConfigurationTarget,
     store: &GlobalDbConfigurationControlStore<'_>,
