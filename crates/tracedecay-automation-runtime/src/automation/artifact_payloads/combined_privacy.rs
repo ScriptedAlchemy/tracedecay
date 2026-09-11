@@ -19,8 +19,8 @@ pub(super) fn skill_handoff_response(ctx: &ArtifactPayloadContext<'_>) -> Value 
 mod tests {
     use super::*;
     use crate::automation::artifact_payloads::ArtifactPayloadContext;
-    use crate::automation::artifact_policy::artifact_policy;
     use crate::automation::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
+    use tracedecay_automation::artifact_policy::artifact_policy;
     use crate::automation::outcomes::AutomationOutcomesSnapshot;
     use crate::automation::run_ledger::AutomationRunLedgerRecord;
 

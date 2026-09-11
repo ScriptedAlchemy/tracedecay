@@ -39,10 +39,10 @@ use super::config_error;
 use super::host_io::{HostIo, home_dir, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
 use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
-use crate::automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 use tracedecay_domain::errors::Result;
+use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
 
-pub use crate::automation::managed_skill_model::MATERIALIZED_SKILL_MANAGED_BY;
+pub use tracedecay_automation::managed_skills::MATERIALIZED_SKILL_MANAGED_BY;
 
 const SKILL_FILE: &str = "SKILL.md";
 const MATERIALIZATION_MANIFEST_FILE: &str = ".tracedecay-materialization.json";
