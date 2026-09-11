@@ -2,11 +2,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1;
 
-use crate::cost_summary::{CostAdminPayload, CostSummaryPayload, TodayCostPayload};
+use crate::{
+    commands::daemon_tool_json,
+    cost_summary::{CostAdminPayload, CostSummaryPayload, TodayCostPayload},
+};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -193,29 +195,22 @@ fn map_cost_payloads(
     }))
 }
 
-fn global_cost_handshake() -> Result<DaemonHandshake> {
-    let cwd = std::env::current_dir()?;
-    let project_root = tracedecay_runtime_core::config::discover_project_root(&cwd);
-    tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)
-}
-
-async fn call_cost_summary(handshake: &DaemonHandshake, range: &str) -> Result<serde_json::Value> {
-    let result = tracedecay::daemon::call_default_tool(
-        handshake,
-        "tracedecay_admin_cli",
-        serde_json::json!({ "action": "cost_summary", "range": range }),
-    )
-    .await?;
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
-}
-
 #[hotpath::measure(label = "cli.monitor.cost_fetch", future = true)]
 async fn fetch_cost_snapshot() -> Result<Option<CostSnapshot>> {
-    let handshake = global_cost_handshake()?;
+    let cwd = std::env::current_dir()?;
+    let project_root = tracedecay_runtime_core::config::discover_project_root(&cwd);
     let fetch = async {
         let (week, today) = tokio::try_join!(
-            call_cost_summary(&handshake, "7d"),
-            call_cost_summary(&handshake, "today")
+            daemon_tool_json(
+                project_root.as_deref(),
+                "tracedecay_admin_cli",
+                serde_json::json!({ "action": "cost_summary", "range": "7d" })
+            ),
+            daemon_tool_json(
+                project_root.as_deref(),
+                "tracedecay_admin_cli",
+                serde_json::json!({ "action": "cost_summary", "range": "today" })
+            )
         )?;
         map_cost_payloads(week, today).map_err(|message| TraceDecayError::Config { message })
     };
@@ -369,18 +364,6 @@ mod tests {
             )
             .unwrap(),
             None
-        );
-    }
-
-    #[test]
-    fn cost_handshake_preserves_discovered_project_identity() {
-        crate::product_runtime::register_for_tests();
-        let handshake = global_cost_handshake().unwrap();
-        assert_eq!(
-            handshake.project_path,
-            tracedecay_runtime_core::config::discover_project_root(
-                &std::env::current_dir().unwrap()
-            )
         );
     }
 

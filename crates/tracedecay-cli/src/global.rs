@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::current_unix_timestamp;
+use crate::{commands::daemon_tool_json, current_unix_timestamp};
 
 pub(crate) use tracedecay_runtime_core::storage::{ProjectStorageLocation, ProjectStorageStatus};
 
@@ -187,8 +187,9 @@ pub(crate) async fn gather_target_projects(
     home_tracedecay: &Option<std::path::PathBuf>,
 ) -> tracedecay_domain::errors::Result<Vec<std::path::PathBuf>> {
     if all {
-        let payload = call_admin_cli(
+        let payload = daemon_tool_json(
             None,
+            "tracedecay_admin_cli",
             serde_json::json!({
                 "action": "registry_list",
                 "limit": 100_000,
@@ -227,22 +228,6 @@ fn registry_project_roots(
                 })
         })
         .collect()
-}
-
-async fn call_admin_cli(
-    project_root: Option<&Path>,
-    arguments: serde_json::Value,
-) -> tracedecay_domain::errors::Result<serde_json::Value> {
-    let handshake = tracedecay::daemon::handshake_for_current_client(
-        project_root.map(Path::to_path_buf),
-        None,
-        false,
-        false,
-    )?;
-    let result =
-        tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
-            .await?;
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
 /// Returns project roots whose `.tracedecay` data dir lives in cwd, an
