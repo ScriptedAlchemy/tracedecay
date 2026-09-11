@@ -1507,6 +1507,26 @@ mod tests {
     }
 
     #[test]
+    fn generation_stripes_cold_load_at_most_the_session_width() {
+        const SESSION_WIDTH: usize = 4;
+        const STRIPES: usize = 12;
+        let pool = fake_pool(SESSION_WIDTH, Duration::from_mins(1), 1 << 20);
+        let authority = authority();
+
+        for _ in 0..STRIPES {
+            let stripe = (0..SESSION_WIDTH)
+                .map(|_| pool.acquire(&authority).expect("generation stripe session"))
+                .collect::<Vec<_>>();
+            drop(stripe);
+        }
+
+        let stats = pool.stats();
+        assert_eq!(stats.sessions_opened, SESSION_WIDTH);
+        assert_eq!(stats.idle, SESSION_WIDTH);
+        assert_eq!(stats.sessions_closed, 0);
+    }
+
+    #[test]
     fn pool_bound_exhaustion_is_typed_not_blocking() {
         let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
         let authority = authority();
