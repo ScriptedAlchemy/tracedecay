@@ -974,6 +974,16 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         &self.manifest
     }
 
+    /// Compare every owner-controlled input represented by the bounded
+    /// manifest and snapshot. Chunk policy census still requires the full
+    /// generation's chunk corpus.
+    pub fn manifest_compatibility_with(
+        &self,
+        config: &CodeIndexProductionConfigV1,
+    ) -> CodeIndexGenerationCompatibilityV1 {
+        CodeIndexGenerationCompatibilityV1::for_metadata(&self.manifest, &self.snapshot, config)
+    }
+
     pub fn source_commitments(
         &self,
     ) -> Result<&CodeGenerationSourceCommitmentsV1, CodeIndexProductionErrorV1> {

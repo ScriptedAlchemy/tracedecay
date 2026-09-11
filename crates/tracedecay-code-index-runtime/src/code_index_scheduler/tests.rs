@@ -101,6 +101,7 @@ static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocato
 
 mod branch_publication_tests;
 mod noop_reconcile_tests;
+mod retained_configuration_tests;
 mod search_permit_release;
 mod semantic_schedule_order_tests;
 
