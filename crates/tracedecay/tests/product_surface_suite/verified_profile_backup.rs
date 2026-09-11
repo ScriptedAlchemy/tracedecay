@@ -22,10 +22,9 @@ use tracedecay_graph_db::{
 use tracedecay_maintenance::profile_backup::{
     ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
 };
-use tracedecay_runtime_core::db::DatabaseAuthority;
 use tracedecay_runtime_core::storage::{
-    PROFILE_IDENTITY_RECORD_NAME, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
-    StorageMode, StoreKind, StoreManifest, write_store_manifest_to_path,
+    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
+    write_store_manifest_to_path,
 };
 use tracedecay_store::{
     BrainId, ProjectId, RetainedGraphStoreLeaseV1, RetainedGraphStoreOwnerAttachmentV1,
