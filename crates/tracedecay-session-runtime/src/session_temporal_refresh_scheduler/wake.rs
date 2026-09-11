@@ -918,9 +918,7 @@ impl SessionTemporalRefreshWake {
         &self,
         timeout: std::time::Duration,
     ) -> Option<SessionHistoricalRefreshReceipt> {
-        let Some(state) = self.target() else {
-            return None;
-        };
+        let state = self.target()?;
         if state.cancelled.load(Ordering::Acquire) {
             return None;
         }

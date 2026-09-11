@@ -120,10 +120,10 @@ async fn public_claim_retains_empty_and_changed_settlements_for_exact_replay() {
     let ContextScoutMutationSettlementOutcomeV1::Reconciled(first) = first else {
         panic!("empty claim must retain a reconciled settlement");
     };
-    assert!(matches!(
+    assert_eq!(
         first.result,
-        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Empty)
-    ));
+        ContextScoutMutationResultV1::Claim(Box::new(ContextScoutDurableClaimOutcomeV1::Empty))
+    );
     assert_eq!(
         store
             .commit_public_mutation(empty_binding.clone(), empty)
@@ -188,7 +188,8 @@ async fn public_claim_retains_empty_and_changed_settlements_for_exact_replay() {
     };
     assert!(matches!(
         claimed.result,
-        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Claimed(_))
+        ContextScoutMutationResultV1::Claim(ref outcome)
+            if matches!(**outcome, ContextScoutDurableClaimOutcomeV1::Claimed(_))
     ));
     assert_eq!(
         store
