@@ -569,6 +569,76 @@ impl NativeIntegrationAnalysisLaneV1 {
         }
         Ok(())
     }
+
+    /// Whether this lane's evidence authorizes a mechanical integration
+    /// mode: complete, or partial solely because changed files are in a
+    /// language the indexer cannot parse. Such a file carries no graph, test,
+    /// or schema semantics the lane could have missed, and it stays named as
+    /// a gap. Generated, ignored, withheld, stale, or parser-failed sources
+    /// may hide semantics and keep the lane closed.
+    pub fn authorizes_mechanical_integration(&self) -> bool {
+        match self.coverage {
+            NativeIntegrationAnalysisCoverageV1::Complete => true,
+            NativeIntegrationAnalysisCoverageV1::Partial => self
+                .gaps
+                .iter()
+                .all(|gap| *gap == NativeIntegrationAnalysisGapV1::UnsupportedLanguage),
+            NativeIntegrationAnalysisCoverageV1::Unsupported => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod analysis_lane_tests {
+    use super::{
+        NativeIntegrationAnalysisCoverageV1, NativeIntegrationAnalysisGapV1,
+        NativeIntegrationAnalysisLaneV1,
+    };
+
+    fn lane(
+        coverage: NativeIntegrationAnalysisCoverageV1,
+        gaps: &[NativeIntegrationAnalysisGapV1],
+    ) -> NativeIntegrationAnalysisLaneV1 {
+        NativeIntegrationAnalysisLaneV1 {
+            coverage,
+            gaps: gaps.to_vec(),
+        }
+    }
+
+    #[test]
+    fn only_unparseable_language_gaps_keep_mechanical_integration_open() {
+        assert!(
+            lane(NativeIntegrationAnalysisCoverageV1::Complete, &[])
+                .authorizes_mechanical_integration()
+        );
+        assert!(
+            lane(
+                NativeIntegrationAnalysisCoverageV1::Partial,
+                &[NativeIntegrationAnalysisGapV1::UnsupportedLanguage],
+            )
+            .authorizes_mechanical_integration()
+        );
+        for closed in [
+            NativeIntegrationAnalysisGapV1::WithheldSource,
+            NativeIntegrationAnalysisGapV1::ParserFailure,
+            NativeIntegrationAnalysisGapV1::StaleEvidence,
+            NativeIntegrationAnalysisGapV1::UnresolvedRequiredEdge,
+            NativeIntegrationAnalysisGapV1::AuthorityUnavailable,
+        ] {
+            assert!(
+                !lane(
+                    NativeIntegrationAnalysisCoverageV1::Partial,
+                    &[closed, NativeIntegrationAnalysisGapV1::UnsupportedLanguage],
+                )
+                .authorizes_mechanical_integration(),
+                "{closed:?} must keep the lane closed"
+            );
+        }
+        assert!(
+            !lane(NativeIntegrationAnalysisCoverageV1::Unsupported, &[])
+                .authorizes_mechanical_integration()
+        );
+    }
 }
 
 /// Static conflict class produced from canonical generation evidence.
@@ -671,9 +741,26 @@ impl NativeIntegrationAnalysisReportV1 {
     }
 
     pub fn is_complete(&self) -> bool {
-        [&self.graph, &self.tests, &self.schema, &self.migrations]
-            .into_iter()
+        self.lanes()
             .all(|lane| lane.coverage == NativeIntegrationAnalysisCoverageV1::Complete)
+    }
+
+    /// Whether the evidence authorizes a mechanical integration mode.
+    ///
+    /// Every lane must be complete, or partial solely because changed files
+    /// are in a language the indexer cannot parse: such a file carries no
+    /// graph, test, or schema semantics that the analysis could have missed,
+    /// and the lane still names it as a gap. Generated, ignored, withheld,
+    /// stale, or parser-failed sources may hide semantics and stay closed.
+    pub fn authorizes_mechanical_integration(&self) -> bool {
+        self.conflicts.is_empty()
+            && self
+                .lanes()
+                .all(NativeIntegrationAnalysisLaneV1::authorizes_mechanical_integration)
+    }
+
+    fn lanes(&self) -> impl Iterator<Item = &NativeIntegrationAnalysisLaneV1> {
+        [&self.graph, &self.tests, &self.schema, &self.migrations].into_iter()
     }
 
     fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {

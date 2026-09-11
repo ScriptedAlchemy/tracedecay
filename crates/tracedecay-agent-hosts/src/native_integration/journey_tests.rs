@@ -46,7 +46,7 @@ use tracedecay_domain::{
     NativeIntegrationAnalysisGapV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationDirectionV1, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewId, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
-    NativeIntegrationTransactionId, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
+    NativeIntegrationTransactionId, ProjectId, RefId, ScopeSetId, ScopeSetRevision,
     ScopeSourceBinding, SourceBindingId, SourceKindV1, StackNodeId, StackSignalKindV1, UtcMicros,
     WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId, canonical_sha256,
 };
@@ -563,18 +563,26 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     prepare_checked_out_conflict(&repository_root, &source_root);
 
     let project_id = ProjectId::new("project.native.journey").expect("project id");
-    let repository_id = RepositoryId::new("repository.native.journey").expect("repository id");
+    let destination_identity =
+        IndexingIdentityV1::resolve(&repository_root).expect("destination indexing identity");
+    let source_identity =
+        IndexingIdentityV1::resolve(&source_root).expect("source indexing identity");
+    assert_eq!(
+        source_identity.repository_id(),
+        destination_identity.repository_id()
+    );
+    let repository_id = destination_identity.repository_id().clone();
     let source_scope = ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
-        WorktreeId::new("worktree.native.dependency").expect("source worktree id"),
+        source_identity.worktree_id().clone(),
         Some(RefId::new("refs/heads/dependency").expect("source ref")),
     )
     .expect("source scope");
     let destination_scope = ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
-        WorktreeId::new("worktree.native.dependent").expect("destination worktree id"),
+        destination_identity.worktree_id().clone(),
         Some(RefId::new("refs/heads/dependent").expect("destination ref")),
     )
     .expect("destination scope");
@@ -1373,7 +1381,12 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
         .expect("durably issue approval");
 
     git(&repository_root, &["checkout", "-b", "foreign"]);
-    write_and_commit(&repository_root, "foreign.txt", "foreign\n", "foreign");
+    write_and_commit(
+        &repository_root,
+        "src/foreign.rs",
+        "pub fn foreign_value() {}\n",
+        "foreign",
+    );
     let foreign_tip = git(&repository_root, &["rev-parse", "HEAD"]);
     git(&repository_root, &["checkout", "main"]);
     git(
