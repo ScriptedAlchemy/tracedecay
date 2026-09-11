@@ -1231,7 +1231,10 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create(true)
         .follow(FollowSymlinks::No);
-    let file = directory.open_with(name, &options)?;
+    // Concurrent settlements race the first creation of this lock; the shared
+    // helper absorbs the spurious Darwin `ENOENT` the losers are handed.
+    let file =
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
