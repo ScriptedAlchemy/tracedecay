@@ -18,7 +18,8 @@ pub const MODEL2VEC_POTION_CODE_16M_V2_MODEL_ID: &str = "PotionCode16MV2";
 
 const MAX_SEMANTIC_MODEL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_SEMANTIC_TOKENIZER_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_SEMANTIC_RESIDENT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const MAX_SEMANTIC_RESIDENT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const DEFAULT_SEMANTIC_RESIDENT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SEMANTIC_THREADS: u32 = 64;
 const MAX_SEMANTIC_CONCURRENT_SESSIONS: u32 = 64;
 const MAX_SEMANTIC_BATCH_SIZE: u32 = 4096;
@@ -57,7 +58,7 @@ impl Default for SemanticResourceCeilings {
         Self {
             max_model_bytes: 700 * 1024 * 1024,
             max_tokenizer_bytes: 64 * 1024 * 1024,
-            max_resident_bytes: 2 * 1024 * 1024 * 1024,
+            max_resident_bytes: DEFAULT_SEMANTIC_RESIDENT_BYTES,
             max_threads: u32::try_from(total_cores.max(1))
                 .unwrap_or(u32::MAX)
                 .min(DEFAULT_INTRA_THREADS),
