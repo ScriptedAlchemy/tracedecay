@@ -77,6 +77,20 @@ pub fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
     }
 }
 
+/// Execution limits for an empty-query chronological browse.
+///
+/// Unlike relevance search, a browse does not need a wider ranking pool: the
+/// storage order is the result order. Read one row beyond the requested page
+/// to prove whether a continuation exists, without charging the rest of a
+/// large session as execution work.
+pub fn admitted_browse_execution_limits(limit: usize) -> ExecutionLimits {
+    let mut limits = admitted_execution_limits(limit);
+    let window = limit.saturating_add(1);
+    limits.candidate_limit = limits.candidate_limit.min(window);
+    limits.record_limit = limits.record_limit.min(window);
+    limits
+}
+
 pub(crate) fn temporal_kernel_deadline(error: &TemporalKernelError) -> bool {
     matches!(
         error,
