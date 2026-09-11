@@ -166,15 +166,18 @@ type AdmissionRound = (
     (Duration, Value),
 );
 
-fn assert_admission_round(round: &AdmissionRound) {
-    let ((lexical_elapsed, lexical), (graph_elapsed, graph), (session_elapsed, session)) = round;
+/// `session` is the ordinary-session envelope after handle resolution: the
+/// retained surface answers past one response frame, and a cut preview is
+/// framing, not a denial.
+fn assert_admission_round(round: &AdmissionRound, session_elapsed: Duration, session: &Value) {
+    let ((lexical_elapsed, lexical), (graph_elapsed, graph), _) = round;
     assert_under_budget("lexical admission", *lexical_elapsed, ADMISSION_BUDGET);
     assert_admitted_with_results("tracedecay_grep", lexical, "results");
     assert_under_budget("graph admission", *graph_elapsed, ADMISSION_BUDGET);
     assert_admitted_with_results("tracedecay_body", graph, "matches");
     assert_under_budget(
         "ordinary session admission",
-        *session_elapsed,
+        session_elapsed,
         ADMISSION_BUDGET,
     );
     assert_eq!(
@@ -695,7 +698,15 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
                     json!({"query": "billing pipeline", "limit": 5, "format": "json"}),
                 ),
             );
-            assert_admission_round(&round);
+            let (session_elapsed, session_envelope) = &round.2;
+            let session = resolved(
+                &harness,
+                &project,
+                "tracedecay_message_search",
+                session_envelope.clone(),
+            )
+            .await;
+            assert_admission_round(&round, *session_elapsed, &session);
             let progress_after = read_progress().await;
             if progress_after.advanced_from(&progress_before) {
                 return (progress_before, progress_after);
