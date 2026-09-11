@@ -11217,7 +11217,10 @@ fn captured_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
 /// identities that address it: the content-addressed file name, the active
 /// pointer, and the generation-index entry with its digest. This is the shape
 /// an operator's store is left in by a build that wrote revision seven.
-fn retire_active_generation_to_revision_seven(store: &Path, keeps_census: bool) {
+fn retire_active_generation_to_revision_seven(
+    store: &Path,
+    keeps_census: bool,
+) -> super::DurablePublicationPointerV1 {
     let pointer_path = store.join("active-code-generation-v1.json");
     let mut pointer: super::DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
@@ -11263,6 +11266,14 @@ fn retire_active_generation_to_revision_seven(store: &Path, keeps_census: bool) 
     }
     pointer.generation_file = generation_file;
     pointer.state_digest = file_digest;
+    write_repaired_pointer(&pointer_path, &mut pointer);
+    pointer
+}
+
+/// Rewrite a hand-built pointer with the index digest its entries imply, so
+/// the durable reader accepts it as a pointer rather than refusing it as a
+/// corrupt index.
+fn write_repaired_pointer(pointer_path: &Path, pointer: &mut super::DurablePublicationPointerV1) {
     pointer.generation_index_digest = Some(
         super::durable_generation_index_digest(
             &pointer.generation_index,
@@ -11271,10 +11282,10 @@ fn retire_active_generation_to_revision_seven(store: &Path, keeps_census: bool) 
         .expect("generation index digest"),
     );
     std::fs::write(
-        &pointer_path,
-        serde_json::to_vec(&pointer).expect("encode retired pointer"),
+        pointer_path,
+        serde_json::to_vec(pointer).expect("encode pointer"),
     )
-    .expect("write retired pointer");
+    .expect("write pointer");
 }
 
 /// A generation sealed at the retired manifest revision seven is rebuilt, not
@@ -11356,6 +11367,78 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
             "the current revision carries its census as a required field"
         );
     }
+}
+
+/// Replacing an undecodable active generation still compare-and-swaps. Its
+/// caller has no decoded generation id to expect, so the token is the pointer
+/// identity observed before the writer lock; a pointer that moved to a
+/// different identity in between must refuse the publication instead of
+/// clobbering whatever a concurrent writer installed.
+#[test]
+fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("initial publish"));
+    let seeded = scheduler
+        .latest_complete_already_decoded()
+        .expect("published generation remains decoded")
+        .generation;
+    let scope = seeded.sealed_scope();
+    drop(scheduler);
+    let observed = retire_active_generation_to_revision_seven(store.path(), true);
+
+    let publication = super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store over a retired generation");
+
+    // The pointer moves to another generation identity that is equally
+    // undecodable: the same retired manifest bytes under a different
+    // generation id, which the durable index must name consistently.
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let mut moved = observed.clone();
+    let moved_generation = "generation.v1.moved-under-the-writer".to_owned();
+    for entry in &mut moved.generation_index {
+        if entry.generation_id == moved.generation_id {
+            entry.generation_id = moved_generation.clone();
+        }
+    }
+    moved.generation_id = moved_generation;
+    write_repaired_pointer(&pointer_path, &mut moved);
+
+    let mut refusing = publication.for_undecoded_active_rebuild(&observed);
+    let error = refusing
+        .publish_atomically(&scope, None, Arc::clone(&seeded))
+        .expect_err("a pointer that moved under the writer must refuse the publication");
+    assert!(
+        matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
+        "a moved pointer reached the wrong refusal: {error}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<super::DurablePublicationPointerV1>(
+            &std::fs::read(&pointer_path).expect("read active pointer")
+        )
+        .expect("decode active pointer"),
+        moved,
+        "a refused publication must leave the pointer it did not expect untouched"
+    );
+
+    // The same publication succeeds against the identity it observed, so the
+    // refusal above is the compare-and-swap and not an unrelated denial.
+    let mut restored = observed.clone();
+    write_repaired_pointer(&pointer_path, &mut restored);
+    let mut admitting = publication.for_undecoded_active_rebuild(&observed);
+    admitting
+        .publish_atomically(&scope, None, seeded)
+        .expect("the observed identity still admits the rebuild");
 }
 
 #[tokio::test]
