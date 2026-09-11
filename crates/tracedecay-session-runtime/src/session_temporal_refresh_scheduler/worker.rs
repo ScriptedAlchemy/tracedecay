@@ -10,7 +10,10 @@ use tracedecay_store::{
     SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError,
 };
 
-use super::history::{SessionHistoricalIngestOutcome, SharedSessionHistoricalIngestor};
+use super::history::{
+    SessionHistoricalIngestOutcome, SessionHistoricalIngestProgress,
+    SharedSessionHistoricalIngestor,
+};
 use super::projector::{
     SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy, SessionTemporalRefreshProjector,
     SessionTemporalRefreshProjectorError, SessionTemporalRefreshProjectorErrorClass,
@@ -58,17 +61,22 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             state.begin_pass();
             state.mark_worker_busy();
             state.pass_count.fetch_add(1, Ordering::AcqRel);
-            let history_outcome = if history_requested {
-                hotpath::future!(
-                    session_history_refresh(&history, &history_admission),
-                    label = "daemon.scheduler.session_temporal.history"
+            let history_sequence = history_requested.then(|| state.history_requested_sequence());
+            let history_result = if history_requested {
+                Some(
+                    hotpath::future!(
+                        session_history_refresh(&history, &history_admission),
+                        label = "daemon.scheduler.session_temporal.history"
+                    )
+                    .await,
                 )
-                .await
             } else {
                 None
             };
+            let history_outcome = history_result.map(|result| result.0);
             projection_requested |= state.take_dirty();
-            if let Some(outcome) = history_outcome {
+            if let Some((outcome, progress)) = history_result {
+                state.record_history_progress(progress);
                 state.record_history_outcome(outcome);
             }
             if matches!(
@@ -120,6 +128,15 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 };
             if state.cancelled.load(Ordering::Acquire) {
                 return;
+            }
+            if let (Some(sequence), Some(outcome)) = (history_sequence, history_outcome)
+                && matches!(
+                    outcome,
+                    SessionHistoricalIngestOutcome::Complete
+                        | SessionHistoricalIngestOutcome::Blocked { .. }
+                )
+            {
+                state.complete_history_sequence(sequence);
             }
             // Queue through the semaphore's fair async admission even when a
             // permit appears immediately available. A retrying profile must
@@ -434,7 +451,10 @@ fn observe_retry(class: SessionTemporalRefreshRetryClass, attempt: u32) {
 async fn session_history_refresh(
     history: &Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
     admission: &tokio::sync::Semaphore,
-) -> Option<SessionHistoricalIngestOutcome> {
+) -> (
+    SessionHistoricalIngestOutcome,
+    SessionHistoricalIngestProgress,
+) {
     let history = history
         .read()
         .unwrap_or_else(PoisonError::into_inner)
@@ -443,14 +463,24 @@ async fn session_history_refresh(
         Some(history) => {
             let Ok(_permit) = admission.try_acquire() else {
                 hotpath::gauge!("session_temporal_refresh_history_admission_deferrals").inc(1.0);
-                return Some(SessionHistoricalIngestOutcome::Retryable {
-                    reason_code: HISTORY_ADMISSION_SATURATED_REASON,
-                    made_progress: false,
-                });
+                return (
+                    SessionHistoricalIngestOutcome::Retryable {
+                        reason_code: HISTORY_ADMISSION_SATURATED_REASON,
+                        made_progress: false,
+                    },
+                    SessionHistoricalIngestProgress::default(),
+                );
             };
-            Some(history.run_pass().await)
+            let outcome = history.run_pass().await;
+            (outcome, history.take_progress())
         }
-        None => None,
+        None => (
+            SessionHistoricalIngestOutcome::Blocked {
+                reason_code: "history_ingestor_missing",
+                made_progress: false,
+            },
+            SessionHistoricalIngestProgress::default(),
+        ),
     }
 }
 

@@ -511,15 +511,15 @@ impl SessionSyncProjectContext {
         request: &SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
-        let history_current = match service
+        let history = match service
             .await_import_history(self, &project_sessions, request)
             .await
         {
-            Ok(()) => true,
+            Ok(progress) => Some(progress),
             Err(Some(interruption)) => {
                 return SessionSyncWorkResult::Interrupted(interruption);
             }
-            Err(None) => false,
+            Err(None) => None,
         };
         let cancellation = tracedecay_application::observation::ObservationCancellation::default();
         let pass_cancellation = cancellation.clone();
@@ -538,7 +538,7 @@ impl SessionSyncProjectContext {
                 )
             };
             let stats = import_transcript_stats(
-                tracedecay_sessions::TranscriptIngestStats::default(),
+                history.map_or_else(Default::default, |progress| progress.stats),
                 git_convergence
                     .as_ref()
                     .and_then(|result| result.as_ref().ok())
@@ -557,7 +557,7 @@ impl SessionSyncProjectContext {
                 }
                 None => 1,
             };
-            let transcript_coverage = if history_current {
+            let transcript_coverage = if history.is_some() {
                 SessionSyncCoverageV1::Complete
             } else {
                 SessionSyncCoverageV1::Partial { deferred_units: 1 }
@@ -597,7 +597,9 @@ impl SessionSyncProjectContext {
                 stats,
                 coverage,
                 source_frontiers,
-                git_convergence.as_ref().is_some_and(|result| result.is_err()),
+                git_convergence
+                    .as_ref()
+                    .is_some_and(|result| result.is_err()),
                 git_deferred_units > 0,
                 git_convergence.as_ref().is_some_and(|result| {
                     result.as_ref().is_ok_and(
@@ -624,7 +626,7 @@ impl SessionSyncProjectContext {
             git_convergence_committed,
         ) = outcomes;
         let mut failure_codes = Vec::new();
-        if !history_current {
+        if history.is_none() {
             failure_codes.push("session_history_not_current".to_owned());
         }
         if source_frontiers.is_err() {
@@ -635,7 +637,7 @@ impl SessionSyncProjectContext {
         } else if git_convergence_incomplete {
             failure_codes.push("git_convergence_incomplete".to_owned());
         }
-        let committed = history_current
+        let committed = history.is_some_and(|progress| progress.committed)
             || git_convergence_committed
             || stats != SessionSyncStatsV1::default();
         SessionSyncWorkResult::Finished {
