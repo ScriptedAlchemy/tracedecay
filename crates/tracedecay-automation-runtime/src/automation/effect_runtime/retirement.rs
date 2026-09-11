@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_contracts::retained_surfaces::AutomationTaskV1;
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_tagged_lowercase_hex};
+#[cfg(test)]
 use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_private_fs::capability_dir::rename_noreplace;
 use tracedecay_private_fs::framed_log::{
