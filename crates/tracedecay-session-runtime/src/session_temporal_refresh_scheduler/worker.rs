@@ -37,6 +37,13 @@ fn history_allows_summary_convergence(outcome: Option<SessionHistoricalIngestOut
 
 /// Consecutive history-priority passes after which the one-shot
 /// predecessor-range rewrite takes one bounded page of its own.
+///
+/// This is the horizon the rewrite buys under perpetually pending history:
+/// one `LCM_SCAN_PAGE_ROWS`-row page every eighth pass, so an N-row store
+/// converges in `ceil(N / LCM_SCAN_PAGE_ROWS) * 8` worker passes (about 3,800
+/// for the 244k-row profile in #843) while history keeps seven of every eight
+/// passes. It is a fairness ratio, not a deadline; a terminal history window
+/// resets it and admits the full convergence page, which also runs the rewrite.
 const HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE: u32 = 8;
 
 /// What a pass may spend its historical-work admission on.
@@ -44,11 +51,18 @@ const HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE: u32 = 8;
 enum LcmConvergenceAdmission {
     /// Historical continuation owns the pass outright.
     Deferred,
+    /// The pass takes the shared admission permit for one bounded page.
+    Admitted(LcmConvergencePage),
+}
+
+/// Which bounded page an admitted pass runs under the shared permit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LcmConvergencePage {
     /// Historical continuation still owns the next window, but the one-shot
     /// predecessor-range rewrite runs alone for one bounded page.
     PredecessorRangeRewrite,
     /// The raw frontier is terminal for now, so derived convergence runs.
-    FullPage,
+    Full,
 }
 
 /// Decides what one pass owes retained LCM convergence.
@@ -69,12 +83,12 @@ fn lcm_convergence_admission(
 ) -> LcmConvergenceAdmission {
     if history_allows_summary_convergence(outcome) {
         *history_priority_passes = 0;
-        return LcmConvergenceAdmission::FullPage;
+        return LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full);
     }
     *history_priority_passes = history_priority_passes.saturating_add(1);
     if *history_priority_passes >= HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE {
         *history_priority_passes = 0;
-        return LcmConvergenceAdmission::PredecessorRangeRewrite;
+        return LcmConvergenceAdmission::Admitted(LcmConvergencePage::PredecessorRangeRewrite);
     }
     LcmConvergenceAdmission::Deferred
 }
@@ -187,129 +201,139 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             {
                 state.complete_history_sequence(sequence);
             }
-            let history_needs_another_pass = !history_allows_summary_convergence(history_outcome);
             let convergence_admission =
                 lcm_convergence_admission(history_outcome, &mut history_priority_passes);
+            // Derived from the admission so the pass report can never disagree
+            // with what this pass actually ran.
+            let history_needs_another_pass = !matches!(
+                convergence_admission,
+                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
+            );
             let (
                 summary_convergence_made_progress,
                 summary_convergence_has_more,
                 summary_retry_delay,
-            ) = if convergence_admission == LcmConvergenceAdmission::Deferred {
-                // Historical continuation owns the next bounded pass. LCM
-                // summaries are independent derived work and can run after
-                // the raw frontier is terminal; placing a model call between
-                // source windows delays both project and profile readiness.
-                (false, false, None)
-            } else {
-                // Queue through the semaphore's fair async admission even when a
-                // permit appears immediately available. A retrying profile must
-                // not use `try_acquire` to jump ahead of profiles already waiting
-                // for the shared historical-work budget.
-                let admission = history_admission.acquire();
-                tokio::pin!(admission);
-                let registered = tokio::select! {
-                    biased;
-                    () = hotpath::future!(
-                        state.wait_for_cancellation(),
-                        label = "daemon.scheduler.lcm_summary.admission_cancel"
-                    ) => return,
-                    permit = &mut admission => Some(permit),
-                    () = tokio::task::yield_now() => None,
-                };
-                let summary_admission = if let Some(permit) = registered {
-                    permit
-                } else {
-                    // The acquisition future has now been polled and joined the
-                    // semaphore's FIFO queue. Only then advertise idle so an
-                    // observer cannot release permits before this worker is
-                    // registered to receive one.
-                    hotpath::gauge!("session_temporal_refresh_history_admission_deferrals")
-                        .inc(1.0);
-                    state.mark_worker_idle();
-                    state.idle.notify_waiters();
-                    let permit = tokio::select! {
+            ) = match convergence_admission {
+                LcmConvergenceAdmission::Deferred => {
+                    // Historical continuation owns the next bounded pass. LCM
+                    // summaries are independent derived work and can run after
+                    // the raw frontier is terminal; placing a model call between
+                    // source windows delays both project and profile readiness.
+                    (false, false, None)
+                }
+                LcmConvergenceAdmission::Admitted(convergence_page) => {
+                    // Queue through the semaphore's fair async admission even when a
+                    // permit appears immediately available. A retrying profile must
+                    // not use `try_acquire` to jump ahead of profiles already waiting
+                    // for the shared historical-work budget.
+                    let admission = history_admission.acquire();
+                    tokio::pin!(admission);
+                    let registered = tokio::select! {
                         biased;
                         () = hotpath::future!(
                             state.wait_for_cancellation(),
                             label = "daemon.scheduler.lcm_summary.admission_cancel"
                         ) => return,
-                        permit = &mut admission => permit,
+                        permit = &mut admission => Some(permit),
+                        () = tokio::task::yield_now() => None,
                     };
-                    state.mark_worker_busy();
-                    permit
-                };
-                let Ok(summary_admission) = summary_admission else {
-                    tracing::warn!(
-                        "retained LCM summary convergence admission closed; worker stopped"
-                    );
-                    return;
-                };
-                let summary_result = {
-                    let permit = summary_admission;
-                    let page = async {
-                        if convergence_admission == LcmConvergenceAdmission::PredecessorRangeRewrite
-                        {
-                            crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
-                                database.clone(),
-                            )
-                            .await
-                        } else {
-                            crate::lcm_summary_convergence::run_summary_convergence_page(
-                                database.clone(),
-                                crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
-                            )
-                            .await
-                        }
-                    };
-                    tokio::pin!(page);
-                    let result = tokio::select! {
-                        biased;
-                        () = hotpath::future!(
-                            state.wait_for_cancellation(),
-                            label = "daemon.scheduler.lcm_summary.cancel"
-                        ) => return,
-                        result = &mut page => result,
-                    };
-                    drop(permit);
-                    result
-                };
-                match summary_result {
-                    Ok(page) => {
-                        summary_retry_attempt = 0;
-                        (
-                            !page.sessions.is_empty()
-                                || page.backfill_rows_scanned > 0
-                                || page.predecessor_range_rows_rewritten > 0
-                                || page.relation_receipts_processed > 0,
-                            page.has_more,
-                            page.next_retry_delay,
-                        )
-                    }
-                    Err(LcmError::Cancelled) => return,
-                    Err(error @ LcmError::ProfileResetRequired { .. }) => {
-                        tracing::error!(
-                            %error,
-                            "retained LCM summary convergence is permanently blocked"
-                        );
-                        (false, false, None)
-                    }
-                    Err(error) => {
-                        let class = if matches!(error, LcmError::DeadlineExceeded) {
-                            SessionTemporalRefreshRetryClass::Deadline
-                        } else {
-                            SessionTemporalRefreshRetryClass::Storage
+                    let summary_admission = if let Some(permit) = registered {
+                        permit
+                    } else {
+                        // The acquisition future has now been polled and joined the
+                        // semaphore's FIFO queue. Only then advertise idle so an
+                        // observer cannot release permits before this worker is
+                        // registered to receive one.
+                        hotpath::gauge!("session_temporal_refresh_history_admission_deferrals")
+                            .inc(1.0);
+                        state.mark_worker_idle();
+                        state.idle.notify_waiters();
+                        let permit = tokio::select! {
+                            biased;
+                            () = hotpath::future!(
+                                state.wait_for_cancellation(),
+                                label = "daemon.scheduler.lcm_summary.admission_cancel"
+                            ) => return,
+                            permit = &mut admission => permit,
                         };
-                        summary_retry_attempt = summary_retry_attempt.saturating_add(1);
+                        state.mark_worker_busy();
+                        permit
+                    };
+                    let Ok(summary_admission) = summary_admission else {
                         tracing::warn!(
-                            %error,
-                            ?class,
-                            "retained LCM summary convergence page will retry"
+                            "retained LCM summary convergence admission closed; worker stopped"
                         );
-                        (
-                            false,
-                            false,
-                            Some(session_refresh_retry_delay(class, summary_retry_attempt)),
-                        )
+                        return;
+                    };
+                    let summary_result = {
+                        let permit = summary_admission;
+                        let page = async {
+                            match convergence_page {
+                            LcmConvergencePage::PredecessorRangeRewrite => {
+                                crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
+                                    database.clone(),
+                                )
+                                .await
+                            }
+                            LcmConvergencePage::Full => {
+                                crate::lcm_summary_convergence::run_summary_convergence_page(
+                                    database.clone(),
+                                    crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
+                                )
+                                .await
+                            }
+                        }
+                        };
+                        tokio::pin!(page);
+                        let result = tokio::select! {
+                            biased;
+                            () = hotpath::future!(
+                                state.wait_for_cancellation(),
+                                label = "daemon.scheduler.lcm_summary.cancel"
+                            ) => return,
+                            result = &mut page => result,
+                        };
+                        drop(permit);
+                        result
+                    };
+                    match summary_result {
+                        Ok(page) => {
+                            summary_retry_attempt = 0;
+                            (
+                                !page.sessions.is_empty()
+                                    || page.backfill_rows_scanned > 0
+                                    || page.predecessor_range_rows_rewritten > 0
+                                    || page.relation_receipts_processed > 0,
+                                page.has_more,
+                                page.next_retry_delay,
+                            )
+                        }
+                        Err(LcmError::Cancelled) => return,
+                        Err(error @ LcmError::ProfileResetRequired { .. }) => {
+                            tracing::error!(
+                                %error,
+                                "retained LCM summary convergence is permanently blocked"
+                            );
+                            (false, false, None)
+                        }
+                        Err(error) => {
+                            let class = if matches!(error, LcmError::DeadlineExceeded) {
+                                SessionTemporalRefreshRetryClass::Deadline
+                            } else {
+                                SessionTemporalRefreshRetryClass::Storage
+                            };
+                            summary_retry_attempt = summary_retry_attempt.saturating_add(1);
+                            tracing::warn!(
+                                %error,
+                                ?class,
+                                "retained LCM summary convergence page will retry"
+                            );
+                            (
+                                false,
+                                false,
+                                Some(session_refresh_retry_delay(class, summary_retry_attempt)),
+                            )
+                        }
                     }
                 }
             };
@@ -1063,7 +1087,7 @@ mod tests {
         let mut passes = 7;
         assert_eq!(
             lcm_convergence_admission(Some(SessionHistoricalIngestOutcome::Complete), &mut passes),
-            LcmConvergenceAdmission::FullPage
+            LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
         );
         assert_eq!(
             passes, 0,
@@ -1106,10 +1130,12 @@ mod tests {
             let admission = lcm_convergence_admission(pending, &mut history_priority_passes);
             assert_ne!(
                 admission,
-                LcmConvergenceAdmission::FullPage,
+                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full),
                 "historical continuation must keep priority over derived summaries"
             );
-            if admission == LcmConvergenceAdmission::PredecessorRangeRewrite {
+            if admission
+                == LcmConvergenceAdmission::Admitted(LcmConvergencePage::PredecessorRangeRewrite)
+            {
                 admitted_rewrites = admitted_rewrites.saturating_add(1);
                 crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
                     database.clone(),
