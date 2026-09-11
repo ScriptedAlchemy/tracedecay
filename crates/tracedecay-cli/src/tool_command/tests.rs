@@ -350,7 +350,7 @@ fn unknown_tool_name_errors() {
 
 #[test]
 fn array_value_collected_via_repetition() {
-    let d = def("affected_tests");
+    let d = def("affected");
     let parsed = parse_invocation(
         &d,
         &[
@@ -371,7 +371,7 @@ fn array_value_collected_via_repetition() {
 
 #[test]
 fn finalize_arrays_splits_csv() {
-    let d = def("affected_tests");
+    let d = def("affected");
     let mut map = Map::new();
     map.insert("files".to_string(), json!("src/a.rs,src/b.rs,src/c.rs"));
     finalize_arrays(&d, &mut map);
