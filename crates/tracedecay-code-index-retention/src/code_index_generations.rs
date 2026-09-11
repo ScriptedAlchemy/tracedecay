@@ -22,9 +22,7 @@ use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 // that number here let the writer be versioned to 3 while retention still
 // demanded 1: every real sealed file was refused as "incompatible" and the store
 // became uncollectable.
-use tracedecay_code_index::production::{
-    SEALED_GENERATION_FORMAT_REVISION_V1, sealed_generation_format_revision_is_compatible,
-};
+use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 /// Only the generation fixtures build tagged digests; production here works in
 /// untagged hex, so importing this unconditionally is an unused-import error.
@@ -909,9 +907,16 @@ fn plan_code_generation_retention_with_verification_cancellable(
                 path.display()
             )));
         }
-        if !sealed_generation_format_revision_is_compatible(format_revision) {
+        // Retention plans a file's lifetime from its identity and size, not
+        // from a decoded graph, so a revision the readers have retired is
+        // ordinary collectable history — the daemon rebuilds past it, and
+        // refusing the whole plan here would leave a store that holds one
+        // permanently uncollectable. Only a revision from a newer build is
+        // unsafe: those bytes were written by a writer this one cannot
+        // reason about, so it must not plan their removal.
+        if format_revision > SEALED_GENERATION_FORMAT_REVISION_V1 {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "generation file '{}' has an incompatible format revision",
+                "generation file '{}' has a newer format revision",
                 path.display()
             )));
         }

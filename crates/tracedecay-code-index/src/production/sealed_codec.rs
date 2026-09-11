@@ -29,12 +29,20 @@ use super::*;
 /// and code-generation retention — must gate on this one value.
 pub(super) const MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION: u32 = 6;
 /// The partitioned generation manifest revision, which the daemon publishes.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 7;
+///
+/// Revision seven is retired rather than read: it named two payload shapes,
+/// one with the sealed census and one without, because the census became a
+/// required manifest field under the same number. One revision cannot mean
+/// two shapes, and a census is re-derivable from the restored rows, so both
+/// shapes are refused and rebuilt instead of decoded by shape.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 8;
 
-/// The oldest sealed envelope revision this build decodes. Anything below it
-/// is refused by [`superseded_sealed_generation_revision`] instead of being
-/// migrated — a generation is re-derivable from its source tree, so the
-/// daemon rebuilds rather than carrying a decoder per retired shape.
+/// The oldest sealed envelope revision this build decodes. Anything below it,
+/// and any retired revision between it and
+/// [`SEALED_GENERATION_FORMAT_REVISION_V1`], is refused by
+/// [`superseded_sealed_generation_revision`] instead of being migrated — a
+/// generation is re-derivable from its source tree, so the daemon rebuilds
+/// rather than carrying a decoder per retired shape.
 pub const MINIMUM_SEALED_GENERATION_FORMAT_REVISION: u32 =
     MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION;
 
@@ -471,7 +479,11 @@ impl<'de> Deserialize<'de> for CompatibleSealedFormatRevisionV1 {
         let revision = u32::deserialize(deserializer)?;
         if !sealed_generation_format_revision_is_compatible(revision) {
             return Err(serde::de::Error::custom(
-                if revision < MINIMUM_SEALED_GENERATION_FORMAT_REVISION {
+                // Retirement runs from below the decode floor up to the
+                // revision the writer emits, so a revision this build once
+                // wrote and has since retired is refused for rebuild rather
+                // than reported as a shape only a newer build produces.
+                if revision < SEALED_GENERATION_FORMAT_REVISION_V1 {
                     superseded_sealed_generation_revision(revision).to_string()
                 } else {
                     "sealed generation format revision is incompatible".to_owned()
@@ -1259,12 +1271,16 @@ mod tests {
 
     #[test]
     fn format_gate_accepts_only_the_monolithic_and_partitioned_revisions() {
-        assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 7);
+        assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 8);
         assert_eq!(MINIMUM_SEALED_GENERATION_FORMAT_REVISION, 6);
         assert!(sealed_generation_format_revision_is_compatible(6));
-        assert!(sealed_generation_format_revision_is_compatible(7));
+        assert!(sealed_generation_format_revision_is_compatible(8));
         assert!(!sealed_generation_format_revision_is_compatible(5));
-        assert!(!sealed_generation_format_revision_is_compatible(8));
+        // Retired between the floor and the current revision: revision seven
+        // named a manifest both with and without its census, so neither
+        // shape decodes.
+        assert!(!sealed_generation_format_revision_is_compatible(7));
+        assert!(!sealed_generation_format_revision_is_compatible(9));
     }
 
     struct LargestAllocationRecorderV1;

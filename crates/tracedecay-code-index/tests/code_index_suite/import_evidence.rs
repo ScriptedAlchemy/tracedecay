@@ -513,7 +513,7 @@ fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
 
 #[test]
 fn sealed_revision_six_import_generation_round_trips_to_identical_bytes() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 7);
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 8);
     let first = published_import_generation();
     let first_sealed = first.encode_sealed().expect("first generation seals");
     let second_sealed = published_import_generation()

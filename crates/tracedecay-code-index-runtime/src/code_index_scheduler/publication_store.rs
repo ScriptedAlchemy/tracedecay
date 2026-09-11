@@ -1557,6 +1557,20 @@ impl DaemonCodeIndexPublicationStoreV1 {
             },
         ) {
             Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => Ok(None),
+            // The manifest revision is refused for the same reason a retired
+            // monolithic envelope is, and on the same terms: the generation is
+            // re-derivable from its source tree, so the scheduler rebuilds it
+            // instead of treating a shape this build no longer writes as
+            // corruption.
+            Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
+                tracing::warn!(
+                    target: "tracedecay::code_index",
+                    sealed_format_revision = revision,
+                    "{}",
+                    CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                );
+                Ok(None)
+            }
             result => result,
         }
     }
@@ -2035,15 +2049,36 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .active_path
             .parent()
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
-        if self.undecoded_active_expectation.is_none() {
-            // Cold hydration takes the store lock itself. Complete it before
-            // entering the publication transaction, then recheck the exact
-            // expected pointer under the writer lock below.
-            let _ = self.load_active_shared()?;
-        }
+        let undecoded_expectation = match self.undecoded_active_expectation.clone() {
+            Some(expectation) => Some(expectation),
+            None => {
+                // Cold hydration takes the store lock itself. Complete it
+                // before entering the publication transaction, then recheck
+                // the exact expected pointer under the writer lock below.
+                match self.load_active_shared()? {
+                    Some(_) => None,
+                    // An active pointer whose sealed generation this build
+                    // abstains from decoding — a retired format revision, a
+                    // superseded sanitizer — is still the incumbent this
+                    // publication replaces, and its caller has no decoded
+                    // generation id to expect. The compare-and-swap token is
+                    // then the pointer identity the abstention observed,
+                    // rechecked under the writer lock below; without it a
+                    // store holding an undecodable generation could never be
+                    // replaced by the rebuild that supersedes it.
+                    None => self.read_publication_pointer()?.map(|pointer| {
+                        UndecodedActivePublicationExpectationV1 {
+                            generation_id: pointer.generation_id,
+                            generation_file: pointer.generation_file,
+                            state_digest: pointer.state_digest,
+                        }
+                    }),
+                }
+            }
+        };
         let _store_lock =
             acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
-        let prior_pointer = if let Some(expected) = self.undecoded_active_expectation.as_ref() {
+        let prior_pointer = if let Some(expected) = undecoded_expectation.as_ref() {
             if expected_active_generation.is_some() {
                 return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
             }
@@ -2057,7 +2092,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         } else {
             self.read_publication_pointer()?
         };
-        if self.undecoded_active_expectation.is_none()
+        if undecoded_expectation.is_none()
             && prior_pointer
                 .as_ref()
                 .map(|pointer| pointer.generation_id.as_str())
@@ -2070,7 +2105,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .active
             .as_ref()
             .map(|current| &current.manifest().generation_id);
-        let cache_matches = self.undecoded_active_expectation.as_ref().map_or(
+        let cache_matches = undecoded_expectation.as_ref().map_or(
             cached_active == expected_active_generation,
             |expected| {
                 cached_active
@@ -2434,7 +2469,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         })?;
         drop(source_fence);
         let mut state = self.cache.lock_state()?;
-        if self.undecoded_active_expectation.is_none() {
+        if undecoded_expectation.is_none() {
             let cached_active = state
                 .active
                 .as_ref()

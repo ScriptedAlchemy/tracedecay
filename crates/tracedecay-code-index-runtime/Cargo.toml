@@ -102,6 +102,7 @@ filetime = "0.2"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = [
     "test-helpers",
     "lite",
