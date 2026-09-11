@@ -2199,6 +2199,20 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|worktree| Arc::clone(&worktree.serving_source_witness))
     }
 
+    /// The shared source-freshness fence for one mounted root, so tests can
+    /// age its bounded proof instead of waiting the bound out in wall clock.
+    #[cfg(test)]
+    pub(crate) async fn source_freshness_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<super::SourceFreshnessFenceV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| worktree.source_freshness.clone())
+    }
+
     /// Drop the retained serving generation, reproducing a mount whose restore
     /// produced nothing servable.
     #[cfg(test)]
