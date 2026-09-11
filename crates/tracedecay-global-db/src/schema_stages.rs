@@ -30,6 +30,8 @@ use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_TABLE_CONTRACTS_V1,
 };
 
+use crate::sqlite_persist::PersistWriteTransaction;
+
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
         path TEXT PRIMARY KEY,
@@ -545,30 +547,16 @@ pub async fn ensure_registered_schema_for_admission(
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
-    let admission = install_registered_schema_stages(
-        &transaction,
+    install_and_commit_registered_schema(
+        transaction,
         configuration_fresh.as_ref(),
         temporal_admission,
         workflow_admission,
         force_exhaustive,
+        "commit registered global schema",
+        "roll back registered global schema",
     )
-    .await;
-
-    match admission {
-        Ok(()) => transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error("commit registered global schema", error))?,
-        Err(error) => {
-            return match transaction.rollback().await {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(global_db_operation_error(
-                    "roll back registered global schema",
-                    std::io::Error::other(format!("{error}; rollback failed: {rollback_error}")),
-                )),
-            };
-        }
-    }
+    .await?;
 
     observation_projection::ensure_observation_projection_performance_indexes(installation)
         .await
@@ -607,6 +595,8 @@ async fn install_registered_schema_stages(
     temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
+    commit_operation: &'static str,
+    rollback_operation: &'static str,
 ) -> tracedecay_domain::errors::Result<()> {
     Box::pin(install_registered_schema_stage_sequence(
         transaction,
@@ -616,6 +606,39 @@ async fn install_registered_schema_stages(
         force_exhaustive,
     ))
     .await
+}
+
+async fn install_and_commit_registered_schema<T>(
+    transaction: T,
+    configuration_fresh: Option<&configuration::FreshConfigurationStoreEvidence>,
+    temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
+    workflow_admission: WorkflowSchemaAdmission,
+    force_exhaustive: bool,
+) -> tracedecay_domain::errors::Result<()>
+where
+    T: Executor + Sync + PersistWriteTransaction,
+{
+    let admission = install_registered_schema_stages(
+        &transaction,
+        configuration_fresh,
+        temporal_admission,
+        workflow_admission,
+        force_exhaustive,
+    )
+    .await;
+    match admission {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(commit_operation, error)),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(global_db_operation_error(
+                rollback_operation,
+                std::io::Error::other(format!("{error}; rollback failed: {rollback_error}")),
+            )),
+        },
+    }
 }
 
 async fn install_registered_schema_stage_sequence(
@@ -931,26 +954,16 @@ pub async fn ensure_attached_registered_schema(
     let transaction = database
         .begin_bulk_write_transaction("install attached registered global database schema")
         .await?;
-    let admission = install_registered_schema_stages(
-        &transaction,
+    install_and_commit_registered_schema(
+        transaction,
         configuration_fresh.as_ref(),
         temporal_admission,
         workflow_admission,
         force_exhaustive,
+        "commit attached registered global schema",
+        "roll back attached registered global schema",
     )
-    .await;
-    match admission {
-        Ok(()) => transaction.commit().await?,
-        Err(error) => {
-            return match transaction.rollback().await {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(global_db_operation_error(
-                    "roll back attached registered global schema",
-                    std::io::Error::other(format!("{error}; rollback failed: {rollback_error}")),
-                )),
-            };
-        }
-    }
+    .await?;
     // Mirror initialization's independently durable index builds: each
     // historical-data index commits on its own so an interrupted later build
     // never rolls back an earlier completed one.
