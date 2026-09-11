@@ -260,7 +260,7 @@ mod runtime_configuration_cutover {
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
     use crate::config::{
-        PinnedRuntimeConfiguration, RuntimeConfigurationCache, RuntimeConfigurationTarget,
+        DaemonRuntimeConfiguration, RuntimeConfigurationCache, RuntimeConfigurationTarget,
         cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
         install_pinned_runtime_configuration, runtime_configuration_for_layout,
     };
@@ -301,7 +301,7 @@ mod runtime_configuration_cutover {
         )
         .expect("explicit settings layer resolves")
         .snapshot;
-        let pinned = PinnedRuntimeConfiguration::new(
+        let pinned = DaemonRuntimeConfiguration::new(
             RuntimeConfigurationTarget {
                 project_id,
                 project_root: root.path().to_path_buf(),
@@ -359,7 +359,7 @@ mod runtime_configuration_cutover {
         let revision_id = revision_id("revision.runtime-cache-retarget");
         let cache = RuntimeConfigurationCache::default();
         cache.insert(
-            PinnedRuntimeConfiguration::new(
+            DaemonRuntimeConfiguration::new(
                 RuntimeConfigurationTarget {
                     project_id: project_id.clone(),
                     project_root: first_root.clone(),
@@ -370,7 +370,7 @@ mod runtime_configuration_cutover {
             .expect("first snapshot materializes"),
         );
         cache.insert(
-            PinnedRuntimeConfiguration::new(
+            DaemonRuntimeConfiguration::new(
                 RuntimeConfigurationTarget {
                     project_id: project_id.clone(),
                     project_root: second_root.clone(),
