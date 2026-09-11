@@ -327,6 +327,14 @@ impl ServingSwapOutcomeV1 {
     }
 }
 
+pub(crate) fn semantic_handoff_has_exact_witness(
+    publication_matches: bool,
+    witness: Option<&super::ServingSourceWitnessV1>,
+    generation: &CodeGenerationId,
+) -> bool {
+    publication_matches && witness.is_some_and(|witness| &witness.generation_id == generation)
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 struct ColdMountFinalCommitGateV1 {
     project_root: PathBuf,
@@ -4334,6 +4342,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_generation = Arc::clone(&worker_text_generation);
                     let serving_seats = Arc::clone(&worker_serving_seats);
                     let serving_generation_changed = worker_serving_generation_changed.clone();
+                    let source_freshness = worker_source_freshness.clone();
+                    let project_root = worker_project_root.clone();
+                    let control_epoch = Arc::clone(&worker_control_epoch);
+                    let semantic_observed_epoch = control_epoch.load(Ordering::Acquire);
                     let text_latest = latest.clone();
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -4418,12 +4430,29 @@ impl CodeIndexSchedulerRegistryV1 {
                                 Self::record_serving_seat(&serving_seats);
                                 serving_generation_changed.send_replace(());
                             }
-                            // Semantic admission is independently retryable. A
-                            // prior attempt may have lost bounded queue capacity,
-                            // so an unchanged reconcile must offer the already-
-                            // serving generation again without reinstalling it.
-                            let _ =
-                                scheduler.schedule_semantic_generation(latest.generation_handle());
+                            // Only the exact-source witness authorizes this
+                            // decoded-seat handoff. A retained stale seat is
+                            // allowed to keep reads available while refresh
+                            // runs, but must not enter semantic projection. Its
+                            // later current Noop uses the retained-text handoff
+                            // below. A witnessed `Offered` generation remains
+                            // eligible for the existing retry semantics.
+                            let semantic_source_is_current = semantic_handoff_has_exact_witness(
+                                publication_matches,
+                                serving_source_witness
+                                    .read()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .as_ref(),
+                                &latest.generation().manifest().generation_id,
+                            ) && control_epoch
+                                .load(Ordering::Acquire)
+                                == semantic_observed_epoch
+                                && source_freshness
+                                    .ready_without_stat(&project_root, &shutting_down);
+                            if semantic_source_is_current {
+                                let _ = scheduler
+                                    .schedule_semantic_generation(latest.generation_handle());
+                            }
                             Ok::<_, CodeIndexSchedulerErrorV1>(outcome)
                         }),
                         label = "daemon.code_index.serving_swap"
@@ -4511,15 +4540,100 @@ impl CodeIndexSchedulerRegistryV1 {
                     // intentionally leaves that seat empty, so the canonical
                     // text owner and current source proof are the wake
                     // authority. Readers still validate scope and freshness.
-                    if matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_))
-                        && worker_text_generation
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .is_some()
+                    let retained_generation =
+                        matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_))
+                            .then(|| {
+                                worker_text_generation
+                                    .read()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .as_ref()
+                                    .map(|latest| {
+                                        latest.metadata().manifest().generation_id.clone()
+                                    })
+                            })
+                            .flatten();
+                    let source_is_current = retained_generation.is_some()
                         && worker_source_freshness
-                            .ready_without_stat(&worker_project_root, &worker_shutting_down)
-                    {
+                            .ready_without_stat(&worker_project_root, &worker_shutting_down);
+                    if source_is_current {
                         worker_serving_generation_changed.send_replace(());
+                    }
+                    if source_is_current && let Some(expected_generation) = retained_generation {
+                        // Semantic projection consumes the canonical immutable
+                        // generation, not the text/graph serving adapters. A
+                        // partitioned retained head intentionally has no decoded
+                        // seat, so load its shared publication only after the
+                        // quiet source proof. Publication caching makes repeated
+                        // Noops reuse this Arc; the semantic scheduler retains
+                        // its existing at-least-once deduplication and retry.
+                        let scheduler = Arc::clone(&worker_scheduler);
+                        let serving_generation = Arc::clone(&worker_serving_generation);
+                        let shutting_down = Arc::clone(&worker_shutting_down);
+                        let source_freshness = worker_source_freshness.clone();
+                        let project_root = worker_project_root.clone();
+                        let control_epoch = Arc::clone(&worker_control_epoch);
+                        let observed_epoch = control_epoch.load(Ordering::Acquire);
+                        let handoff = tokio::task::spawn_blocking(move || -> Result<
+                            Option<SavedGenerationScheduleOutcomeV1>,
+                            CodeIndexSchedulerErrorV1,
+                        > {
+                            let scheduler = Self::lock_scheduler_unless_shutting_down(
+                                &scheduler,
+                                &shutting_down,
+                            )?;
+                            if scheduler.semantic_schedule.is_none()
+                                || control_epoch.load(Ordering::Acquire) != observed_epoch
+                            {
+                                return Ok(None);
+                            }
+                            let generation = serving_generation
+                                .read()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .filter(|latest| {
+                                    latest.generation().manifest().generation_id
+                                        == expected_generation
+                                })
+                                .map(LatestCompleteCodeIndexV1::generation_handle)
+                                .or_else(|| {
+                                    scheduler.latest_complete().and_then(|latest| {
+                                        (latest.generation().manifest().generation_id
+                                            == expected_generation)
+                                            .then(|| latest.generation_handle())
+                                        })
+                                });
+                            if control_epoch.load(Ordering::Acquire) != observed_epoch
+                                || !source_freshness
+                                    .ready_without_stat(&project_root, &shutting_down)
+                            {
+                                return Ok(None);
+                            }
+                            let Some(generation) = generation else {
+                                tracing::warn!(
+                                    event = "code_index_semantic_schedule_declined",
+                                    outcome = SavedGenerationScheduleOutcomeV1::NoServingGeneration
+                                        .as_str(),
+                                    generation = %expected_generation,
+                                    "current retained generation could not be loaded for semantic projection"
+                                );
+                                return Ok(None);
+                            };
+                            Ok(Some(scheduler.schedule_semantic_generation(generation)))
+                        })
+                        .await;
+                        match handoff {
+                            Ok(Ok(Some(_)) | Ok(None)) => {}
+                            Ok(Err(error)) => tracing::warn!(
+                                event = "code_index_semantic_retained_handoff_failed",
+                                error = %error,
+                                "current retained generation could not reach semantic projection"
+                            ),
+                            Err(error) => tracing::warn!(
+                                event = "code_index_semantic_retained_handoff_task_failed",
+                                error = %error,
+                                "retained semantic handoff task failed"
+                            ),
+                        }
                     }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
