@@ -25,6 +25,7 @@ try {
   await page.locator('[data-task-id="T-103"]').waitFor();
   assert.equal(await page.locator('.wk-task').count(), 4, 'default outcome path must focus the selected task and reachable gating neighborhood');
   assert.equal(await page.locator('.wk-plan-context').count(), 2, 'other plans must remain visible as counted stable context');
+  assert.match(await page.locator('.wk-inspect').innerText(), /GRAPH REVISION.*revision 7.*OUTCOME EVIDENCE.*No delivery outcome has been recorded/s, 'selected task inspector must distinguish immutable graph revision from absent delivery evidence');
   const selectedBox = await page.locator('[data-task-id="T-102"]').boundingBox();
   const childBox = await page.locator('[data-task-id="T-103"]').boundingBox();
   assert(selectedBox && childBox && selectedBox.y < childBox.y, 'selected outcome root must sit above its real gating descendants');
