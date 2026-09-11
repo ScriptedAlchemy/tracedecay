@@ -8,6 +8,10 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use crate::{LcmCompressionResponse, LcmError, schema};
 
 const BACKFILL_FRONTIER_KEY: &str = "summary_convergence_queue_backfill_store_id_v1";
+/// Journal key for the role-aware predecessor-range rewrite: a decimal
+/// keyset cursor while the pass is in progress, then
+/// [`PREDECESSOR_RANGE_ROLE_FILTER_COMPLETE`] once it has retired.
+pub(crate) const PREDECESSOR_RANGE_ROLE_FILTER_KEY: &str = "predecessor_range_role_filter_v1";
 
 const SUMMARY_CONVERGENCE_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS lcm_summary_convergence_queue (
@@ -388,6 +392,146 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
     )
     .await?;
     Ok(())
+}
+
+/// Journaled progress of the role-aware predecessor-range rewrite.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PredecessorRangeRewriteJournal {
+    /// The rewrite walked the whole corpus once; ingest keeps every later
+    /// row's interval role-aware, so there is nothing left to repair.
+    Complete,
+    /// Every raw row at or below this store id carries a role-aware interval.
+    Cursor(i64),
+}
+
+/// One page of the role-aware predecessor-range rewrite.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LcmPredecessorRangeRewritePage {
+    pub rows_rewritten: usize,
+    pub has_more: bool,
+}
+
+const PREDECESSOR_RANGE_ROLE_FILTER_COMPLETE: &str = "applied";
+
+async fn predecessor_range_rewrite_journal(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<PredecessorRangeRewriteJournal, LcmError> {
+    let Some(journaled) = schema::get_gc_meta(conn, PREDECESSOR_RANGE_ROLE_FILTER_KEY).await?
+    else {
+        return Ok(PredecessorRangeRewriteJournal::Cursor(0));
+    };
+    if journaled == PREDECESSOR_RANGE_ROLE_FILTER_COMPLETE {
+        return Ok(PredecessorRangeRewriteJournal::Complete);
+    }
+    journaled
+        .parse::<i64>()
+        .map(PredecessorRangeRewriteJournal::Cursor)
+        .map_err(|error| {
+            LcmError::Db(format!(
+                "decode LCM predecessor-range rewrite cursor: {error}"
+            ))
+        })
+}
+
+/// Retires the role-aware predecessor-range rewrite on a store being created.
+///
+/// A fresh store never held an unfiltered interval: every range it will ever
+/// carry is written by ingest under the current role filter. Journaling the
+/// rewrite as complete at install is what keeps the background worker from
+/// paging the whole corpus to re-derive intervals that are already correct.
+pub(crate) async fn retire_predecessor_range_rewrite(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
+    schema::set_gc_meta(
+        conn,
+        PREDECESSOR_RANGE_ROLE_FILTER_KEY,
+        PREDECESSOR_RANGE_ROLE_FILTER_COMPLETE,
+    )
+    .await
+}
+
+/// Read-side probe: is the role-aware predecessor-range rewrite still owed?
+///
+/// An incomplete journal always has work — either a page to rewrite or the
+/// completion marker to write — so this never scans the raw corpus and an
+/// idle pass takes no writer transaction.
+pub async fn predecessor_range_rewrite_has_work(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<bool, LcmError> {
+    Ok(predecessor_range_rewrite_journal(conn).await? != PredecessorRangeRewriteJournal::Complete)
+}
+
+/// Bounded page of the one-shot rewrite of already-persisted predecessor
+/// ranges.
+///
+/// Ingest after the role-aware filter writes the conversational interval.
+/// Preserved profiles ingested before that cutover still hold unfiltered
+/// ranges, which is the #843 native-evidence miss: the compact-boundary
+/// system row widens the interval past the selected backlog. Repairing that
+/// is historical convergence, so it pages by `store_id` keyset under the
+/// background convergence worker instead of blocking store open, and journals
+/// its cursor in `lcm_gc_meta` per page. A restart mid-rewrite resumes from
+/// the journaled cursor; the completion marker retires the pass for good.
+///
+/// A row above the journaled cursor keeps serving its pre-fix interval as a
+/// valid [`LcmPredecessorRangeState::Interval`](crate::raw::LcmPredecessorRangeState)
+/// until its page runs. That is deliberate: the typed absent states cover an
+/// interval that is missing, not one that is stale, and a row that already
+/// carries provenance must not be downgraded to unavailable while its repair
+/// is pending. The pre-fix interval fails over-inclusive — it starts at or
+/// before the conversational predecessor, never after — so a caller sees a
+/// widened window rather than a gap, and each page narrows the remaining rows
+/// monotonically toward the filtered interval.
+pub async fn predecessor_range_rewrite_page(
+    conn: &(impl Executor + ?Sized),
+    page_limit: usize,
+) -> Result<LcmPredecessorRangeRewritePage, LcmError> {
+    let PredecessorRangeRewriteJournal::Cursor(cursor) =
+        predecessor_range_rewrite_journal(conn).await?
+    else {
+        return Ok(LcmPredecessorRangeRewritePage::default());
+    };
+    let page_limit_usize = page_limit.max(1);
+    let page_limit = i64::try_from(page_limit_usize).map_err(|_| {
+        LcmError::Db("LCM predecessor-range rewrite page limit overflow".to_string())
+    })?;
+    let mut rows = conn
+        .query(
+            "SELECT store_id
+             FROM lcm_raw_messages
+             WHERE store_id > ?1
+             ORDER BY store_id
+             LIMIT ?2",
+            params![cursor, page_limit],
+        )
+        .await?;
+    let mut rows_rewritten = 0_usize;
+    let mut last_store_id = None;
+    while let Some(row) = rows.next().await? {
+        last_store_id = Some(row.get::<i64>(0)?);
+        rows_rewritten += 1;
+    }
+    drop(rows);
+    let Some(last_store_id) = last_store_id else {
+        schema::set_gc_meta(
+            conn,
+            PREDECESSOR_RANGE_ROLE_FILTER_KEY,
+            PREDECESSOR_RANGE_ROLE_FILTER_COMPLETE,
+        )
+        .await?;
+        return Ok(LcmPredecessorRangeRewritePage::default());
+    };
+    crate::raw::rewrite_predecessor_ranges_for_store_range(conn, cursor, last_store_id).await?;
+    schema::set_gc_meta(
+        conn,
+        PREDECESSOR_RANGE_ROLE_FILTER_KEY,
+        &last_store_id.to_string(),
+    )
+    .await?;
+    Ok(LcmPredecessorRangeRewritePage {
+        rows_rewritten,
+        has_more: rows_rewritten == page_limit_usize,
+    })
 }
 
 /// Read-side probe: does any raw message lie beyond the backfill frontier?

@@ -5,6 +5,23 @@ use super::replay_transactions;
 
 pub const DEFAULT_INCREMENTAL_MAX_DEPTH: i64 = 1;
 
+/// Roles compression pins as `pinned_anchors` and excludes from the
+/// conversational backlog. Predecessor-range SQL must use this same list so
+/// persisted ranges match the backlog native evidence is compared against.
+pub(crate) const POLICY_ANCHOR_ROLES: &[&str] = &["system", "developer"];
+
+pub(crate) fn is_policy_anchor_role(role: &str) -> bool {
+    POLICY_ANCHOR_ROLES.contains(&role)
+}
+
+pub(crate) fn policy_anchor_role_sql_in_list() -> String {
+    POLICY_ANCHOR_ROLES
+        .iter()
+        .map(|role| format!("'{role}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssemblyCapInput {
     pub max_assembly_tokens: Option<i64>,
