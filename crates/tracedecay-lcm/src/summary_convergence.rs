@@ -8,6 +8,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use crate::{LcmCompressionResponse, LcmError, schema};
 
 const BACKFILL_FRONTIER_KEY: &str = "summary_convergence_queue_backfill_store_id_v1";
+const PREDECESSOR_RANGE_ROLE_FILTER_KEY: &str = "predecessor_range_role_filter_v1";
 
 const SUMMARY_CONVERGENCE_TABLE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS lcm_summary_convergence_queue (
@@ -387,6 +388,29 @@ pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmErr
          DO NOTHING",
     )
     .await?;
+    recompute_predecessor_ranges_for_role_filter(conn).await?;
+    Ok(())
+}
+
+/// One-shot rewrite of already-persisted predecessor ranges.
+///
+/// Ingest after the role-aware filter writes the conversational interval.
+/// Preserved profiles ingested before that cutover still hold unfiltered
+/// ranges, which is the #843 native-evidence miss: the compact-boundary
+/// system row widens the interval past the selected backlog. Journal the
+/// rewrite in `lcm_gc_meta` so it runs once per store, not on every open.
+pub(crate) async fn recompute_predecessor_ranges_for_role_filter(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
+    if schema::get_gc_meta(conn, PREDECESSOR_RANGE_ROLE_FILTER_KEY)
+        .await?
+        .as_deref()
+        == Some("applied")
+    {
+        return Ok(());
+    }
+    crate::raw::rewrite_all_predecessor_ranges(conn).await?;
+    schema::set_gc_meta(conn, PREDECESSOR_RANGE_ROLE_FILTER_KEY, "applied").await?;
     Ok(())
 }
 
