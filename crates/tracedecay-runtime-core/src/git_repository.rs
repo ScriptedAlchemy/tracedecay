@@ -18,7 +18,8 @@ pub use history::{
     GitHistoryBudget, GitHistoryOptions, GitHistoryTermination, GitRepositoryHistory,
 };
 pub use native_integration::{
-    GitNativeApplyOutcome, GitNativeIntegrationMode, GitNativePreflight,
+    GitNativeApplyOutcome, GitNativeCandidateTreeV1, GitNativeCandidateTreeVisitError,
+    GitNativeIntegrationMode, GitNativePreflight, GitNativePreflightCaptureError,
     GitNativePreflightDisposition, GitNativeUnsupportedReason,
 };
 

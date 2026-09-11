@@ -17,6 +17,13 @@ pub(super) async fn wait_for_project_open_publication<Publication, Output>(
 where
     Publication: std::future::Future<Output = Result<Output>>,
 {
+    // The bound is a plain deadline: a waiter resumed after it elapsed still
+    // needs one more await — `route_bound_project_server` — before its
+    // publication loop can read the route's terminal state, so an elapsed
+    // deadline preempts a failure that was already recorded and the caller
+    // would see warming for a route that is no longer opening. Callers repair
+    // that with `prefer_recorded_open_failure` against the claim's own watch
+    // channel instead of weakening the bound.
     hotpath::future!(
         tokio::time::timeout_at(deadline, publication),
         label = "daemon.project.open.publication_wait"
@@ -477,8 +484,10 @@ pub(super) async fn portable_project_server_for_request(
         ))
         .await;
         let result = match claim {
-            ProjectOpenTaskClaim::InFlight(mut state) => {
+            ProjectOpenTaskClaim::InFlight(state) => {
+                let recorded = state.clone();
                 let publication = async {
+                    let mut state = state;
                     loop {
                         if let Some(server) = portable_cached_project_server(
                             &store_administration,
@@ -534,12 +543,15 @@ pub(super) async fn portable_project_server_for_request(
                 // released for the wait's duration so a tool that needs no project
                 // owner is never shed by a queue of warming clients. The wait stays
                 // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
-                park_admission(wait_for_project_open_publication(
-                    &canonical_project_path,
-                    publication_deadline,
-                    publication,
-                ))
-                .await
+                prefer_recorded_open_failure(
+                    park_admission(wait_for_project_open_publication(
+                        &canonical_project_path,
+                        publication_deadline,
+                        publication,
+                    ))
+                    .await,
+                    &recorded,
+                )
             }
             ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
             ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),

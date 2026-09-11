@@ -1840,7 +1840,27 @@ fn semantic_project_runtime(
     lifecycle: Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>,
 ) -> Result<SemanticProjectRuntime> {
     let semantic_config = &runtime_configuration.config().semantic;
-    let semantic_resources = &semantic_config.resources;
+    let semantic_candidates = runtime_configuration
+        .snapshot()
+        .provenance
+        .iter()
+        .find(|(key, _)| key.as_str() == crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
+        .map(|(_, candidates)| candidates)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "semantic runtime configuration provenance is unavailable".to_owned(),
+        })?;
+    let semantic_defaulted = semantic_candidates.last().is_some_and(|candidate| {
+        matches!(
+            &candidate.layer,
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::Default
+        )
+    });
+    let mut semantic_resources = semantic_config.resources;
+    semantic_resources.max_resident_bytes =
+        tracedecay_semantic::embedding_parallelism::effective_resident_ceiling(
+            runtime.resident_memory_admission_limit_bytes(),
+            (!semantic_defaulted).then_some(semantic_resources.max_resident_bytes),
+        );
     // The configured ceiling still caps concurrency; this only narrows it to
     // what the serving reservation leaves room for and adds one slot so an
     // interactive query keeps a warm session while a rebuild holds the rest.
@@ -1860,7 +1880,7 @@ fn semantic_project_runtime(
     Ok(SemanticProjectRuntime {
         handle,
         lifecycle: Some(lifecycle),
-        resources: *semantic_resources,
+        resources: semantic_resources,
         document_composition: semantic_config.document_composition,
         auto_download_enabled: semantic_config.auto_download && runtime.semantic_auto_download(),
     })

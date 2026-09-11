@@ -2829,6 +2829,96 @@ async fn analysis_symbol_locations_are_one_based() {
 }
 
 #[tokio::test]
+async fn typescript_typed_variables_reach_public_type_relation_queries() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("package.json"),
+        r#"{"name":"typescript-type-relations","private":true,"type":"module"}"#,
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/types.ts"),
+        "export interface Greeter { greet(): string }\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join("src/values.ts"),
+        "import type { Greeter } from './types';\n\
+         export const primary: Greeter = { greet: () => 'primary' };\n\
+         export let fallback: Greeter = primary;\n",
+    )
+    .unwrap();
+    let (graph, ()) = init_test_project(&project_root).await;
+    let greeter_id = find_node_id(&graph, "Greeter").await;
+    let variable_ids = [
+        ("primary", find_node_id(&graph, "primary").await),
+        ("fallback", find_node_id(&graph, "fallback").await),
+    ];
+    let request = |node_id: &str| {
+        json!({
+            "node_id": node_id,
+            "scope": {
+                "generation": tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL,
+                "path_prefix": Value::Null,
+            },
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "cursor": Value::Null,
+            },
+        })
+    };
+
+    for (name, node_id) in &variable_ids {
+        let result = call_production_tool(
+            &graph.harness,
+            &graph.project_root,
+            "tracedecay_code_type_definition",
+            request(node_id),
+        )
+        .await
+        .expect("public type-definition request");
+        let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+        let items = output
+            .pointer("/outcome/value/payload/items")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{name} type-definition items missing: {output:#}"));
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item["name"].as_str(), item["file"].as_str()))
+                .collect::<Vec<_>>(),
+            [(Some("Greeter"), Some("src/types.ts"))],
+            "{name} must resolve its imported annotation through the public query: {output:#}"
+        );
+    }
+
+    let result = call_production_tool(
+        &graph.harness,
+        &graph.project_root,
+        "tracedecay_code_references",
+        request(&greeter_id),
+    )
+    .await
+    .expect("public references request");
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let mut typed_variables = output
+        .pointer("/outcome/value/payload/items")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("reference items missing: {output:#}"))
+        .iter()
+        .filter(|item| item["edge_kind"] == "typeof")
+        .filter_map(|item| item.pointer("/symbol/name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    typed_variables.sort_unstable();
+    assert_eq!(typed_variables, ["fallback", "primary"], "{output:#}");
+
+    close_test_graph(graph).await;
+}
+
+#[tokio::test]
 async fn typescript_interface_extends_drives_hierarchy_and_depth() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");

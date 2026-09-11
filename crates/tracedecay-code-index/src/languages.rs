@@ -198,9 +198,19 @@ impl StaticLanguageRegistry {
             for alias in extra_aliases(&language) {
                 aliases.insert(alias.to_owned());
             }
-            // Rust v3 adds parser-backed grouped and relative import evidence.
-            // Pinning that behavior forces older file artifacts to be re-extracted.
-            let extractor_revision = if language == "rust" { 3 } else { 2 };
+            // The latest revision binds persisted symbol content digests to the
+            // exact source span published by chunk projection. Rust v4 added
+            // parser-backed import visibility for re-export resolution;
+            // TypeScript v3 added variable type-relation evidence; protobuf and
+            // SQL v3 retained canonical schema evidence. Pinning these behaviors
+            // forces older file artifacts to be re-extracted.
+            let extractor_revision = if language == "rust" {
+                5
+            } else if matches!(language.as_str(), "typescript" | "protobuf" | "sql") {
+                4
+            } else {
+                3
+            };
             let descriptor = LanguageDescriptorV1 {
                 language: LanguageId::new(language.clone())
                     .expect("canonical language identity is valid"),
@@ -423,7 +433,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v3");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v5");
 
         assert_eq!(
             registry

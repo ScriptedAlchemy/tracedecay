@@ -30,7 +30,7 @@ mod tests {
             ArtifactMemberRoleV1::Config => b"config",
             ArtifactMemberRoleV1::SpecialTokensMap => b"{}",
             ArtifactMemberRoleV1::TokenizerConfig => {
-                br#"{"model_max_length": 512, "pad_token": "[PAD]"}"#
+                br#"{"model_max_length": 4096, "pad_token": "[PAD]"}"#
             }
             ArtifactMemberRoleV1::QueryInstruction | ArtifactMemberRoleV1::DocumentInstruction => {
                 unreachable!()
@@ -78,7 +78,7 @@ mod tests {
             pooling: EmbeddingPoolingV1::Mean,
             truncation: TruncationPolicyV1 {
                 side: TruncationSideV1::Right,
-                max_length: 512,
+                max_length: 4096,
             },
             precision: EmbeddingPrecisionV1::Fp32,
             runtime: RuntimeCompatibilityV1 {
@@ -96,7 +96,7 @@ mod tests {
                 max_resident_bytes: 1_000_000_000,
                 max_threads: 4,
                 max_batch_size: 32,
-                max_sequence_length: 512,
+                max_sequence_length: 4096,
                 load_deadline_ms: 30_000,
             },
             upstream: UpstreamSourceV1 {

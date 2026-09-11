@@ -35,6 +35,7 @@ impl LspCodeIndexProjectionIdentityPort for SealedIdentity {
                 repository: id("repository.managed-test"),
                 worktree: Some(id("worktree.managed-test")),
                 reference: Some(id("ref.main")),
+                freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
                 head_commit_id: Some(id("commit.head")),
                 source_revision: None,
                 code_generation_id: id::<CodeGenerationId>("generation.managed.test.9"),

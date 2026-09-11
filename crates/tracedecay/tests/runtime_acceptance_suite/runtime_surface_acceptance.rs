@@ -3236,15 +3236,18 @@ async fn application_markdown_is_payload_first_and_json_stays_exact() {
     );
     assert_command_success("CLI health_read Markdown", &health);
     let health = String::from_utf8(health.stdout).expect("CLI health_read Markdown is UTF-8");
+    // Same pretty-printed payload block the storage_status half of this test
+    // already grades: the Markdown renderer is `to_string_pretty`, not compact.
     assert!(
-        health.starts_with("## health\\_read\n\n### Payload\n\n    {\"status\":\""),
+        health.starts_with("## health\\_read\n\n### Payload\n\n    {\n      \"status\": \""),
         "health status must be the first rendered field: {health}"
     );
     assert!(health.contains("\n- Evidence: `freshness="));
     assert!(health.contains("\n- Provenance: `binding=binding.cli.health_read.v1;"));
-    assert!(
-        health.lines().count() <= 9,
-        "health output is not compact: {health}"
+    assert_eq!(
+        health.lines().count(),
+        11,
+        "health output is not the compact pretty-printed payload: {health}"
     );
 }
 

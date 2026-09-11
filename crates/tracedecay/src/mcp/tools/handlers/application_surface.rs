@@ -1,7 +1,8 @@
+use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_contracts::{
-    ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, InvocationTarget,
-    RequestId, RetainedSurfaceOperation,
+    ApplicationOutcome, ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline,
+    InvocationTarget, RequestId, RetainedSurfaceOperation,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
@@ -171,7 +172,56 @@ pub(super) async fn handle_application_surface(
     }
     .map_err(application_surface_dispatch_error)?;
 
-    render_result(cg, result)
+    let served_stale = served_stale_code_graph_read(&result)?;
+    let mut rendered = render_result(cg, result)?;
+    if let Some(served) = served_stale.as_ref() {
+        super::append_code_graph_freshness(&mut rendered, served);
+    }
+    Ok(rendered)
+}
+
+#[derive(Deserialize)]
+struct CodeGraphFreshnessMarker {
+    generation: tracedecay_domain::CodeGenerationId,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+}
+
+fn served_stale_code_graph_read(
+    result: &ApplicationSurfaceInvocationResult,
+) -> Result<Option<super::ServedStaleCodeGraphReadV1>> {
+    if !matches!(
+        result.operation,
+        ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers
+            | ApplicationSurfaceOperation::CodeCallees
+    ) {
+        return Ok(None);
+    }
+    let Ok(envelope) = &result.result else {
+        return Ok(None);
+    };
+    let ApplicationOutcome::Evidence(evidence) = &envelope.outcome else {
+        return Ok(None);
+    };
+    let Some(payload) = evidence.payload.as_ref() else {
+        return Ok(None);
+    };
+    let marker: CodeGraphFreshnessMarker = serde_json::from_value(payload.clone())?;
+    let tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+        sealed_at,
+        rebuild_in_flight,
+    } = marker.freshness
+    else {
+        return Ok(None);
+    };
+    Ok(Some(super::ServedStaleCodeGraphReadV1 {
+        generation: marker.generation.as_str().to_owned(),
+        sealed_at,
+        rebuild_in_flight,
+    }))
 }
 
 /// Map surface-resolution failures to typed reason codes so MCP clients see

@@ -1491,6 +1491,9 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         repository_id: tracedecay_domain::RepositoryId,
         policy_digest: ManifestDigest,
         observed_at: UtcMicros,
+        analysis: Arc<
+            dyn tracedecay_application::native_integration::NativeIntegrationAnalysisPort,
+        >,
     ) -> Result<
         tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner,
         tracedecay_contracts::NativeIntegrationPortError,
@@ -1503,6 +1506,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
                 repository_id,
                 policy_digest,
                 observed_at,
+                analysis,
             )
             .await
     }

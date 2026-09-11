@@ -717,17 +717,20 @@ async fn superseded_fact_leaves_current_retrieval_but_stays_in_history() {
         retired.payload().is_some(),
         "the retired projection keeps its payload"
     );
-    assert!(
-        store
-            .get_project_memory_fact(
-                old.target.clone(),
-                &FactReadControl::new(Arc::new(|| false)),
-            )
-            .await
-            .expect("load superseded fact by id")
-            .is_none(),
-        "the default get surface no longer projects the superseded fact"
-    );
+    let retired = store
+        .get_project_memory_fact(
+            old.target.clone(),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("load superseded fact by id")
+        .expect("the exact get surface keeps the superseded fact readable");
+    let ProjectMemoryFactProjectionV1::Available(retired) = retired else {
+        panic!("the superseded fact keeps its available payload");
+    };
+    assert_eq!(retired.content(), old_fact.content());
+    assert_eq!(retired.trust(), old_fact.trust());
+    assert_eq!(retired.superseded_by(), Some(successor.target.fact_id()));
 }
 
 #[tokio::test]

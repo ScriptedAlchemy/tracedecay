@@ -27,4 +27,5 @@ mod sanitized_intake;
 mod sealed_generation_restore;
 mod search_chunks;
 mod support;
+mod symbol_span_digest;
 mod test_attribution;

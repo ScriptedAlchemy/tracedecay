@@ -1,5 +1,7 @@
 use tracedecay_code_extraction::LanguageExtractor;
-use tracedecay_code_extraction::ProtoExtractor;
+use tracedecay_code_extraction::{
+    ExtractedSchemaFactV1, ProtoExtractor, SchemaEvidenceIssueV1, SchemaEvidenceStatusV1,
+};
 use tracedecay_domain::*;
 
 fn extract_sample() -> ExtractionResult {
@@ -13,6 +15,99 @@ fn extract_sample() -> ExtractionResult {
 fn test_proto_no_errors() {
     let result = extract_sample();
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn schema_evidence_retains_qualified_messages_fields_services_and_rpcs() {
+    let source = r#"syntax = "proto3";
+package acme.billing.v1;
+
+message Invoice {
+  string id = 7;
+  map<string, int32> totals = 8;
+}
+
+service Billing {
+  rpc GetInvoice (Invoice) returns (Invoice);
+}
+"#;
+    let artifact = ProtoExtractor.extract_artifact("api/billing.proto", source);
+    let evidence = artifact.schema_evidence.expect("protobuf schema evidence");
+    assert_eq!(evidence.status, SchemaEvidenceStatusV1::Complete);
+    assert!(evidence.issues.is_empty());
+    assert!(evidence.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufMessage { qualified_name, span }
+            if qualified_name == "acme.billing.v1.Invoice"
+                && &source[span.start_byte as usize..span.end_byte as usize]
+                    == "message Invoice {\n  string id = 7;\n  map<string, int32> totals = 8;\n}"
+    )));
+    assert!(evidence.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufField {
+            message_qualified_name,
+            name,
+            type_name,
+            tag: 7,
+            ..
+        } if message_qualified_name == "acme.billing.v1.Invoice"
+            && name == "id"
+            && type_name == "string"
+    )));
+    assert!(evidence.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufRpc {
+            service_qualified_name,
+            name,
+            request_type,
+            response_type,
+            ..
+        } if service_qualified_name == "acme.billing.v1.Billing"
+            && name == "GetInvoice"
+            && request_type == "Invoice"
+            && response_type == "Invoice"
+    )));
+
+    let malformed = ProtoExtractor.extract_artifact(
+        "api/broken.proto",
+        "syntax = \"proto3\"; message Broken { string id = ; }",
+    );
+    let malformed = malformed.schema_evidence.expect("partial schema evidence");
+    assert_eq!(malformed.status, SchemaEvidenceStatusV1::Partial);
+    assert_eq!(malformed.issues, vec![SchemaEvidenceIssueV1::ParseError]);
+
+    let late_package_source = r#"syntax = "proto3";
+message Early { string id = 1; }
+package acme.late.v1;
+service Late { rpc Get (Early) returns (Early); }
+"#;
+    let late_package = ProtoExtractor.extract_artifact("api/late.proto", late_package_source);
+    let late_package = late_package
+        .schema_evidence
+        .expect("late package schema evidence");
+    assert!(late_package.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufMessage { qualified_name, .. }
+            if qualified_name == "acme.late.v1.Early"
+    )));
+    assert!(late_package.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufService { qualified_name, .. }
+            if qualified_name == "acme.late.v1.Late"
+    )));
+
+    let enum_schema = ProtoExtractor.extract_artifact(
+        "api/status.proto",
+        "syntax = \"proto3\"; package acme; enum Status { UNKNOWN = 0; READY = 1; }",
+    );
+    let enum_schema = enum_schema
+        .schema_evidence
+        .expect("partial enum schema evidence");
+    assert_eq!(enum_schema.status, SchemaEvidenceStatusV1::Partial);
+    assert_eq!(
+        enum_schema.issues,
+        vec![SchemaEvidenceIssueV1::UnsupportedSyntax]
+    );
 }
 
 #[test]

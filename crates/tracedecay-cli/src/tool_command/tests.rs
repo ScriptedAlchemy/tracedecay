@@ -93,6 +93,30 @@ fn application_operations_resolve_by_identity_and_by_cli_spelling() {
 }
 
 #[test]
+fn retryable_surface_refusals_stop_at_the_attempt_and_deadline_bounds() {
+    let delay = Duration::from_millis(10);
+    let roomy_deadline = Instant::now() + Duration::from_secs(1);
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 1, roomy_deadline),
+        Some(delay)
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 2, roomy_deadline),
+        Some(delay)
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 3, roomy_deadline),
+        None,
+        "the third typed refusal is surfaced instead of retried"
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 1, Instant::now() + delay),
+        None,
+        "a retry that cannot complete inside the request deadline is refused"
+    );
+}
+
+#[test]
 fn whole_payload_invocation_parses_without_a_tool_definition() {
     let parsed = parse_whole_payload_invocation_with_stdin(
         &[
@@ -350,7 +374,7 @@ fn unknown_tool_name_errors() {
 
 #[test]
 fn array_value_collected_via_repetition() {
-    let d = def("affected_tests");
+    let d = def("affected");
     let parsed = parse_invocation(
         &d,
         &[
@@ -371,7 +395,7 @@ fn array_value_collected_via_repetition() {
 
 #[test]
 fn finalize_arrays_splits_csv() {
-    let d = def("affected_tests");
+    let d = def("affected");
     let mut map = Map::new();
     map.insert("files".to_string(), json!("src/a.rs,src/b.rs,src/c.rs"));
     finalize_arrays(&d, &mut map);
@@ -1227,6 +1251,9 @@ fn application_problem_makes_the_tool_command_fail() {
 fn documented_json_invocations() -> Vec<(&'static str, Value)> {
     vec![
         ("tracedecay_storage_status", json!({})),
+        // `health_read` takes no parameters at all, so the documented
+        // invocation is the empty object on every transport.
+        ("tracedecay_health_read", json!({})),
         ("tracedecay_git_status", json!({})),
         ("tracedecay_git_diff", json!({})),
         ("tracedecay_git_history", json!({"count": 3})),

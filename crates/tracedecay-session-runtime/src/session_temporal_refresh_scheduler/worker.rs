@@ -31,6 +31,68 @@ use tracedecay_session_temporal_store::{
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
+fn history_allows_summary_convergence(outcome: Option<SessionHistoricalIngestOutcome>) -> bool {
+    !outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass)
+}
+
+/// Consecutive history-priority passes after which the one-shot
+/// predecessor-range rewrite takes one bounded page of its own.
+///
+/// This is the horizon the rewrite buys under perpetually pending history:
+/// one `LCM_SCAN_PAGE_ROWS`-row page every eighth pass, so an N-row store
+/// converges in `ceil(N / LCM_SCAN_PAGE_ROWS) * 8` worker passes (about 3,800
+/// for the 244k-row profile in #843) while history keeps seven of every eight
+/// passes. It is a fairness ratio, not a deadline; a terminal history window
+/// resets it and admits the full convergence page, which also runs the rewrite.
+const HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE: u32 = 8;
+
+/// What a pass may spend its historical-work admission on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LcmConvergenceAdmission {
+    /// Historical continuation owns the pass outright.
+    Deferred,
+    /// The pass takes the shared admission permit for one bounded page.
+    Admitted(LcmConvergencePage),
+}
+
+/// Which bounded page an admitted pass runs under the shared permit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LcmConvergencePage {
+    /// Historical continuation still owns the next window, but the one-shot
+    /// predecessor-range rewrite runs alone for one bounded page.
+    PredecessorRangeRewrite,
+    /// The raw frontier is terminal for now, so derived convergence runs.
+    Full,
+}
+
+/// Decides what one pass owes retained LCM convergence.
+///
+/// Deferring derived summaries to historical continuation is deliberate: a
+/// model call placed between source windows delays both project and profile
+/// readiness. The one-shot predecessor-range rewrite lives behind the same
+/// convergence page but is bounded SQL with no model call, so a profile whose
+/// history perpetually needs another pass would otherwise never repair a
+/// range persisted before the policy-anchor role filter. Every
+/// `HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE`-th such pass therefore
+/// spends its admission — the same permit and bounded budget one history page
+/// takes — on the rewrite alone, which caps the rewrite's starvation at that
+/// many passes per page while leaving history the other passes.
+fn lcm_convergence_admission(
+    outcome: Option<SessionHistoricalIngestOutcome>,
+    history_priority_passes: &mut u32,
+) -> LcmConvergenceAdmission {
+    if history_allows_summary_convergence(outcome) {
+        *history_priority_passes = 0;
+        return LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full);
+    }
+    *history_priority_passes = history_priority_passes.saturating_add(1);
+    if *history_priority_passes >= HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE {
+        *history_priority_passes = 0;
+        return LcmConvergenceAdmission::Admitted(LcmConvergencePage::PredecessorRangeRewrite);
+    }
+    LcmConvergenceAdmission::Deferred
+}
+
 /// Typed deferral reported when the daemon-wide historical-ingest admission
 /// has no free permit. The worker retries after the history-retry delay while
 /// projection serving continues unblocked.
@@ -46,6 +108,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
 ) {
     let mut retry_attempt = 0u32;
     let mut summary_retry_attempt = 0u32;
+    let mut history_priority_passes = 0u32;
     let _instrumentation = SessionTemporalRefreshWorkerInstrumentation::new(&state);
     state.mark_running();
     loop {
@@ -138,104 +201,140 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             {
                 state.complete_history_sequence(sequence);
             }
-            // Queue through the semaphore's fair async admission even when a
-            // permit appears immediately available. A retrying profile must
-            // not use `try_acquire` to jump ahead of profiles already waiting
-            // for the shared historical-work budget.
-            let admission = history_admission.acquire();
-            tokio::pin!(admission);
-            let registered = tokio::select! {
-                biased;
-                () = hotpath::future!(
-                    state.wait_for_cancellation(),
-                    label = "daemon.scheduler.lcm_summary.admission_cancel"
-                ) => return,
-                permit = &mut admission => Some(permit),
-                () = tokio::task::yield_now() => None,
-            };
-            let summary_admission = if let Some(permit) = registered {
-                permit
-            } else {
-                // The acquisition future has now been polled and joined the
-                // semaphore's FIFO queue. Only then advertise idle so an
-                // observer cannot release permits before this worker is
-                // registered to receive one.
-                hotpath::gauge!("session_temporal_refresh_history_admission_deferrals").inc(1.0);
-                state.mark_worker_idle();
-                state.idle.notify_waiters();
-                let permit = tokio::select! {
-                    biased;
-                    () = hotpath::future!(
-                        state.wait_for_cancellation(),
-                        label = "daemon.scheduler.lcm_summary.admission_cancel"
-                    ) => return,
-                    permit = &mut admission => permit,
-                };
-                state.mark_worker_busy();
-                permit
-            };
-            let Ok(summary_admission) = summary_admission else {
-                tracing::warn!("retained LCM summary convergence admission closed; worker stopped");
-                return;
-            };
-            let summary_result = {
-                let permit = summary_admission;
-                let page = crate::lcm_summary_convergence::run_summary_convergence_page(
-                    database.clone(),
-                    crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
-                );
-                tokio::pin!(page);
-                let result = tokio::select! {
-                    biased;
-                    () = hotpath::future!(
-                        state.wait_for_cancellation(),
-                        label = "daemon.scheduler.lcm_summary.cancel"
-                    ) => return,
-                    result = &mut page => result,
-                };
-                drop(permit);
-                result
-            };
+            let convergence_admission =
+                lcm_convergence_admission(history_outcome, &mut history_priority_passes);
+            // Derived from the admission so the pass report can never disagree
+            // with what this pass actually ran.
+            let history_needs_another_pass = !matches!(
+                convergence_admission,
+                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
+            );
             let (
                 summary_convergence_made_progress,
                 summary_convergence_has_more,
                 summary_retry_delay,
-            ) = match summary_result {
-                Ok(page) => {
-                    summary_retry_attempt = 0;
-                    (
-                        !page.sessions.is_empty()
-                            || page.backfill_rows_scanned > 0
-                            || page.relation_receipts_processed > 0,
-                        page.has_more,
-                        page.next_retry_delay,
-                    )
-                }
-                Err(LcmError::Cancelled) => return,
-                Err(error @ LcmError::ProfileResetRequired { .. }) => {
-                    tracing::error!(
-                        %error,
-                        "retained LCM summary convergence is permanently blocked"
-                    );
+            ) = match convergence_admission {
+                LcmConvergenceAdmission::Deferred => {
+                    // Historical continuation owns the next bounded pass. LCM
+                    // summaries are independent derived work and can run after
+                    // the raw frontier is terminal; placing a model call between
+                    // source windows delays both project and profile readiness.
                     (false, false, None)
                 }
-                Err(error) => {
-                    let class = if matches!(error, LcmError::DeadlineExceeded) {
-                        SessionTemporalRefreshRetryClass::Deadline
-                    } else {
-                        SessionTemporalRefreshRetryClass::Storage
+                LcmConvergenceAdmission::Admitted(convergence_page) => {
+                    // Queue through the semaphore's fair async admission even when a
+                    // permit appears immediately available. A retrying profile must
+                    // not use `try_acquire` to jump ahead of profiles already waiting
+                    // for the shared historical-work budget.
+                    let admission = history_admission.acquire();
+                    tokio::pin!(admission);
+                    let registered = tokio::select! {
+                        biased;
+                        () = hotpath::future!(
+                            state.wait_for_cancellation(),
+                            label = "daemon.scheduler.lcm_summary.admission_cancel"
+                        ) => return,
+                        permit = &mut admission => Some(permit),
+                        () = tokio::task::yield_now() => None,
                     };
-                    summary_retry_attempt = summary_retry_attempt.saturating_add(1);
-                    tracing::warn!(
-                        %error,
-                        ?class,
-                        "retained LCM summary convergence page will retry"
-                    );
-                    (
-                        false,
-                        false,
-                        Some(session_refresh_retry_delay(class, summary_retry_attempt)),
-                    )
+                    let summary_admission = if let Some(permit) = registered {
+                        permit
+                    } else {
+                        // The acquisition future has now been polled and joined the
+                        // semaphore's FIFO queue. Only then advertise idle so an
+                        // observer cannot release permits before this worker is
+                        // registered to receive one.
+                        hotpath::gauge!("session_temporal_refresh_history_admission_deferrals")
+                            .inc(1.0);
+                        state.mark_worker_idle();
+                        state.idle.notify_waiters();
+                        let permit = tokio::select! {
+                            biased;
+                            () = hotpath::future!(
+                                state.wait_for_cancellation(),
+                                label = "daemon.scheduler.lcm_summary.admission_cancel"
+                            ) => return,
+                            permit = &mut admission => permit,
+                        };
+                        state.mark_worker_busy();
+                        permit
+                    };
+                    let Ok(summary_admission) = summary_admission else {
+                        tracing::warn!(
+                            "retained LCM summary convergence admission closed; worker stopped"
+                        );
+                        return;
+                    };
+                    let summary_result = {
+                        let permit = summary_admission;
+                        let page = async {
+                            match convergence_page {
+                            LcmConvergencePage::PredecessorRangeRewrite => {
+                                crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
+                                    database.clone(),
+                                )
+                                .await
+                            }
+                            LcmConvergencePage::Full => {
+                                crate::lcm_summary_convergence::run_summary_convergence_page(
+                                    database.clone(),
+                                    crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
+                                )
+                                .await
+                            }
+                        }
+                        };
+                        tokio::pin!(page);
+                        let result = tokio::select! {
+                            biased;
+                            () = hotpath::future!(
+                                state.wait_for_cancellation(),
+                                label = "daemon.scheduler.lcm_summary.cancel"
+                            ) => return,
+                            result = &mut page => result,
+                        };
+                        drop(permit);
+                        result
+                    };
+                    match summary_result {
+                        Ok(page) => {
+                            summary_retry_attempt = 0;
+                            (
+                                !page.sessions.is_empty()
+                                    || page.backfill_rows_scanned > 0
+                                    || page.predecessor_range_rows_rewritten > 0
+                                    || page.relation_receipts_processed > 0,
+                                page.has_more,
+                                page.next_retry_delay,
+                            )
+                        }
+                        Err(LcmError::Cancelled) => return,
+                        Err(error @ LcmError::ProfileResetRequired { .. }) => {
+                            tracing::error!(
+                                %error,
+                                "retained LCM summary convergence is permanently blocked"
+                            );
+                            (false, false, None)
+                        }
+                        Err(error) => {
+                            let class = if matches!(error, LcmError::DeadlineExceeded) {
+                                SessionTemporalRefreshRetryClass::Deadline
+                            } else {
+                                SessionTemporalRefreshRetryClass::Storage
+                            };
+                            summary_retry_attempt = summary_retry_attempt.saturating_add(1);
+                            tracing::warn!(
+                                %error,
+                                ?class,
+                                "retained LCM summary convergence page will retry"
+                            );
+                            (
+                                false,
+                                false,
+                                Some(session_refresh_retry_delay(class, summary_retry_attempt)),
+                            )
+                        }
+                    }
                 }
             };
             if state.cancelled.load(Ordering::Acquire) {
@@ -248,8 +347,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 || report.cancelled > 0
                 || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress)
                 || summary_convergence_made_progress;
-            let history_needs_another_pass =
-                history_outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass);
             observe_pass_report(
                 &report,
                 !made_progress && (report.retry_class.is_some() || history_needs_another_pass),
@@ -934,6 +1031,10 @@ pub async fn run_session_temporal_refresh_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_runtime_core::db::engine::params;
+    use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+    use tracedecay_store::ParseOffset;
 
     #[test]
     fn dropping_worker_instrumentation_clears_pending_state_once() {
@@ -954,5 +1055,206 @@ mod tests {
         state.cancel();
         assert!(!state.dirty.load(Ordering::Acquire));
         assert!(!state.has_pending_work());
+    }
+
+    #[test]
+    fn pending_history_windows_take_precedence_over_derived_summaries() {
+        assert!(!history_allows_summary_convergence(Some(
+            SessionHistoricalIngestOutcome::Pending {
+                made_progress: true,
+            },
+        )));
+        assert!(!history_allows_summary_convergence(Some(
+            SessionHistoricalIngestOutcome::Retryable {
+                reason_code: "provider_busy",
+                made_progress: false,
+            },
+        )));
+        assert!(history_allows_summary_convergence(Some(
+            SessionHistoricalIngestOutcome::Complete,
+        )));
+        assert!(history_allows_summary_convergence(Some(
+            SessionHistoricalIngestOutcome::Blocked {
+                reason_code: "invalid_observation_contract",
+                made_progress: false,
+            },
+        )));
+        assert!(history_allows_summary_convergence(None));
+    }
+
+    #[test]
+    fn a_terminal_history_window_releases_the_full_convergence_page() {
+        let mut passes = 7;
+        assert_eq!(
+            lcm_convergence_admission(Some(SessionHistoricalIngestOutcome::Complete), &mut passes),
+            LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
+        );
+        assert_eq!(
+            passes, 0,
+            "a released pass must not carry priority debt forward"
+        );
+    }
+
+    /// A profile whose history perpetually needs another window must still
+    /// converge the one-shot predecessor-range rewrite: the fix for #843 moved
+    /// that rewrite behind this scheduler, so a permanently prioritized
+    /// history lane would leave a pre-fix widened range in place forever.
+    #[tokio::test]
+    async fn perpetually_pending_history_cannot_starve_the_range_rewrite() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-range-rewrite-fairness").await;
+        let database = harness.registered.clone();
+        let session_id = "range-rewrite-fairness-session";
+        seed_pre_fix_widened_range(&database, session_id).await;
+        assert!(
+            rewrite_has_work(&database).await,
+            "the seeded store must owe the rewrite a pass"
+        );
+
+        // One bounded page per admitted pass, so the whole rewrite may need
+        // several; the bound is generous enough to prove convergence rather
+        // than to pin the page count.
+        const PASS_BOUND: u32 = HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE * 4;
+        let pending = Some(SessionHistoricalIngestOutcome::Pending {
+            made_progress: true,
+        });
+        let mut history_priority_passes = 0u32;
+        let mut admitted_rewrites = 0u32;
+        let mut passes = 0u32;
+        while rewrite_has_work(&database).await {
+            passes = passes.saturating_add(1);
+            assert!(
+                passes <= PASS_BOUND,
+                "a perpetually pending history lane starved the range rewrite for \
+                 {passes} passes"
+            );
+            let admission = lcm_convergence_admission(pending, &mut history_priority_passes);
+            assert_ne!(
+                admission,
+                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full),
+                "historical continuation must keep priority over derived summaries"
+            );
+            if admission
+                == LcmConvergenceAdmission::Admitted(LcmConvergencePage::PredecessorRangeRewrite)
+            {
+                admitted_rewrites = admitted_rewrites.saturating_add(1);
+                crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
+                    database.clone(),
+                )
+                .await
+                .expect("bounded predecessor-range rewrite page");
+            }
+        }
+        assert!(
+            admitted_rewrites > 0 && passes >= HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE,
+            "the rewrite must converge through admitted passes, not by skipping priority"
+        );
+        assert_eq!(
+            persisted_range(&database, session_id).await,
+            Some((2, 2)),
+            "the admitted pages must narrow the pre-fix interval off the policy anchor"
+        );
+    }
+
+    /// Ingests one policy anchor plus two conversational rows, then models a
+    /// store written before the policy-anchor role filter: the interval starts
+    /// at the anchor and the rewrite journal has never run.
+    async fn seed_pre_fix_widened_range(database: &RegisteredGlobalDbLeaseV1, session_id: &str) {
+        let session = SessionRecord {
+            provider: "claude".to_string(),
+            session_id: session_id.to_string(),
+            project_key: "project.range-rewrite-fairness".to_string(),
+            project_path: "/tmp/range-rewrite-fairness".to_string(),
+            title: None,
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        let messages = ["system", "user", "user"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| {
+                let ordinal = index as i64 + 1;
+                SessionMessageRecord {
+                    provider: "claude".to_string(),
+                    message_id: format!("{session_id}-message-{ordinal}"),
+                    session_id: session_id.to_string(),
+                    role: role.to_string(),
+                    timestamp: Some(ordinal),
+                    ordinal,
+                    text: format!("durable conversational context {ordinal}"),
+                    kind: Some("message".to_string()),
+                    model: None,
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            database
+                .upsert_transcript_batch(
+                    &session,
+                    &messages,
+                    &format!("/tmp/{session_id}.jsonl"),
+                    ParseOffset::default(),
+                )
+                .await
+        );
+        let transaction = database
+            .begin_write_transaction()
+            .await
+            .expect("write transaction");
+        transaction
+            .execute(
+                "UPDATE lcm_raw_predecessor_ranges SET from_store_id = 1
+                 WHERE provider = 'claude' AND session_id = ?1",
+                params![session_id],
+            )
+            .await
+            .expect("widen the persisted interval");
+        transaction
+            .execute(
+                "DELETE FROM lcm_gc_meta WHERE key = 'predecessor_range_role_filter_v1'",
+                (),
+            )
+            .await
+            .expect("clear the rewrite journal");
+        transaction.commit().await.expect("commit pre-fix store");
+    }
+
+    async fn rewrite_has_work(database: &RegisteredGlobalDbLeaseV1) -> bool {
+        let snapshot = database.read_snapshot().await.expect("read snapshot");
+        tracedecay_lcm::summary_convergence::predecessor_range_rewrite_has_work(&snapshot)
+            .await
+            .expect("journaled rewrite frontier")
+    }
+
+    async fn persisted_range(
+        database: &RegisteredGlobalDbLeaseV1,
+        session_id: &str,
+    ) -> Option<(i64, i64)> {
+        let snapshot = database.read_snapshot().await.expect("read snapshot");
+        let mut rows = snapshot
+            .query(
+                "SELECT from_store_id, to_store_id
+                 FROM lcm_raw_predecessor_ranges
+                 WHERE provider = 'claude' AND session_id = ?1
+                 ORDER BY to_store_id DESC
+                 LIMIT 1",
+                params![session_id],
+            )
+            .await
+            .expect("persisted interval");
+        let row = rows.next().await.expect("interval row")?;
+        Some((
+            row.get::<i64>(0).expect("from store id"),
+            row.get::<i64>(1).expect("to store id"),
+        ))
     }
 }

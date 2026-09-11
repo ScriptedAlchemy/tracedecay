@@ -13,6 +13,7 @@ use super::compression_decision::{
     CondensationDecision, CondensationDecisionInput, OverflowRecoveryCapInput,
     PreflightDecisionInput,
 };
+use super::compression_policy::is_policy_anchor_role;
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
 use super::types::{LcmExtractionResult, LcmRelationProjectionStatus, LcmSummarySourceRange};
@@ -1237,10 +1238,6 @@ fn filtered_session_reason(
     } else {
         None
     }
-}
-
-fn is_policy_anchor_role(role: &str) -> bool {
-    matches!(role, "system" | "developer")
 }
 
 fn replay_without_summary(

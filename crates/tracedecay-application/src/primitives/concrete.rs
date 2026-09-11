@@ -185,13 +185,19 @@ fn source_read_failed(observed_at: UtcMicros) -> SourceReadPortOutcome {
 pub struct SymbolGraphCursorSnapshot {
     temporal: TemporalExecutionSnapshot,
     code_generation_id: CodeGenerationId,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
 impl SymbolGraphCursorSnapshot {
-    pub fn new(temporal: TemporalExecutionSnapshot, code_generation_id: CodeGenerationId) -> Self {
+    pub fn new(
+        temporal: TemporalExecutionSnapshot,
+        code_generation_id: CodeGenerationId,
+        freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+    ) -> Self {
         Self {
             temporal,
             code_generation_id,
+            freshness,
         }
     }
 
@@ -201,6 +207,10 @@ impl SymbolGraphCursorSnapshot {
 
     pub const fn code_generation_id(&self) -> &CodeGenerationId {
         &self.code_generation_id
+    }
+
+    pub const fn freshness(&self) -> tracedecay_graph_query::CodeGraphReadFreshnessV1 {
+        self.freshness
     }
 }
 
@@ -750,7 +760,11 @@ mod tests {
             ValidatedAuthorization::Authorized,
         )
         .expect("execution snapshot");
-        SymbolGraphCursorSnapshot::new(temporal, code_generation_id)
+        SymbolGraphCursorSnapshot::new(
+            temporal,
+            code_generation_id,
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+        )
     }
 
     fn application_context(suffix: &str) -> (ResolvedScope, RequestContext, ApplicationOperation) {

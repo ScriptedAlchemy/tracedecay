@@ -549,8 +549,11 @@ pub(super) async fn dispatch_work_application(
         WorkApplicationInvocationV1::PrepareDuplicateAdjudication(request) => {
             hotpath::measure_block!("daemon.service.work.prepare_duplicate", {
                 let prepared = preparation::prepare_duplicate_adjudication(
+                    &registered,
                     &services,
                     &context,
+                    capability,
+                    &use_case,
                     request,
                     &canonical_request_id,
                     observed_at,

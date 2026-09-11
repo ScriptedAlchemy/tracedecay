@@ -671,7 +671,7 @@ impl RustExtractor {
             .filter(|parent| parent.kind() == "source_file")
             .and_then(|_| node.child_by_field_name("argument"));
         if let Some(argument) = top_level_argument {
-            Self::extract_use_bindings(state, argument, None);
+            Self::extract_use_bindings(state, argument, None, visibility == Visibility::Pub);
         }
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
         let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
@@ -755,6 +755,7 @@ impl RustExtractor {
         state: &mut ExtractionState<'_>,
         node: TsNode<'_>,
         prefix: Option<&str>,
+        is_public: bool,
     ) {
         match node.kind() {
             "scoped_use_list" => {
@@ -763,13 +764,13 @@ impl RustExtractor {
                     .map(|path| state.node_text(path));
                 let combined = Self::join_use_path(prefix, path);
                 if let Some(list) = node.child_by_field_name("list") {
-                    Self::extract_use_bindings(state, list, combined.as_deref());
+                    Self::extract_use_bindings(state, list, combined.as_deref(), is_public);
                 }
             }
             "use_list" => {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
-                    Self::extract_use_bindings(state, child, prefix);
+                    Self::extract_use_bindings(state, child, prefix, is_public);
                 }
             }
             "use_as_clause" => {
@@ -781,15 +782,31 @@ impl RustExtractor {
                 };
                 let full_path = Self::join_use_path(prefix, Some(state.node_text(path)));
                 if let Some(full_path) = full_path {
-                    Self::push_use_binding(state, &full_path, state.node_text(alias), node);
+                    Self::push_use_binding(
+                        state,
+                        &full_path,
+                        state.node_text(alias),
+                        node,
+                        is_public,
+                    );
                 }
             }
-            "use_wildcard" => {}
+            "use_wildcard" => {
+                let text = state.node_text(node);
+                let module = node
+                    .child_by_field_name("path")
+                    .map(|path| state.node_text(path))
+                    .or(prefix)
+                    .or_else(|| text.strip_suffix("::*"));
+                if let Some(module) = module {
+                    Self::push_glob_binding(state, module, node, is_public);
+                }
+            }
             _ => {
                 let full_path = Self::join_use_path(prefix, Some(state.node_text(node)));
                 if let Some(full_path) = full_path {
                     let local_name = full_path.rsplit("::").next().unwrap_or(full_path.as_str());
-                    Self::push_use_binding(state, &full_path, local_name, node);
+                    Self::push_use_binding(state, &full_path, local_name, node, is_public);
                 }
             }
         }
@@ -810,6 +827,7 @@ impl RustExtractor {
         full_path: &str,
         local_name: &str,
         evidence_node: TsNode<'_>,
+        is_public: bool,
     ) {
         let (module_specifier, imported_name) = match full_path.rsplit_once("::") {
             Some(parts) => parts,
@@ -825,6 +843,36 @@ impl RustExtractor {
             module_specifier,
             imported_name: Some(imported_name.to_owned()),
             local_name: Some(local_name.to_owned()),
+            is_public,
+            is_glob: false,
+            namespace: ImportNamespaceV1::Value,
+            module_kind,
+            span: SourceSpan {
+                start_byte: evidence_node.start_byte() as u64,
+                end_byte: evidence_node.end_byte() as u64,
+            },
+            start_line: evidence_node.start_position().row as u32,
+            start_column: evidence_node.start_position().column as u32,
+        });
+    }
+
+    fn push_glob_binding(
+        state: &mut ExtractionState<'_>,
+        module: &str,
+        evidence_node: TsNode<'_>,
+        is_public: bool,
+    ) {
+        let module_specifier = Self::canonical_rust_import_module(state, module);
+        let Some(module_kind) = import_module_kind("rust", &module_specifier) else {
+            return;
+        };
+        state.imports.push(ExtractedImportEvidenceV1 {
+            logical_path: state.file_path.clone(),
+            module_specifier,
+            imported_name: Some("*".to_owned()),
+            local_name: None,
+            is_public,
+            is_glob: true,
             namespace: ImportNamespaceV1::Value,
             module_kind,
             span: SourceSpan {
@@ -1892,6 +1940,7 @@ impl RustExtractor {
                 duration_ms: start.elapsed().as_millis() as u64,
             },
             imports: state.imports,
+            schema_evidence: None,
         }
     }
 }

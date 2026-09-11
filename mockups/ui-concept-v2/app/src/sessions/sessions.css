@@ -67,6 +67,17 @@
   font-weight: 500;
   color: var(--signal-cyan);
 }
+.sn-mode {
+  border: 1px solid #314b57;
+  color: #8196a1;
+  font: 8px/1.2 var(--font-display);
+  letter-spacing: .11em;
+  padding: 4px 6px;
+}
+.sn-mode.is-fixture {
+  border-color: color-mix(in oklab, var(--activity-amber) 45%, #31414a);
+  color: var(--activity-amber);
+}
 .sn-info {
   appearance: none;
   width: 14px;
@@ -778,6 +789,15 @@ th[aria-sort] .sn-th { color: var(--signal-cyan); }
   font-size: 11px;
   line-height: 1.45;
 }
+.sn-source-matrix details {
+  margin-top: 8px;
+  border: 1px dashed color-mix(in oklab, var(--signal-cyan) 28%, var(--edge-subtle));
+  color: #9eb0be;
+  font: 10px/1.4 var(--font-mono);
+  padding: 6px 8px;
+}
+.sn-source-matrix summary { color: var(--signal-cyan); cursor: pointer; }
+.sn-source-matrix p { margin: 6px 0 0; }
 
 @media (prefers-reduced-motion: reduce) {
   .sn-chev svg { transition: none; }

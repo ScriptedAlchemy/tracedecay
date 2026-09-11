@@ -1728,7 +1728,7 @@ mod tests {
                 provenance: "fixture".to_owned(),
             },
             expected_dimensions: 8,
-            max_length: 512,
+            max_length: 4096,
             members,
         };
         let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
@@ -1745,7 +1745,7 @@ mod tests {
                 max_threads,
                 max_concurrent_sessions: 1,
                 max_batch_size: 8,
-                max_sequence_length: 512,
+                max_sequence_length: 4096,
                 load_deadline_ms: 1_000,
             },
             EmbeddingDocumentCompositionV1::SanitizedText,
@@ -1930,7 +1930,7 @@ mod tests {
             max_threads: 1,
             max_concurrent_sessions: 1,
             max_batch_size: 4,
-            max_sequence_length: 512,
+            max_sequence_length: 4096,
             load_deadline_ms: 180_000,
         };
         let authority = AdmittedProjectionArtifactV1::from_lifecycle_install(
