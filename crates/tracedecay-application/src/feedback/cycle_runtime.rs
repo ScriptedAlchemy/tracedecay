@@ -8,7 +8,9 @@ use std::time::Instant;
 use thiserror::Error;
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_contracts::diagnostics::{
-    AnalyzerAdmittedDiagnosticProviderV1, DiagnosticProviderIdentity,
+    DiagnosticProviderIdentity, DiagnosticProviderIdentityParts,
+    FeedbackDiagnosticProviderAdmissionV1, ProviderDocumentIdentity, ProviderFreshness,
+    ProviderSourceIdentity,
 };
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackLspMethodClassV1, FeedbackLspStateV1, FeedbackOperationV1,
@@ -35,7 +37,8 @@ use tracedecay_domain::feedback::{
     FeedbackImpactV1, FeedbackTriggerV1,
 };
 use tracedecay_domain::{
-    FileOccurrenceId, RelationEdgeKindV1, RetrievalAnchorId, SymbolOccurrenceId, canonical_sha256,
+    ContentDigest, FileOccurrenceId, RelationEdgeKindV1, RetrievalAnchorId, SymbolOccurrenceId,
+    canonical_sha256,
 };
 use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
@@ -251,7 +254,8 @@ pub struct FeedbackCycleRuntime {
     publications: ProjectFeedbackStore,
     service: Arc<ProductionFeedbackCycleService>,
     lsp_input: FeedbackCycleLspInput,
-    provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
+    publication_selector: Arc<DiagnosticStoreFeedbackProvider<DatabaseDiagnosticStore>>,
+    provider_admissions: Vec<FeedbackDiagnosticProviderAdmissionV1>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
@@ -264,7 +268,7 @@ pub fn open_feedback_cycle_runtime(
     feedback: Arc<FeedbackRuntime>,
     runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
-    provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
+    provider_admissions: Vec<FeedbackDiagnosticProviderAdmissionV1>,
     project_root: PathBuf,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     affected_tests: Arc<dyn AffectedTestsRetrievalPort + Send + Sync>,
@@ -281,10 +285,36 @@ pub fn open_feedback_cycle_runtime(
 
     let publications = feedback.publication_store();
     let source_observations = feedback.source_observation_port();
+    let publication_selector = Arc::new(DiagnosticStoreFeedbackProvider::new(
+        DatabaseDiagnosticStore::new(database.clone()),
+    ));
     let diagnostics = GenerationBoundFeedbackDiagnosticsAdapter::new(
         DiagnosticStoreFeedbackProvider::new(DatabaseDiagnosticStore::new(database)),
         provider_admissions.clone(),
     )?;
+    let source_lsp_input = lsp_input;
+    let lsp_publication_selector = Arc::clone(&publication_selector);
+    let lsp_input: FeedbackCycleLspInput = Arc::new(move |request| {
+        let source_lsp_input = Arc::clone(&source_lsp_input);
+        let publication_selector = Arc::clone(&lsp_publication_selector);
+        Box::pin(async move {
+            let mut invocation = source_lsp_input(request).await?;
+            let selected = publication_selector
+                .current_publication_providers(
+                    &invocation.request.providers,
+                    &invocation.request.input,
+                )
+                .await
+                .map_err(|()| LspRuntimeFailure::new("feedback-diagnostic-publication-read"))?;
+            if !selected.is_empty() {
+                invocation.request.providers = selected;
+                invocation
+                    .validate()
+                    .map_err(|_| LspRuntimeFailure::new("feedback-provider-selection"))?;
+            }
+            Ok(invocation)
+        })
+    });
     let route_authorization = feedback.route_authorization();
     let impact = DirectFeedbackImpactAdapter::new(
         project_root,
@@ -310,6 +340,7 @@ pub fn open_feedback_cycle_runtime(
         publications,
         service: Arc::new(service),
         lsp_input,
+        publication_selector,
         provider_admissions,
         correlation_policy,
         source_observations,
@@ -349,7 +380,9 @@ impl FeedbackCycleRuntime {
         invocation: FeedbackCycleInvocation,
     ) -> Result<CanonicalFeedbackResultV1, FeedbackCycleRuntimeError> {
         invocation.validate()?;
-        if !self.admits_provider_set(&invocation.request.providers) {
+        if !self.admits_current_provider_set(&invocation.request).await
+            || !self.admits_provider_set(&invocation.request.providers)
+        {
             return Err(FeedbackCycleRuntimeError::ProviderSetMismatch);
         }
         let FeedbackCycleInvocation { context, request } = invocation;
@@ -373,7 +406,9 @@ impl FeedbackCycleRuntime {
         request: FeedbackCycleExecutionRequest,
         advisory: FeedbackCycleAdvisoryV1,
     ) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
-        if !self.admits_provider_set(&request.providers) {
+        if !self.admits_current_provider_set(&request).await
+            || !self.admits_provider_set(&request.providers)
+        {
             return Err(ApplicationContractError::Inconsistent {
                 field: "feedback cycle provider set",
             });
@@ -388,7 +423,11 @@ impl FeedbackCycleRuntime {
     }
 
     fn admits_provider_set(&self, providers: &[DiagnosticProviderIdentity]) -> bool {
-        providers.len() == self.provider_admissions.len()
+        !providers.is_empty()
+            && !providers
+                .iter()
+                .enumerate()
+                .any(|(index, identity)| providers[index.saturating_add(1)..].contains(identity))
             && providers.iter().all(|identity| {
                 self.provider_admissions
                     .iter()
@@ -396,6 +435,74 @@ impl FeedbackCycleRuntime {
                     .count()
                     == 1
             })
+    }
+
+    async fn admits_current_provider_set(&self, request: &FeedbackCycleExecutionRequest) -> bool {
+        let Some(admitted) = self.providers_for_input(&request.input) else {
+            let analyzer_admissions = self
+                .provider_admissions
+                .iter()
+                .filter(|admission| {
+                    matches!(
+                        admission,
+                        FeedbackDiagnosticProviderAdmissionV1::Analyzer(_)
+                    )
+                })
+                .count();
+            return matches!(
+                request.input.request.content,
+                tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay { .. }
+            ) && request.providers.len() == analyzer_admissions;
+        };
+        match self
+            .publication_selector
+            .current_publication_providers(&admitted, &request.input)
+            .await
+        {
+            Ok(selected) if selected.is_empty() => admitted == request.providers,
+            Ok(selected) => selected == request.providers,
+            Err(()) => false,
+        }
+    }
+
+    fn providers_for_input(
+        &self,
+        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+    ) -> Option<Vec<DiagnosticProviderIdentity>> {
+        let tracedecay_domain::feedback::FeedbackContentIdentityV1::SavedContent {
+            file_digest,
+            ..
+        } = &input.request.content
+        else {
+            return None;
+        };
+        let generation = input.target.generation_id.clone()?;
+        let content_digest = ContentDigest::new(file_digest.as_str().to_owned()).ok()?;
+        self.provider_admissions
+            .iter()
+            .map(|admission| {
+                let provider = admission.identity();
+                DiagnosticProviderIdentity::new(DiagnosticProviderIdentityParts {
+                    scope: provider.scope.clone(),
+                    source: ProviderSourceIdentity::CleanGeneration {
+                        generation: generation.clone(),
+                    },
+                    document: ProviderDocumentIdentity {
+                        file: input.target.file.clone(),
+                        content_digest: content_digest.clone(),
+                        document_version: None,
+                    },
+                    producer: provider.producer.clone(),
+                    requested_capability: provider.requested_capability.clone(),
+                    freshness: ProviderFreshness::current(input.observed_at),
+                    coverage: provider.coverage.clone(),
+                    provenance: provider.provenance.clone(),
+                    configuration: provider.configuration.clone(),
+                    policy: provider.policy.clone(),
+                })
+                .ok()
+            })
+            .collect()
     }
 }
 

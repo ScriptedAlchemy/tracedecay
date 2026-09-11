@@ -53,6 +53,23 @@ pub enum DiagnosticPillarV1 {
     Proximity,
 }
 
+/// Canonical analyzer revision shared by the production compiler-diagnostic
+/// publisher and its feedback provider binding.
+pub fn compiler_diagnostic_analyzer_revision_v1()
+-> std::result::Result<ComponentVersion, tracedecay_domain::DomainError> {
+    ComponentVersion::new(format!(
+        "analyzer.tracedecay-diagnose.{}",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+/// Canonical configuration revision shared by the production
+/// compiler-diagnostic publisher and its feedback provider binding.
+pub fn compiler_diagnostic_configuration_revision_v1()
+-> std::result::Result<ComponentVersion, tracedecay_domain::DomainError> {
+    ComponentVersion::new("configuration.tracedecay-diagnose.v1".to_owned())
+}
+
 impl DiagnosticPillarV1 {
     /// Canonical provider identity persisted in `provenance.producer`. The LSP
     /// gateway maps exactly these strings onto its `source` field.

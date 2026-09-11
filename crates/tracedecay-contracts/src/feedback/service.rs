@@ -1806,7 +1806,10 @@ fn diagnostic_matches_input(
             .as_ref()
             .map(|reference| reference.as_str())
             == Some(input.request.scope.branch_ref.as_str())
-        && diagnostic.source_revision.as_ref() == Some(&input.request.scope.head_commit_id)
+        && diagnostic
+            .source_revision
+            .as_ref()
+            .is_none_or(|revision| revision == &input.request.scope.head_commit_id)
         && diagnostic.content_digest.as_str() == file_digest.as_str()
         && diagnostic.provenance.producer == provider.producer.provider
         && diagnostic.provenance.analyzer_revision == provider.producer.analyzer_revision
