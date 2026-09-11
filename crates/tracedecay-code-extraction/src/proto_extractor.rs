@@ -135,6 +135,9 @@ impl ProtoExtractor {
     ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        state.package = find_direct_child_by_kind(tree.root_node(), "package")
+            .and_then(|package| find_direct_child_by_kind(package, "fullIdent"))
+            .map(|full_ident| state.node_text(full_ident).to_owned());
         if tree.root_node().has_error() {
             state.schema_issues.push(SchemaEvidenceIssueV1::ParseError);
         }
@@ -548,6 +551,9 @@ impl ProtoExtractor {
 
     /// Extract an `enum` definition.
     fn visit_enum(state: &mut ExtractionState, node: TsNode<'_>) {
+        state
+            .schema_issues
+            .push(SchemaEvidenceIssueV1::UnsupportedSyntax);
         // enum -> enumName -> ident, enumBody -> enumField*
         let name = find_direct_child_by_kind(node, "enumName")
             .and_then(|en| find_direct_child_by_kind(en, "ident"))

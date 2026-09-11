@@ -75,6 +75,39 @@ service Billing {
     let malformed = malformed.schema_evidence.expect("partial schema evidence");
     assert_eq!(malformed.status, SchemaEvidenceStatusV1::Partial);
     assert_eq!(malformed.issues, vec![SchemaEvidenceIssueV1::ParseError]);
+
+    let late_package_source = r#"syntax = "proto3";
+message Early { string id = 1; }
+package acme.late.v1;
+service Late { rpc Get (Early) returns (Early); }
+"#;
+    let late_package = ProtoExtractor.extract_artifact("api/late.proto", late_package_source);
+    let late_package = late_package
+        .schema_evidence
+        .expect("late package schema evidence");
+    assert!(late_package.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufMessage { qualified_name, .. }
+            if qualified_name == "acme.late.v1.Early"
+    )));
+    assert!(late_package.facts.iter().any(|fact| matches!(
+        fact,
+        ExtractedSchemaFactV1::ProtobufService { qualified_name, .. }
+            if qualified_name == "acme.late.v1.Late"
+    )));
+
+    let enum_schema = ProtoExtractor.extract_artifact(
+        "api/status.proto",
+        "syntax = \"proto3\"; package acme; enum Status { UNKNOWN = 0; READY = 1; }",
+    );
+    let enum_schema = enum_schema
+        .schema_evidence
+        .expect("partial enum schema evidence");
+    assert_eq!(enum_schema.status, SchemaEvidenceStatusV1::Partial);
+    assert_eq!(
+        enum_schema.issues,
+        vec![SchemaEvidenceIssueV1::UnsupportedSyntax]
+    );
 }
 
 #[test]

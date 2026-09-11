@@ -402,16 +402,25 @@ impl CodeFileIndexArtifactsV1 {
                 IMPORT_AUTHORITY_MISMATCH.to_owned(),
             ));
         }
-        if let Some(evidence) = &self.schema_evidence
-            && !matches!(
-                (extraction.language.as_str(), evidence.language),
-                ("protobuf", SchemaEvidenceLanguageV1::Protobuf)
-                    | ("sql", SchemaEvidenceLanguageV1::Sql)
-            )
-        {
-            return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                "schema evidence language does not match its extraction".to_owned(),
-            ));
+        match (extraction.language.as_str(), &self.schema_evidence) {
+            ("protobuf" | "sql", None) => {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "schema extraction is missing its typed evidence".to_owned(),
+                ));
+            }
+            ("protobuf", Some(evidence))
+                if evidence.language != SchemaEvidenceLanguageV1::Protobuf =>
+            {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "schema evidence language does not match its extraction".to_owned(),
+                ));
+            }
+            ("sql", Some(evidence)) if evidence.language != SchemaEvidenceLanguageV1::Sql => {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "schema evidence language does not match its extraction".to_owned(),
+                ));
+            }
+            _ => {}
         }
         Ok(())
     }
