@@ -50,7 +50,7 @@ pub struct FeedbackAdvisoryCycleWireV1 {
     pub published: bool,
 }
 
-/// One daemon-minted read-handle pair for a finding in the completed cycle.
+/// One daemon-minted read-handle pair for a finding in the published cycle.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackAdvisoryFindingHandleV1 {
@@ -60,7 +60,7 @@ pub struct FeedbackAdvisoryFindingHandleV1 {
     pub expansion_handle: Option<String>,
 }
 
-/// Daemon-minted handles for reads over this exact completed publication.
+/// Daemon-minted handles for reads over this exact publication.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackAdvisoryReadHandlesV1 {
