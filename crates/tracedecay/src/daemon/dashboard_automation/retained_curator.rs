@@ -21,6 +21,10 @@ use tracedecay_daemon_service::DaemonInvocationService;
 const MEMORY_CURATOR_REQUEST_TIMEOUT_SECS: u64 = 80;
 
 #[hotpath::measure(label = "daemon.dashboard.automation.curate", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Retained curator walks one memory-settlement pass end to end."
+)]
 pub(crate) async fn execute_retained_memory_curator(
     cg: &TraceDecay,
     invocation_service: &DaemonInvocationService,

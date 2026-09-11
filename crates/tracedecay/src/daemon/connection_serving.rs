@@ -800,6 +800,10 @@ async fn serve_broker_socket_client(
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One broker connection: authenticate, handshake, bind identity, then serve that client to completion."
+)]
 fn serve_broker_socket_client_inner(
     stream: BrokerStream,
     engine: DaemonEngine,

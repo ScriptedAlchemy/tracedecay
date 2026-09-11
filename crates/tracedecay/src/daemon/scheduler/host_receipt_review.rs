@@ -84,6 +84,10 @@ where
     Ok(completed)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Host-receipt review is one load-review-settle pass for a single receipt."
+)]
 async fn run_one_host_receipt_review(
     project_path: &Path,
     cg: &TraceDecay,

@@ -359,6 +359,10 @@ where
 }
 
 #[hotpath::measure(label = "daemon.dashboard.automation.execute", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One dashboard automation admission-to-settlement run."
+)]
 async fn execute_dashboard_automation_run(
     cg: &TraceDecay,
     profile_root: PathBuf,

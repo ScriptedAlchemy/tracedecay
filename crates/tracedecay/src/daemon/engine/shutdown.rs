@@ -31,6 +31,10 @@ use tracedecay_store_runtime::ShutdownTaskReceipt;
 
 impl DaemonEngine {
     #[hotpath::measure(label = "daemon.engine.shutdown_owner_phases", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Shutdown owner-phase list is the ordered drain plan for one daemon stop."
+    )]
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;
 

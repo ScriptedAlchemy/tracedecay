@@ -430,6 +430,10 @@ async fn collect_over_budget_store_findings(
 /// something to report, because one sealed generation alone exceeds any budget
 /// small enough to be called cheap.
 #[hotpath::measure(label = "daemon.doctor.code_generation_retention", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One retention census: plan, verify, and surface every generation finding from the same read."
+)]
 pub(super) async fn collect_code_generation_retention_findings(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
@@ -774,6 +778,10 @@ pub(in crate::daemon) async fn compose_doctor_report(
 /// kernel. The dashboard receives no database handles or authority-bearing
 /// inputs.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The production Doctor report is one composed read of every storage family."
+)]
 pub(in crate::daemon) fn production_doctor_report_reader(
     project_root: PathBuf,
     project_id: tracedecay_domain::ProjectId,

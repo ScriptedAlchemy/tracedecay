@@ -263,6 +263,10 @@ fn retain_status_failures(status: &mut ShutdownStatus, failures: &[String]) {
 }
 
 #[hotpath::measure(label = "daemon.shutdown.coordinate", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Shutdown coordination is one receipt-and-join of the running stop plan."
+)]
 pub(super) async fn coordinate_daemon_shutdown<Prepare>(
     lifecycle: &DaemonLifecycle,
     shutdown_deadline: tokio::time::Instant,
@@ -393,6 +397,10 @@ where
 }
 
 #[hotpath::measure(label = "daemon.shutdown.run", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Daemon shutdown is one ordered client-drain then owner-phase list."
+)]
 async fn run_daemon_shutdown(
     lifecycle: DaemonLifecycle,
     mut plan: DaemonShutdownPlan,
