@@ -2957,6 +2957,24 @@ fn admit_file_generation_artifacts(
     )
 }
 
+/// Serialize one retained page row through a reused staging buffer.
+///
+/// Every chunk, symbol display, and import row is kept for the page it lands
+/// in, and `serde_json::to_vec` reaches that length by doubling a fresh
+/// buffer: it churned one growing allocation per row and then retained up to
+/// the row's length again as unused capacity. Staging the bytes once and
+/// copying the exact slice keeps one allocation per row, sized to the row.
+fn serialize_page_row<T: serde::Serialize>(
+    value: &T,
+    staging: &mut Vec<u8>,
+    message: &'static str,
+) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    staging.clear();
+    serde_json::to_writer(&mut *staging, value)
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(format!("{message}: {error}")))?;
+    Ok(staging.as_slice().to_vec())
+}
+
 fn admit_validated_file_parts(
     authority: &ReceiptBoundCodeFileAuthorityV1,
     extraction: &ExtractionBatchV1,
@@ -3016,29 +3034,25 @@ fn admit_validated_file_parts(
             {
                 let mut serialized_chunks = Vec::with_capacity(chunks.len());
                 let mut serialized_displays = Vec::with_capacity(chunks.len());
+                let mut staging = Vec::new();
                 for chunk in &chunks {
-                    serialized_chunks.push(serde_json::to_vec(chunk.chunk()).map_err(|error| {
-                        CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed lexical chunk serialization failed: {error}"
-                        ))
-                    })?);
+                    serialized_chunks.push(serialize_page_row(
+                        chunk.chunk(),
+                        &mut staging,
+                        "sealed lexical chunk serialization failed",
+                    )?);
                     let serialized_display =
                         match chunk.chunk().anchor.symbol_occurrence_id.as_ref() {
-                            Some(occurrence) => Some(
-                                serde_json::to_vec(symbol_displays.get(occurrence).ok_or_else(
-                                    || {
-                                        CodeIndexProductionErrorV1::Contract(
-                                            "sealed lexical symbol chunk has no parser-attested display identity"
-                                                .to_owned(),
-                                        )
-                                    },
-                                )?)
-                                .map_err(|error| {
-                                    CodeIndexProductionErrorV1::Contract(format!(
-                                        "sealed lexical symbol display serialization failed: {error}"
-                                    ))
+                            Some(occurrence) => Some(serialize_page_row(
+                                symbol_displays.get(occurrence).ok_or_else(|| {
+                                    CodeIndexProductionErrorV1::Contract(
+                                        "sealed lexical symbol chunk has no parser-attested display identity"
+                                            .to_owned(),
+                                    )
                                 })?,
-                            ),
+                                &mut staging,
+                                "sealed lexical symbol display serialization failed",
+                            )?),
                             None => None,
                         };
                     serialized_displays.push(serialized_display);
@@ -3046,11 +3060,11 @@ fn admit_validated_file_parts(
                 let serialized_imports = imports
                     .iter()
                     .map(|evidence| {
-                        serde_json::to_vec(evidence).map_err(|error| {
-                            CodeIndexProductionErrorV1::Contract(format!(
-                                "sealed lexical import serialization failed: {error}"
-                            ))
-                        })
+                        serialize_page_row(
+                            evidence,
+                            &mut staging,
+                            "sealed lexical import serialization failed",
+                        )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok::<_, CodeIndexProductionErrorV1>((
