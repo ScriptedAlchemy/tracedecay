@@ -10,6 +10,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
     RegisteredWorkRuntime, work_product_problem, work_projection_problem, work_topology_problem,
+    work_topology_unavailable_problem,
 };
 
 pub(super) fn prepare_graph_mutation(
@@ -127,6 +128,30 @@ pub(super) fn current_work_product_revision_pins(
         configuration_revision_id: registered.proposal_routing.configuration_revision().clone(),
         catalog_generation_id,
     })
+}
+
+/// Executor topology from the verified Work event graph. Product-graph tasks
+/// must not mint this binding — a committed product item is not an attempt
+/// generation.
+pub(super) fn current_executor_attempt_topology(
+    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
+    authority: &tracedecay_domain::WorkAuthority,
+) -> Result<tracedecay_contracts::WorkAttemptTopologyStateV1, ApplicationProblem> {
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    match services.topology().verified_snapshot(authority, cancelled) {
+        Ok(topology) => {
+            let task_count = u32::try_from(topology.task_count()).map_err(|_| {
+                work_topology_unavailable_problem("the verified topology task count overflowed")
+            })?;
+            Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(
+                tracedecay_contracts::WorkAttemptTopologyBindingV1 {
+                    generation: topology.generation().as_str().to_owned(),
+                    task_count,
+                },
+            ))
+        }
+        Err(error) => work_topology_problem(error),
+    }
 }
 
 pub(super) fn current_work_product_attempt_topology(

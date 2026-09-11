@@ -949,9 +949,14 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     common::initialize_tracedecay_cli_project(environment.home(), &project);
     let daemon_log = environment.home().join("advisory-daemon.log");
     let _daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
-        command.stderr(Stdio::from(
-            std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
-        ));
+        // `.cargo/config.toml` sets TRACEDECAY_DISABLE_GLOBAL_DB=1 so cargo
+        // children never touch the operator ledger. This journey depends on
+        // the registered profile accounting owner for hint-outcome settlement.
+        command
+            .env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+            .stderr(Stdio::from(
+                std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
+            ));
     });
     let transcript = project.join("cursor-proximity.jsonl");
     std::fs::write(

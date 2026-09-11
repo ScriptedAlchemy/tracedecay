@@ -519,15 +519,15 @@ mod tests {
     }
 
     fn preview_result(preview: &NativeIntegrationPreviewV1) -> NativeIntegrationSurfaceResultV1 {
-        NativeIntegrationSurfaceResultV1::Preview(
+        NativeIntegrationSurfaceResultV1::Preview(Box::new(
             NativeIntegrationPreviewProjectionV1::project(preview).unwrap(),
-        )
+        ))
     }
 
     fn projection_result(
         disposition: NativeIntegrationPreviewDispositionV1,
     ) -> NativeIntegrationSurfaceResultV1 {
-        NativeIntegrationSurfaceResultV1::Preview(NativeIntegrationPreviewProjectionV1 {
+        NativeIntegrationSurfaceResultV1::Preview(Box::new(NativeIntegrationPreviewProjectionV1 {
             preview_id: NativeIntegrationPreviewId::new("preview.work-conflict.projection")
                 .unwrap(),
             preview_digest: digest('a'),
@@ -545,7 +545,7 @@ mod tests {
             ordered_commit_count: 1,
             created_at: UtcMicros(12),
             expires_at: UtcMicros(1_000),
-        })
+        }))
     }
 
     fn receipt_result(

@@ -29,6 +29,10 @@ pub struct CodeIndexImportEvidenceV1 {
     pub module_specifier: String,
     pub imported_name: Option<String>,
     pub local_name: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
+    #[serde(default)]
+    pub is_glob: bool,
     pub namespace: ImportNamespaceV1,
     pub module_kind: ImportModuleKindV1,
     pub span: SourceSpan,
@@ -47,6 +51,8 @@ impl CodeIndexImportEvidenceV1 {
             module_specifier: row.module_specifier.clone(),
             imported_name: row.imported_name.clone(),
             local_name: row.local_name.clone(),
+            is_public: row.is_public,
+            is_glob: row.is_glob,
             namespace: row.namespace,
             module_kind: row.module_kind,
             span: row.span,
@@ -61,6 +67,8 @@ impl CodeIndexImportEvidenceV1 {
             module_specifier: self.module_specifier.clone(),
             imported_name: self.imported_name.clone(),
             local_name: self.local_name.clone(),
+            is_public: self.is_public,
+            is_glob: self.is_glob,
             namespace: self.namespace,
             module_kind: self.module_kind,
             span: self.span,
@@ -93,7 +101,10 @@ impl CodeIndexImportEvidenceV1 {
 
         let binding_shape_is_valid = match self.namespace {
             ImportNamespaceV1::SideEffect => {
-                self.imported_name.is_none() && self.local_name.is_none()
+                !self.is_glob && self.imported_name.is_none() && self.local_name.is_none()
+            }
+            ImportNamespaceV1::Type | ImportNamespaceV1::Value if self.is_glob => {
+                self.imported_name.as_deref() == Some("*") && self.local_name.is_none()
             }
             ImportNamespaceV1::Type | ImportNamespaceV1::Value => {
                 self.imported_name.is_some() && self.local_name.is_some()
@@ -541,24 +552,6 @@ fn validate_schema_evidence_language(
     Ok(())
 }
 
-#[cfg(test)]
-mod schema_evidence_tests {
-    use super::*;
-
-    #[test]
-    fn rejects_schema_evidence_for_a_foreign_language() {
-        let evidence = Some(ExtractedSchemaEvidenceV1 {
-            logical_path: "src/lib.rs".to_owned(),
-            language: SchemaEvidenceLanguageV1::Sql,
-            status: SchemaEvidenceStatusV1::Complete,
-            issues: Vec::new(),
-            facts: Vec::new(),
-        });
-
-        assert!(validate_schema_evidence_language("rust", &evidence).is_err());
-    }
-}
-
 fn rematerialized_occurrence(
     occurrences: &BTreeMap<SymbolOccurrenceId, SymbolOccurrenceId>,
     occurrence: &SymbolOccurrenceId,
@@ -585,6 +578,26 @@ fn canonical_import_order(
         .then(left.module_specifier.cmp(&right.module_specifier))
         .then(left.imported_name.cmp(&right.imported_name))
         .then(left.local_name.cmp(&right.local_name))
+        .then(left.is_public.cmp(&right.is_public))
+        .then(left.is_glob.cmp(&right.is_glob))
         .then(left.namespace.cmp(&right.namespace))
         .then(left.module_kind.cmp(&right.module_kind))
+}
+
+#[cfg(test)]
+mod schema_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_schema_evidence_for_a_foreign_language() {
+        let evidence = Some(ExtractedSchemaEvidenceV1 {
+            logical_path: "src/lib.rs".to_owned(),
+            language: SchemaEvidenceLanguageV1::Sql,
+            status: SchemaEvidenceStatusV1::Complete,
+            issues: Vec::new(),
+            facts: Vec::new(),
+        });
+
+        assert!(validate_schema_evidence_language("rust", &evidence).is_err());
+    }
 }
