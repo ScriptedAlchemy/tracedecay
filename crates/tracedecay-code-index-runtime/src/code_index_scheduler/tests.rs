@@ -12482,7 +12482,16 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
 async fn callable_application_operations_consume_exact_lexical_and_graph_owners() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
-        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+        "pub trait Processor { fn process(&self, input: u32) -> u32; }\n\
+         pub struct Doubler;\n\
+         impl Processor for Doubler {\n\
+             fn process(&self, input: u32) -> u32 { input * 2 }\n\
+         }\n\
+         pub fn via_trait(processor: &Doubler, input: u32) -> u32 {\n\
+             Processor::process(processor, input)\n\
+         }\n\
+         pub fn caller() { callee(); }\n\
+         pub fn callee() {}\n",
     )]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -12616,7 +12625,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         node_id: caller,
         maximum_depth: 2,
         resolve_trait_dispatch: false,
-        scope,
+        scope: scope.clone(),
         meta: query_meta(),
     };
     let graph = registry
@@ -12637,13 +12646,148 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             assert_eq!(callee.edge_kind, "calls");
             assert_eq!(callee.symbol.name, "callee");
             assert_eq!(callee.symbol.file, "src/lib.rs");
-            assert_eq!(callee.symbol.start_line_zero_based, 1);
-            assert_eq!(callee.symbol.end_line_zero_based, 1);
-            assert_eq!(callee.symbol.line, 2);
-            assert_eq!(callee.symbol.end_line, 2);
+            assert_eq!(callee.symbol.start_line_zero_based, 9);
+            assert_eq!(callee.symbol.end_line_zero_based, 9);
+            assert_eq!(callee.symbol.line, 10);
+            assert_eq!(callee.symbol.end_line, 10);
         }
         outcome => panic!("expected completed graph operation, got {outcome:?}"),
     }
+
+    let via_trait = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("via_trait"))
+        .expect("trait caller symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let trait_method = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| {
+            record.simple_name == "process"
+                && record.qualified_name.contains("Processor")
+                && record.kind == "method"
+        })
+        .expect("trait method symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let implementation_method = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| {
+            record.simple_name == "process"
+                && record.qualified_name.contains("Doubler")
+                && record.kind == "method"
+        })
+        .expect("implementation method symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let direct_dispatch_request = CodeRelationRequest {
+        node_id: via_trait.clone(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope: scope.clone(),
+        meta: query_meta(),
+    };
+    let direct_dispatch = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &direct_dispatch_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Completed(direct_dispatch) = direct_dispatch else {
+        panic!("expected completed direct trait call");
+    };
+    let direct_dispatch = direct_dispatch.payload.expect("direct trait call page");
+    assert!(
+        direct_dispatch
+            .items
+            .iter()
+            .any(|record| record.symbol.node_id == trait_method)
+    );
+    assert!(
+        direct_dispatch
+            .items
+            .iter()
+            .all(|record| record.symbol.node_id != implementation_method)
+    );
+
+    let mut resolved_meta = query_meta();
+    resolved_meta.page = PageRequest::first(1).expect("dispatch page size");
+    let resolved_dispatch_request = CodeRelationRequest {
+        node_id: via_trait.clone(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: true,
+        scope: scope.clone(),
+        meta: resolved_meta,
+    };
+    let resolved_dispatch = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &resolved_dispatch_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Completed(resolved_dispatch) = resolved_dispatch else {
+        panic!("expected completed resolved trait call");
+    };
+    let resolved_dispatch = resolved_dispatch.payload.expect("resolved trait call page");
+    assert_eq!(resolved_dispatch.total, Some(2));
+    assert_eq!(resolved_dispatch.items.len(), 1);
+    assert_eq!(resolved_dispatch.items[0].symbol.node_id, trait_method);
+    assert!(!resolved_dispatch.items[0].dispatch_via_trait);
+    let cursor = resolved_dispatch
+        .next_cursor
+        .expect("resolved dispatch continuation");
+    let mut continuation_meta = query_meta();
+    continuation_meta.page = PageRequest::new(1, Some(cursor)).expect("dispatch continuation");
+    let continuation_request = CodeRelationRequest {
+        node_id: via_trait,
+        maximum_depth: 1,
+        resolve_trait_dispatch: true,
+        scope: scope.clone(),
+        meta: continuation_meta,
+    };
+    let continuation = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &continuation_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Completed(continuation) = continuation else {
+        panic!("expected completed resolved trait continuation");
+    };
+    let continuation = continuation
+        .payload
+        .expect("resolved trait continuation page");
+    assert_eq!(continuation.items.len(), 1);
+    let implementation = &continuation.items[0];
+    assert_eq!(implementation.symbol.node_id, implementation_method);
+    assert!(implementation.dispatch_via_trait);
+    assert_eq!(
+        implementation.dispatch_from.as_deref(),
+        Some(trait_method.as_str())
+    );
+    assert_eq!(implementation.depth, Some(1));
+    assert!(continuation.next_cursor.is_none());
 
     let qualified_name = latest
         .generation
