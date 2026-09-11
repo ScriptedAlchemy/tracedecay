@@ -125,6 +125,25 @@ fn files_listing_text(response: &tracedecay_mcp::JsonRpcResponse) -> &str {
         .unwrap_or_else(|| panic!("files response must contain text: {response:?}"))
 }
 
+/// A linked route that reopens degraded to core still answers `Ok` and keeps
+/// its key, its alias and the shared store publication, so every other
+/// assertion in these journeys holds while the defect is present. Only the
+/// published level names it.
+fn assert_reopened_linked_route_is_not_degraded(
+    servers: &crate::daemon::database_owner_registry::DatabaseOwnerRegistry,
+    linked_key: &crate::daemon::project_open_admission::ProjectServerKey,
+) {
+    assert_eq!(
+        servers
+            .servers
+            .get(linked_key)
+            .expect("the reopened linked route is published")
+            .publication,
+        crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
+        "the reopened linked route must publish full capabilities, not a degraded core"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bindings() {
     let home = TempDir::new().expect("isolated home");
@@ -450,15 +469,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         let mut servers = engine.store_administration.project_servers().lock().await;
         assert_eq!(servers.servers.len(), 2);
         assert_eq!(servers.aliases.len(), 2);
-        assert_eq!(
-            servers
-                .servers
-                .get(&linked_key)
-                .expect("the reopened linked route is published")
-                .publication,
-            crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
-            "the reopened linked route must publish full capabilities, not a degraded core"
-        );
+        assert_reopened_linked_route_is_not_degraded(&servers, &linked_key);
         assert!(servers.remove(&primary_key).is_some());
     }
 
@@ -672,15 +683,7 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
         // route that shares the store publication — so every assertion above
         // holds while the route serves core-only capabilities for the life of
         // the daemon. Name the published level so that degradation fails here.
-        assert_eq!(
-            servers
-                .servers
-                .get(&linked_key)
-                .expect("the reopened linked route is published")
-                .publication,
-            crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
-            "the reopened linked route must publish full capabilities, not a degraded core"
-        );
+        assert_reopened_linked_route_is_not_degraded(&servers, &linked_key);
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
