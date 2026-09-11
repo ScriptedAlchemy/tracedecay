@@ -67,7 +67,15 @@ pub async fn handle_field_sites(
                 // nodes anyway cost one daemon round trip per file in the project —
                 // O(store) work to answer a question whose result is a handful of
                 // sites.
-                let sites = find_field_references(&source, &field_name);
+                let masked = if path_is_rust(file) {
+                    tracedecay_code_extraction::source_mask::masked_rust_source_with(
+                        &source,
+                        tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
+                    )
+                } else {
+                    source.clone()
+                };
+                let sites = find_field_references(&masked, &field_name);
                 if sites.is_empty() {
                     continue;
                 }
