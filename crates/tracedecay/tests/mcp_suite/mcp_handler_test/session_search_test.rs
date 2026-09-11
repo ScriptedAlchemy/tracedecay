@@ -104,7 +104,30 @@ async fn production_codex_message_search(
         }),
         "production Codex message search was empty after completed ingest: {payload}"
     );
+    assert!(
+        payload["results"].as_array().is_some_and(|results| {
+            results.iter().any(|result| {
+                result["message"]["text"].as_str()
+                    == Some("The cobalt orchard scheduler migration is ready for review")
+            })
+        }),
+        "production Codex message search did not hydrate the exact assistant message: {payload}"
+    );
     payload
+}
+
+#[cfg(feature = "test-transport")]
+fn production_tool_payload(response: serde_json::Value) -> Value {
+    let envelope: Value = serde_json::from_str(
+        response["content"][0]["text"]
+            .as_str()
+            .expect("production tool JSON content"),
+    )
+    .expect("production tool JSON");
+    envelope
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .unwrap_or(envelope)
 }
 
 /// Same contract for `tracedecay_message_search`: invalid scope values fail
@@ -509,4 +532,86 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
         "reopened production Codex retrieval was empty: {resumed}"
     );
     restarted.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_session_import_immediately_searches_canonical_message() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let root = test_temp_dir();
+    let isolation = root.path().join("composition");
+    let home = root.path().join("home");
+    let _home_guard = HomeEnvGuard::set(&home);
+    let project = isolation.join("project");
+    std::fs::create_dir_all(&project).expect("production composition project");
+    fixture::write_indexed_fixture_sources(&project);
+    let init = Command::new(common::git_program())
+        .args(["init", "-q"])
+        .current_dir(&project)
+        .status()
+        .expect("git init");
+    assert!(init.success(), "git init must succeed");
+    write_production_codex_rollout(&home, &project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        &isolation,
+        [project.clone()],
+    )
+    .await
+    .expect("production composition harness");
+    let import = harness
+        .call_tool(
+            &project,
+            "tracedecay_admin_cli",
+            json!({"action": "sessions_import", "format": "json"}),
+        )
+        .await
+        .expect("production transcript import invocation");
+    let import_result = import.result.expect("production transcript import result");
+    assert_ne!(import_result["isError"], true, "{import_result}");
+    let accepted = production_tool_payload(import_result);
+    let idempotency_key = accepted["idempotency_key"]
+        .as_str()
+        .expect("session import idempotency key")
+        .to_owned();
+
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let status = harness
+                .call_tool(
+                    &project,
+                    "tracedecay_admin_cli",
+                    json!({
+                        "action": "sessions_sync_status",
+                        "idempotency_key": idempotency_key,
+                        "format": "json",
+                    }),
+                )
+                .await
+                .expect("production transcript import status");
+            let result = status.result.expect("production transcript status result");
+            assert_ne!(result["isError"], true, "{result}");
+            let payload = production_tool_payload(result);
+            if payload["status"] == "complete" {
+                break payload;
+            }
+            assert!(
+                matches!(payload["status"].as_str(), Some("accepted" | "joined")),
+                "session import did not remain active: {payload}"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session import completion deadline");
+    assert_eq!(completed["termination"], "completed", "{completed}");
+    assert!(
+        completed["failure_codes"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{completed}"
+    );
+
+    production_codex_message_search(&harness, &project).await;
+    harness.shutdown().await;
 }
