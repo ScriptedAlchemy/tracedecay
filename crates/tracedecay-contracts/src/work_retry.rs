@@ -29,12 +29,15 @@ use crate::{
     ApplicationContractError, ApplicationProblem, LegalAction, RequestAdmission, RequestContext,
     RetryDirective, SafeDiagnostic, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
     WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductRetryAdmissionV1, WorkProductRevisionPinsV1,
+    WorkProductRetryAdmissionV1, WorkProductRevisionPinsV1, WorkflowFanOutAttemptBindingV1,
+    WorkflowRunAppendRequest,
 };
 
 const RETRY_INPUT_DIGEST_DOMAIN: &str = "tracedecay.application.work-retry-input.v1";
 const RETRY_RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.application.work-retry-receipt.v1";
 const RETRY_LEASE_DOMAIN: &str = "tracedecay.application.work-retry-lease.v1";
+const RECOVERY_REQUIRED_EVIDENCE_DOMAIN: &str =
+    "tracedecay.application.work-retry-recovery-required-evidence.v1";
 const WORK_PRODUCT_RETRY_INPUT_DIGEST_DOMAIN: &str =
     "tracedecay.application.work-product-retry-attempt.final-v2";
 
@@ -48,15 +51,7 @@ pub enum WorkRetrySourceV1 {
 #[serde(rename_all = "snake_case")]
 pub enum WorkRetryCauseV1 {
     RuntimeFailure,
-}
-
-impl WorkRetryCauseV1 {
-    #[hotpath::skip]
-    const fn restart_reason(self) -> WorkRestartReasonV1 {
-        match self {
-            Self::RuntimeFailure => WorkRestartReasonV1::FailureObserved,
-        }
-    }
+    RestartRecoveryRequired,
 }
 
 /// A selector into the owning runtime-terminal evidence authority.
@@ -75,7 +70,6 @@ pub struct WorkRetryFailureSelectorV1 {
 impl WorkRetryFailureSelectorV1 {
     fn validate(&self) -> bool {
         self.source == WorkRetrySourceV1::Runtime
-            && self.cause == WorkRetryCauseV1::RuntimeFailure
             && !self.evidence_ref.is_empty()
             && self.evidence_ref.len() <= 256
             && self.evidence_ref.bytes().all(|byte| {
@@ -124,38 +118,60 @@ impl WorkRetryEvidencePortV1 for RuntimeWorkRetryEvidenceV1 {
         original: &WorkAttemptV1,
         selector: &WorkRetryFailureSelectorV1,
     ) -> Result<VerifiedWorkRetryFailureV1, WorkRetryEvidenceErrorV1> {
-        let terminal = original
-            .terminal()
-            .ok_or(WorkRetryEvidenceErrorV1::Conflict)?;
-        let (digest, observed_at, eligible) = match terminal {
-            WorkTerminalEvidenceV1::Failed {
-                evidence_digest,
-                observed_at,
+        let (evidence_digest, observed_at) = match selector.cause {
+            WorkRetryCauseV1::RuntimeFailure => {
+                let terminal = original
+                    .terminal()
+                    .ok_or(WorkRetryEvidenceErrorV1::Conflict)?;
+                let (digest, observed_at) = match terminal {
+                    WorkTerminalEvidenceV1::Failed {
+                        evidence_digest,
+                        observed_at,
+                    }
+                    | WorkTerminalEvidenceV1::TimedOut {
+                        evidence_digest,
+                        observed_at,
+                    } => (evidence_digest.clone(), *observed_at),
+                    WorkTerminalEvidenceV1::Succeeded { .. }
+                    | WorkTerminalEvidenceV1::Cancelled { .. } => {
+                        return Err(WorkRetryEvidenceErrorV1::Conflict);
+                    }
+                };
+                let expected_ref = format!("runtime-terminal:{}", digest.as_str());
+                if selector.evidence_ref != expected_ref {
+                    return Err(WorkRetryEvidenceErrorV1::Conflict);
+                }
+                (digest, observed_at)
             }
-            | WorkTerminalEvidenceV1::TimedOut {
-                evidence_digest,
-                observed_at,
-            } => (evidence_digest, observed_at, true),
-            WorkTerminalEvidenceV1::Succeeded {
-                evidence_digest,
-                observed_at,
+            WorkRetryCauseV1::RestartRecoveryRequired => {
+                let WorkRecoveryStateV1::RecoveryRequired {
+                    reason,
+                    observed_at,
+                    ..
+                } = original.recovery()
+                else {
+                    return Err(WorkRetryEvidenceErrorV1::Conflict);
+                };
+                if original.state() != WorkAttemptStateV1::RecoveryRequired
+                    || selector.evidence_ref != "recovery-required"
+                {
+                    return Err(WorkRetryEvidenceErrorV1::Conflict);
+                }
+                let digest = canonical_sha256(&(
+                    RECOVERY_REQUIRED_EVIDENCE_DOMAIN,
+                    original.identity(),
+                    original.lease(),
+                    reason,
+                    observed_at,
+                ))
+                .map_err(|_| WorkRetryEvidenceErrorV1::Unavailable)?;
+                (digest, *observed_at)
             }
-            | WorkTerminalEvidenceV1::Cancelled {
-                evidence_digest,
-                observed_at,
-            } => (evidence_digest, observed_at, false),
         };
-        let expected_ref = format!("runtime-terminal:{}", digest.as_str());
-        if !eligible
-            || selector.cause != WorkRetryCauseV1::RuntimeFailure
-            || selector.evidence_ref != expected_ref
-        {
-            return Err(WorkRetryEvidenceErrorV1::Conflict);
-        }
         Ok(VerifiedWorkRetryFailureV1 {
             selector: selector.clone(),
-            evidence_digest: digest.clone(),
-            observed_at: *observed_at,
+            evidence_digest,
+            observed_at,
         })
     }
 }
@@ -328,6 +344,12 @@ pub struct WorkProductRetryServiceV1<S, E> {
     evidence: E,
 }
 
+#[derive(Clone, Debug)]
+pub struct WorkflowFanOutRetryRebindV1 {
+    pub projection: tracedecay_domain::WorkflowRunProjection,
+    pub binding: WorkflowFanOutAttemptBindingV1,
+}
+
 impl<S, E> WorkProductRetryServiceV1<S, E>
 where
     S: WorkRetryStoragePortV1
@@ -352,6 +374,7 @@ where
         topology: &WorkTopologyPolicyV1,
         command: RetryWorkAttemptCommandV1,
         restarted_at: UtcMicros,
+        workflow_rebind: Option<WorkflowFanOutRetryRebindV1>,
     ) -> Result<WorkRetryAttemptOutcomeV1, ApplicationProblem> {
         admit(context, restarted_at)?;
         if !command.validate() {
@@ -401,6 +424,10 @@ where
                     receipt: replayed.receipt().clone(),
                     attempt,
                 },
+                workflow_rebind: prepare_workflow_rebind(
+                    workflow_rebind.as_ref(),
+                    replayed.receipt(),
+                )?,
             };
             return self
                 .storage
@@ -433,6 +460,7 @@ where
             &product,
             &command,
             restarted_at,
+            failure.observed_at,
             &authority,
             &original,
         )?;
@@ -457,6 +485,7 @@ where
             attempt.identity(),
             product.context.observed_at(),
         )?;
+        let workflow_rebind = prepare_workflow_rebind(workflow_rebind.as_ref(), &receipt)?;
         let admission = WorkProductRetryAdmissionV1 {
             admission: WorkProductAttemptAdmissionV1 {
                 product_context: product.context,
@@ -466,12 +495,98 @@ where
                 concurrency: topology.concurrency.clone(),
             },
             retry: WorkRetryWriteV1 { receipt, attempt },
+            workflow_rebind,
         };
         self.storage
             .admit_retry(&admission)
             .map(|(_, outcome)| outcome)
             .map_err(product_admission_problem)
     }
+}
+
+fn prepare_workflow_rebind(
+    rebind: Option<&WorkflowFanOutRetryRebindV1>,
+    receipt: &WorkRetryReceiptV1,
+) -> Result<Option<WorkflowRunAppendRequest>, ApplicationProblem> {
+    let Some(rebind) = rebind else {
+        return Ok(None);
+    };
+    if rebind.projection.run_id() != &rebind.binding.run_id
+        || rebind
+            .projection
+            .fan_out_plans()
+            .get(&rebind.binding.step_id)
+            .is_none_or(|plan| plan.plan_digest != rebind.binding.plan_digest)
+    {
+        return Err(conflict_problem(
+            "application.work-retry.workflow-binding-conflict",
+            "The workflow child binding no longer matches its admitted plan.",
+        ));
+    }
+    if let Some(event) = rebind
+        .projection
+        .event_by_command_id(&receipt.command.command_id)
+    {
+        let exact_replay = matches!(
+            event.event(),
+            tracedecay_domain::WorkflowRunEventKind::FanOutChildRetryRebound {
+                step_id,
+                prior_attempt,
+                replacement_attempt,
+                retry_receipt_digest,
+                ..
+            } if step_id == &rebind.binding.step_id
+                && prior_attempt == &receipt.command.original_attempt
+                && replacement_attempt == &receipt.new_attempt
+                && retry_receipt_digest == &receipt.owner_receipt_digest
+        );
+        if !exact_replay {
+            return Err(conflict_problem(
+                "application.work-retry.workflow-binding-conflict",
+                "The workflow command identity was already used by another transition.",
+            ));
+        }
+        return Ok(Some(WorkflowRunAppendRequest {
+            expected_sequence: event.sequence().checked_sub(1),
+            event: event.clone(),
+        }));
+    }
+    let planned_attempt = rebind
+        .projection
+        .planned_fan_out_attempt(&receipt.command.original_attempt)
+        .ok_or_else(|| {
+            conflict_problem(
+                "application.work-retry.workflow-binding-conflict",
+                "The original Work attempt is not the active workflow child.",
+            )
+        })?
+        .clone();
+    let event = rebind
+        .projection
+        .next_event(
+            tracedecay_domain::WorkflowRunCommand::RebindFanOutChildRetry {
+                step_id: rebind.binding.step_id.clone(),
+                planned_attempt,
+                prior_attempt: receipt.command.original_attempt.clone(),
+                replacement_attempt: receipt.new_attempt.clone(),
+                retry_receipt_digest: receipt.owner_receipt_digest.clone(),
+            },
+            tracedecay_domain::WorkflowRunEventContext {
+                command_id: receipt.command.command_id.clone(),
+                input_digest: receipt.canonical_input_digest.clone(),
+                occurred_at: receipt.restarted_at,
+            },
+        )
+        .map_err(|_| {
+            conflict_problem(
+                "application.work-retry.workflow-binding-conflict",
+                "The workflow child retry transition is no longer authorized.",
+            )
+        })?;
+    Ok(Some(WorkflowRunAppendRequest {
+        expected_sequence: Some(rebind.projection.sequence()),
+        event,
+    }))
 }
 
 fn require_product_retry_admission(
@@ -528,6 +643,7 @@ fn prepare_product_retry_attempt<S>(
     product: &CurrentWorkProductAttemptGraphV1,
     command: &RetryWorkAttemptCommandV1,
     restarted_at: UtcMicros,
+    recovery_observed_at: UtcMicros,
     authority: &WorkAuthority,
     original: &WorkAttemptV1,
 ) -> Result<WorkAttemptV1, ApplicationProblem>
@@ -599,7 +715,11 @@ where
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::RecoveryRequired {
             source_attempt_id: Some(original.identity().attempt_id().clone()),
-            reason: command.failure.cause.restart_reason(),
+            reason: match original.recovery() {
+                WorkRecoveryStateV1::RecoveryRequired { reason, .. } => *reason,
+                _ => WorkRestartReasonV1::FailureObserved,
+            },
+            observed_at: recovery_observed_at,
         },
         original.requested_route().clone(),
         None,
@@ -619,10 +739,27 @@ fn validate_failure(
             "The resolved failure does not authorize this Work retry.",
         ));
     }
+    if command.failure.cause == WorkRetryCauseV1::RestartRecoveryRequired {
+        let WorkRecoveryStateV1::RecoveryRequired { observed_at, .. } = original.recovery() else {
+            return Err(conflict_problem(
+                "application.work-retry.recovery-conflict",
+                "The original Work attempt no longer requires restart recovery.",
+            ));
+        };
+        if original.state() != WorkAttemptStateV1::RecoveryRequired
+            || observed_at != &failure.observed_at
+        {
+            return Err(conflict_problem(
+                "application.work-retry.recovery-conflict",
+                "The restart recovery evidence no longer matches the original attempt.",
+            ));
+        }
+        return Ok(());
+    }
     let Some(terminal) = original.terminal() else {
         return Err(conflict_problem(
             "application.work-retry.original-not-terminal",
-            "A runtime retry requires terminal failure evidence.",
+            "A runtime failure retry requires terminal evidence.",
         ));
     };
     let (digest, observed_at, eligible) = match terminal {
@@ -820,5 +957,15 @@ mod tests {
         let mut receipt = valid_receipt();
         receipt.command.failure.evidence_ref = "runtime-terminal:other".to_owned();
         assert!(!receipt.validate_for_observation());
+    }
+
+    #[test]
+    fn restart_recovery_selector_requires_the_canonical_owner_reference() {
+        let selector = WorkRetryFailureSelectorV1 {
+            source: WorkRetrySourceV1::Runtime,
+            cause: WorkRetryCauseV1::RestartRecoveryRequired,
+            evidence_ref: "recovery-required".to_owned(),
+        };
+        assert!(selector.validate());
     }
 }

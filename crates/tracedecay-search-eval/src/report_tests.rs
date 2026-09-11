@@ -72,11 +72,16 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
             profile.profile_id, profile.partition, profile.partition
         );
     }
+    // Every recall label above is satisfied, so a non-`Pass` status here is
+    // absent resource evidence, not a measured quality failure. Print the
+    // exact incomplete observation instead of leaving the reader to assume
+    // peak RSS is the only field a host failed to report.
     assert_eq!(
         report.status,
         crate::DirectEvaluationStatusV1::Pass,
         "the checked-in query-fallback baseline must keep passing the labels \
-         activation requires: {}",
+         activation requires: {} profiles={}",
+        report.pending_diagnostic(),
         serde_json::to_string(&report.profiles).expect("serialize profile evaluations")
     );
 
@@ -189,12 +194,26 @@ fn baseline_report_is_self_validating_but_not_activation_evidence() {
     report
         .validate_against(&repo_root, &workload)
         .expect("baseline evidence remains self-validating");
+    // Self-validation and the not-activation-evidence rule are separate
+    // contracts. Incomplete resource evidence refuses at the earlier status
+    // gate and would mask the refusal this test is about, so name it first
+    // with the exact observation the host failed to report.
+    assert_eq!(
+        report.status,
+        crate::DirectEvaluationStatusV1::Pass,
+        "resource evidence is incomplete, so the activation refusal below would \
+         be the status gate rather than the missing native evidence: {}",
+        report.pending_diagnostic()
+    );
     let activation_error = report
         .validate_for_activation(&repo_root, &workload)
         .expect_err("baseline-only report cannot stand in for native activation evidence");
     assert!(
-        activation_error.to_string().contains("native"),
-        "unexpected activation refusal: {activation_error}"
+        activation_error
+            .to_string()
+            .contains("no native current/10x resource evidence"),
+        "a baseline report must be refused for lacking native evidence, not for \
+         any other reason that happens to mention `native`: {activation_error}"
     );
 
     let mut tampered = report.clone();

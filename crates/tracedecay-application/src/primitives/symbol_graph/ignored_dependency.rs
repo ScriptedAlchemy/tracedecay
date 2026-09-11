@@ -41,6 +41,7 @@ impl SymbolGraphPageClaim {
             snapshot: crate::primitives::concrete::SymbolGraphCursorSnapshot::new(
                 temporal,
                 code_generation_id,
+                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
             ),
             offset,
         }

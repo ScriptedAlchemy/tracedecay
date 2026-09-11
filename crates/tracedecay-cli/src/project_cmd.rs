@@ -2,7 +2,6 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
 use tracedecay_contracts::{ProjectRegistryView, render_project_registry_view};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
@@ -10,7 +9,10 @@ use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::cli::ProjectsAction;
-use crate::commands::{ProfileOfflineAuthority, join_outcome_and_restore, take_profile_offline};
+use crate::commands::{
+    ProfileOfflineAuthority, join_outcome_and_restore, take_profile_offline,
+    try_admit_profile_registry,
+};
 
 const MAX_LIMIT: usize = 1_000;
 
@@ -129,8 +131,7 @@ async fn forget_under_profile_offline(
         profile_root,
         "projects forget",
     )?;
-    let Some(registry) = ProfileRegistryMaintenanceRuntime::try_open_existing(profile_root).await?
-    else {
+    let Some(registry) = try_admit_profile_registry(profile_root).await? else {
         return Err(TraceDecayError::Config {
             message: "no profile registry exists; there is nothing to forget".to_string(),
         });
@@ -333,12 +334,26 @@ fn render_project_context_payload(payload: &Value) -> String {
 async fn call_registry_admin(arguments: Value) -> Result<Value> {
     let cwd = std::env::current_dir()?;
     let project_root = tracedecay::config::discover_project_root(&cwd);
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(project_root, None, false, false)?;
+    let (handshake, arguments) = registry_admin_request(project_root, arguments)?;
     let result =
         tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
             .await?;
     tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
+}
+
+fn registry_admin_request(
+    project_root: Option<PathBuf>,
+    mut arguments: Value,
+) -> Result<(tracedecay_daemon_protocol::DaemonHandshake, Value)> {
+    if let Some(project_root) = project_root
+        && let Some(arguments) = arguments.as_object_mut()
+    {
+        arguments
+            .entry("project_arg")
+            .or_insert_with(|| json!(project_root));
+    }
+    let handshake = tracedecay::daemon::handshake_for_current_client(None, None, false, false)?;
+    Ok((handshake, arguments))
 }
 
 /// Renders the plain-text `projects context` view. Deliberately omits
@@ -410,6 +425,20 @@ mod tests {
 
     const CREDENTIAL_REMOTE_URL: &str =
         "https://user:sekret-token@github.com/example/private-repo.git";
+
+    #[test]
+    fn registry_admin_request_is_projectless_and_carries_cwd_project() {
+        crate::product_runtime::register_for_tests();
+        let project_root = PathBuf::from("/repo");
+        let (handshake, arguments) = registry_admin_request(
+            Some(project_root.clone()),
+            json!({ "action": "registry_list", "limit": 10, "query": null }),
+        )
+        .unwrap();
+
+        assert_eq!(handshake.project_path, None);
+        assert_eq!(arguments["project_arg"], json!(project_root));
+    }
 
     fn context_with_credential_remote() -> ProjectRegistryContext {
         ProjectRegistryContext {

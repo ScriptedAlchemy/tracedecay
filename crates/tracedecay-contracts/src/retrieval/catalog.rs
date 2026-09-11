@@ -28,18 +28,20 @@ use crate::retrieval::primitive_surface::{
 use crate::retrieval::requests::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
     DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
-    FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, HealthDeltaRequest,
-    HealthDeltaResult, HealthReadRequest, HealthReadResult, ModuleApiPrimitiveRequest,
-    ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
-    SessionLookupRequest, SessionLookupResult, SourceBodyPrimitiveRequest,
-    SourceBodyPrimitiveResult, SourceLinesRequest, SourceLinesResult,
+    HealthDeltaRequest, HealthDeltaResult, HealthReadRequest, HealthReadResult,
+    ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult, QualifiedNamePrimitiveRequest,
+    QualifiedNamePrimitiveResult, SessionLookupRequest, SessionLookupResult,
+    SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceLinesRequest, SourceLinesResult,
     SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest,
     StorageStatusPrimitiveResult,
 };
 use crate::retrieval::symbol_graph::{
-    CodeSymbolSearchSurfaceRequestV1, GraphRelationRequest, ImplementationsRequest,
-    SignatureSearchRequest, SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord,
-    TypeHierarchyRecord, TypeHierarchyRequest,
+    SymbolGraphPage, SymbolPrimitiveRecord, SymbolRelationRecord, TypeHierarchyRecord,
+};
+use crate::surface_contracts::{
+    CodeCallersSurfaceRequest, CodeImplementationsSurfaceRequest,
+    CodeSignatureSearchSurfaceRequest, CodeSymbolSearchSurfaceRequest,
+    CodeTypeHierarchySurfaceRequest,
 };
 use crate::{current_application_bindings, current_bindings};
 
@@ -143,7 +145,7 @@ fn primitive_lsp_methods(operation: &str) -> &'static [&'static str] {
     }
 }
 
-const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 27] = [
+const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     primitive_spec("code_signature_search"),
     primitive_spec("code_implementations"),
     primitive_spec("code_type_hierarchy"),
@@ -166,7 +168,6 @@ const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 27] = [
     primitive_spec("source_body"),
     primitive_spec("source_outline"),
     primitive_spec("module_api"),
-    primitive_spec("file_metadata"),
     primitive_spec("health_read"),
     primitive_spec("health_delta"),
     primitive_spec("storage_status"),
@@ -280,7 +281,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             })
             .sum(),
     );
-    for spec in &PRIMITIVE_READ_SPECS {
+    for spec in PRIMITIVE_READ_SPECS {
         let capability_id = CapabilityId::new(format!(
             "capability.application.primitive.{}",
             spec.capability.replace('_', "-")
@@ -386,8 +387,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
 /// The registered pairs are exactly the types the daemon parses and returns
 /// for these operations: the retrieval reads bind their
 /// `crate::retrieval::requests` pairs, and the symbol-graph reads bind the
-/// request each [`crate::retrieval::SymbolGraphPrimitivePort`] method
-/// validates against the [`SymbolGraphPage`] payload it returns, so the
+/// transport DTOs against the [`SymbolGraphPage`] payloads they return, so the
 /// generated SDKs cannot describe a shape the surface does not speak.
 fn primitive_executable_schemas(
     contribution: &CatalogContributionV1,
@@ -398,7 +398,7 @@ fn primitive_executable_schemas(
             schemas.push(primitive_executable_schema::<$request, SymbolGraphPage<$item>>(
                 contribution,
                 $operation,
-                concat!("tracedecay_contracts::retrieval::", stringify!($request)),
+                concat!("tracedecay_contracts::surface_contracts::", stringify!($request)),
                 concat!(
                     "tracedecay_contracts::retrieval::SymbolGraphPage<tracedecay_contracts::retrieval::",
                     stringify!($item),
@@ -450,11 +450,6 @@ fn primitive_executable_schemas(
         ModuleApiPrimitiveResult
     );
     add!(
-        "file_metadata",
-        FileMetadataPrimitiveRequest,
-        FileMetadataPrimitiveResult
-    );
-    add!(
         "storage_status",
         StorageStatusPrimitiveRequest,
         StorageStatusPrimitiveResult
@@ -466,22 +461,22 @@ fn primitive_executable_schemas(
     );
     add!(
         "code_signature_search",
-        SignatureSearchRequest,
+        CodeSignatureSearchSurfaceRequest,
         SymbolGraphPage<SymbolPrimitiveRecord>
     );
     add!(
         "code_implementations",
-        ImplementationsRequest,
+        CodeImplementationsSurfaceRequest,
         SymbolGraphPage<SymbolRelationRecord>
     );
     add!(
         "code_type_hierarchy",
-        TypeHierarchyRequest,
+        CodeTypeHierarchySurfaceRequest,
         SymbolGraphPage<TypeHierarchyRecord>
     );
     add!(
         "code_callers",
-        GraphRelationRequest,
+        CodeCallersSurfaceRequest,
         SymbolGraphPage<SymbolRelationRecord>
     );
     add!("context", ContextSurfaceRequestV1, ContextResultV1);
@@ -571,8 +566,9 @@ pub fn symbol_search_handler_descriptor()
 
 /// Catalog contribution for the declared symbol-search use case.
 ///
-/// Root composition remains outside this crate; the contribution declares
-/// transport bindings but has no dispatch, storage, or transport side effect.
+/// The contribution declares transport bindings but has no dispatch, storage,
+/// or transport side effect; binding them to the canonical dispatcher stays in
+/// `tracedecay-daemon-service`.
 pub fn symbol_search_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
     let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
     let request_schema = symbol_search_request_schema()?;
@@ -699,11 +695,11 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         },
     )?;
     let schemas = vec![ExecutableSchemaAuthority::for_types_at_paths::<
-        CodeSymbolSearchSurfaceRequestV1,
+        CodeSymbolSearchSurfaceRequest,
         SymbolGraphPage<SymbolPrimitiveRecord>,
     >(
         &manifest,
-        "tracedecay_contracts::retrieval::CodeSymbolSearchSurfaceRequestV1",
+        "tracedecay_contracts::surface_contracts::CodeSymbolSearchSurfaceRequest",
         "tracedecay_contracts::retrieval::SymbolGraphPage<tracedecay_contracts::retrieval::SymbolPrimitiveRecord>",
     )?];
     Ok(contribution.with_executable_schemas(schemas)?)

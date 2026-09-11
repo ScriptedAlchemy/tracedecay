@@ -3,8 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use tracedecay_domain::errors::Result;
-
-use super::log_daemon_event;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 #[hotpath::measure(label = "daemon.project.compose.join_sessions", future = true)]
 pub(super) async fn join_independent_session_opens<Project, Profile, ProjectOpen, ProfileOpen>(

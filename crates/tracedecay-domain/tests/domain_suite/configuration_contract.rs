@@ -4,10 +4,9 @@ use tracedecay_domain::configuration::{
     AccessRuleId, AuthorityRef, CapabilityResolutionContextV1, ConfigurationGrantId,
     ConfigurationGrantReceiptId, ConfigurationIdempotencyKey, ConfigurationMutationEffectV1,
     ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
-    ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationSettlementAuthorityV1,
-    CredentialKindV1, CredentialReferenceId, CredentialReferenceMetadataV1, RuleEffect,
-    ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding, SourceBindingId, SourceKindV1,
-    UserProfileId, resolve_restrictive_capabilities,
+    ConfigurationMutationSinkV1, ConfigurationRevisionId, RuleEffect, ScopeAccessRule,
+    ScopeAccessSubjectV1, ScopeSourceBinding, SourceBindingId, SourceKindV1, UserProfileId,
+    resolve_restrictive_capabilities,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, CapabilityId, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
@@ -96,32 +95,6 @@ fn deny_rules_union_before_allow_rules_intersect() {
     assert_eq!(result.effective, BTreeSet::from([read]));
 }
 
-#[test]
-fn credential_metadata_has_no_plaintext_value_surface() {
-    let reference = CredentialReferenceMetadataV1 {
-        reference_id: id::<CredentialReferenceId>("credential.reference"),
-        kind: CredentialKindV1::ApiToken,
-        reference_digest: digest('c'),
-        operation_digest: digest('d'),
-        settlement_authority: ConfigurationSettlementAuthorityV1 {
-            policy_epoch: 1,
-            policy_digest: id::<AccessPolicyDigest>(&format!("sha256:{}", "e".repeat(64))),
-            revalidated_at: UtcMicros(42),
-        },
-        created_at: UtcMicros(42),
-        effective_deadline_at: UtcMicros(84),
-        rotation: 1,
-    };
-    reference.validate().unwrap();
-
-    let encoded = serde_json::to_value(reference).unwrap();
-    assert!(encoded.get("value").is_none());
-    assert!(encoded.get("plaintext").is_none());
-    assert!(encoded.get("secret").is_none());
-    assert!(encoded.get("reference_digest").is_some());
-    assert!(encoded.get("operation_digest").is_some());
-}
-
 fn mutation_receipt() -> ConfigurationMutationGrantReceiptV1 {
     ConfigurationMutationGrantReceiptV1::issue(
         id::<ConfigurationGrantReceiptId>("configuration.grant-receipt.fixture"),
@@ -161,11 +134,11 @@ fn mutation_receipt_rejects_expiry_and_binding_replay() {
         receipt
             .validate_for(
                 &receipt.actor_id,
-                ConfigurationMutationOperationV1::CredentialWrite,
+                ConfigurationMutationOperationV1::ProtectedApply,
                 &receipt.scope_digest,
                 &receipt.expected_configuration_revision,
-                ConfigurationMutationSinkV1::CredentialStore,
-                ConfigurationMutationEffectV1::WriteCredentialReference,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
                 UtcMicros(19),
             )
             .is_err()

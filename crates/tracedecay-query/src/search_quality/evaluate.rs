@@ -740,11 +740,17 @@ fn ndcg_at_10_ppm(
     if anchors.is_empty() {
         return 0;
     }
-    let dcg = candidates
+    // Recall and ideal gain count labelled targets, not rows. Multiple
+    // occurrences or aliases of one target must not earn repeated gain.
+    let anchors = anchors.iter().collect::<BTreeSet<_>>();
+    let dcg = anchors
         .iter()
-        .enumerate()
-        .filter(|(_, candidate)| candidate_matches_any_anchor(candidate, anchors))
-        .map(|(index, _)| 1.0 / ((index + 2) as f64).log2())
+        .filter_map(|anchor| {
+            candidates
+                .iter()
+                .position(|candidate| candidate_matches_anchor(candidate, anchor))
+        })
+        .map(|index| 1.0 / ((index + 2) as f64).log2())
         .sum::<f64>();
     let ideal = (0..anchors.len().min(10))
         .map(|index| 1.0 / ((index + 2) as f64).log2())
@@ -968,8 +974,12 @@ fn resource_sample_verdict(
     }
     match sample.status {
         ResourceMeasurementStatusV1::Measured => {
+            // A zero high-water mark is not a measurement: every supported
+            // sampler reports a positive peak for a process that ran queries,
+            // so `Some(0)` is an unavailable observation wearing a measured
+            // label. Reject it here rather than let it pass as evidence.
             if sample.pending_reason.is_some()
-                || sample.peak_rss_bytes.is_none()
+                || !sample.peak_rss_bytes.is_some_and(|bytes| bytes > 0)
                 || sample.measured_queries != expected_queries
                 || sample.latency_samples_us.is_empty()
             {
@@ -1064,10 +1074,18 @@ fn pairwise_candidate_evaluation(
             .saturating_sub(baseline_natural.ndcg_at_10_ppm)
             < REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
         {
+            // A lexical baseline already at the metric ceiling leaves no
+            // room to demonstrate gain; name that so a small corpus is not
+            // mistaken for a semantic quality regression.
+            let saturated = if u64::from(baseline_natural.ndcg_at_10_ppm) >= METRIC_SCALE_PPM {
+                " (lexical baseline is saturated on this corpus; semantic gain cannot be demonstrated here)"
+            } else {
+                ""
+            };
             return (
                 DirectEvaluationStatusV1::Fail,
                 Some(format!(
-                    "pairwise candidate quality failed: profile={} partition={} stratum=natural_language metric=ndcg_at_10_ppm baseline={} candidate={} required_gain={}",
+                    "pairwise candidate quality failed: profile={} partition={} stratum=natural_language metric=ndcg_at_10_ppm baseline={} candidate={} required_gain={}{saturated}",
                     candidate.profile_id,
                     candidate.partition,
                     baseline_natural.ndcg_at_10_ppm,
@@ -1357,6 +1375,46 @@ mod tests {
     }
 
     #[test]
+    fn ndcg_credits_each_label_once_despite_distinct_candidate_aliases() {
+        let query = query("aliases", "natural_language", &["a", "b", "c"]);
+        let mut candidates = (0..5)
+            .map(|index| {
+                let mut candidate = ranked(&format!("symbol-{index}"));
+                candidate.anchors.push("a".to_owned());
+                candidate
+            })
+            .collect::<Vec<_>>();
+        let repeated = evaluate_query(&query, &row("aliases", candidates.clone())).unwrap();
+        assert_eq!(repeated.quality.recall_at_10.numerator, 1);
+        assert_eq!(repeated.quality.duplicate_rate.numerator, 0);
+        assert_eq!(repeated.quality.ndcg_at_10_ppm, 469_279);
+
+        // Adding genuinely new labelled evidence earns gain at its real rank;
+        // extra aliases of the first label did not move its first occurrence.
+        candidates.push(ranked("b"));
+        candidates.push(ranked("c"));
+        let covered = evaluate_query(&query, &row("aliases", candidates)).unwrap();
+        assert_eq!(covered.quality.recall_at_10.numerator, 3);
+        assert!(covered.quality.ndcg_at_10_ppm > repeated.quality.ndcg_at_10_ppm);
+        assert!(covered.quality.ndcg_at_10_ppm < 1_000_000);
+
+        let ideal = evaluate_query(
+            &query,
+            &row("aliases", vec![ranked("a"), ranked("b"), ranked("c")]),
+        )
+        .unwrap();
+        assert_eq!(ideal.quality.ndcg_at_10_ppm, 1_000_000);
+
+        // One row can satisfy multiple labelled targets; each earns its first
+        // gain at that row, rather than being lost to binary row relevance.
+        let mut composite = ranked("composite");
+        composite.anchors = vec!["a".to_owned(), "b".to_owned()];
+        let multiple = evaluate_query(&query, &row("aliases", vec![composite])).unwrap();
+        assert_eq!(multiple.quality.recall_at_10.numerator, 2);
+        assert_eq!(multiple.quality.ndcg_at_10_ppm, 938_557);
+    }
+
+    #[test]
     fn candidate_without_pairwise_natural_language_gain_fails() {
         for profile_id in [SEMANTIC_PROFILE, RERANK_PROFILE] {
             let baseline = passing_profile(QUERY_BASELINE_PROFILE, 500_000, 1_000_000);
@@ -1374,6 +1432,21 @@ mod tests {
                 Some(expected.as_str())
             );
         }
+    }
+
+    #[test]
+    fn saturated_baseline_names_why_gain_cannot_be_demonstrated() {
+        let baseline = passing_profile(QUERY_BASELINE_PROFILE, 1_000_000, 1_000_000);
+        let candidate = passing_profile(SEMANTIC_PROFILE, 1_000_000, 1_000_000);
+
+        assert_eq!(
+            aggregate_profile_status(&[baseline.clone(), candidate.clone()]),
+            super::DirectEvaluationStatusV1::Fail
+        );
+        let diagnostic = super::pairwise_candidate_failure_diagnostic(&[baseline, candidate])
+            .expect("saturated baseline still refuses activation");
+        assert!(diagnostic.contains("baseline=1000000 candidate=1000000 required_gain=1"));
+        assert!(diagnostic.contains("lexical baseline is saturated"));
     }
 
     #[test]
@@ -1494,6 +1567,40 @@ mod tests {
         assert_eq!(
             super::resource_sample_verdict(&measured, 3),
             Some(super::DirectEvaluationStatusV1::Pass)
+        );
+    }
+
+    /// A host that cannot report peak RSS must stay `Pending`; it must never
+    /// arrive as a measured zero. Every sampler filters its own non-positive
+    /// reading, so a zero reaching the evaluator is an unavailable observation
+    /// relabelled as evidence, and the verdict refuses it.
+    #[test]
+    fn a_zero_peak_rss_is_not_a_measurement() {
+        let zero = resource_sample(
+            ResourceMeasurementStatusV1::Measured,
+            Some(0),
+            vec![10, 20, 30],
+            None,
+        );
+        assert_eq!(
+            super::resource_sample_verdict(&zero, 3),
+            None,
+            "a zero peak RSS must not reach the report as passing resource evidence"
+        );
+
+        // The same unavailable reading, honestly typed, is still evidence.
+        let honest = resource_sample(
+            ResourceMeasurementStatusV1::Pending,
+            None,
+            vec![10, 20, 30],
+            Some(
+                "Windows peak_rss_bytes is unavailable because K32GetProcessMemoryInfo returned \
+                 zero PeakWorkingSetSize",
+            ),
+        );
+        assert_eq!(
+            super::resource_sample_verdict(&honest, 3),
+            Some(super::DirectEvaluationStatusV1::Pending)
         );
     }
 }

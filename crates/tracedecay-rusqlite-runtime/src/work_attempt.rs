@@ -327,15 +327,17 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         &self,
         authority: &WorkAuthority,
     ) -> Result<Vec<WorkAttemptV1>, WorkAttemptStorageError> {
-        let rows = registered_work_query(
-            self.handle(),
-            "SELECT attempt_payload FROM work_attempts_v1
-             WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-               AND actor_id = ?4 AND policy_digest = ?5 AND terminal = 0
-             ORDER BY task_id, run_id, attempt_id",
-            authority_params_owned(authority),
-        )
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        let sql = format!(
+            "SELECT attempt.attempt_payload FROM work_attempts_v1 AS attempt
+             WHERE attempt.project_id = ?1 AND attempt.repository_id = ?2
+               AND attempt.worktree_id = ?3 AND attempt.actor_id = ?4
+               AND attempt.policy_digest = ?5
+               AND {}
+             ORDER BY attempt.task_id, attempt.run_id, attempt.attempt_id",
+            crate::work::ACTIVE_ATTEMPT_PREDICATE
+        );
+        let rows = registered_work_query(self.handle(), &sql, authority_params_owned(authority))
+            .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         rows.rows
             .into_iter()
             .map(|row| {
@@ -354,12 +356,16 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         repository_id: &RepositoryId,
         worktree_id: &WorktreeId,
     ) -> Result<bool, WorkAttemptStorageError> {
+        let sql = format!(
+            "SELECT attempt.task_id FROM work_attempts_v1 AS attempt
+             WHERE attempt.project_id = ?1 AND attempt.repository_id = ?2
+               AND attempt.worktree_id = ?3 AND {}
+             LIMIT 1",
+            crate::work::ACTIVE_ATTEMPT_PREDICATE
+        );
         let rows = registered_work_query(
             self.handle(),
-            "SELECT task_id FROM work_attempts_v1
-             WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-               AND terminal = 0
-             LIMIT 1",
+            &sql,
             vec![
                 ExactSqlValue::Text(project_id.as_str().to_owned()),
                 ExactSqlValue::Text(repository_id.as_str().to_owned()),

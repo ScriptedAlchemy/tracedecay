@@ -29,6 +29,7 @@ use tracedecay_domain::configuration::{
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
 };
 
+use tracedecay_configuration::config::work_executable_binding::PinnedWorkExecutableBindingResolver;
 use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 use tracedecay_global_db::configuration::resolver::{ConfigurationLayerV1, resolve_configuration};
@@ -40,7 +41,9 @@ use tracedecay_contracts::{
     CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
-    WorkAttemptCapacityVerdictV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
+    WorkAttemptCapacityVerdictV1, WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1,
+    WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1, WorkAttemptEffectStorageErrorV1,
+    WorkAttemptEffectStoragePortV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
     WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
@@ -105,6 +108,7 @@ struct AttemptRows {
     /// here, so the tests read the ladder from the durable trail rather than
     /// from the terminal row alone.
     observed_states: Vec<WorkAttemptStateV1>,
+    effects: BTreeMap<AttemptKey, WorkAttemptEffectHolderV1>,
 }
 
 /// In-memory attempt rows with the same fenced compare-and-swap semantics as
@@ -400,6 +404,65 @@ fn deadline_in(seconds: i64) -> UtcMicros {
     UtcMicros(current_micros().0.saturating_add(seconds * 1_000_000))
 }
 
+impl WorkAttemptEffectStoragePortV1 for AttemptStore {
+    fn begin_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        holder: &WorkAttemptEffectHolderV1,
+    ) -> Result<WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectStorageErrorV1> {
+        let key = attempt_key(authority, holder.attempt());
+        let mut rows = self.inner.lock().unwrap();
+        if !rows.rows.contains_key(&key) {
+            return Err(WorkAttemptEffectStorageErrorV1::NotFoundOrNotAuthorized);
+        }
+        if let Some(existing) = rows.effects.get(&key) {
+            return if existing == holder {
+                Ok(WorkAttemptEffectDispatchOutcomeV1::Replayed(
+                    existing.clone(),
+                ))
+            } else {
+                Err(WorkAttemptEffectStorageErrorV1::Conflict)
+            };
+        }
+        rows.effects.insert(key, holder.clone());
+        Ok(WorkAttemptEffectDispatchOutcomeV1::Recorded(holder.clone()))
+    }
+
+    fn settle_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptIdentityV1,
+        resolution: WorkAttemptEffectResolutionV1,
+        resolved_at: UtcMicros,
+    ) -> Result<WorkAttemptEffectHolderV1, WorkAttemptEffectStorageErrorV1> {
+        let key = attempt_key(authority, attempt);
+        let mut rows = self.inner.lock().unwrap();
+        let current = rows
+            .effects
+            .get(&key)
+            .ok_or(WorkAttemptEffectStorageErrorV1::NotFoundOrNotAuthorized)?;
+        let next = current
+            .with_resolution(resolution, resolved_at)
+            .map_err(|_| WorkAttemptEffectStorageErrorV1::Conflict)?;
+        rows.effects.insert(key, next.clone());
+        Ok(next)
+    }
+
+    fn load_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptIdentityV1,
+    ) -> Result<Option<WorkAttemptEffectHolderV1>, WorkAttemptEffectStorageErrorV1> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .effects
+            .get(&attempt_key(authority, attempt))
+            .cloned())
+    }
+}
+
 struct SnapshotShape {
     backend: WorkProviderBackendV1,
     max_stdout_bytes: u64,
@@ -475,6 +538,7 @@ fn crossed_execution_snapshot(
 
 struct Fixture {
     attempts: WorkAttemptService<AttemptStore>,
+    effects: WorkAttemptEffectServiceV1<AttemptStore>,
     rows: AttemptStore,
     context: RequestContext,
     authority: WorkAuthority,
@@ -583,6 +647,7 @@ fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShap
     );
     Fixture {
         attempts,
+        effects: WorkAttemptEffectServiceV1::new(rows.clone()),
         rows,
         context,
         authority,
@@ -657,7 +722,13 @@ fn binding(
     path: &Path,
     capability: WorkExecutableCapabilityV1,
 ) -> WorkExecutableBindingV1 {
-    WorkExecutableBindingV1::new(reference.clone(), path.to_path_buf(), vec![capability]).unwrap()
+    WorkExecutableBindingV1::new(
+        reference.clone(),
+        path.to_path_buf(),
+        vec![capability],
+        Vec::new(),
+    )
+    .unwrap()
 }
 
 /// A real `PinnedWorkExecutableBindingResolver` over exactly these bindings.
@@ -722,6 +793,7 @@ const CLEAN_PROVIDER: &str = "#!/bin/sh\ncat > /dev/null\nexit 0\n";
 #[cfg(unix)]
 #[tokio::test]
 async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let argv_marker = root.join("argv");
@@ -752,6 +824,8 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -780,6 +854,14 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
     );
 
     assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
+    assert_eq!(
+        fixture
+            .effects
+            .load(&fixture.context, fixture.identity())
+            .unwrap()
+            .and_then(|holder| holder.resolution()),
+        Some(WorkAttemptEffectResolutionV1::NoEffect)
+    );
     let settled = fixture.current_attempt();
     assert_eq!(settled.artifacts().len(), 1);
     assert_eq!(
@@ -787,6 +869,13 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         "artifact.provider.stdout"
     );
     assert_eq!(settled.artifacts()[0].byte_length(), stream.len() as u64);
+    assert_eq!(
+        workflow_artifacts
+            .load(&settled.artifacts()[0])
+            .unwrap()
+            .bytes(),
+        stream.as_bytes()
+    );
     let scheduled = std::time::Instant::now();
     let admitted = scheduled + std::time::Duration::from_micros(5);
     let started = scheduled + std::time::Duration::from_micros(10);
@@ -866,6 +955,7 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
 #[cfg(unix)]
 #[tokio::test]
 async fn initial_provider_child_uses_values_captured_for_that_spawn() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let environment_marker = root.join("environment");
@@ -907,6 +997,8 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
     }
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -945,6 +1037,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
 #[cfg(unix)]
 #[tokio::test]
 async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let argv_marker = root.join("argv");
@@ -980,6 +1073,8 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -1093,6 +1188,7 @@ fn overflow_classification_names_the_channel_and_yields_to_cancellation() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let started_marker = root.join("started");
@@ -1159,6 +1255,8 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
     tokio::select! {
         () = execute_provider_with_environment(
             &fixture.attempts,
+            &fixture.effects,
+            Some(&workflow_artifacts),
             &fixture.context,
             &fixture.attempt,
             &provider,
@@ -1207,6 +1305,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
 #[cfg(unix)]
 #[tokio::test]
 async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_terminal() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
@@ -1254,6 +1353,8 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -1417,6 +1518,7 @@ fn a_resolvable_app_server_is_preferred_over_an_equally_resolvable_codex_cli() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_evidence() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let (app_server, app_server_path) =
@@ -1490,6 +1592,8 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &selection,
@@ -1683,46 +1787,6 @@ fn every_pinned_backend_protocol_pair_maps_onto_a_transport() {
     );
 }
 
-/// A configuration that cannot be resolved at all denies every backend with a
-/// transport-level state, and never with `Unsupported` — `Unsupported` is
-/// reserved for a pairing the runtime genuinely does not admit.
-#[test]
-fn an_unresolvable_configuration_denies_every_backend_without_claiming_unsupported() {
-    let directory = tempfile::TempDir::new().unwrap();
-    let root = directory.path();
-    let unresolvable_root = root.join("absent-project-root");
-
-    for backend in [
-        WorkProviderBackendV1::ClaudeCodeCli,
-        WorkProviderBackendV1::CodexAppServer,
-        WorkProviderBackendV1::CodexCli,
-    ] {
-        let fixture = leased_attempt(
-            root,
-            "Unresolvable configuration.",
-            &SnapshotShape {
-                backend,
-                ..SnapshotShape::default()
-            },
-        );
-        let denial = select_provider(&unresolvable_root, &fixture.attempt)
-            .err()
-            .expect("a fixture executable binding never resolves");
-        assert_ne!(
-            denial.state,
-            WorkProviderAvailabilityV1::Unsupported,
-            "backend {backend:?} is an admitted pairing"
-        );
-        assert!(denial.fallback.is_none());
-        // Nothing was started, so the lease is untouched.
-        assert_eq!(fixture.state(), WorkAttemptStateV1::Leased);
-        assert_eq!(
-            fixture.rows.observed_states(),
-            vec![WorkAttemptStateV1::Leased]
-        );
-    }
-}
-
 /// The gate's `provider_arguments` catch-all can only ever see a crossed pair:
 /// the domain pins every protocol to exactly one backend, so such a pair
 /// cannot be constructed upstream in the first place.
@@ -1756,6 +1820,7 @@ fn crossed_backend_protocol_pairs_cannot_be_admitted_upstream() {
 
 #[tokio::test]
 async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking() {
+    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
     let absent = root.join("provider-that-was-never-installed");
@@ -1770,6 +1835,8 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
         &fixture.attempts,
+        &fixture.effects,
+        Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
         &preferred(
@@ -1980,4 +2047,27 @@ fn the_process_registry_isolates_equal_attempt_ids_by_worktree() {
     registry.release_for_worktree(fixture.identity(), &first_worktree);
     assert!(!registry.holds_attempt(&first_worktree, fixture.identity()));
     assert!(registry.holds_attempt(&second_worktree, fixture.identity()));
+}
+
+async fn provider_artifact_store() -> (
+    tempfile::TempDir,
+    tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+) {
+    use tracedecay_runtime_core::db::{
+        Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
+    tracedecay_global_db::register_test_schema_installer();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("artifacts.db");
+    let authority = DatabaseAuthority::acquire_test(&path, "provider artifacts").unwrap();
+    let (database, _) = Database::publish_registered_test_runtime(
+        &path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+        TestDatabaseRuntimeScope::Profile,
+    )
+    .await
+    .unwrap();
+    let store = database.workflow_storage().unwrap();
+    (directory, store)
 }

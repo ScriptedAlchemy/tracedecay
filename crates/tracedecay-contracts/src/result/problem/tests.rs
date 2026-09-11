@@ -1,3 +1,5 @@
+use tracedecay_domain::errors::TraceDecayError;
+
 use super::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemKind,
     ApplicationUnavailableClassV1, CancellationStage, LegalAction, ProblemTerminality,
@@ -141,6 +143,31 @@ fn unavailable_and_execution_failure_classes_cannot_change_admission_semantics()
     authority_wire["classification"] = serde_json::json!("backend_unavailable");
     authority_wire["retry"] = serde_json::json!("after_delay");
     assert!(serde_json::from_value::<ApplicationProblem>(authority_wire).is_err());
+}
+
+#[test]
+fn application_problem_converts_to_typed_trace_decay_error() {
+    let denied = ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never);
+    let denied_error = TraceDecayError::from(denied);
+    let (reason_code, retryable, _) = denied_error
+        .project_route_context()
+        .expect("denial stays a project-route error");
+    assert_eq!(reason_code, "not_found_or_not_authorized");
+    assert!(!retryable);
+
+    let warming = ApplicationProblem::unavailable(
+        SafeDiagnostic::new(
+            "application.surface.unavailable",
+            "The project runtime for this operation is still mounting",
+        )
+        .expect("fixture diagnostic is valid"),
+    );
+    let warming_error = warming.into_trace_decay_error();
+    let (reason_code, retryable, _) = warming_error
+        .project_route_context()
+        .expect("warming stays a project-route error");
+    assert_eq!(reason_code, "application.surface.unavailable");
+    assert!(retryable);
 }
 
 #[test]

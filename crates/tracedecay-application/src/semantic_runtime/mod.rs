@@ -17,6 +17,7 @@ mod graph_provider;
 mod owner;
 mod ports;
 mod production;
+mod project_open;
 mod publish_failure_memo;
 mod redundancy;
 mod retention;
@@ -93,8 +94,9 @@ pub use production::{
 };
 pub use production::{
     PreparedProductionSemanticRuntimeCommitV1, PreparedSemanticEvaluationGenerationV1,
-    ProductionSemanticRuntimeV1, SavedCodeGenerationScheduleHookV1,
-    SavedGenerationScheduleHookParametersV1, SemanticCompatibleCurrentGenerationSnapshotV1,
+    ProductionSemanticRuntimeV1, RetiredProjectSemanticRuntimeV1,
+    SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleHookParametersV1,
+    SavedGenerationScheduleOutcomeV1, SemanticCompatibleCurrentGenerationSnapshotV1,
     SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationLifecycleVerificationV1,
     SemanticEvaluationPublicationLeaseV1, SemanticVectorPublicationLeaseV1,
     SemanticVerifiedEvaluationTargetSnapshotV1, lifecycle_to_runtime_state,
@@ -104,6 +106,9 @@ pub use production::{
     register_project_semantic_runtime, resolve_project_semantic_runtime_status,
     resolve_semantic_application_status, unbind_project_semantic_cache_if_current,
     unregister_project_semantic_runtime,
+};
+pub use project_open::{
+    InitialSemanticActivationRestoreV1, classify_initial_semantic_activation_restore,
 };
 pub use publish_failure_memo::{
     DEFAULT_PUBLISH_FAILURE_BACKOFF_BASE, DEFAULT_PUBLISH_FAILURE_BACKOFF_CEILING,

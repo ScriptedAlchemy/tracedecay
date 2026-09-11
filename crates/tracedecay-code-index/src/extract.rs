@@ -12,12 +12,15 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_code_extraction::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
+use tracedecay_code_extraction::{
+    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1,
+    SchemaEvidenceIssueV1,
+};
 use tracedecay_domain::{
-    CodeGenerationId, ComplexityAnalysisV1, ContentDigest, Edge, ExtractionResult,
-    ExtractorRevision, FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision,
-    LanguageDescriptorV1, LanguageId, ManifestDigest, Node, SourceSpan, UnresolvedRef,
-    ValidatedCodeFileV1, Visibility, canonical_sha256,
+    CodeGenerationId, ComplexityAnalysisV1, ContentDigest, Edge, ExtractorRevision,
+    FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageDescriptorV1,
+    LanguageId, ManifestDigest, Node, SourceSpan, UnresolvedRef, ValidatedCodeFileV1, Visibility,
+    canonical_sha256,
 };
 
 use super::{
@@ -297,73 +300,6 @@ impl TreeSitterExtractor {
             )
         })
     }
-
-    /// Typed evidence for one file whose bounded retained parse exceeded its
-    /// per-file budget.
-    ///
-    /// The batch truthfully reports [`ParseOutcomeV1::TimedOut`] with zero
-    /// parsed bytes, every byte unsupported, and no parser rows, so the
-    /// chunker records the file as an unsupported document with a reason and
-    /// the rest of the generation still builds and publishes. Nothing here
-    /// invents structure: the digests cover the (empty) rows this parse
-    /// actually produced.
-    pub(crate) fn extract_parse_timed_out(
-        &self,
-        file: &ReceiptBoundCodeFileV1,
-        descriptor: &LanguageDescriptorV1,
-    ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-        let authority = file.authority().clone();
-        let file = file.validated_file();
-        validate_descriptor(file, descriptor)?;
-        let artifact = ExtractionArtifactV1 {
-            result: ExtractionResult {
-                nodes: Vec::new(),
-                edges: Vec::new(),
-                unresolved_refs: Vec::new(),
-                errors: Vec::new(),
-                duration_ms: 0,
-            },
-            imports: Vec::new(),
-        };
-        let file_len = file.sanitized_bytes.len() as u64;
-        let unsupported_ranges = if file_len > 0 {
-            vec![SourceSpan {
-                start_byte: 0,
-                end_byte: file_len,
-            }]
-        } else {
-            Vec::new()
-        };
-        let rows_digest = rows_digest(file, descriptor, &artifact)?;
-        let parser_import_rows_digest = parser_import_rows_digest(&artifact.imports)?;
-        Ok(ExtractedCodeFileV1 {
-            authority,
-            batch: ExtractionBatchV1 {
-                generation_id: file.generation_id.clone(),
-                file_occurrence_id: file.file.file_occurrence_id.clone(),
-                language: descriptor.language.clone(),
-                descriptor_revision: descriptor.descriptor_revision.clone(),
-                grammar_revision: descriptor.grammar_revision.clone(),
-                extractor_revision: descriptor.extractor_revision.clone(),
-                content_digest: file.file.content_digest.clone(),
-                parse_outcome: ParseOutcomeV1::TimedOut,
-                parsed_ranges: Vec::new(),
-                error_ranges: Vec::new(),
-                unsupported_ranges,
-                coverage: ExtractionCoverageV1 {
-                    parsed_bytes: 0,
-                    error_bytes: 0,
-                    unsupported_bytes: file_len,
-                    symbols_extracted: 0,
-                    relations_extracted: 0,
-                    ambiguity_count: 0,
-                },
-                parser_import_rows_digest,
-                rows_digest,
-            },
-            parse_artifact: artifact,
-        })
-    }
 }
 
 impl Default for TreeSitterExtractor {
@@ -526,6 +462,8 @@ fn rows_digest(
         grammar_revision: &'a str,
         extractor_revision: &'a str,
         imports: Vec<ExtractedImportEvidenceV1>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema_evidence: Option<&'a ExtractedSchemaEvidenceV1>,
         nodes: Vec<CanonicalNodeRow<'a>>,
         edges: Vec<CanonicalEdgeRow<'a>>,
         unresolved_refs: Vec<CanonicalUnresolvedRefRow<'a>>,
@@ -541,6 +479,7 @@ fn rows_digest(
             grammar_revision: descriptor.grammar_revision.as_str(),
             extractor_revision: descriptor.extractor_revision.as_str(),
             imports,
+            schema_evidence: artifact.schema_evidence.as_ref(),
             nodes,
             edges,
             unresolved_refs: unresolved,
@@ -645,6 +584,9 @@ fn finish_extraction(
     source_was_capped: bool,
     cancellation: &dyn ExtractionCancellation,
 ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
+    if source_was_capped && let Some(evidence) = &mut artifact.schema_evidence {
+        evidence.mark_partial(SchemaEvidenceIssueV1::SourceTruncated);
+    }
     artifact.result.sanitize();
     if cancellation.is_cancelled() {
         return Err(ExtractionFailureV1::Cancelled);
@@ -832,7 +774,7 @@ mod tests {
 
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:62eaaf3e43a4f9773e43c7f2385213ca6aa59bb5a0ee6c07ff44fa7e37beede3"
+            "sha256:5143ed246c9900a5de85721fb98d0aeb93b8565bd8714f55341693889be0ab86"
         );
     }
 

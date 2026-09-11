@@ -12,7 +12,9 @@ use tracedecay_domain::{TaskId, WorkAuthority, configuration::TopologyConcurrenc
 use crate::exact_sql::ExactSqlValue;
 use crate::exact_sql::{ExactSqlError, ExactSqlRows};
 
-use super::{RegisteredWorkQuery, exact_sql_integer, registered_work_query};
+use super::{
+    ACTIVE_ATTEMPT_PREDICATE, RegisteredWorkQuery, exact_sql_integer, registered_work_query,
+};
 
 pub(crate) fn capacity(
     source: &impl RegisteredWorkQuery,
@@ -49,28 +51,32 @@ pub(crate) fn capacities(
         ExactSqlValue::Text(authority.repository_id().as_str().to_owned()),
     ];
     let rows = coherent_capacity_query(|| {
-        registered_work_query(
-            source,
-            "SELECT row_kind, global_active, repository_active, task_id, task_active
+        let sql = format!(
+            "WITH active_attempts AS (
+             SELECT attempt.project_id, attempt.repository_id, attempt.task_id
+             FROM work_attempts_v1 AS attempt
+             WHERE {ACTIVE_ATTEMPT_PREDICATE}
+         )
+         SELECT row_kind, global_active, repository_active, task_id, task_active
          FROM (
              SELECT 0 AS row_kind,
-                    (SELECT COUNT(*) FROM work_attempts_v1
-                     WHERE project_id = ?1 AND terminal = 0) AS global_active,
-                    (SELECT COUNT(*) FROM work_attempts_v1
-                     WHERE project_id = ?1 AND repository_id = ?2 AND terminal = 0)
+                    (SELECT COUNT(*) FROM active_attempts
+                     WHERE project_id = ?1) AS global_active,
+                    (SELECT COUNT(*) FROM active_attempts
+                     WHERE project_id = ?1 AND repository_id = ?2)
                         AS repository_active,
                     '' AS task_id,
                     0 AS task_active
              UNION ALL
              SELECT 1 AS row_kind, 0 AS global_active, 0 AS repository_active,
                     task_id, COUNT(*) AS task_active
-             FROM work_attempts_v1
-             WHERE project_id = ?1 AND repository_id = ?2 AND terminal = 0
+             FROM active_attempts
+             WHERE project_id = ?1 AND repository_id = ?2
              GROUP BY task_id
          )
-         ORDER BY row_kind, task_id",
-            params.clone(),
-        )
+         ORDER BY row_kind, task_id"
+        );
+        registered_work_query(source, &sql, params.clone())
     })
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     let header = rows

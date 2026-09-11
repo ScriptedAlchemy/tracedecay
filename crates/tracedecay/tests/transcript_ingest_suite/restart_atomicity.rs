@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceCursorV1, ProjectId};
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,

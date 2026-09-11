@@ -17,11 +17,13 @@
 //! `store` drives a synthetic in-memory source so the shared
 //! persist-transcript store stack is measured without parse cost.
 
+#![allow(clippy::too_many_lines)]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use futures_util::FutureExt as _;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
 use tracedecay_runtime_core::storage::write_repository_identity_marker;
 use tracedecay_sessions::runtime::SessionProvider;
@@ -435,10 +437,14 @@ async fn run_provider_bench(
     // covers the whole fixture at steady state.
     loop {
         let started = Instant::now();
+        // Boxed so the ingest pass's future layout stays out of this loop
+        // body: with the hotpath wrappers compiled in, the inlined chain
+        // overflows rustc's query depth for this bench.
         let stats = tracedecay_sessions::runtime::ingest::with_transcript_source_home(
             home.clone(),
             runtime.ingest_project_provider_for_test(&sandbox.project, Some(provider)),
         )
+        .boxed_local()
         .await
         .expect("provider ingest pass");
         elapsed += started.elapsed();

@@ -11,6 +11,24 @@ fn hotpath_command() -> Command {
     command
 }
 
+#[cfg(unix)]
+#[test]
+fn shipped_binary_stops_quietly_when_a_pipeline_reader_exits() {
+    let output = Command::new("sh")
+        .args(["-c", r#""$TRACEDECAY_BIN" tool | head -n 4"#])
+        .env("TRACEDECAY_BIN", env!("CARGO_BIN_EXE_tracedecay"))
+        .output()
+        .expect("tracedecay tool pipeline should run");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 4);
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(not(feature = "hotpath"))]
 #[test]
 fn production_feature_profile_ignores_hotpath_environment() {

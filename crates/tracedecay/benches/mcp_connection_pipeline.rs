@@ -3,6 +3,7 @@
 //! Runs only against a temporary git project mounted by the production
 //! composition harness. It never opens the operator daemon or profile store.
 
+#![allow(clippy::too_many_lines)]
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;

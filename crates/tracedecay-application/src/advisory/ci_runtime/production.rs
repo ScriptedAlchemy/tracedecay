@@ -208,58 +208,6 @@ struct GitHubActionsCheckRunsPageV1 {
     check_runs: Vec<GitHubActionsCheckRunV1>,
 }
 
-trait ProductionCiDiscoveryReadPortV1: Send + Sync {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        head_sha: &'a str,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1>;
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        run_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1>;
-
-    fn read_check_runs<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        check_suite_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1>;
-}
-
-impl ProductionCiDiscoveryReadPortV1 for GitHubCiReadOnlyClientV1 {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        head_sha: &'a str,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.read_workflow_runs_for_head(context, head_sha, page)
-    }
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        run_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.read_workflow_jobs(context, run_id, page)
-    }
-
-    fn read_check_runs<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        check_suite_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.read_check_runs(context, check_suite_id, page)
-    }
-}
-
 #[hotpath::measure(label = "usecases.ci_runtime.discover", future = true)]
 pub async fn discover_production_ci_failure_request_v1(
     context: &RequestContext,
@@ -286,7 +234,7 @@ async fn discover_production_ci_failure_request_with_v1(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
 ) -> ProductionCiFailureDiscoveryOutcomeV1 {
     let first =
         discover_production_ci_failure_request_scan_v1(context, config, scope, client).await;
@@ -305,7 +253,7 @@ async fn discover_production_ci_failure_request_scan_v1(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
 ) -> ProductionCiFailureDiscoveryOutcomeV1 {
     if !context_admitted_for_ci_discovery(context, scope) {
         return ProductionCiFailureDiscoveryOutcomeV1::Denied;
@@ -383,7 +331,7 @@ async fn collect_workflow_runs(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
 ) -> Result<Vec<GitHubActionsWorkflowRunV1>, ProductionCiFailureDiscoveryOutcomeV1> {
     let mut records = Vec::new();
     let mut expected_total = None;
@@ -414,7 +362,7 @@ async fn collect_workflow_jobs(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
     run_id: u64,
 ) -> Result<Vec<GitHubActionsWorkflowJobV1>, ProductionCiFailureDiscoveryOutcomeV1> {
     let mut records = Vec::new();
@@ -446,7 +394,7 @@ async fn collect_check_runs(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
     check_suite_id: u64,
 ) -> Result<Vec<GitHubActionsCheckRunV1>, ProductionCiFailureDiscoveryOutcomeV1> {
     let mut records = Vec::new();
@@ -1440,8 +1388,10 @@ const fn state_matches_coverage(
 #[cfg(test)]
 mod discovery_tests {
     use std::collections::BTreeSet;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use tracedecay_contracts::feedback::CiFailureLocalizationPortOutcomeV1;
     use tracedecay_contracts::{
@@ -1593,83 +1543,37 @@ mod discovery_tests {
         .unwrap()
     }
 
-    struct CountingDiscoveryClient {
-        calls: Arc<AtomicUsize>,
+    fn fixture_client(listener: &TcpListener) -> GitHubCiReadOnlyClientV1 {
+        crate::advisory::github_runtime::ci_fixture_client(listener.local_addr().unwrap())
     }
 
-    impl ProductionCiDiscoveryReadPortV1 for CountingDiscoveryClient {
-        fn read_workflow_runs_for_head<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            _head_sha: &'a str,
-            _page: u32,
-        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-        }
-
-        fn read_workflow_jobs<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            _run_id: u64,
-            _page: u32,
-        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-        }
-
-        fn read_check_runs<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            _check_suite_id: u64,
-            _page: u32,
-        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-        }
-    }
-
-    struct PagedDiscoveryClient {
-        workflow_run_pages: Vec<Vec<u8>>,
-        requested_pages: Mutex<Vec<u32>>,
-    }
-
-    impl ProductionCiDiscoveryReadPortV1 for PagedDiscoveryClient {
-        fn read_workflow_runs_for_head<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            _head_sha: &'a str,
-            page: u32,
-        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-            self.requested_pages.lock().unwrap().push(page);
-            let outcome = usize::try_from(page.saturating_sub(1))
-                .ok()
-                .and_then(|index| self.workflow_run_pages.get(index))
-                .cloned()
-                .map_or(
-                    GitHubCiTransportOutcomeV1::Unavailable,
-                    GitHubCiTransportOutcomeV1::Response,
-                );
-            Box::pin(async move { outcome })
-        }
-
-        fn read_workflow_jobs<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            _run_id: u64,
-            _page: u32,
-        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-        }
-
-        fn read_check_runs<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            _check_suite_id: u64,
-            _page: u32,
-        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-        }
+    fn serve_ci_pages(
+        listener: TcpListener,
+        pages: Vec<Vec<u8>>,
+    ) -> std::thread::JoinHandle<(TcpListener, Vec<String>)> {
+        std::thread::spawn(move || {
+            let mut paths = Vec::with_capacity(pages.len());
+            for body in pages {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                paths.push(request.lines().next().unwrap().to_owned());
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-RateLimit-Limit: 5000\r\nX-RateLimit-Remaining: 4999\r\nX-RateLimit-Reset: 2000000000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            (listener, paths)
+        })
     }
 
     #[tokio::test]
@@ -1677,10 +1581,8 @@ mod discovery_tests {
         let fixture =
             crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let client = CountingDiscoveryClient {
-            calls: Arc::clone(&calls),
-        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = fixture_client(&listener);
 
         assert_eq!(
             discover_production_ci_failure_request_with_v1(
@@ -1692,7 +1594,11 @@ mod discovery_tests {
             .await,
             ProductionCiFailureDiscoveryOutcomeV1::Denied
         );
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        listener.set_nonblocking(true).unwrap();
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 
     #[tokio::test]
@@ -1700,10 +1606,8 @@ mod discovery_tests {
         let fixture =
             crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
         let scope = scope(&fixture);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let client = CountingDiscoveryClient {
-            calls: Arc::clone(&calls),
-        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = fixture_client(&listener);
 
         let outcome = discover_production_ci_failure_request_with_v1(
             &context(&scope, UtcMicros(i64::MAX)),
@@ -1714,7 +1618,11 @@ mod discovery_tests {
         .await;
 
         assert_eq!(outcome, ProductionCiFailureDiscoveryOutcomeV1::Stale);
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        listener.set_nonblocking(true).unwrap();
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 
     #[test]
@@ -2078,8 +1986,11 @@ mod discovery_tests {
         let first = fixture.ci_provider_record.workflow_run.clone();
         let mut second = first.clone();
         second.id += 1;
-        let client = PagedDiscoveryClient {
-            workflow_run_pages: vec![
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = fixture_client(&listener);
+        let server = serve_ci_pages(
+            listener,
+            vec![
                 serde_json::to_vec(&serde_json::json!({
                     "total_count": 2,
                     "workflow_runs": [first],
@@ -2091,8 +2002,7 @@ mod discovery_tests {
                 }))
                 .unwrap(),
             ],
-            requested_pages: Mutex::new(Vec::new()),
-        };
+        );
 
         let records = collect_workflow_runs(
             &context(&scope, UtcMicros(i64::MAX)),
@@ -2104,7 +2014,9 @@ mod discovery_tests {
         .unwrap();
 
         assert_eq!(records.len(), 2);
-        assert_eq!(*client.requested_pages.lock().unwrap(), vec![1, 2]);
+        let (_, requests) = server.join().unwrap();
+        assert!(requests[0].ends_with("page=1 HTTP/1.1"));
+        assert!(requests[1].ends_with("page=2 HTTP/1.1"));
     }
 
     #[tokio::test]
@@ -2115,21 +2027,18 @@ mod discovery_tests {
         let first = fixture.ci_provider_record.workflow_run.clone();
         let source = SequencedSourceAccess::revoke_at(3);
         let config = config_with_source(&fixture, source.clone());
-        let client = PagedDiscoveryClient {
-            workflow_run_pages: vec![
-                serde_json::to_vec(&serde_json::json!({
-                    "total_count": 2,
-                    "workflow_runs": [first.clone()],
-                }))
-                .unwrap(),
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = fixture_client(&listener);
+        let server = serve_ci_pages(
+            listener,
+            vec![
                 serde_json::to_vec(&serde_json::json!({
                     "total_count": 2,
                     "workflow_runs": [first],
                 }))
                 .unwrap(),
             ],
-            requested_pages: Mutex::new(Vec::new()),
-        };
+        );
 
         assert_eq!(
             collect_workflow_runs(
@@ -2141,6 +2050,13 @@ mod discovery_tests {
             .await,
             Err(ProductionCiFailureDiscoveryOutcomeV1::Denied)
         );
-        assert_eq!(*client.requested_pages.lock().unwrap(), vec![1]);
+        let (listener, requests) = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].ends_with("page=1 HTTP/1.1"));
+        listener.set_nonblocking(true).unwrap();
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 }

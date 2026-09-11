@@ -137,7 +137,7 @@ pub fn find_nearest_tracked_ancestor(
     let mut best_merge_base: Option<(String, gix::date::Time)> = None;
 
     for tracked_name in meta.branches.keys() {
-        if tracked_name == branch {
+        if tracked_name == branch || !meta.is_query_eligible(tracked_name) {
             continue;
         }
         let tracked_ref = format!("refs/heads/{tracked_name}");
@@ -208,8 +208,8 @@ pub enum BranchAddOutcome {
     /// A branch snapshot was created from the nearest ancestor and synced into
     /// the canonical project graph.
     Added,
-    /// Another process was adding or syncing; snapshot metadata may be
-    /// created, but catch-up sync was deferred.
+    /// Exact branch publication was admitted to the daemon, or another owner
+    /// is already publishing it. Indexing continues in the background.
     Deferred,
 }
 

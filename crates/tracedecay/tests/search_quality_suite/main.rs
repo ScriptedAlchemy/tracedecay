@@ -6,6 +6,7 @@
 //! workload/fixture contract that is bound to the root-owned `search_eval`
 //! module and the root-checked-in fixture corpus.
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

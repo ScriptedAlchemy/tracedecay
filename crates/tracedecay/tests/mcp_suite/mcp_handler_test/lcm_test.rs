@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
 use std::time::SystemTime;
 #[cfg(feature = "test-transport")]
-use tracedecay::host_admission::LcmLineageFaultForTest;
+use tracedecay::test_support::host_admission::LcmLineageFaultForTest;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
@@ -371,6 +371,66 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn retained_session_reads_bound_large_sessions_to_the_requested_page() {
+    const RECORDS: usize = 300;
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let mut projections = Vec::with_capacity(RECORDS);
+    for index in 0..RECORDS {
+        projections.push(
+            seed_temporal_lcm_session_message_for_provider(
+                &cg,
+                "codex",
+                "lcm-budgeted-page",
+                &format!("lcm-budgeted-message-{index}"),
+                &format!("bounded retained message {index}"),
+                i64::try_from(index + 1).unwrap(),
+            )
+            .await,
+        );
+    }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-budgeted-page", projections).await;
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "codex",
+            "session_id": "lcm-budgeted-page",
+            "limit": 1,
+            "content_limit": 80
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("one-message load must fit the admitted budget");
+    let loaded: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded["messages"].as_array().unwrap().len(), 1, "{loaded}");
+
+    let described = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_describe",
+        json!({"provider": "codex", "session_id": "lcm-budgeted-page"}),
+        None,
+        None,
+    )
+    .await
+    .expect("bounded describe must fit the admitted budget");
+    let described: Value = serde_json::from_str(extract_text(&described.value)).unwrap();
+    assert_eq!(described["description"]["raw_message_count"], RECORDS);
+    assert!(
+        described["description"]["raw_messages"]
+            .as_array()
+            .unwrap()
+            .len()
+            <= 20,
+        "{described}"
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;
@@ -670,6 +730,60 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     assert!(!rendered.contains("describe source body"));
     assert!(!rendered.contains("describe external secret"));
     server.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lcm_grep_raw_hit_store_id_expands_byte_exactly() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let content = "grep-to-expand byte identity: café\nsecond line";
+    let projection = seed_temporal_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "lcm-grep-expand-session",
+        "lcm-grep-expand-message",
+        content,
+        1,
+    )
+    .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-grep-expand-session", vec![projection]).await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "codex",
+            "query": "grep-to-expand byte identity",
+            "scope": "session",
+            "session_id": "lcm-grep-expand-session",
+            "limit": 1
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    let store_id = grep_payload["hits"][0]["store_id"]
+        .as_i64()
+        .expect("raw grep hit must expose its LCM store id");
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "codex",
+            "session_id": "lcm-grep-expand-session",
+            "target": {"kind": "raw_message", "store_id": store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["expansion"]["content"], content);
 }
 
 #[cfg(feature = "test-transport")]

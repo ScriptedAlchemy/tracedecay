@@ -385,7 +385,7 @@ fn audit_project(project_root: &Path) -> Result<ProjectAudit> {
     let rust = hotpath::measure_block!("mcp.analysis.unmounted_files.rust", rust::audit(&files)?);
     let typescript = hotpath::measure_block!(
         "mcp.analysis.unmounted_files.typescript",
-        typescript::audit(&files)
+        typescript::audit(&files)?
     );
     let mut ecosystems = vec![rust, typescript];
     ecosystems.extend(unmodelled_ecosystems(&files));

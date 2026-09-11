@@ -11,7 +11,7 @@ use tracedecay_contracts::retained_surfaces::{MessageSearchResultV1, RetainedOut
 mod refresh;
 mod session_sync;
 use refresh::handle_session_refresh_action;
-use session_sync::{await_session_sync_completion, run_git_sync};
+use session_sync::{await_session_sync_completion, run_git_sync, run_sync_status};
 
 fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
     let SessionsSearchArgs {
@@ -62,6 +62,13 @@ pub(crate) async fn handle_sessions_action(
             project_path,
         } => {
             handle_sessions_import(project_id, project_path).await?;
+        }
+        SessionsAction::SyncStatus {
+            idempotency_key,
+            project_id,
+            project_path,
+        } => {
+            run_sync_status(project_id, project_path, idempotency_key).await?;
         }
         SessionsAction::Search(args) => {
             handle_sessions_search(*args).await?;

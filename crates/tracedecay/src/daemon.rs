@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use serde_json::json;
 #[cfg(unix)]
@@ -16,9 +16,11 @@ use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
+use tracedecay_mcp::server::RmcpConnectionAdapter;
+
 use crate::mcp::server::{
-    McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, SERVER_INSTRUCTIONS,
-    classify_mcp_method, initialize_result,
+    McpMethod, ProductionMcpConnectionContext, RmcpInitializeResponseDecorator,
+    SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result,
 };
 use crate::mcp::tools::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
@@ -44,7 +46,9 @@ pub(crate) use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::transport::ReplayTransport;
-use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_mcp::{
+    BrokerStreamTransport, ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport,
+};
 use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
@@ -178,9 +182,6 @@ use bootstrap_route::{
 };
 mod branch_add;
 mod branch_admin;
-mod broker_stream_transport;
-use broker_stream_transport::BrokerStreamTransport;
-mod callable_code_authorization;
 use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
 use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
 #[cfg(test)]
@@ -232,24 +233,20 @@ mod database_owner_registry;
 use database_owner_registry::DatabaseOwnerRegistry;
 pub(crate) mod dashboard_automation;
 #[cfg(feature = "test-transport")]
+#[path = "../tests/common/dashboard_configuration_test_runtime.rs"]
 mod dashboard_configuration_test_runtime;
 pub(crate) mod doctor_kernel;
-pub(crate) mod hook_v2_replay;
-pub(crate) mod privacy_remediation;
+pub(crate) mod hook_v2_replay_consumer;
 pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_configuration_test_runtime::{
     dashboard_configuration_authorities_for_test, register_dashboard_test_retained_runtime,
 };
-pub(crate) mod query_authority_provider;
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) mod retained_test_support;
 mod shutdown_coordination;
 mod shutdown_orchestration;
 mod shutdown_watchdog;
-#[cfg(feature = "hotpath")]
-pub use shutdown_watchdog::install_hotpath_shutdown_finalizer;
-mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
@@ -259,14 +256,14 @@ pub(crate) use core_lifecycle::*;
 pub use core_logging::*;
 pub use core_proxy::*;
 pub(crate) use shutdown_coordination::ShutdownStatus;
+#[cfg(feature = "hotpath")]
+pub use shutdown_watchdog::install_hotpath_shutdown_finalizer;
 mod github_credential_lifecycle;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;
 mod http_application;
 pub use http_application::live_remote_operational_status;
 mod http_application_router;
-pub(crate) mod remote_protocol;
-mod remote_query;
 pub(crate) mod retained_owner;
 use http_application_router::{
     install_http_application_cold_resolver, install_remote_http_application_router,
@@ -298,17 +295,14 @@ use lsp_sessions::{
     settle_pending_lsp_workspace_mutation, update_connection_lsp_sessions,
 };
 mod maintenance;
-mod maintenance_tasks;
-pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
-use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 pub mod pr_autotrack;
+#[cfg_attr(any(test, feature = "test-transport"), allow(clippy::too_many_lines))]
 mod production_harness;
 mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
 pub use production_harness::ProductionProjectCompositionHarnessV1;
 #[cfg(all(unix, feature = "test-transport"))]
 pub use production_harness::capture_exact_git_snapshot_for_test;
-mod profile_host_admission_replay;
 mod projectless;
 mod remote_deletion;
 #[cfg(test)]
@@ -364,10 +358,10 @@ use project_routing::portable_database_owner_reconciler;
 use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
     bind_authenticated_profile_identity, cached_or_bind_ready_project_server,
-    project_open_cancellation_checkpoint, project_open_cancellation_error,
-    project_open_capacity_gate, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
-    project_warming_error, resolved_project_server_key,
+    prefer_recorded_open_failure, project_open_cancellation_checkpoint,
+    project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
+    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
+    project_server_capacity_error, project_warming_error, resolved_project_server_key,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
@@ -376,7 +370,6 @@ use project_server_lifecycle::{
     schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
     shutdown_project_servers,
 };
-mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
 #[cfg(test)]
@@ -385,9 +378,9 @@ pub(crate) mod session_runtime_tests;
 #[cfg(test)]
 pub(crate) mod store_runtime_tests;
 
-mod store_writer_gate;
 mod wire_io;
-pub(crate) mod work_evidence_retrieval;
+#[cfg(test)]
+mod work_evidence_retrieval_tests;
 use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };
@@ -419,6 +412,10 @@ mod code_index_runtime_graph_activation_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod http_application_tests;
+
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used)]
+mod broker_stream_transport_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

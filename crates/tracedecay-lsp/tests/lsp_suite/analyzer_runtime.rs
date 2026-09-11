@@ -180,6 +180,20 @@ fn bounded_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
     )
 }
 
+/// Protocol hang / partial-frame tests still use a short I/O quiet window.
+/// Initialize waits for the fake Python process to answer, which a starved
+/// macOS runner can delay past the hang budget (`StartupFailed` instead of
+/// the later `TransportFailed` / `InvalidResponse` under test).
+fn hang_after_start_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
+    let hang = std::time::Duration::from_millis(350);
+    lsp::client::LspRefreshTimeouts::new(
+        FAKE_LSP_START_TIMEOUT + hang,
+        FAKE_LSP_START_TIMEOUT,
+        hang,
+        std::time::Duration::from_millis(50),
+    )
+}
+
 fn recovery_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
     lsp::client::LspRefreshTimeouts::new(
         FAKE_LSP_RECOVERY_TIMEOUT + FAKE_LSP_TIMEOUT,

@@ -8,8 +8,11 @@ use std::sync::Arc;
 use tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
 use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
-use tracedecay_contracts::ResolvedScope;
+use tracedecay_application::work::{
+    WorkTaskSessionAdmittedRetrievalPortV1, WorkTaskSessionEvidenceRetrievalV1,
+};
 use tracedecay_contracts::feedback::observations::FeedbackSourceEventV1;
+use tracedecay_contracts::{CapabilityGrantSnapshot, ResolvedScope};
 use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonWorkProposalRoutingAuthorityV1,
     UnavailableFeedbackCycleRuntimeV1,
@@ -26,30 +29,15 @@ use tracedecay_lsp::{
 
 struct DeniedWorkEvidenceRetrieval;
 
-impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1
-    for DeniedWorkEvidenceRetrieval
-{
-    fn retrieve_admitted<'a>(
-        &'a self,
-        _context: &'a tracedecay_contracts::RequestContext,
-        _query: tracedecay_session_memory::session::SessionTemporalQuery,
-    ) -> tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalFutureV1<'a>
-    {
-        Box::pin(async {
-            tracedecay_session_runtime::session_retrieval::SessionRetrievalServiceOutcome::Denied
-        })
-    }
-}
+impl WorkTaskSessionAdmittedRetrievalPortV1 for DeniedWorkEvidenceRetrieval {}
 
-pub(super) fn denied_work_evidence_retrieval()
--> crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1 {
-    crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::new(
-        DeniedWorkEvidenceRetrieval,
-    ))
+pub(super) fn denied_work_evidence_retrieval() -> WorkTaskSessionEvidenceRetrievalV1 {
+    WorkTaskSessionEvidenceRetrievalV1::new(Arc::new(DeniedWorkEvidenceRetrieval))
 }
 
 pub(super) fn empty_work_proposal_routing(
     scope: ResolvedScope,
+    grant: &CapabilityGrantSnapshot,
 ) -> (DaemonWorkProposalRoutingAuthorityV1, ManifestDigest) {
     let revision = tracedecay_domain::configuration::ConfigurationRevisionId::new(
         "configuration.revision.work-empty-routing",
@@ -59,29 +47,40 @@ pub(super) fn empty_work_proposal_routing(
         tracedecay_domain::configuration::WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
     )
     .expect("work executable bindings key");
-    let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
-        std::collections::BTreeMap::from([(
-            key.clone(),
-            tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
-                Vec::new(),
-            ),
-        )]),
-        std::collections::BTreeMap::from([(
-            key,
-            vec![tracedecay_domain::configuration::ConfigurationCandidateV1 {
-                layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
-                    project_id: scope.project_id.clone(),
-                },
-                revision_id: revision.clone(),
-                disposition: tracedecay_domain::configuration::CandidateDispositionV1::Winning,
-                safe_reason: None,
-            }],
-        )]),
+    // The runtime pin rejects a snapshot that omitted registry defaults
+    // such as `index.include.v1`. Resolve through the same core registry
+    // the daemon uses at project open, then overlay empty Work bindings.
+    let snapshot = crate::config::resolver::resolve_configuration(
+        &crate::config::registry::ConfigurationRegistry::core()
+            .expect("configuration registry defaults"),
+        &[crate::config::resolver::ConfigurationLayerV1 {
+            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: scope.project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: std::collections::BTreeMap::from([(
+                key,
+                tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
+                    Vec::new(),
+                ),
+            )]),
+        }],
     )
-    .expect("empty Work routing snapshot");
+    .expect("empty Work routing resolved through production defaults")
+    .snapshot;
     let digest = snapshot.effective_behavior_digest.clone();
-    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(scope, revision, &snapshot, &digest)
-        .expect("empty Work proposal routing");
+    let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            project_id: scope.project_id.clone(),
+            project_root: std::env::current_dir().expect("test project root"),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("empty pinned Work routing configuration");
+    let routing =
+        DaemonWorkProposalRoutingAuthorityV1::mount(scope, &configuration, &digest, grant)
+            .expect("empty Work proposal routing");
     (routing, digest)
 }
 
@@ -282,8 +281,6 @@ pub(super) fn admitted_root_fixture(name: &str) -> (std::path::PathBuf, String) 
 mod configuration_registrars_tests;
 mod lsp_lease_tests;
 mod lsp_tests;
-mod observability_tests;
-mod primitive_tests;
 mod project_lifecycle_tests;
 mod types_tests;
 mod work_evidence_journey_tests;

@@ -39,14 +39,17 @@ pub fn register_runtime_ports() -> Result<()> {
     Ok(())
 }
 
-/// Adapts the root catalog composer to the code-index runtime's provider seam.
+/// Injects the contracts-owned catalog composition into the code-index
+/// runtime's provider seam.
 pub(crate) fn compose_application_catalog_snapshot() -> std::result::Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
     tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
 > {
-    crate::catalog_composition::build_application_catalog_snapshot().map_err(|error| {
-        tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
-    })
+    tracedecay_contracts::catalog_composition::build_application_catalog_snapshot().map_err(
+        |error| {
+            tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -311,19 +314,13 @@ mod tests {
             .canonicalize()
             .expect("canonical checkout");
 
-        assert!(!runtime.is_project_initialized(&checkout));
+        assert!(!(runtime.project_initialization_gate)(&checkout));
+        assert!((runtime.project_root_resolver)(&checkout).await.is_none());
         assert!(
-            runtime
-                .resolve_project_root_with_identity(&checkout)
-                .await
-                .is_none()
-        );
-        assert!(
-            runtime.hook_timings_enabled(&checkout).is_none(),
+            (runtime.timing_gate)(&checkout).is_none(),
             "an unregistered checkout has no published telemetry override"
         );
-        let layout = runtime
-            .resolve_store_layout(&checkout)
+        let layout = (runtime.store_layout_resolver)(&checkout)
             .await
             .expect("the root resolves a canonical layout for any checkout");
         assert_eq!(layout.project_root, checkout);

@@ -1,4 +1,4 @@
-use tracedecay_contracts::feedback::FeedbackCompletedPublicationV1;
+use tracedecay_contracts::feedback::FeedbackPublicationV1;
 use tracedecay_contracts::{
     CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
     EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState,
@@ -34,7 +34,7 @@ pub(super) fn interruption<T>(
 
 pub(super) fn complete<T>(
     payload: T,
-    publications: Vec<&FeedbackCompletedPublicationV1>,
+    publications: Vec<&FeedbackPublicationV1>,
     domains: Vec<EvidenceDomain>,
     page: Option<(u64, Option<OpaqueCursor>)>,
     expires_at: Option<UtcMicros>,
@@ -190,7 +190,7 @@ fn terminal_interruption<T>(
     }
 }
 
-fn evidence_authority(publication: &FeedbackCompletedPublicationV1) -> EvidenceAuthority {
+fn evidence_authority(publication: &FeedbackPublicationV1) -> EvidenceAuthority {
     EvidenceAuthority {
         evidence_id: EvidenceIdentity::new(format!(
             "feedback-publication.{}",

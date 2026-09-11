@@ -49,13 +49,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::application_surface::resolve_catalog_tool_binding;
-use tracedecay::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_api::{
     WorkOperation, WorkflowOperation, http_application_full_route_path,
     is_http_application_operation_exposed, retained_application_route_path,
 };
+use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
+use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityManifestV1, CatalogSnapshotV1,
@@ -95,7 +95,7 @@ const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
 
 /// The callable-code operations, mirroring the set that
 /// `http_page_projection` classifies as `HttpPageProjection::MetaCursor` in
-/// `src/application_surface.rs`.
+/// `tracedecay-daemon-service/src/application_surface.rs`.
 ///
 /// These are the operations whose decoded surface request carries callable-code
 /// metadata. CLI, MCP, and HTTP must expose the same application operations.

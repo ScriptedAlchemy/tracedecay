@@ -160,17 +160,15 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
     let second = runtime(timings_off, tool_second);
     let root = Path::new("/workspace/project");
 
-    assert_eq!(first.hook_timings_enabled(root), Some(true));
-    assert_eq!(second.hook_timings_enabled(root), Some(false));
+    assert_eq!((first.timing_gate)(root), Some(true));
+    assert_eq!((second.timing_gate)(root), Some(false));
     assert_eq!(
-        first
-            .daemon_tool_json(None, "tracedecay_status", json!({}), false)
+        (first.daemon_tool)(None, "tracedecay_status", json!({}), false)
             .await
             .expect("first handle's daemon answers"),
         json!({ "handle": "first" })
     );
-    let error = second
-        .daemon_tool_json(None, "tracedecay_status", json!({}), false)
+    let error = (second.daemon_tool)(None, "tracedecay_status", json!({}), false)
         .await
         .expect_err("second handle must not borrow the first handle's daemon");
     assert!(error.to_string().contains("second handle has no daemon"));

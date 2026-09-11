@@ -1,8 +1,9 @@
 //! Capability-relative durable directory primitives shared by the quarantine
 //! and retirement authorities: atomic no-replace rename between already-open
-//! parent capabilities, directory metadata sync, and recursive no-follow
-//! removal. Every mutation is relative to an open `Dir` handle so a parent
-//! path swapped for a symlink cannot redirect the operation.
+//! parent capabilities, directory metadata sync, recursive no-follow removal,
+//! and create-or-open of one entry that survives the Darwin create race.
+//! Every mutation is relative to an open `Dir` handle so a parent path
+//! swapped for a symlink cannot redirect the operation.
 
 use std::ffi::OsStr;
 use std::io;
@@ -10,9 +11,53 @@ use std::io;
 use cap_fs_ext::DirExt;
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
-use cap_std::fs::Dir;
-#[cfg(not(windows))]
-use cap_std::fs::OpenOptions;
+use cap_std::fs::{Dir, File, OpenOptions};
+
+/// How many times a create-or-open that reports the entry missing is asked
+/// again before the answer is believed. xnu bounds its own retry of the same
+/// condition at ten; downstream measurements found one extra look always
+/// sufficed, so this is generous without letting a genuinely missing parent
+/// spin.
+const CREATE_RACE_LOOKS: usize = 8;
+
+/// Creates or opens `name` beneath an already-open directory capability.
+///
+/// `options` must request `create(true)` without `create_new`: this is the
+/// create-or-open form, whose two correct answers are "the entry was created"
+/// and "the existing entry was opened". On macOS that form has a defect the
+/// others do not. `openat(dirfd, name, O_CREAT)` without `O_EXCL` hands most
+/// callers that lose the first-creation race of one name a spurious `ENOENT`
+/// (xnu's `vn_open_auth` retries a create that failed with `EEXIST` as an
+/// open, and the fallback is not atomic), even though the entry is present
+/// the moment the error arrives. `O_CREAT|O_EXCL`, opens of an existing entry,
+/// and absolute-path `open` are all correct, which is why the std-based
+/// sidecar locks never see it and only the capability-relative lock and
+/// ledger opens do — and those are exactly the files many writers create at
+/// once.
+///
+/// A `NotFound` answer is therefore looked at again a bounded number of
+/// times. A parent that is genuinely gone still reports `NotFound` after the
+/// bound, so the caller's error mapping keeps working.
+pub fn open_or_create_with(
+    directory: &Dir,
+    name: &OsStr,
+    options: &OpenOptions,
+) -> io::Result<File> {
+    look_again_on_not_found(|| directory.open_with(name, options))
+}
+
+fn look_again_on_not_found<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut looks = 0;
+    loop {
+        match attempt() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && looks < CREATE_RACE_LOOKS => {
+                looks += 1;
+                std::thread::yield_now();
+            }
+            result => return result,
+        }
+    }
+}
 
 /// Atomically renames one directory entry between already-open parent
 /// capabilities without allowing an occupied destination to be replaced.
@@ -295,5 +340,85 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert!(tree.join("file").exists());
+    }
+
+    #[test]
+    fn a_transient_missing_answer_is_looked_at_again() {
+        let mut attempts = 0;
+        let value = look_again_on_not_found(|| {
+            attempts += 1;
+            if attempts <= 2 {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            } else {
+                Ok(attempts)
+            }
+        })
+        .expect("the entry that appears within the bound is returned");
+        assert_eq!(value, 3);
+    }
+
+    #[test]
+    fn a_persistent_missing_answer_is_still_reported_after_the_bound() {
+        let mut attempts = 0;
+        let error = look_again_on_not_found(|| -> io::Result<()> {
+            attempts += 1;
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        })
+        .expect_err("a parent that is genuinely gone must not spin");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(attempts, CREATE_RACE_LOOKS + 1);
+    }
+
+    #[test]
+    fn other_errors_are_not_looked_at_again() {
+        let mut attempts = 0;
+        let error = look_again_on_not_found(|| -> io::Result<()> {
+            attempts += 1;
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("only the create race is retried");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts, 1);
+    }
+
+    /// Many threads racing the first creation of one name must all come back
+    /// holding the same entry. On macOS this is the `openat(O_CREAT)` race
+    /// the helper exists for; elsewhere it is a plain concurrency smoke test.
+    #[test]
+    fn concurrent_creators_of_one_entry_all_open_it() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().expect("create race fixture");
+        for round in 0..16 {
+            let name = format!("racy-{round}.lock");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles = (0..8)
+                .map(|_| {
+                    let path = root.path().to_path_buf();
+                    let name = name.clone();
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let directory = open(&path);
+                        let mut options = OpenOptions::new();
+                        options.read(true).write(true).create(true);
+                        barrier.wait();
+                        open_or_create_with(&directory, OsStr::new(&name), &options)
+                            .expect("a create-or-open loser must still be handed the entry")
+                            .into_std()
+                            .metadata()
+                            .expect("metadata of the opened entry")
+                            .ino()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let inodes = handles
+                .into_iter()
+                .map(|handle| handle.join().expect("creator thread"))
+                .collect::<Vec<_>>();
+            assert!(
+                inodes.iter().all(|inode| *inode == inodes[0]),
+                "every racer must open the one created entry"
+            );
+        }
     }
 }

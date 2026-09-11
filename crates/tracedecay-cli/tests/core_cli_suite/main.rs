@@ -7,9 +7,9 @@
 //! which the Windows test-group filters in `.config/nextest.toml` match on.
 //!
 //! The build-support and packaging checks (`build_version_test`,
-//! `cli_boundary`, `dashboard_bundle_test`, `host_cli_fixture`,
-//! `source_provenance_test`) were the crate's remaining default-feature
-//! singles and are modules here for the same reason.
+//! `cli_boundary`, `dashboard_bundle_test`, `source_provenance_test`) were
+//! the crate's remaining default-feature singles and are modules here for the
+//! same reason.
 
 mod build_version_test;
 mod cli_boundary;
@@ -19,10 +19,9 @@ mod common;
 mod config_test;
 mod dashboard_bundle_test;
 mod gain_test;
-mod host_cli_fixture;
 mod monitor_test;
-// Mounted once for cli_non_interactive_test and host_cli_fixture, which both
-// exercise the compiled host-CLI fixture provisioner.
+// Mounted for cli_non_interactive_test, which exercises the compiled
+// host-CLI fixture provisioner.
 #[cfg(unix)]
 mod observation_reset_recovery_test;
 #[path = "../../build-support/provision_host_cli_fixture.rs"]

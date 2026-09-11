@@ -13,13 +13,12 @@ mod worktree;
 pub use catalog::{git_index_catalog_contribution, git_index_handler_descriptors};
 pub use native_integration::{
     NativeIntegrationApplyRequestV1, NativeIntegrationCancelDispositionV1,
-    NativeIntegrationCancelRequestV1, NativeIntegrationContractError,
-    NativeIntegrationEvidenceRevisionsV1, NativeIntegrationPort, NativeIntegrationPortError,
-    NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
-    NativeIntegrationRecoveryRequestV1, NativeIntegrationSelectionBindingV1,
-    NativeIntegrationService, NativeIntegrationStackResolutionOutcomeV1,
-    NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
-    NativeIntegrationStatusRequestV1,
+    NativeIntegrationCancelRequestV1, NativeIntegrationContractError, NativeIntegrationPort,
+    NativeIntegrationPortError, NativeIntegrationPreflightOutcomeV1,
+    NativeIntegrationPreflightRequestV1, NativeIntegrationRecoveryRequestV1,
+    NativeIntegrationSelectionBindingV1, NativeIntegrationService,
+    NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
+    NativeIntegrationStackResolutionRequestV1, NativeIntegrationStatusRequestV1,
 };
 pub use native_integration_surface::{
     NATIVE_INTEGRATION_APPLY_OPERATION, NATIVE_INTEGRATION_APPROVE_OPERATION,
@@ -27,9 +26,10 @@ pub use native_integration_surface::{
     NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION, NATIVE_INTEGRATION_STATUS_OPERATION,
     NativeIntegrationApplySurfaceRequest, NativeIntegrationApprovalProjectionV1,
     NativeIntegrationApproveSurfaceRequest, NativeIntegrationCancelSurfaceRequest,
-    NativeIntegrationCancellationProjectionV1, NativeIntegrationEvidenceRevisionsWireV1,
-    NativeIntegrationPreflightSurfaceRequest, NativeIntegrationPreviewProjectionV1,
-    NativeIntegrationReceiptProjectionV1, NativeIntegrationSnapshotProjectionV1,
+    NativeIntegrationCancellationProjectionV1, NativeIntegrationPreflightSurfaceRequest,
+    NativeIntegrationPreviewProjectionV1, NativeIntegrationReceiptProjectionV1,
+    NativeIntegrationSealedStackSnapshotProjectionV1, NativeIntegrationSealedStackSnapshotV1,
+    NativeIntegrationSelectionDeclarationV1, NativeIntegrationSnapshotProjectionV1,
     NativeIntegrationStackSnapshotService, NativeIntegrationStackSnapshotSurfaceRequest,
     NativeIntegrationStatusProjectionV1, NativeIntegrationStatusSurfaceRequest,
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
@@ -43,15 +43,18 @@ pub use public_wire::{
     GitReadResultV1, GitStatusSummaryV1, GitStatusSurfaceRequest, GitSurfaceDiffScopeV1,
 };
 pub use read::{
-    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
-    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
-    GitIntelligenceError, GitReadPort, is_canonical_repository_relative_path,
+    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GIT_QUERY_DEFAULT_MAX_BYTES,
+    GIT_QUERY_DEFAULT_MAX_ENTRIES, GitBlameRequest, GitHistoricalBlobReadPort,
+    GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest, GitIntelligenceError,
+    GitReadPort, is_canonical_repository_relative_path,
 };
 pub use stack_signal_expand::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalEvidenceRefV1,
     GitHubStackSignalExpandPort, GitHubStackSignalExpandPortError,
     GitHubStackSignalExpandRequestV1, GitHubStackSignalExpandSurfaceRequest,
     GitHubStackSignalExpandSurfaceResultV1, GitHubStackSignalExpandUnavailableV1,
+    GitHubStackSignalNativePreviewV1, GitHubStackSignalNativeSourceV1,
+    GitHubStackSignalNativeTerminalV1,
 };
 pub use surface_catalog::{
     git_surface_catalog_contribution, git_surface_handler_descriptors, git_surface_operation,

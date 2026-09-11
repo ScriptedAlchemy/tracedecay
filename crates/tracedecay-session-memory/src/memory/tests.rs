@@ -913,6 +913,71 @@ async fn automation_receipt_recovery_rejects_foreign_authority_identity() {
 }
 
 #[test]
+fn read_cancelled_maps_to_cancellation_variant_not_store() {
+    let error = MemoryApplicationError::from(FactStoreError::ReadCancelled);
+    assert!(
+        matches!(
+            error,
+            MemoryApplicationError::Cancelled(FactStoreError::ReadCancelled)
+        ),
+        "ReadCancelled must stay typed as cancellation, not Store: {error:?}"
+    );
+    assert!(!matches!(error, MemoryApplicationError::Store(_)));
+
+    let mapped = memory_application_error(error);
+    assert!(
+        is_memory_application_cancellation(&mapped),
+        "ReadCancelled must map to typed cancellation, not a generic store/database wrap: {mapped}"
+    );
+    assert!(
+        mapped.to_string().contains("cancelled"),
+        "typed cancellation must keep the store cancellation Display: {mapped}"
+    );
+    assert!(
+        !mapped.to_string().contains("config error"),
+        "cancellation must not be wrapped as a config error: {mapped}"
+    );
+}
+
+#[test]
+fn store_storage_error_cause_survives_into_trace_decay_message() {
+    let error = MemoryApplicationError::from(FactStoreError::Storage {
+        operation: "open project memory",
+        source: Box::new(std::io::Error::other("disk full")),
+    });
+    assert!(
+        matches!(error, MemoryApplicationError::Store(_)),
+        "ordinary Storage failures stay Store, not Cancelled: {error:?}"
+    );
+    let mapped = memory_application_error(error);
+    let message = mapped.to_string();
+    assert!(
+        message.contains("fact store operation failed"),
+        "Store Display must remain in the TraceDecayError chain: {message}"
+    );
+    assert!(
+        message.contains("fact storage operation open project memory failed"),
+        "Storage Display must survive flatten_error_chain: {message}"
+    );
+    assert!(
+        message.contains("disk full"),
+        "Storage source must survive flatten_error_chain: {message}"
+    );
+}
+
+#[test]
+fn graph_deadline_exceeded_maps_to_cancellation_variant_not_store() {
+    let error = MemoryApplicationError::from(FactStoreError::GraphDeadlineExceeded);
+    assert!(matches!(
+        error,
+        MemoryApplicationError::Cancelled(FactStoreError::GraphDeadlineExceeded)
+    ));
+    assert!(is_memory_application_cancellation(
+        &memory_application_error(error)
+    ));
+}
+
+#[test]
 fn graph_reset_required_keeps_profile_and_project_authority_in_root_errors() {
     let profile = memory_application_error(MemoryApplicationError::Store(
         FactStoreError::GraphResetRequired {

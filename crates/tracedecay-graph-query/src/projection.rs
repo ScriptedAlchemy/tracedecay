@@ -8,6 +8,7 @@ use thiserror::Error;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphProjectionError, CodeGraphProjectionStore,
 };
+pub use tracedecay_contracts::retrieval::CodeGraphReadFreshnessV1;
 use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, Deadline, RequestAdmission, RequestContext,
     RequestId, ResolvedScope,
@@ -144,42 +145,6 @@ where
 {
     fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
         (**self).open(request)
-    }
-}
-
-/// Freshness of the generation a verified graph read serves.
-///
-/// Mirrors the search lane's `served_stale` contract: the serving arm of
-/// query admission answers from the last complete seated generation while a
-/// rebuild is in flight, and the answer must say so rather than present
-/// itself as current.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CodeGraphReadFreshnessV1 {
-    /// The ready gate proved the served generation current against the live
-    /// checkout when the read opened.
-    Current,
-    /// The last complete seated generation answered because no proven-current
-    /// generation was admissible (the scheduler owns a rebuild pass or the
-    /// checkout drifted past the currency witness). Recall is sound for the
-    /// served generation; freshness is not. The payload carries the evidence
-    /// a caller needs to say how stale and whether a remedy is in motion: a
-    /// seat sealed days ago with no rebuild pass in flight is a wedged route,
-    /// not a routine rebuild window.
-    LastCompleteStale {
-        /// When the served generation was durably sealed.
-        sealed_at: UtcMicros,
-        /// Whether a reconcile pass or pending scheduler wake existed for the
-        /// route when the read opened.
-        rebuild_in_flight: bool,
-    },
-}
-
-impl CodeGraphReadFreshnessV1 {
-    pub fn is_stale(self) -> bool {
-        match self {
-            Self::Current => false,
-            Self::LastCompleteStale { .. } => true,
-        }
     }
 }
 

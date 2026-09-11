@@ -54,13 +54,6 @@ pub(super) fn acquire_run_ledger_lock(path: &Path) -> std::io::Result<std::fs::F
 }
 
 fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
-    if let Some(parent) = lock_path.parent() {
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
-    }
-    tracedecay_runtime_core::storage::reject_symlink_components(
-        lock_path,
-        "automation run ledger lock",
-    )?;
     let parent = lock_path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -73,6 +66,13 @@ fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
             "automation run ledger lock has no filename",
         )
     })?;
+    // Resolve directory aliases without trusting the final lock entry.
+    let parent = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(parent);
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&parent)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &parent.join(name),
+        "automation run ledger lock",
+    )?;
     let directory = Dir::open_ambient_dir(parent, ambient_authority())?;
     let mut options = CapOpenOptions::new();
     options
@@ -80,7 +80,10 @@ fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create(true)
         .follow(FollowSymlinks::No);
-    let file = directory.open_with(name, &options)?;
+    // Concurrent writers race the first creation of this lock; the shared
+    // helper absorbs the spurious Darwin `ENOENT` the losers are handed.
+    let file =
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -99,12 +102,6 @@ pub(super) fn open_run_ledger_nofollow(
     append: bool,
     create: bool,
 ) -> std::io::Result<Option<std::fs::File>> {
-    if let Some(parent) = path.parent()
-        && create
-    {
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
-    }
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation run ledger")?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -117,6 +114,16 @@ pub(super) fn open_run_ledger_nofollow(
             "automation run ledger has no filename",
         )
     })?;
+    // cap-std ambient opens need the resolved macOS `/var` directory alias.
+    // Resolve only the parent: resolving the final entry would bypass no-follow.
+    let parent = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(parent);
+    if create {
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&parent)?;
+    }
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &parent.join(name),
+        "automation run ledger",
+    )?;
     let directory = match Dir::open_ambient_dir(parent, ambient_authority()) {
         Ok(directory) => directory,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => return Ok(None),
@@ -129,7 +136,12 @@ pub(super) fn open_run_ledger_nofollow(
         .append(append)
         .create(create)
         .follow(FollowSymlinks::No);
-    match directory.open_with(name, &options) {
+    let opened = if create {
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)
+    } else {
+        directory.open_with(name, &options)
+    };
+    match opened {
         Ok(file) => {
             let metadata = file.metadata()?;
             if !metadata.is_file() {
@@ -2080,6 +2092,53 @@ mod tests {
         assert_eq!(
             digest_regular_file(&spool).expect("republished spool"),
             Some((actual.ledger_digest, actual.payload_len))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ledger_and_lock_open_through_parent_alias_without_following_final_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let directory = temp.path().join("dashboard");
+        std::fs::create_dir(&directory).expect("dashboard");
+        let alias = temp.path().join("dashboard-alias");
+        symlink(&directory, &alias).expect("directory alias");
+        let ledger = run_ledger_path(&alias);
+        let mut file = open_run_ledger_nofollow(&ledger, true, true, false, true)
+            .expect("create through alias")
+            .expect("ledger");
+        file.write_all(b"retained ledger").expect("write ledger");
+        drop(file);
+        drop(acquire_run_ledger_lock(&ledger).expect("lock through alias"));
+        let mut file = open_run_ledger_nofollow(&ledger, true, false, false, false)
+            .expect("reopen through alias")
+            .expect("ledger");
+        let mut payload = String::new();
+        file.read_to_string(&mut payload).expect("read ledger");
+        assert_eq!(payload, "retained ledger");
+        drop(file);
+
+        let lock = tracedecay_runtime_core::storage::append_lock_path(&ledger);
+        std::fs::remove_file(&lock).expect("remove lock");
+        symlink(&ledger, &lock).expect("final lock symlink");
+        let error = acquire_run_ledger_lock(&ledger).expect_err("refuse final lock symlink");
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(
+            std::fs::read(&ledger).expect("unchanged target"),
+            b"retained ledger"
+        );
+
+        let target = directory.join("retained.jsonl");
+        std::fs::rename(&ledger, &target).expect("move ledger");
+        symlink(&target, &ledger).expect("final ledger symlink");
+        let error = open_run_ledger_nofollow(&ledger, true, true, false, false)
+            .expect_err("refuse final ledger symlink through parent alias");
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(
+            std::fs::read(&target).expect("unchanged target"),
+            b"retained ledger"
         );
     }
 

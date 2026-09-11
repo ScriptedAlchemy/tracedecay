@@ -36,6 +36,20 @@ pub(super) async fn setup_project() -> FactStoreMcpFixture {
 async fn invoke_exact_tool(
     server: &tracedecay::mcp::McpServer,
     tool_name: &str,
+    arguments: Value,
+) -> tracedecay_domain::errors::Result<Value> {
+    let response_value = invoke_exact_tool_envelope(server, tool_name, arguments).await?;
+    response_value
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("{tool_name} omitted its canonical application payload"),
+        })
+}
+
+async fn invoke_exact_tool_envelope(
+    server: &tracedecay::mcp::McpServer,
+    tool_name: &str,
     mut arguments: Value,
 ) -> tracedecay_domain::errors::Result<Value> {
     arguments
@@ -63,13 +77,7 @@ async fn invoke_exact_tool(
             .to_owned();
         return Err(tracedecay_domain::errors::TraceDecayError::Config { message });
     }
-    let payload = response_value
-        .pointer("/outcome/value/payload")
-        .cloned()
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("{tool_name} omitted its canonical application payload"),
-        })?;
-    Ok(payload)
+    Ok(response_value)
 }
 
 pub(super) async fn invoke_production_tool(
@@ -370,7 +378,7 @@ async fn memory_fact_store_add_search_update_and_remove() {
         (
             "tracedecay_fact_store_reason",
             "reason",
-            json!({"entities": ["Amari Memory", "Project Phoenix"]}),
+            json!({"entities": ["Project Phoenix", "Amari Memory"]}),
         ),
         (
             "tracedecay_fact_store_contradict",
@@ -521,6 +529,20 @@ async fn memory_fact_store_supersede_retires_old_fact_from_default_surfaces() {
         "the successor stays current: {listed}"
     );
 
+    let retired = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_get",
+        json!({"fact_id": old_fact_id.clone()}),
+    )
+    .await
+    .expect("an exact read keeps the superseded fact available");
+    assert_eq!(retired["fact"]["kind"], "superseded", "{retired}");
+    assert_eq!(retired["fact"]["superseded_by"], successor_fact_id);
+    assert_eq!(
+        retired["fact"]["fact"]["content"],
+        "Project Phoenix ships on the first of the month"
+    );
+
     // The identical request is the same retained operation: it replays the
     // recorded commit instead of writing a second supersession event.
     let replayed = invoke_production_tool(
@@ -631,7 +653,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     .await
     .unwrap();
 
-    let target_list = invoke_exact_tool(
+    let target_list_envelope = invoke_exact_tool_envelope(
         &fixture.active_server,
         "tracedecay_fact_store_list",
         json!({
@@ -642,6 +664,22 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     )
     .await
     .unwrap();
+    let selected_scope = &target_list_envelope["scope"];
+    let selected_evidence = &target_list_envelope["outcome"]["value"];
+    assert_eq!(selected_scope["project_id"], target_project_id);
+    assert_eq!(
+        selected_evidence["authority"]["authorized_scope_digest"], selected_scope["scope_digest"],
+        "the selected server's project-open grant must authorize the reported scope: {target_list_envelope}"
+    );
+    assert_eq!(
+        selected_evidence["evidence_authorities"][0]["scope"], *selected_scope,
+        "selected evidence must be produced under the same scope the envelope reports: {target_list_envelope}"
+    );
+    assert_eq!(
+        selected_evidence["payload"]["owner"]["project_id"], target_project_id,
+        "the selected payload owner must match the project-open grant: {target_list_envelope}"
+    );
+    let target_list = selected_evidence["payload"].clone();
     assert_fact_list(
         &target_list,
         "Target selector fact",
@@ -978,7 +1016,29 @@ async fn memory_recall_updates_retrieval_count() {
             .as_u64()
             .unwrap_or_default()
             > 0,
-        "returned facts should increment retrieval_count: {status}"
+        "writable-graph search must increment retrieval_count: {status}"
+    );
+    assert!(
+        fact["telemetry"]["last_retrieved_at"].as_i64().is_some(),
+        "writable-graph search must stamp last_retrieved_at: {status}"
+    );
+
+    let memory_status = invoke_production_tool(&cg, "tracedecay_memory_status", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        memory_status["memory"]["feedback_funnel"]["retrieval_count_total"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "memory_status retrieval funnel must move after search: {memory_status}"
+    );
+    assert!(
+        memory_status["memory"]["feedback_funnel"]["retrieved_fact_count"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "memory_status must count the retrieved fact: {memory_status}"
     );
     close_test_graph(cg).await;
 }
@@ -1020,6 +1080,20 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
             .as_u64()
             .is_some_and(|capacity| capacity > 0)
     );
+    close_test_graph(cg).await;
+}
+
+#[tokio::test]
+async fn fact_store_reason_requires_an_entity_selection() {
+    let cg = setup_project().await;
+
+    for args in [json!({}), json!({"entities": ["same", "same"]})] {
+        let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", args).await;
+        assert!(
+            result.is_err(),
+            "the exact reason route must reject empty or duplicate entity selections"
+        );
+    }
     close_test_graph(cg).await;
 }
 

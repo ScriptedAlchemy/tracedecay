@@ -94,7 +94,7 @@ impl DashboardRuntime {
                 "registered project graph is not mounted: {project_id}"
             ))
         })?;
-        if cg.store_layout().identity.project_id.as_deref() != Some(project_id) {
+        if cg.store_layout.identity.project_id.as_deref() != Some(project_id) {
             return Err(config_error(format!(
                 "registered project id mismatch for {project_id}: {}",
                 project_root.display()

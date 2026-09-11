@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorResolutionStateV2, ClaudeByteRangeV1, ClaudeFileGenerationV1,
     ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,

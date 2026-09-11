@@ -100,6 +100,48 @@ impl CodeIndexMcpReadAdmissionV1 for PausingAdmission {
     }
 }
 
+/// Read admission that never pauses: the request this fixture drives is
+/// abandoned inside generation resolution, where no control checkpoint runs at
+/// all, so a checkpoint seam would never be reached.
+#[derive(Clone)]
+struct OpenAdmission(CodeIndexSearchAuthorityV1);
+
+impl CodeIndexMcpReadAdmissionV1 for OpenAdmission {
+    type Grant = FixtureGrant;
+
+    fn route_is_registered(&self) -> bool {
+        true
+    }
+
+    fn admit_current(
+        &self,
+        _scope: &ResolvedScope,
+    ) -> Result<Self::Grant, CodeIndexMcpAdmissionUnavailableV1> {
+        Ok(FixtureGrant(self.0.clone()))
+    }
+}
+
+/// Scope resolution is the last thing an admitted search does before it takes
+/// the execution permit, and nothing between the two awaits. Reporting from
+/// here therefore lets the test observe the request only once the permit is
+/// held, without polling for it.
+#[derive(Clone)]
+struct AdmittingScopeResolver {
+    scope: ResolvedScope,
+    admitted: Arc<tokio::sync::Notify>,
+}
+
+impl CodeIndexScopeResolverV1 for AdmittingScopeResolver {
+    fn resolved_scope_for_project(
+        &self,
+        _project_root: &Path,
+        _project_id: &ProjectId,
+    ) -> Result<ResolvedScope, CodeIndexScopeUnavailableV1> {
+        self.admitted.notify_one();
+        Ok(self.scope.clone())
+    }
+}
+
 fn search_request(
     project_root: &Path,
     cancellation: Option<CancellationSignal>,
@@ -218,6 +260,85 @@ async fn cancelled_lexical_scan_releases_the_search_permit_to_the_next_request()
     assert!(
         matches!(admitted, CodeIndexSearchOutcomeV1::Complete(_)),
         "the permit released by the cancelled scan admits the next request: {admitted:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// A request whose dispatch deadline expires while its search is parked in
+/// generation resolution must release the execution permit to the next
+/// request.
+///
+/// Generation resolution is the first thing an admitted search does, it runs
+/// with the single execution permit already held, and it consults no control:
+/// it parks on the scheduler's mounted map and, when nothing is servable, on
+/// the in-flight decode. Holding that map is exactly the window a busy daemon
+/// spends there. Before the permit followed request settlement, an expired
+/// request left the permit held by work nobody was waiting for, and the retry
+/// its `retryable=true` refusal invited was refused
+/// `search_capacity_unavailable` for as long as the abandoned scan sat there.
+#[tokio::test]
+async fn expired_request_parked_in_generation_resolution_releases_the_permit() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+
+    let admitted = Arc::new(tokio::sync::Notify::new());
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.search-permit.deadline").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.search-permit.deadline",
+            )
+            .expect("authorization revision"),
+        }),
+        AdmittingScopeResolver {
+            scope,
+            admitted: Arc::clone(&admitted),
+        },
+    );
+
+    // The control-free window, reproduced: every generation resolution takes
+    // this lock, and none of them checks the request control first.
+    let parked_resolution = registry.mounted.lock().await;
+
+    let deadline = Deadline::new(UtcMicros(
+        tracedecay_contracts::clock::now_micros().0 + 300_000,
+    ))
+    .expect("deadline");
+    let abandoned = tokio::spawn(executor(CodeIndexSearchRequestV1 {
+        deadline: Some(deadline),
+        ..search_request(fixture.path(), None)
+    }));
+    admitted.notified().await;
+
+    let refused = executor(search_request(fixture.path(), None)).await;
+    assert_eq!(
+        unavailable_reason(&refused),
+        Some(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable),
+        "the parked request owns the single execution permit: {refused:?}"
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), abandoned)
+        .await
+        .expect(
+            "a request past its deadline must stop holding the execution permit even where \
+             generation resolution consults no control",
+        )
+        .expect("executor task joins");
+    assert_eq!(
+        unavailable_reason(&outcome),
+        Some(CodeIndexSearchUnavailableReasonV1::TimedOut),
+        "the expired request reports the typed deadline state: {outcome:?}"
+    );
+
+    drop(parked_resolution);
+    let admitted_next = executor(search_request(fixture.path(), None)).await;
+    assert!(
+        matches!(admitted_next, CodeIndexSearchOutcomeV1::Complete(_)),
+        "the permit released by the expired request admits the next request: {admitted_next:?}"
     );
 
     registry.shutdown().await;

@@ -325,7 +325,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
 pub async fn record_codex_subagent_start(runtime: &HookRuntimeV1, event_json: &str) -> Option<u64> {
     let parsed: Value = serde_json::from_str(event_json).ok()?;
     let root = event_project_root_with_identity(runtime, &parsed).await?;
-    let layout = runtime.resolve_store_layout(&root).await.ok()?;
+    let layout = (runtime.store_layout_resolver)(&root).await.ok()?;
     let path = layout.data_root.join("codex_subagent_starts.json");
     let analytics_session_id = event_session_id(&parsed);
     let session_id = analytics_session_id

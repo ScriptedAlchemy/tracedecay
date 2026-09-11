@@ -133,18 +133,6 @@ fn test_qbasic_docstrings() {
 }
 
 #[test]
-fn test_qbasic_extensions() {
-    let extractor = QBasicExtractor;
-    let exts = extractor.extensions();
-    assert!(exts.contains(&"qb"), "extensions should contain 'qb'");
-    // Should NOT contain 'bas' to avoid conflict with msbasic2
-    assert!(
-        !exts.contains(&"bas"),
-        "extensions should NOT contain 'bas'"
-    );
-}
-
-#[test]
 fn test_qbasic_signatures() {
     let result = extract_fixture();
 

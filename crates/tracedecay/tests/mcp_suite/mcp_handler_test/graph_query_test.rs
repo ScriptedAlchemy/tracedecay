@@ -79,6 +79,31 @@ pub fn gmres(x: u32) -> u32 {
     .await
 }
 
+async fn production_signature_metadata_fixture() -> (GraphQueryFixture, GraphQueryProjectRoot) {
+    graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            r#"/// Loads the current value.
+pub async fn fetch_value() -> u32 {
+    42
+}
+
+pub fn cached_value() -> u32 {
+    42
+}
+
+#[derive(Clone, Debug)]
+pub struct DerivedValue;
+
+pub struct PlainValue;
+"#,
+        )
+        .unwrap();
+    })
+    .await
+}
+
 async fn shutdown_graph_fixture(fixture: GraphQueryFixture) {
     fixture.production.harness.shutdown().await;
 }
@@ -138,6 +163,84 @@ async fn graph_node_id(fixture: &GraphQueryFixture, name: &str) -> String {
         .and_then(|item| item["id"].as_str())
         .unwrap_or_else(|| panic!("exact-symbol response did not contain {name}: {payload}"))
         .to_owned()
+}
+
+#[tokio::test]
+async fn rust_wrapper_callees_follow_declared_sibling_module_imports() {
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "mod execute;\n\
+             mod unrelated;\n\
+             use execute::{execute_source_edit_inner, resolve_source_edit_preview};\n\
+             pub async fn execute_source_edit<A>(authorization: &A)\n\
+             where\n\
+                 A: Send,\n\
+             {\n\
+                 execute_source_edit_inner(authorization).await;\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/execute.rs"),
+            "pub(super) async fn execute_source_edit_inner<A>(_authorization: &A) {}\n\
+             pub(super) fn resolve_source_edit_preview() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/unrelated.rs"),
+            "pub fn execute_source_edit_inner() {}\n",
+        )
+        .unwrap();
+    })
+    .await;
+    let wrapper = graph_node_id(&fixture, "execute_source_edit").await;
+    let result = call_production_tool(
+        &fixture,
+        "tracedecay_code_callees",
+        json!({
+            "node_id": wrapper,
+            "maximum_depth": 1,
+            "resolve_trait_dispatch": false,
+            "scope": {
+                "generation": tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL,
+                "path_prefix": Value::Null,
+            },
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "cursor": Value::Null,
+            },
+            "format": "json",
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("code callees request");
+    let payload: Value =
+        serde_json::from_str(extract_text(&result.value)).expect("code callees response JSON");
+    let items = payload
+        .pointer("/outcome/value/payload/items")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("code callees response should contain items: {payload:#}"));
+    assert_eq!(
+        items.len(),
+        1,
+        "the declared module must disambiguate the imported callee: {payload:#}"
+    );
+    assert_eq!(
+        items[0].pointer("/symbol/file").and_then(Value::as_str),
+        Some("src/execute.rs"),
+        "wrapper should call the sibling module function: {payload:#}"
+    );
+    assert_eq!(
+        items[0].pointer("/symbol/name").and_then(Value::as_str),
+        Some("execute_source_edit_inner"),
+        "wrapper should call the imported symbol: {payload:#}"
+    );
+    shutdown_graph_fixture(fixture).await;
 }
 
 /// A `limit` above the accepted retrieval budget must serve a budget-bounded
@@ -646,6 +749,102 @@ async fn test_node_existing() {
 }
 
 #[tokio::test]
+async fn signature_search_and_derives_use_extracted_metadata() {
+    let (fixture, _root) = production_signature_metadata_fixture().await;
+    let async_node = graph_node_id(&fixture, "fetch_value").await;
+    let sync_node = graph_node_id(&fixture, "cached_value").await;
+
+    for (node_id, expected, expected_doc) in [
+        (async_node.clone(), true, Some("Loads the current value.")),
+        (sync_node, false, None),
+    ] {
+        let result = call_production_tool(
+            &fixture,
+            "tracedecay_signature",
+            json!({"node_id": node_id, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .expect("signature lookup");
+        let payload: Value =
+            serde_json::from_str(extract_text(&result.value)).expect("signature response JSON");
+        assert_eq!(payload[0]["is_async"], expected);
+        assert_eq!(payload[0]["docstring"].as_str(), expected_doc);
+        assert!(
+            !payload[0]["unavailable_fields"]
+                .as_array()
+                .expect("unavailable fields")
+                .iter()
+                .any(|field| field == "is_async")
+        );
+    }
+
+    let result = call_production_tool(
+        &fixture,
+        "tracedecay_node",
+        json!({"node_id": async_node, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("node lookup");
+    let payload: Value =
+        serde_json::from_str(extract_text(&result.value)).expect("node response JSON");
+    assert_eq!(payload["docstring"], "Loads the current value.");
+
+    for (want_async, expected_name) in [(true, "fetch_value"), (false, "cached_value")] {
+        let result = call_production_tool(
+            &fixture,
+            "tracedecay_signature_search",
+            json!({"async": want_async, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .expect("signature search");
+        let payload: Value = serde_json::from_str(extract_text(&result.value))
+            .expect("signature-search response JSON");
+        let matches = payload["matches"].as_array().expect("signature matches");
+        assert_eq!(matches.len(), 1, "unexpected matches: {payload}");
+        assert_eq!(matches[0]["name"], expected_name);
+        assert_eq!(matches[0]["is_async"], want_async);
+    }
+
+    let derived_node = graph_node_id(&fixture, "DerivedValue").await;
+    let plain_node = graph_node_id(&fixture, "PlainValue").await;
+    for (node_id, expected_names) in [
+        (derived_node, vec!["Clone", "Debug"]),
+        (plain_node, Vec::new()),
+    ] {
+        let result = call_production_tool(
+            &fixture,
+            "tracedecay_derives",
+            json!({"node_id": node_id, "format": "json"}),
+            None,
+            None,
+        )
+        .await
+        .expect("derive lookup");
+        let payload: Value =
+            serde_json::from_str(extract_text(&result.value)).expect("derive response JSON");
+        let derives = payload[0]["derives"].as_array().expect("derive records");
+        let names = derives
+            .iter()
+            .map(|derive| derive["name"].as_str().expect("derive name"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, expected_names);
+        assert!(
+            derives
+                .iter()
+                .all(|derive| derive["evidence_class"] == "syntax_exact")
+        );
+    }
+
+    shutdown_graph_fixture(fixture).await;
+}
+
+#[tokio::test]
 async fn test_node_not_found() {
     let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
     let result = call_production_tool(
@@ -1098,21 +1297,32 @@ async fn test_complexity_response_fields() {
 }
 
 #[tokio::test]
-async fn test_doc_coverage_response_structure() {
+async fn doc_coverage_distinguishes_documented_and_undocumented_enum_variants() {
     let (cg, _dir) = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/lib.rs"),
-            "/// This public function is documented.\n\
-             pub fn documented() {}\n\
-             pub fn undocumented() {}\n",
+            "/// A documented public enum.\n\
+             pub enum Mode {\n\
+                 /// A documented variant.\n\
+                 Documented,\n\
+                 Undocumented,\n\
+                 ///   \n\
+                 WhitespaceOnly,\n\
+             }\n",
         )
         .unwrap();
     })
     .await;
-    let result = call_production_tool(&cg, "tracedecay_doc_coverage", json!({}), None, None)
-        .await
-        .unwrap();
+    let result = call_production_tool(
+        &cg,
+        "tracedecay_doc_coverage",
+        json!({"limit": 1}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let text = extract_text(&result.value);
     let parsed: Value = serde_json::from_str(text).unwrap();
     assert!(
@@ -1123,9 +1333,12 @@ async fn test_doc_coverage_response_structure() {
     assert!(parsed.get("files").is_some(), "should have files array");
     assert_eq!(
         parsed["total_undocumented"].as_u64(),
-        Some(1),
-        "only the public symbol without a doc comment should be reported: {parsed}"
+        Some(2),
+        "missing and whitespace-only documentation should be counted: {parsed}"
     );
+    assert_eq!(parsed["returned_count"].as_u64(), Some(1), "{parsed}");
+    assert_eq!(parsed["omitted_count"].as_u64(), Some(1), "{parsed}");
+    assert_eq!(parsed["complete"].as_bool(), Some(false), "{parsed}");
     assert_eq!(parsed["file_count"].as_u64(), Some(1), "{parsed}");
     let first = parsed["files"]
         .as_array()
@@ -1133,10 +1346,11 @@ async fn test_doc_coverage_response_structure() {
         .unwrap_or_else(|| panic!("doc coverage should report src/lib.rs: {parsed}"));
     assert_eq!(first["file"].as_str(), Some("src/lib.rs"), "{parsed}");
     assert_eq!(first["count"].as_u64(), Some(1), "{parsed}");
+    assert_eq!(first["symbols"][0]["line"].as_u64(), Some(5), "{parsed}");
     assert_eq!(
         first["symbols"][0]["name"].as_str(),
-        Some("undocumented"),
-        "documented public symbols must be excluded: {parsed}"
+        Some("Undocumented"),
+        "documented enum variants must be excluded: {parsed}"
     );
 }
 

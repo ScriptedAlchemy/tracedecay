@@ -4,16 +4,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::daemon::branch_admin::StoreAdministration;
-use crate::daemon::log_daemon_event;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 use super::{
     MAX_NEW_TRACKS_PER_CYCLE, PrCommandControl, PrDiscovery, PrStoreAdministration,
     discover_open_prs_with_control, load_state, reconcile_project_with_administration,
 };
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Base cadence of the poll loop; per-project intervals are honored on top of
 /// this floor via a last-run map.
@@ -22,14 +23,18 @@ const BASE_TICK: Duration = Duration::from_mins(1);
 /// Retained owner for the PR-autotrack loop and every bounded child process it
 /// starts. Shutdown signals the same token carried into Git/GitHub commands
 /// before joining the task.
-pub struct PrAutotrackTask {
+pub(crate) struct PrAutotrackTask {
     cancellation: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl PrAutotrackTask {
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
     #[hotpath::skip]
-    pub async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         self.cancellation.cancel();
         if let Err(error) = self.task.await {
             log_daemon_event(
@@ -173,10 +178,7 @@ async fn poll_project(
         return;
     };
     let data_root = graph.store_layout().data_root.clone();
-    let command_control = PrCommandControl {
-        cancellation: Some(cancellation.clone()),
-        ..PrCommandControl::default()
-    };
+    let command_control = PrCommandControl::with_cancellation(cancellation.clone());
     let repo_for_discovery = repo_root.clone();
     let discovery_control = command_control.clone();
     let discovery = match tokio::task::spawn_blocking(move || {
@@ -210,15 +212,28 @@ async fn poll_project(
         Err(_) => return,
     };
 
-    let report = reconcile_project_with_administration(
+    let report = match reconcile_project_with_administration(
         &repo_root,
         &data_root,
         &discovery,
         MAX_NEW_TRACKS_PER_CYCLE,
         PrStoreAdministration::with_control(schedulers, &graph, &command_control),
     )
-    .await;
-    let managed = load_state(&data_root).managed.len();
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            log_state_error(&repo_root, "poll", &error);
+            return;
+        }
+    };
+    let managed = match load_state(&data_root) {
+        Ok(state) => state.managed.len(),
+        Err(error) => {
+            log_state_error(&repo_root, "poll", &error);
+            return;
+        }
+    };
     log_daemon_event(
         "pr_autotrack",
         &[
@@ -245,27 +260,48 @@ async fn teardown_disabled_project_with_administration(
         return;
     };
     let data_root = graph.store_layout().data_root.clone();
-    if load_state(&data_root).managed.is_empty() {
-        return;
+    match load_state(&data_root) {
+        Ok(state) if state.managed.is_empty() => return,
+        Ok(_) => {}
+        Err(error) => {
+            log_state_error(repo_root, "teardown", &error);
+            return;
+        }
     }
-    let command_control = PrCommandControl {
-        cancellation: Some(cancellation.clone()),
-        ..PrCommandControl::default()
-    };
-    let report = reconcile_project_with_administration(
+    let command_control = PrCommandControl::with_cancellation(cancellation.clone());
+    let report = match reconcile_project_with_administration(
         repo_root,
         &data_root,
         &PrDiscovery::default(),
         MAX_NEW_TRACKS_PER_CYCLE,
         PrStoreAdministration::with_control(schedulers, &graph, &command_control),
     )
-    .await;
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            log_state_error(repo_root, "teardown", &error);
+            return;
+        }
+    };
     log_daemon_event(
         "pr_autotrack",
         &[
             ("project", repo_root.display().to_string()),
             ("action", "teardown".to_string()),
             ("untracked", report.untracked.len().to_string()),
+        ],
+    );
+}
+
+fn log_state_error(repo_root: &Path, action: &str, error: &TraceDecayError) {
+    log_daemon_event(
+        "pr_autotrack",
+        &[
+            ("project", repo_root.display().to_string()),
+            ("action", action.to_owned()),
+            ("outcome", "error".to_owned()),
+            ("reason", error.to_string()),
         ],
     );
 }

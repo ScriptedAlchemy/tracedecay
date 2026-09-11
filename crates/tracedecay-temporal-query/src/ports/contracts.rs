@@ -181,11 +181,55 @@ pub async fn prepare_temporal_candidate_cohort(
     TemporalPreparedCandidateCohort::new(candidates)
 }
 
+pub fn begin_prepared_candidate_pull(
+    request: &TemporalSnapshotRequest,
+    state: &mut CandidateReadState,
+) -> Result<ExecutionLimits, TemporalPortError> {
+    begin_pull_request(
+        request,
+        state,
+        |limits| {
+            (
+                limits.candidate_limit,
+                limits.candidate_total_bytes,
+                limits.candidate_item_bytes,
+            )
+        },
+        CANDIDATE_READ_BUDGET,
+    )
+}
+
+pub fn commit_prepared_candidate_pull(
+    state: &mut CandidateReadState,
+    page: BoundedPage<RankingCandidate>,
+) -> Result<BoundedPage<RankingCandidate>, TemporalPortError> {
+    commit_pulled_page(state, page, CANDIDATE_READ_BUDGET)
+}
+
 pub async fn pull_candidate_page(
     port: &impl TemporalReadPort,
     snapshot: &TemporalExecutionSnapshot,
     plan: &CandidatePlan,
     state: &mut CandidateReadState,
+) -> Result<BoundedPage<RankingCandidate>, TemporalPortError> {
+    pull_candidate_page_inner(port, snapshot, plan, state, false).await
+}
+
+pub async fn pull_bounded_candidate_cohort_page(
+    port: &impl TemporalReadPort,
+    snapshot: &TemporalExecutionSnapshot,
+    plan: &CandidatePlan,
+    state: &mut CandidateReadState,
+) -> Result<BoundedPage<RankingCandidate>, TemporalPortError> {
+    pull_candidate_page_inner(port, snapshot, plan, state, true).await
+}
+
+async fn pull_candidate_page_inner(
+    port: &impl TemporalReadPort,
+    snapshot: &TemporalExecutionSnapshot,
+    plan: &CandidatePlan,
+    state: &mut CandidateReadState,
+    accept_item_cap: bool,
 ) -> Result<BoundedPage<RankingCandidate>, TemporalPortError> {
     let limits = begin_pull(
         snapshot,
@@ -224,6 +268,10 @@ pub async fn pull_candidate_page(
     )
     .await?;
     let page = sink.finish(status)?;
+    if accept_item_cap && page.status() == PageStatus::More && state.item_limit_exhausted() {
+        state.advanced_page(page.continuation.clone());
+        return Ok(page);
+    }
     commit_pulled_page(state, page, CANDIDATE_READ_BUDGET)
 }
 

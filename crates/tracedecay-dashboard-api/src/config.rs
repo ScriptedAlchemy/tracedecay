@@ -1,33 +1,13 @@
 //! Dashboard configuration values and injected root-owned read authority.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay_contracts::storage::{StorageByteSizeV1, StoreKeyV1, StoreSizeBudgetV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub use tracedecay_application::config::retrieval;
+pub use tracedecay_configuration::RetentionConfig;
 pub use tracedecay_configuration::config::*;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RetentionConfig {
-    pub store_soft_budgets_bytes: BTreeMap<String, u64>,
-}
-
-impl RetentionConfig {
-    pub fn store_soft_budget(&self, store: &str) -> Result<Option<StoreSizeBudgetV1>> {
-        let Some(bytes) = self.store_soft_budgets_bytes.get(store).copied() else {
-            return Ok(None);
-        };
-        let budget = StoreSizeBudgetV1 {
-            store: StoreKeyV1::new(store.to_owned()).map_err(config_error)?,
-            soft_limit_bytes: StorageByteSizeV1(bytes),
-        };
-        budget.validate().map_err(config_error)?;
-        Ok(Some(budget))
-    }
-}
 
 pub trait DashboardConfigurationReadPort: Send + Sync {
     fn cached_runtime_configuration(

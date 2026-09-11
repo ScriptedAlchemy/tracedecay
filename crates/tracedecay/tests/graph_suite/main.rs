@@ -4,6 +4,7 @@
 //! Merging these formerly separate integration-test binaries into one binary
 //! cuts Windows CI link time (each `tests/*.rs` file links separately).
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

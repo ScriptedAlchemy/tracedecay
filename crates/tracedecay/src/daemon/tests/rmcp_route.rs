@@ -10,6 +10,12 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use super::*;
 
 const PHASE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Wall-clock bound for the dedicated-runtime drain. Isolation `--exact`
+/// hangs sat in `Runtime::drop` after the two servers were already down;
+/// a join timeout well under the 360s harness kill turns that wedge into
+/// a typed red instead of a SIGKILL.
+#[cfg(unix)]
+const FIXTURE_DRAIN_BOUND: Duration = Duration::from_mins(2);
 const AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 struct RmcpRouteFixture {
@@ -741,27 +747,17 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         .expect("serve selected target verification connection");
 
     let executor = Arc::new(ControlledCancellationExecutor::new());
-    let project_path = fixture
-        .handshake
-        .project_path
-        .as_deref()
-        .expect("fixture project");
-    let graph = super::super::open_project_for_handshake(
-        project_path,
-        &fixture.handshake,
-        &fixture.engine.store_administration,
-    )
-    .await
-    .expect("open controlled selector owner");
-    let controlled_key = ProjectServerKey::from_open_project(&graph, &fixture.handshake)
-        .expect("controlled selector-owner key");
-    let controlled_route = ProjectRouteKey::from_handshake(project_path, &fixture.handshake)
-        .expect("controlled selector-owner route");
+    // `tracedecay_fact_store_list` is a registered-project reader: the
+    // connection server resolves the selector, then hops to the selected
+    // project's retained owner. Replace that owner in place — a second key
+    // for the same project_id makes the resolver report ambiguous, and a
+    // replacement without profile identity is filtered out of the mount set.
+    let graph = target_server.cg().await;
     let profile_identity = fixture
         .engine
         .store_administration
         .profile_identity()
-        .expect("controlled selector-owner profile identity")
+        .expect("selected-project profile identity")
         .clone();
     let controlled = crate::mcp::McpServer::new_with_context(
         crate::mcp::server::McpServerConstructionContext::direct(graph, None)
@@ -776,8 +772,12 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
             .project_servers()
             .lock()
             .await;
-        owners.insert_route(controlled_route, controlled_key.clone(), controlled);
-        assert!(owners.mark_ready(&controlled_key));
+        assert!(
+            owners
+                .swap_ready_if(&target_key, controlled, |_| true)
+                .is_some(),
+            "selected-project owner must be replaced in place"
+        );
     }
 
     let (server_stream, client_stream) =
@@ -813,7 +813,7 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
     wait_for_count(
         &executor.started,
         1,
-        "selector-only request never reached the connection owner",
+        "selected reader never reached the selected-project owner",
     )
     .await;
     writer
@@ -844,8 +844,43 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
 }
 
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn production_rmcp_cancels_concurrent_requests_before_or_after_registration() {
+#[test]
+fn production_rmcp_cancels_concurrent_requests_before_or_after_registration() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("rmcp-cancel-route".into())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("cancellation test runtime");
+                runtime.block_on(
+                    production_rmcp_cancels_concurrent_requests_before_or_after_registration_inner(
+                    ),
+                );
+                // Production non-foreground shape (`main.rs`): bound leftover
+                // blocking work. `shutdown_background()` is timeout 0.
+                runtime.shutdown_timeout(Duration::from_secs(2));
+            }));
+            let _ = done_tx.send(outcome);
+        })
+        .expect("spawn cancellation test thread");
+    match done_rx.recv_timeout(FIXTURE_DRAIN_BOUND) {
+        Ok(Ok(())) => {}
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("rmcp cancellation fixture: dedicated-runtime drain exceeded the test bound");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("rmcp cancellation fixture: dedicated-runtime thread disconnected");
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn production_rmcp_cancels_concurrent_requests_before_or_after_registration_inner() {
     let fixture = rmcp_route_fixture("rmcp-live-cancellation").await;
     let executor = Arc::new(ControlledCancellationExecutor::new());
     let project_path = fixture
@@ -874,7 +909,7 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
             .project_servers()
             .lock()
             .await;
-        owners.insert_route(route, key.clone(), controlled_server);
+        owners.insert_route(route, key.clone(), Arc::clone(&controlled_server));
         assert!(owners.mark_ready(&key));
     }
 
@@ -958,4 +993,25 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     assert_eq!(started, 2);
     assert_eq!(cancellation_observed, started);
     assert_eq!(completed, started);
+
+    // The replacement route leaves the original fixture server and the
+    // controlled replacement both live. Shut those two servers down
+    // first so ownership is explicit, then drain the remaining engine
+    // owners (`shutdown_all` is the production-bounded canceller).
+    {
+        let mut owners = fixture
+            .engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await;
+        owners.remove(&key);
+    }
+    controlled_server.shutdown().await;
+    fixture.server.shutdown().await;
+    let shutdown = fixture.engine.shutdown_all().await;
+    assert!(
+        shutdown.project_servers.is_clean(),
+        "cancelled route owners must shut down cleanly: {shutdown:?}"
+    );
 }

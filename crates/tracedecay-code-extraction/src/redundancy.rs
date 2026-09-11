@@ -82,12 +82,13 @@ pub fn compute_fingerprint(full_source: &str, body_node: Node<'_>) -> Fingerprin
     let body_text = body_node
         .utf8_text(full_source.as_bytes())
         .unwrap_or_default();
-    let body_tokens = tokenize(body_text);
+    let body_tokens: Vec<_> = tokenize(body_text).collect();
+    let (ast_hash, cfg_hash, call_seq_hash) = hash_tree_walk(body_node, full_source.as_bytes());
 
     Fingerprint {
-        ast_hash: hash_kind_walk(body_node, false),
-        cfg_hash: hash_kind_walk(body_node, true),
-        call_seq_hash: hash_call_sequence(body_node, full_source.as_bytes()),
+        ast_hash,
+        cfg_hash,
+        call_seq_hash,
         shingles: compute_shingles(&body_tokens),
         body_tokens: body_tokens.len(),
         source_hash: short_sha256(body_text),
@@ -112,71 +113,74 @@ pub fn parse_file(source: &str, language: &tree_sitter::Language) -> Option<Tree
 /// Split body text into alphanumeric runs (a–z, A–Z, 0–9, underscore).
 /// Whitespace and punctuation are skipped. Numbers are kept as their
 /// literal text so `1` and `2` are different tokens (helps shingles).
-fn tokenize(body: &str) -> Vec<&str> {
+fn tokenize(body: &str) -> impl Iterator<Item = &str> {
     let bytes = body.as_bytes();
-    let mut tokens: Vec<&str> = Vec::new();
     let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b.is_ascii_alphanumeric() || b == b'_' {
-            let start = i;
-            while i < bytes.len() {
-                let bb = bytes[i];
-                if bb.is_ascii_alphanumeric() || bb == b'_' {
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            tokens.push(&body[start..i]);
-        } else {
+    std::iter::from_fn(move || {
+        while i < bytes.len() && !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_' {
             i += 1;
         }
-    }
-    tokens
+        let start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        (start < i).then(|| &body[start..i])
+    })
+}
+
+/// Count body tokens using the same lexical rules as fingerprint shingles.
+pub fn body_token_count(body: &str) -> usize {
+    tokenize(body).count()
 }
 
 // ---------------------------------------------------------------------------
 // AST / CFG fingerprints
 // ---------------------------------------------------------------------------
 
-/// Pre-order kind walk. If `control_flow_only`, emit only the kinds whose
-/// names look like control-flow constructs.
-fn hash_kind_walk(root: Node<'_>, control_flow_only: bool) -> String {
-    let mut hasher = Sha256::new();
-    let mut stack: Vec<(Node<'_>, u32)> = vec![(root, 0)];
-    while let Some((node, depth)) = stack.pop() {
+/// Hash the AST shape, control-flow shape, and call sequence in one pre-order walk.
+fn hash_tree_walk(root: Node<'_>, source: &[u8]) -> (String, String, String) {
+    let mut ast_hasher = Sha256::new();
+    let mut cfg_hasher = Sha256::new();
+    let mut call_hasher = Sha256::new();
+    let mut cursor = root.walk();
+    let mut depth = 0u32;
+
+    loop {
+        let node = cursor.node();
         let kind = node.kind();
-        let emit = if control_flow_only {
-            is_control_flow_kind(kind)
-        } else {
-            true
-        };
-        if emit {
-            // Encode depth so structural reshapes don't collide. Using a
-            // separator byte (0x1f, unit separator) keeps the
-            // serialisation unambiguous.
-            hasher.update(kind.as_bytes());
-            hasher.update([0x1f]);
-            hasher.update(depth.to_le_bytes());
-            hasher.update([0x1e]);
+        // Encode depth so structural reshapes don't collide. Using separator
+        // bytes keeps the serialisation unambiguous.
+        ast_hasher.update(kind.as_bytes());
+        ast_hasher.update([0x1f]);
+        ast_hasher.update(depth.to_le_bytes());
+        ast_hasher.update([0x1e]);
+        if is_control_flow_kind(kind) {
+            cfg_hasher.update(kind.as_bytes());
+            cfg_hasher.update([0x1f]);
+            cfg_hasher.update(depth.to_le_bytes());
+            cfg_hasher.update([0x1e]);
         }
-        let mut cursor = node.walk();
+        if is_call_kind(kind)
+            && let Some(name) = leftmost_callable_name(node, source)
+        {
+            call_hasher.update(name.as_bytes());
+            call_hasher.update([0x1f]);
+        }
         if cursor.goto_first_child() {
-            let mut children: Vec<Node<'_>> = Vec::new();
-            loop {
-                children.push(cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
+            depth += 1;
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return (
+                    short_hex(ast_hasher.finalize().as_slice()),
+                    short_hex(cfg_hasher.finalize().as_slice()),
+                    short_hex(call_hasher.finalize().as_slice()),
+                );
             }
-            // Reverse-push so pop yields left-to-right order.
-            for child in children.into_iter().rev() {
-                stack.push((child, depth + 1));
-            }
+            depth -= 1;
         }
     }
-    short_hex(hasher.finalize().as_slice())
 }
 
 /// Heuristic: a tree-sitter kind name represents control flow if it
@@ -190,45 +194,6 @@ fn is_control_flow_kind(kind: &str) -> bool {
     MARKERS.iter().any(|m| kind.contains(m))
 }
 
-// ---------------------------------------------------------------------------
-// Call-sequence fingerprint
-// ---------------------------------------------------------------------------
-
-/// Pre-order walk, collecting the leftmost identifier of every
-/// call/invocation/macro node, in source order, then hashing them.
-fn hash_call_sequence(root: Node<'_>, source: &[u8]) -> String {
-    let mut calls: Vec<String> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(node) = stack.pop() {
-        let kind = node.kind();
-        if is_call_kind(kind)
-            && let Some(name) = leftmost_callable_name(node, source)
-        {
-            calls.push(name);
-        }
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            let mut children: Vec<Node<'_>> = Vec::new();
-            loop {
-                children.push(cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-            for child in children.into_iter().rev() {
-                stack.push(child);
-            }
-        }
-    }
-
-    let mut hasher = Sha256::new();
-    for name in &calls {
-        hasher.update(name.as_bytes());
-        hasher.update([0x1f]);
-    }
-    short_hex(hasher.finalize().as_slice())
-}
-
 fn is_call_kind(kind: &str) -> bool {
     const MARKERS: [&str; 4] = ["call", "invocation", "macro", "apply"];
     MARKERS.iter().any(|m| kind.contains(m))
@@ -237,7 +202,7 @@ fn is_call_kind(kind: &str) -> bool {
 /// Return the leftmost identifier-like child of a call node, treating
 /// `field_expression` / `member_expression` as a chain (returns the
 /// rightmost field of the leftmost chain — i.e. the called method).
-fn leftmost_callable_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+fn leftmost_callable_name<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
     let mut cursor = node.walk();
     if !cursor.goto_first_child() {
         return None;
@@ -250,7 +215,7 @@ fn leftmost_callable_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             || kind == "property_identifier"
             || kind == "scoped_identifier"
         {
-            return child.utf8_text(source).ok().map(str::to_string);
+            return child.utf8_text(source).ok();
         }
         if kind.contains("field_expression")
             || kind.contains("member_expression")
@@ -258,14 +223,14 @@ fn leftmost_callable_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         {
             let mut inner = child.walk();
             if inner.goto_first_child() {
-                let mut last_id: Option<String> = None;
+                let mut last_id = None;
                 loop {
                     let ic = inner.node();
                     let ik = ic.kind();
                     if ik.contains("identifier")
                         && let Ok(t) = ic.utf8_text(source)
                     {
-                        last_id = Some(t.to_string());
+                        last_id = Some(t);
                     }
                     if !inner.goto_next_sibling() {
                         break;
@@ -1027,6 +992,16 @@ mod tests {
         let c = fingerprint_for_rust_fn("fn c() { baz(); bar(); foo(); }");
         assert_eq!(a.call_seq_hash, b.call_seq_hash);
         assert_ne!(a.call_seq_hash, c.call_seq_hash);
+    }
+
+    #[test]
+    fn body_token_count_uses_fingerprint_token_rules() {
+        let body = "let café_value = α1 + foo_2;";
+        assert_eq!(
+            tokenize(body).collect::<Vec<_>>(),
+            ["let", "caf", "_value", "1", "foo_2"]
+        );
+        assert_eq!(body_token_count(body), 5);
     }
 
     #[test]

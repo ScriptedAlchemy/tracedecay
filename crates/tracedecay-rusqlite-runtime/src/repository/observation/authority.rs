@@ -6,8 +6,10 @@
 
 use rusqlite::{OptionalExtension, params};
 use tracedecay_domain::{
-    DurableObservationV1, FactOwnerV1, ObservationSourceCursorV1, RetrievalAnchorRecordV2,
-    RetrievalAnchorTargetV2, prove_cline_native_source_transition,
+    AnchorSourceGenerationV2, DurableObservationV1, EvidenceAvailabilityV1, FactOwnerV1,
+    GenerationBoundRepositoryProvenanceV1, ObservationSourceCursorV1, RepositoryProvenanceV1,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    prove_cline_native_source_transition,
 };
 use tracedecay_store::{
     AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
@@ -357,12 +359,103 @@ pub(super) fn verify_observation_authority(
             .transpose()?,
     );
     if stored.as_ref() != Some(&expected) {
-        return Err(invalid("observation repository provenance collision"));
+        let Some((availability, capture, anchor_id, owner)) = stored else {
+            return Err(invalid("observation repository provenance collision"));
+        };
+        let replay = repository_replay_anchor(attachment, &availability)?;
+        let Some(replay) = replay else {
+            return Err(invalid("observation repository provenance collision"));
+        };
+        let retained: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> =
+            decode(availability)?;
+        if capture != retained.value().map(encode).transpose()?
+            || anchor_id.as_deref() != Some(replay.anchor_id().as_str())
+            || owner.as_deref() != Some(encode(replay.owner())?.as_str())
+        {
+            return Err(invalid("observation repository provenance collision"));
+        }
+        return verify_retrieval_anchor(connection, &replay);
     }
     if let Some(anchor) = attachment.anchor() {
         verify_retrieval_anchor(connection, anchor)?;
     }
     Ok(())
+}
+
+/// A concurrent first writer can recapture the same Git evidence at a later
+/// local clock. Normalize only that clock and its derived capture identities;
+/// the caller still verifies every retained provenance and anchor field and
+/// returns the original immutable receipt. Different Git evidence is a conflict.
+fn repository_replay_anchor(
+    attachment: &RepositoryProvenanceAttachmentV1,
+    retained_json: &str,
+) -> rusqlite::Result<Option<RetrievalAnchorRecordV2>> {
+    let retained: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> =
+        decode(retained_json.to_owned())?;
+    let (Some(old), Some(new), Some(anchor)) = (
+        retained.value(),
+        attachment.provenance(),
+        attachment.anchor(),
+    ) else {
+        return Ok(None);
+    };
+    let capture = new.capture();
+    let normalized = GenerationBoundRepositoryProvenanceV1::new(
+        new.generation_id().clone(),
+        RepositoryProvenanceV1::new(
+            capture.repository_id().clone(),
+            capture.project_id().cloned(),
+            capture.worktree_id().cloned(),
+            capture.canonical_root_digest().clone(),
+            capture.evidence().clone(),
+            old.capture().captured_at(),
+        )
+        .map_err(invalid)?,
+        new.source_observation().cloned(),
+    )
+    .map_err(invalid)?;
+    let normalized = match attachment.availability() {
+        EvidenceAvailabilityV1::Known(_) => EvidenceAvailabilityV1::Known(normalized),
+        EvidenceAvailabilityV1::PartiallyReadable(_) => {
+            EvidenceAvailabilityV1::PartiallyReadable(normalized)
+        }
+        _ => return Ok(None),
+    };
+    if encode(&normalized)? != retained_json {
+        return Ok(None);
+    }
+    let RetrievalAnchorTargetV2::RepositoryCapture {
+        repository_id,
+        receipt,
+        ..
+    } = anchor.target()
+    else {
+        return Ok(None);
+    };
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::RepositoryCapture {
+            repository_id: repository_id.clone(),
+            capture_id: old.capture_id().clone(),
+            receipt: receipt.clone(),
+        },
+        owner: anchor.owner().clone(),
+        aliases: anchor.aliases().to_vec(),
+        occurred_at: anchor.occurred_at(),
+        ingested_at: anchor.ingested_at(),
+        evidence_class: anchor.evidence_class(),
+        source_generation: AnchorSourceGenerationV2::RepositoryCapture(old.capture_id().clone()),
+        projection_generation: anchor.projection_generation().clone(),
+        projection_watermark: anchor.projection_watermark().clone(),
+        coverage: anchor.coverage().clone(),
+        source_observations: anchor.source_observations().to_vec(),
+        source_anchors: anchor.source_anchors().to_vec(),
+        authorization: anchor.authorization().clone(),
+        payload_access: anchor.payload_access(),
+        retention_class: anchor.retention_class().clone(),
+        durability: anchor.durability().clone(),
+    })
+    .map(Some)
+    .map_err(invalid)
 }
 
 pub(super) fn read_cursor(

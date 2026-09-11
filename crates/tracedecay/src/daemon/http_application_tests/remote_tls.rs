@@ -22,9 +22,9 @@ use tracedecay_domain::{
 use super::{AUTH_TOKEN, current_micros};
 use crate::daemon::http_application::{
     DaemonHttpApplicationRegistry, DaemonHttpApplicationService,
-    validate_remote_brain_tls_identity_at,
 };
 use tracedecay_daemon_service::DaemonInvocationService;
+use tracedecay_daemon_service::remote_http_transport::validate_remote_brain_tls_identity_at;
 
 const REMOTE_TLS_CERTIFICATE: &[u8] =
     include_bytes!("../../../../../tests/fixtures/remote_tls/localhost.crt.pem");
@@ -85,7 +85,7 @@ fn unprovisioned_remote_registry(identity: &str) -> DaemonHttpApplicationRegistr
         )
         .expect("remote replay transaction authority"),
     );
-    let router = crate::daemon::remote_protocol::build_daemon_remote_protocol_router(
+    let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         transaction,
         DaemonInvocationService::default(),
@@ -824,7 +824,7 @@ async fn remote_tls_listener_serves_only_remote_routes_and_isolates_credential_a
         .expect("provision first TLS authority enrollment");
 
     let first_credentials = runtime.remote_credential_authority();
-    let first_router = crate::daemon::remote_protocol::build_daemon_remote_protocol_router(
+    let first_router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&first_credentials),
         runtime.remote_replay_transaction(),
         DaemonInvocationService::default(),
@@ -950,7 +950,7 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         .await
         .expect("provision TLS admission credential");
     let credentials = runtime.remote_credential_authority();
-    let router = crate::daemon::remote_protocol::build_daemon_remote_protocol_router(
+    let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
         DaemonInvocationService::default(),

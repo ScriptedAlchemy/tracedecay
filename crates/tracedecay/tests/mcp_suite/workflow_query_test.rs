@@ -10,8 +10,10 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
 use tracedecay::mcp::McpServer;
+use tracedecay::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
+};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_sessions::runtime::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,

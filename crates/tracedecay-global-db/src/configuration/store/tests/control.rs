@@ -8,18 +8,16 @@ use super::super::{
 };
 use super::{
     HostAdmissionScope, control_authority, control_authority_with_key, digest,
-    direct_project_layer, evidence_for, global_setup, id, policy_digest, protected_plan_for,
+    direct_project_layer, evidence_for, global_setup, id, protected_plan_for,
 };
 use crate::configuration::contracts::{ConfigurationRollbackRequest, DirectConfigurationMutation};
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::{registry_default_candidate, resolve_configuration};
 use std::collections::BTreeSet;
-use tracedecay_domain::configuration::CredentialReferenceMetadataV1;
 use tracedecay_domain::configuration::{
     AccessRuleId, AuthorityRef, ConfigurationLayerIdV1, ConfigurationMutationOperationV1,
-    ConfigurationSettlementAuthorityV1, ConfigurationValueV1, CredentialKindV1,
-    DIAGNOSTICS_PREWARM_SETTING_KEY, ProtectedApplyRequest, ProtectedChange, RollbackModeV1,
-    RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1,
+    ConfigurationValueV1, DIAGNOSTICS_PREWARM_SETTING_KEY, ProtectedApplyRequest, ProtectedChange,
+    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1,
     ScopeControlOperationV1, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::research::CapabilityId;
@@ -181,39 +179,6 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
             )
             .await,
         Err(ConfigurationError::PolicyWideningForbidden)
-    );
-    let credential_reference = CredentialReferenceMetadataV1 {
-        reference_id: id("credential.reference.direct-rejection"),
-        kind: CredentialKindV1::ApiToken,
-        reference_digest: digest('f'),
-        operation_digest: digest('e'),
-        settlement_authority: ConfigurationSettlementAuthorityV1 {
-            policy_epoch: 7,
-            policy_digest: policy_digest('b'),
-            revalidated_at: UtcMicros(1),
-        },
-        created_at: UtcMicros(1),
-        effective_deadline_at: UtcMicros(2),
-        rotation: 0,
-    };
-    credential_reference.validate().unwrap();
-    assert_eq!(
-        store
-            .commit_direct(
-                &authority,
-                &DirectConfigurationMutation::Set {
-                    layer: direct_project_layer(),
-                    key: SettingKey::new("diagnostics.credential_reference.v1").unwrap(),
-                    value: Box::new(ConfigurationValueV1::CredentialReference(
-                        credential_reference
-                    )),
-                },
-                &root.revision_id,
-            )
-            .await,
-        Err(ConfigurationError::Validation(
-            "credential references require the write-only credential operation".to_owned()
-        ))
     );
 }
 

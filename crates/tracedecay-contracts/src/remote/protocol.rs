@@ -4,6 +4,7 @@
 //! deliberately absent from these serializable payloads.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
@@ -102,13 +103,12 @@ pub trait RemoteEnrollmentProtocolPortV1: Send + Sync {
 
 /// Validates canonical protocol metadata before delegating exactly once to the
 /// authenticated transport-neutral remote port.
-pub struct RemoteProtocolServiceV1<Port> {
-    port: Port,
+pub struct RemoteProtocolServiceV1<Port: ?Sized> {
+    port: Arc<Port>,
 }
 
-impl<Port> RemoteProtocolServiceV1<Port> {
-    #[hotpath::skip]
-    pub const fn new(port: Port) -> Self {
+impl<Port: ?Sized> RemoteProtocolServiceV1<Port> {
+    pub fn new(port: Arc<Port>) -> Self {
         Self { port }
     }
 
@@ -656,9 +656,9 @@ mod tests {
     #[test]
     fn generic_protocol_service_delegates_once_to_application_port() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let service = RemoteProtocolServiceV1::new(FakeProtocolPort {
+        let service = RemoteProtocolServiceV1::new(Arc::new(FakeProtocolPort {
             calls: Arc::clone(&calls),
-        });
+        }));
         let request = RemoteProtocolRequestV1::new(
             RequestId::new("request.remote").unwrap(),
             BrainId::new("brain.remote").unwrap(),

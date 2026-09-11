@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1,
@@ -1362,6 +1362,72 @@ async fn claude_compact_boundary_record_becomes_marker_row() {
     assert_eq!(metadata["trigger"], "auto");
     assert_eq!(metadata["pre_tokens"], 150000);
     assert_eq!(metadata["logical_parent_uuid"], "pre-compact-parent");
+    assert!(
+        metadata.get("canonical_envelope").is_some(),
+        "compact-boundary pairing evidence must stay on the marker row: {metadata}"
+    );
+}
+
+#[tokio::test]
+async fn claude_compact_summary_keeps_pairing_envelope() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("claude-compact-pair.jsonl");
+    let cwd = project.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "sessionId": "claude-compact-pair",
+            "uuid": "ffffffff-0000-1111-2222-333333333333",
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "cwd": cwd,
+            "logicalParentUuid": "pre-compact-parent",
+            "compactMetadata": {
+                "trigger": "auto",
+                "preTokens": 120000,
+                "preservedSegment": {
+                    "anchorUuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "user",
+            "sessionId": "claude-compact-pair",
+            "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "parentUuid": "ffffffff-0000-1111-2222-333333333333",
+            "timestamp": "2026-01-01T00:00:06.000Z",
+            "cwd": cwd,
+            "isCompactSummary": true,
+            "isVisibleInTranscriptOnly": true,
+            "message": {
+                "role": "user",
+                "content": "Exercise Claude compact-summary pair extraction."
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
+
+    let summary = db
+        .get_session_message("claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        .await
+        .expect("compact-summary must persist");
+    let metadata: serde_json::Value =
+        serde_json::from_str(summary.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["canonical_envelope"]["relations"]["parent_message_id"],
+        "ffffffff-0000-1111-2222-333333333333",
+        "compact-summary pairing evidence must stay on the message row: {metadata}"
+    );
 }
 
 #[tokio::test]

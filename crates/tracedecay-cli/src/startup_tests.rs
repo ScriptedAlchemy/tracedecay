@@ -6,8 +6,9 @@ use super::{
     daemon_cpu_threads_from, hotpath_focus_is_valid, hotpath_output_format_is_none,
     hotpath_output_format_is_valid, hotpath_output_path_is_valid,
     hotpath_requires_protocol_safe_output, is_full_component_set_adoption,
-    normalize_tool_reserved_global_flags, should_skip_agent_install_check,
-    should_skip_startup_maintenance, stderr_tracing_default, validate_host_bundle_options,
+    normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
+    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
+    validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -729,6 +730,14 @@ fn post_update_full_reinstall_advances_both_version_markers() {
     assert_eq!(config.last_installed_version, running);
     // Idempotent: a second post-update run has nothing left to record.
     assert!(!config.mark_version_installed(running));
+}
+
+#[test]
+fn init_defers_worldwide_counter_flush_but_retains_other_startup_maintenance() {
+    let command = parse_command(&["init", "/tmp/project"]);
+    assert!(!runs_worldwide_counter_flush(&command));
+    assert!(!should_skip_startup_maintenance(&command));
+    assert!(runs_worldwide_counter_flush(&parse_command(&["sync"])));
 }
 
 #[test]

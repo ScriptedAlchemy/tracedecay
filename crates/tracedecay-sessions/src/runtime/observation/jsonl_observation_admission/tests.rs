@@ -158,6 +158,7 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
         position: 0,
         generation: 0,
         max_new_bytes: Some(1024),
+        max_frames: None,
         resume: None,
         preparation: false.into(),
     };

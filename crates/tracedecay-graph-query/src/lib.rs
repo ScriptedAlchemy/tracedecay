@@ -8,7 +8,8 @@
 //! (`tracedecay-code-index`, `tracedecay-graph-db`,
 //! `tracedecay-runtime-core`). It owns the [`VerifiedGraphQuery`] authority:
 //! admission, source binding, and every analytical read run through the one
-//! generation-pinned reader opened by [`open_verified_graph_query`].
+//! generation-pinned reader opened by [`open_verified_graph_query`], including
+//! the redundancy and test-risk scans that consume that admitted handle.
 
 use std::path::{Path, PathBuf};
 
@@ -18,8 +19,10 @@ pub mod context;
 pub mod health;
 mod projection;
 pub mod queries;
+pub mod redundancy_scan;
 pub mod scc;
 mod source_authority;
+pub mod test_risk;
 mod verified_query;
 
 pub use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
@@ -42,9 +45,12 @@ pub use queries::{
 pub use source_authority::{
     CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+pub use verified_query::admitted_verified_graph_query_port;
 pub use verified_query::{
-    VerifiedGraphQuery, VerifiedGraphQueryFuture, VerifiedGraphQueryPort,
-    VerifiedGraphQueryRequest, open_verified_graph_query,
+    AdmittedVerifiedGraphQueryPort, VerifiedGraphQuery, VerifiedGraphQueryFuture,
+    VerifiedGraphQueryPort, VerifiedGraphQueryRequest,
+    admitted_verified_graph_query_port_with_source, open_verified_graph_query,
 };
 
 /// Immutable filesystem and cache values supplied for one admitted source

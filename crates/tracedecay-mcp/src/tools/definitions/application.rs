@@ -3,9 +3,25 @@ use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, CatalogContributionV1, CatalogValidationError, OperationId,
 };
 
-use super::application_schema::closed_object_schema;
+use super::application_schema::{bound_tagged_union, closed_object_schema};
 use super::def;
 use crate::{McpCatalogError, ToolDefinition};
+
+/// Guidance carried by the bounded `ConfigurationValueV1` payload on the
+/// CAS-gated direct configuration writes.
+const CONFIGURATION_VALUE_GUIDANCE: &str = "Read the setting first through \
+    tracedecay_configuration_get: that read supplies the CAS \
+    expected_revision and shows the exact typed shape to send, and the daemon validates the \
+    payload against the canonical ConfigurationValueV1 schema on admission.";
+
+/// Guidance carried by the bounded `ProtectedChange` payload on the CAS-gated
+/// protected-change preview.
+const PROTECTED_CHANGE_GUIDANCE: &str = "Read the affected setting first through \
+    tracedecay_configuration_list or tracedecay_configuration_get: that read supplies the CAS \
+    expected_revision and shows the \
+    exact typed shape of the current source bindings, access rules, or work topology policy, and \
+    the daemon validates the change against the canonical ProtectedChange schema before it \
+    returns the redacted preview.";
 
 /// Project every canonical application handler into its MCP transport view.
 ///
@@ -67,7 +83,7 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
                 input_schema: application_input_schema(
                     operation,
                     executable.request_schema().body(),
-                ),
+                )?,
                 annotations: Some(json!({
                     "readOnlyHint": executable.effect().is_read_only(),
                     "title": manifest.routing().name(),
@@ -79,14 +95,45 @@ pub(super) fn application_definitions() -> Result<Vec<ToolDefinition>, McpCatalo
         .collect()
 }
 
-fn application_input_schema(operation: ApplicationSurfaceOperation, canonical: &Value) -> Value {
-    if operation != ApplicationSurfaceOperation::DiagnosticsRead {
-        return canonical.clone();
+fn application_input_schema(
+    operation: ApplicationSurfaceOperation,
+    canonical: &Value,
+) -> Result<Value, McpCatalogError> {
+    match operation {
+        // The configuration writes are revision-CAS gated: the agent reads the
+        // setting to obtain `expected_revision`, and that read already shows
+        // the typed value. Advertising the complete value union again costs
+        // 15–30 KiB per tool in every `tools/list`, so MCP keeps the
+        // discriminator and bounds the payload; HTTP/SDK callers keep the full
+        // canonical schema.
+        ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationBatch => bounded_input_schema(
+            canonical,
+            "ConfigurationValueV1",
+            CONFIGURATION_VALUE_GUIDANCE,
+        ),
+        ApplicationSurfaceOperation::ConfigurationProtectedPreview => {
+            bounded_input_schema(canonical, "ProtectedChange", PROTECTED_CHANGE_GUIDANCE)
+        }
+        ApplicationSurfaceOperation::DiagnosticsRead => Ok(shipped_diagnostics_input_schema()),
+        _ => Ok(canonical.clone()),
     }
+}
 
-    // `tracedecay_diagnostics` shipped with this flat MCP/CLI input. Keep this
-    // one transport projection at the edge while the descriptor, HTTP/SDK
-    // schema, handler, and runtime all retain DiagnosticsPrimitiveRequest.
+fn bounded_input_schema(
+    canonical: &Value,
+    definition: &str,
+    payload_guidance: &str,
+) -> Result<Value, McpCatalogError> {
+    let mut schema = canonical.clone();
+    bound_tagged_union(&mut schema, definition, payload_guidance)?;
+    Ok(schema)
+}
+
+/// `tracedecay_diagnostics` shipped with this flat MCP/CLI input. Keep this
+/// one transport projection at the edge while the descriptor, HTTP/SDK
+/// schema, handler, and runtime all retain `DiagnosticsPrimitiveRequest`.
+fn shipped_diagnostics_input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -196,7 +243,84 @@ mod tests {
             assert_eq!(
                 definition.input_schema,
                 application_input_schema(operation, executable.request_schema().body())
+                    .expect("application input schema")
             );
         }
+    }
+
+    #[test]
+    fn cas_gated_configuration_writes_bound_the_value_union_to_its_tags() {
+        let registry = tracedecay_contracts::mcp_executable_binding_registry()
+            .expect("application MCP registry");
+        let definitions = application_definitions().expect("application definitions");
+        let canonical_body = |operation: &str| {
+            let operation_id = OperationId::new(format!("operation.application.{operation}"))
+                .expect("operation ID");
+            registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .expect("executable binding")
+                .request_schema()
+                .body()
+                .clone()
+        };
+
+        for (tool_name, operation, union) in [
+            (
+                "tracedecay_configuration_set",
+                "configuration_set",
+                "ConfigurationValueV1",
+            ),
+            (
+                "tracedecay_configuration_batch",
+                "configuration_batch",
+                "ConfigurationValueV1",
+            ),
+            (
+                "tracedecay_configuration_protected_preview",
+                "configuration_protected_preview",
+                "ProtectedChange",
+            ),
+        ] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == tool_name)
+                .expect("configuration write definition");
+            let canonical = canonical_body(operation);
+            let canonical_tags = canonical["$defs"][union]["oneOf"]
+                .as_array()
+                .expect("canonical value union")
+                .iter()
+                .map(|branch| branch["properties"]["kind"]["const"].clone())
+                .collect::<Vec<_>>();
+            let bounded = &definition.input_schema["$defs"][union];
+            assert_eq!(
+                bounded["properties"]["kind"]["enum"],
+                serde_json::Value::Array(canonical_tags)
+            );
+            assert_eq!(bounded["required"], serde_json::json!(["kind", "value"]));
+            assert!(bounded["properties"]["value"].get("$ref").is_none());
+            assert!(
+                definition.input_schema["$defs"]
+                    .get("WorkTopologyPolicyV1")
+                    .is_none(),
+                "{tool_name} must not re-advertise the typed value payloads"
+            );
+            assert_eq!(
+                definition.input_schema["$defs"]["ConfigurationRevisionId"],
+                canonical["$defs"]["ConfigurationRevisionId"],
+                "{tool_name} must keep the definitions its other fields reference"
+            );
+        }
+
+        let unset = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_configuration_unset")
+            .expect("configuration unset definition");
+        assert!(
+            unset.input_schema["$defs"]
+                .get("ConfigurationValueV1")
+                .is_none()
+        );
     }
 }

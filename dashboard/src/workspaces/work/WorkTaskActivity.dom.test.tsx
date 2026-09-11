@@ -25,7 +25,8 @@ vi.mock('../../data/sse/useEvents.tsx', () => ({
 }));
 
 function pulse(family: string, projectId: string | null = 'project.alpha'): LiveActivityPulse {
-  return { projectId, family, streamId: `${family}:${projectId ?? 'none'}`, at: 1 };
+  return { projectId, family, streamId: `${family}:${projectId ?? 'none'}`, at: 1,
+    eventId: `fixture:${family}:${projectId ?? 'none'}`, observationTime: '1000' };
 }
 
 /** The window the all-projects scope produces, for the readings that are about

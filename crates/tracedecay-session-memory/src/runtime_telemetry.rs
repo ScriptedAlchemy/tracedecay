@@ -226,6 +226,54 @@ pub struct DatabaseSnapshot {
     pub runtime_registry: RuntimeRegistrySnapshot,
 }
 
+impl DatabaseSnapshot {
+    /// Assembles the wire snapshot from kernel store facts plus admitted
+    /// census, dirty-marker, and registry projection values.
+    pub fn from_collected(
+        collected: tracedecay_runtime_core::store_telemetry::CollectedStoreTelemetry,
+        dirty_marker: DirtyMarkerSnapshot,
+        generation_census: GenerationCensusSnapshot,
+        runtime_registry: RuntimeRegistrySnapshot,
+    ) -> Self {
+        let writer_owner = match collected.writer_owner {
+            Ok(tracedecay_runtime_core::db::WriterOwnership::Idle) => WriterOwnerSnapshot::Idle,
+            Ok(tracedecay_runtime_core::db::WriterOwnership::Active(owner)) => {
+                WriterOwnerSnapshot::Active {
+                    pid: owner.pid,
+                    started_epoch_ms: u64::try_from(owner.started_epoch_ms).unwrap_or(u64::MAX),
+                    version: owner.version,
+                    intent: owner.intent,
+                }
+            }
+            Ok(tracedecay_runtime_core::db::WriterOwnership::ActiveUnknown) => {
+                WriterOwnerSnapshot::ActiveUnknown
+            }
+            Err(error) => WriterOwnerSnapshot::ProbeFailed { error },
+        };
+        Self {
+            project_root: collected.project_root,
+            db_path: collected.db_path,
+            canonical_db_path: collected.canonical_db_path,
+            db_size_bytes: collected.db_size_bytes,
+            wal_size_bytes: collected.wal_size_bytes,
+            shm_size_bytes: collected.shm_size_bytes,
+            journal_mode: collected.journal_mode,
+            synchronous: collected.synchronous,
+            page_size: collected.page_size,
+            quick_check_ok: collected.quick_check_ok,
+            quick_check_error: collected.quick_check_error,
+            dirty_marker,
+            writer_owner,
+            generation_census,
+            reader_pool: collected
+                .reader_pool
+                .as_ref()
+                .map(ReaderPoolOccupancy::from_pool),
+            runtime_registry,
+        }
+    }
+}
+
 /// Per-lane reader-pool occupancy at one instant.
 ///
 /// `available + leased + limbo` accounts for every worker in a lane. `limbo`

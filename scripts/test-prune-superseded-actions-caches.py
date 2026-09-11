@@ -76,6 +76,13 @@ class SupersededSelectionTests(unittest.TestCase):
         ]
         self.assertEqual(self.prune.superseded(entries), [])
 
+    def test_a_newer_rust_cache_generation_supersedes_the_same_lane(self) -> None:
+        entries = [
+            entry(1, "v0-rust-hotpath-runtime-core-Linux-x64-a68045c9-6447760f", "2026-09-08T15:10:00Z"),
+            entry(2, "v1-rust-hotpath-runtime-core-Linux-x64-a68045c9-6447760f", "2026-09-09T01:00:00Z"),
+        ]
+        self.assertEqual(ids(self.prune.superseded(entries)), {1})
+
     def test_keys_outside_the_known_lineages_are_never_selected(self) -> None:
         # Two live node caches share one prefix: the root and dashboard
         # lockfiles hash differently and belong to different jobs.

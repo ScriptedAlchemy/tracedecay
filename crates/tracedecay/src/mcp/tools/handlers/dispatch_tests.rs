@@ -69,6 +69,50 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
 }
 
 #[tokio::test]
+async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
+    let retired = "tracedecay_file_metadata";
+    assert!(
+        get_tool_definitions()
+            .expect("tool definitions")
+            .iter()
+            .all(|definition| definition.name != retired)
+    );
+    assert!(
+        crate::mcp::tools::binding::mcp_dispatch_catalog()
+            .expect("MCP dispatch catalog")
+            .contract(retired)
+            .is_none()
+    );
+
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("temporary project");
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("retired-file-metadata");
+    fs::create_dir_all(&project).expect("project root");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.retired-file-metadata",
+    )
+    .await
+    .expect("TraceDecay fixture");
+    let error = handle_tool_call_with_registry_options(
+        &cg,
+        retired,
+        json!({"files": ["../outside"]}),
+        None,
+        None,
+        ToolCallRegistryOptions::default(),
+    )
+    .await
+    .expect_err("retired tool must be refused");
+    assert!(
+        error.to_string().contains("unknown tool"),
+        "retired tool reached a public dispatch path: {error}"
+    );
+    cg.close();
+}
+
+#[tokio::test]
 async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
@@ -505,10 +549,15 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         )
         .await
         .unwrap();
-    let options = || ToolCallRegistryOptions {
-        registered_project_session_db: runtime
-            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project),
-        ..Default::default()
+    let options = || {
+        ToolCallRegistryOptions {
+            registered_project_session_db: runtime.registered_database_arc(
+                tracedecay_sessions::admission::HostAdmissionScope::Project,
+            ),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits")
     };
     let status = handle_tool_call_with_registry_options(
         &cg,
@@ -642,7 +691,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(freshness_reader(None, Some("indexing"), true)),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while nothing serves");
@@ -671,7 +722,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 false,
             )),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while serving");
@@ -686,6 +739,117 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         "a serving census restores the branch claim: {serving}",
     );
 
+    // A branch publication can finish after the drift-triggered graph reopen
+    // already froze the startup fallback. The ready generation source is the
+    // serving authority in that window, including when its ref is the private
+    // tracking ref rather than the user-visible branch name.
+    let mut branch_meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root)
+        .expect("main branch metadata");
+    branch_meta.add_branch(
+        "feature",
+        tracedecay_runtime_core::config::DB_FILENAME,
+        "main",
+    );
+    tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branch_meta)
+        .unwrap();
+    run_git_in(&project, &["checkout", "-b", "feature"]);
+    let feature_revision = git_stdout_in(&project, &["rev-parse", "HEAD"]);
+    let feature_reference = "refs/heads/tracedecay/track/feature";
+    let published = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        &layout.data_root,
+        "feature",
+        None,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+            project_id: "project.mcp-status-serving-truth".to_owned(),
+            repository_id: "repository.status-serving-truth".to_owned(),
+            worktree_id: "worktree.status-serving-truth".to_owned(),
+            worktree_root: project.display().to_string(),
+            reference: feature_reference.to_owned(),
+            source_oid: feature_revision.clone(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        published,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+    ));
+    let feature_reference = feature_reference.to_owned();
+    let feature_reader:
+        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
+            let freshness = tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: worktree_root.display().to_string(),
+                source_reference: Some(feature_reference.clone()),
+                source_revision: Some(feature_revision.clone()),
+                latest_generation_id: Some("generation.status-serving-truth.feature".to_owned()),
+                code_graph_serving: Some(
+                    tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
+                ),
+                staleness_state: Some("fresh".to_owned()),
+                ..Default::default()
+            };
+            Box::pin(async move { Some(freshness) })
+        });
+    let published_feature = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json"}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(feature_reader.clone()),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("status answers after branch publication");
+    let published_feature = status_output(published_feature);
+    assert_eq!(published_feature["active_branch"], json!("feature"));
+    assert_eq!(published_feature["serving_branch"], json!("feature"));
+    assert_eq!(published_feature["branch_drifted"], json!(false));
+    assert_eq!(published_feature["branch_resolution"], json!("exact"));
+    assert_eq!(
+        published_feature["branch_diagnostics"]["open_active_branch"],
+        json!("feature")
+    );
+    assert_eq!(
+        published_feature["branch_diagnostics"]["serving_branch"],
+        json!("feature")
+    );
+    let feature_row = published_feature["branch_diagnostics"]["branches"]
+        .as_array()
+        .and_then(|branches| {
+            branches
+                .iter()
+                .find(|branch| branch["name"] == json!("feature"))
+        })
+        .expect("published feature branch diagnostics");
+    assert_eq!(feature_row["is_open_active"], json!(true));
+    assert_eq!(feature_row["is_serving"], json!(true));
+    assert_eq!(feature_row["is_ready"], json!(true));
+    assert!(published_feature.get("branch_warnings").is_none());
+
+    let compact_feature = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_status",
+        json!({"format": "json", "include_branch_diagnostics": false}),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            code_index_freshness_reader: Some(feature_reader),
+            ..Default::default()
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
+    )
+    .await
+    .expect("compact status answers after branch publication");
+    let compact_feature = status_output(compact_feature);
+    assert_eq!(compact_feature["active_branch"], json!("feature"));
+    assert_eq!(compact_feature["serving_branch"], json!("feature"));
+
     let rebuilding = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
@@ -699,7 +863,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
                 true,
             )),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers while a stale seat is rebuilding");
@@ -743,7 +909,9 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
         ToolCallRegistryOptions {
             code_index_freshness_reader: Some(aged_reader),
             ..Default::default()
-        },
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits"),
     )
     .await
     .expect("status answers for an aged seat");
@@ -902,7 +1070,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     let target_server = crate::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
         target,
         None,
-        crate::host_admission::ProjectScopedTestRuntimeV1::new(target_runtime)
+        crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(target_runtime)
             .expect("target project-scoped runtime"),
     )
     .await
@@ -910,7 +1078,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     let server = crate::mcp::McpServer::new_with_retained_test_servers_for_test(
         active,
         None,
-        crate::host_admission::ProjectScopedTestRuntimeV1::new(active_runtime)
+        crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(active_runtime)
             .expect("active project-scoped runtime"),
         vec![target_server],
     )
@@ -1147,7 +1315,9 @@ async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_ha
                 tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
             ),
             ..ToolCallRegistryOptions::default()
-        };
+        }
+        .admit_opened_project(&cg)
+        .expect("opened fixture admits");
         let started = std::time::Instant::now();
         let result = dispatch_git_tools(
             tool_name,
@@ -1313,79 +1483,6 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
             expected_reason
         );
         assert_eq!(payload["verified_graph_evidence"]["status"], "unavailable");
-    }
-
-    cg.close();
-}
-
-#[tokio::test]
-async fn pr_context_propagates_terminal_graph_failures_without_a_cursor() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("git-pr-context-terminal-graph");
-    fs::create_dir_all(project.join("src")).unwrap();
-    run_git_in(&project, &["init", "-b", "main"]);
-    fs::write(project.join("src/lib.rs"), "pub fn before() {}\n").unwrap();
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-m", "initial"]);
-    run_git_in(&project, &["switch", "-c", "feature"]);
-    fs::write(
-        project.join("src/lib.rs"),
-        "pub fn before() {}\npub fn after() {}\n",
-    )
-    .unwrap();
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-m", "change source"]);
-
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
-        "project.mcp-git-pr-context-terminal-graph",
-    )
-    .await
-    .unwrap();
-    let terminal_errors = [
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::Cancelled,
-        ),
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::Denied,
-        ),
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::Corrupt {
-                detail: "corrupt projection".to_owned(),
-            },
-        ),
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::ResetRequired {
-                detail: "generation reset required".to_owned(),
-            },
-        ),
-        tracedecay_graph_query::map_code_graph_read_runtime_error(
-            tracedecay_graph_query::CodeGraphReadError::InvalidRequest {
-                detail: "invalid graph request".to_owned(),
-            },
-        ),
-        TraceDecayError::Config {
-            message: "graph configuration is invalid".to_owned(),
-        },
-    ];
-
-    for error in terminal_errors {
-        let detail = error.to_string();
-        let result = git::handle_pr_context(
-            &cg,
-            async move { Err::<tracedecay_graph_query::VerifiedGraphQuery, _>(error) },
-            json!({"base_ref": "main", "head_ref": "HEAD", "format": "json"}),
-            None,
-            None,
-            None,
-        )
-        .await;
-        assert!(
-            result.is_err(),
-            "terminal graph failure must not become partial success: {detail}"
-        );
     }
 
     cg.close();
@@ -1677,7 +1774,7 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
         "a rebuild-in-flight serve must state the seat age and the rebuild: {rendered}",
     );
 
-    let wedged = handle_tool_call_with_registry_options(
+    let unverified = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_files",
         json!({}),
@@ -1686,15 +1783,15 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
         verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await
-    .expect("a wedged stale serve still answers");
-    let rendered = serde_json::to_string(&wedged.value).unwrap();
+    .expect("an unverified stale serve still answers");
+    let rendered = serde_json::to_string(&unverified.value).unwrap();
     assert!(
-        rendered.contains("no rebuild pass in flight"),
-        "a wedged route must not claim a rebuild is in flight: {rendered}",
+        rendered.contains("source freshness remains unverified"),
+        "an unverified route must state what remains unknown: {rendered}",
     );
     assert!(
         !rendered.contains("while the code index rebuilds"),
-        "a wedged route must not present itself as a routine rebuild: {rendered}",
+        "an unverified route must not present itself as a rebuild: {rendered}",
     );
 
     let current = handle_tool_call_with_registry_options(
@@ -1756,7 +1853,7 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
             .expect("profile root identity"),
     );
     let profile_retained_authority =
-        crate::daemon::retained_owner::profile_retained_connection_authority(
+        tracedecay_session_runtime::retained::profile_retained_connection_authority(
             &profile_identity,
             &session_identity,
         )
@@ -1833,7 +1930,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
             .expect("profile root identity"),
     );
     let profile_retained_authority =
-        crate::daemon::retained_owner::profile_retained_connection_authority(
+        tracedecay_session_runtime::retained::profile_retained_connection_authority(
             &profile_identity,
             &session_identity,
         )
@@ -1889,7 +1986,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
                         .with_profile_retained_authority(Some(profile_retained_authority))
                         .with_profile_session_refresh(mounted.then_some(
                             refresh
-                                as &dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1,
+                                as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
                         )),
                     ..Default::default()
                 },

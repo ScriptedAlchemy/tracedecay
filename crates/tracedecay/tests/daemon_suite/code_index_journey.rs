@@ -409,6 +409,10 @@ pub async fn wait_for_terminal_generation(
             if !query_matches {
                 continue;
             }
+            let incomplete = crate::common::incomplete_code_index_query_lanes(&last_search);
+            if !incomplete.is_empty() {
+                continue;
+            }
             assert_exact_identity(
                 &last_status,
                 project,
@@ -417,12 +421,6 @@ pub async fn wait_for_terminal_generation(
                 expected_revision,
             );
             assert_project_identity(socket, handshake, project, identity).await;
-            for lane in ["exact", "lexical", "graph"] {
-                assert_eq!(
-                    last_search["coverage"][lane], "complete",
-                    "terminal query must have complete {lane} coverage: {last_search}"
-                );
-            }
             return TerminalGenerationReceipt {
                 generation_id: generation.expect("terminal generation"),
                 status: last_status.clone(),
@@ -433,7 +431,8 @@ pub async fn wait_for_terminal_generation(
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "timed out waiting for terminal generation for {query}; status={last_status}; search={last_search}; daemon_log={}",
+            "timed out waiting for terminal generation for {query}; incomplete lanes={:?}; status={last_status}; search={last_search}; daemon_log={}",
+            crate::common::incomplete_code_index_query_lanes(&last_search),
             daemon_log_for_failure()
         )
     })

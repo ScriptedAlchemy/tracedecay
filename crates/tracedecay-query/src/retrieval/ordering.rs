@@ -1,7 +1,8 @@
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
 
 use tracedecay_domain::{
-    ExactClass, FreshnessCompatibilityV1, FusedCandidate, RankingDecision, SourceOccurrenceId,
+    ExactClass, FixedPointScore, FreshnessCompatibilityV1, FusedCandidate, RankingDecision,
+    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceOccurrenceId,
 };
 
 use super::stage_counters;
@@ -35,9 +36,27 @@ pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Or
         .cmp(&exact_class_rank(right.exact_class))
         .then_with(|| right.utility_micros.cmp(&left.utility_micros))
         .then_with(|| source_validity_rank(right).cmp(&source_validity_rank(left)))
-        .then_with(|| left.anchor_id.cmp(&right.anchor_id))
-        .then_with(|| left.logical_evidence_id.cmp(&right.logical_evidence_id))
+        .then_with(|| ordered_domain_scores(left).cmp(&ordered_domain_scores(right)))
+        .then_with(|| {
+            ordered_retriever_evidence_anchors(left).cmp(&ordered_retriever_evidence_anchors(right))
+        })
         .then_with(|| ordered_occurrence_id_refs(left).cmp(&ordered_occurrence_id_refs(right)))
+}
+
+/// Source-bound lexical/exact and graph evidence anchors are generation-free.
+/// Generation-scoped occurrence IDs remain the final discriminator only when
+/// the available source identity cannot distinguish otherwise equal evidence.
+pub(super) fn ordered_retriever_evidence_anchors(
+    candidate: &FusedCandidate,
+) -> Vec<&RetrievalAnchorId> {
+    let mut anchors = candidate
+        .occurrences
+        .iter()
+        .map(|occurrence| &occurrence.retriever_evidence_anchor)
+        .collect::<Vec<_>>();
+    anchors.sort();
+    anchors.dedup();
+    anchors
 }
 
 pub(super) fn decision_cmp(left: &RankingDecision, right: &RankingDecision) -> Ordering {
@@ -88,4 +107,30 @@ pub(super) fn ordered_occurrence_ids(candidate: &FusedCandidate) -> Vec<SourceOc
         .into_iter()
         .cloned()
         .collect()
+}
+
+/// Preserve measured score differences when calibration rounds or saturates.
+/// Compare unique entries lexicographically: retriever and score-domain tags
+/// ascending, then raw score descending within matching tags. Different lane
+/// or domain mixes therefore use tag order before evidence identity, never
+/// compare unrelated numeric scales. A common-domains-only comparison would
+/// not define a transitive total order across candidates with different lanes.
+pub(super) fn ordered_domain_scores(
+    candidate: &FusedCandidate,
+) -> Vec<(RetrieverKind, &ScoreDomainId, Reverse<FixedPointScore>)> {
+    let mut scores = candidate
+        .contributions
+        .iter()
+        .filter(|contribution| contribution.weight_micros > 0)
+        .map(|contribution| {
+            (
+                contribution.retriever,
+                &contribution.score_domain,
+                Reverse(contribution.raw_score),
+            )
+        })
+        .collect::<Vec<_>>();
+    scores.sort();
+    scores.dedup();
+    scores
 }

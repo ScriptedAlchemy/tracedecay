@@ -58,6 +58,10 @@ impl StoreAdministration {
     /// before any runtime is retired or store directory is removed, so a
     /// failed cleanup stays fail-closed and a retry resumes safely.
     #[hotpath::measure(label = "daemon.branch_admin.remote_deletion", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Remote deletion is one fail-closed tombstone-then-retire lifecycle; phases must stay ordered together."
+    )]
     pub(in super::super) async fn execute_remote_deletion(
         &self,
         owners: &super::super::remote_deletion::RemoteDeletionRuntimeOwners,
@@ -649,6 +653,10 @@ impl StoreAdministration {
     }
 
     #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Project store removal is one destructive cleanup sequence after the tombstone is durable."
+    )]
     async fn remove_remote_deleted_project(
         &self,
         owners: &super::super::remote_deletion::RemoteDeletionRuntimeOwners,
@@ -759,7 +767,7 @@ impl StoreAdministration {
                 },
             ));
         }
-        crate::daemon::hook_v2_replay::shutdown_hook_v2_replay_consumer(&data_root).await;
+        crate::daemon::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
         self.project_routes
             .forget_project(identity.profile_id(), project_id)
             .map_err(|error| {
@@ -770,6 +778,10 @@ impl StoreAdministration {
                     error,
                 )
             })?;
+        super::retire_registered_context_scout_owner(
+            &typed_project_id,
+            &data_root.join(crate::config::db_filename(&data_root)),
+        );
         self.git_index_transaction_services
             .retire_project_database(&typed_project_id, &project_sessions_path)
             .await

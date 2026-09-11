@@ -24,11 +24,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ActorId, CapabilityId as DomainCapabilityId, ManifestDigest, MechanicalIntegrationModeV1,
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
-    NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
-    NativeIntegrationReceiptV1, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
-    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
-    RepositoryId, UtcMicros, WorktreeInventoryEpoch,
+    NativeIntegrationAnalysisReportV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationPhaseV1, NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
+    NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
+    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
+    NativeIntegrationTransactionStatusV1, ProjectId, RefId, RepositoryId, UtcMicros,
+    WorktreeInventoryEpoch,
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
@@ -60,7 +61,10 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 mod stack_snapshot;
 
-pub use stack_snapshot::NativeIntegrationStackSnapshotSurfaceRequest;
+pub use stack_snapshot::{
+    NativeIntegrationSealedStackSnapshotV1, NativeIntegrationSelectionDeclarationV1,
+    NativeIntegrationStackSnapshotSurfaceRequest,
+};
 
 /// Canonical wire operation names for the native-integration journey.
 pub const NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION: &str = "stack_snapshot";
@@ -109,32 +113,6 @@ impl<P: NativeIntegrationStackResolutionPort> NativeIntegrationStackSnapshotServ
     }
 }
 
-/// Exact semantic evidence revisions joined to native conflict evidence.
-///
-/// Mirrors [`super::NativeIntegrationEvidenceRevisionsV1`] on the wire; the
-/// application type stays the single validation authority.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct NativeIntegrationEvidenceRevisionsWireV1 {
-    pub graph_revision_digest: ManifestDigest,
-    pub test_revision_digest: ManifestDigest,
-    pub schema_revision_digest: ManifestDigest,
-    pub migration_revision_digest: ManifestDigest,
-}
-
-impl From<NativeIntegrationEvidenceRevisionsWireV1>
-    for super::NativeIntegrationEvidenceRevisionsV1
-{
-    fn from(value: NativeIntegrationEvidenceRevisionsWireV1) -> Self {
-        Self {
-            graph_revision_digest: value.graph_revision_digest,
-            test_revision_digest: value.test_revision_digest,
-            schema_revision_digest: value.schema_revision_digest,
-            migration_revision_digest: value.migration_revision_digest,
-        }
-    }
-}
-
 /// Read-only preflight over one frozen snapshot identity.
 ///
 /// `preferred_mode` selects only one of the three fixed mechanical encodings.
@@ -142,8 +120,7 @@ impl From<NativeIntegrationEvidenceRevisionsWireV1>
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeIntegrationPreflightSurfaceRequest {
-    pub snapshot: NativeIntegrationStackSnapshotSurfaceRequest,
-    pub evidence: NativeIntegrationEvidenceRevisionsWireV1,
+    pub snapshot: NativeIntegrationSealedStackSnapshotV1,
     #[serde(default)]
     pub preferred_mode: Option<MechanicalIntegrationModeV1>,
 }
@@ -272,6 +249,14 @@ impl NativeIntegrationSnapshotProjectionV1 {
     }
 }
 
+/// Frozen selection summary plus the exact sealed proof preflight accepts.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationSealedStackSnapshotProjectionV1 {
+    pub selection: NativeIntegrationSnapshotProjectionV1,
+    pub sealed_snapshot: NativeIntegrationSealedStackSnapshotV1,
+}
+
 /// Bounded projection of one immutable preview.
 ///
 /// Candidate trees, conflict bodies, and ordered commit objects stay behind the
@@ -284,6 +269,7 @@ pub struct NativeIntegrationPreviewProjectionV1 {
     pub preview_digest: ManifestDigest,
     pub selection: NativeIntegrationSnapshotProjectionV1,
     pub disposition: NativeIntegrationPreviewDispositionV1,
+    pub analysis: Option<NativeIntegrationAnalysisReportV1>,
     pub ordered_commit_count: u32,
     pub created_at: UtcMicros,
     pub expires_at: UtcMicros,
@@ -296,6 +282,7 @@ impl NativeIntegrationPreviewProjectionV1 {
             preview_digest: preview.preview_digest.clone(),
             selection: NativeIntegrationSnapshotProjectionV1::project(&preview.selection)?,
             disposition: preview.disposition.clone(),
+            analysis: preview.analysis.clone(),
             ordered_commit_count: u32::try_from(preview.ordered_commits.len()).map_err(|_| {
                 ApplicationContractError::Inconsistent {
                     field: "native integration ordered commit count",
@@ -422,8 +409,8 @@ pub enum NativeIntegrationCancellationProjectionV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum NativeIntegrationSurfaceResultV1 {
-    StackSnapshot(NativeIntegrationSnapshotProjectionV1),
-    Preview(NativeIntegrationPreviewProjectionV1),
+    StackSnapshot(Box<NativeIntegrationSealedStackSnapshotProjectionV1>),
+    Preview(Box<NativeIntegrationPreviewProjectionV1>),
     Approval(NativeIntegrationApprovalProjectionV1),
     Receipt(NativeIntegrationReceiptProjectionV1),
     Status(NativeIntegrationStatusProjectionV1),
@@ -455,10 +442,14 @@ impl NativeIntegrationSurfaceResultV1 {
 
     pub fn from_stack_resolution(
         outcome: &NativeIntegrationStackResolutionOutcomeV1,
+        sealed_snapshot: NativeIntegrationSealedStackSnapshotV1,
     ) -> Result<Self, ApplicationContractError> {
         Ok(match outcome {
             NativeIntegrationStackResolutionOutcomeV1::Complete(selection) => {
-                Self::StackSnapshot(NativeIntegrationSnapshotProjectionV1::project(selection)?)
+                Self::StackSnapshot(Box::new(NativeIntegrationSealedStackSnapshotProjectionV1 {
+                    selection: NativeIntegrationSnapshotProjectionV1::project(selection)?,
+                    sealed_snapshot,
+                }))
             }
             NativeIntegrationStackResolutionOutcomeV1::Partial => {
                 Self::unavailable(NativeIntegrationSurfaceUnavailableV1::Partial)
@@ -485,9 +476,9 @@ impl NativeIntegrationSurfaceResultV1 {
         outcome: &NativeIntegrationPreflightOutcomeV1,
     ) -> Result<Self, ApplicationContractError> {
         Ok(match outcome {
-            NativeIntegrationPreflightOutcomeV1::Preview(preview) => {
-                Self::Preview(NativeIntegrationPreviewProjectionV1::project(preview)?)
-            }
+            NativeIntegrationPreflightOutcomeV1::Preview(preview) => Self::Preview(Box::new(
+                NativeIntegrationPreviewProjectionV1::project(preview)?,
+            )),
             NativeIntegrationPreflightOutcomeV1::Partial => {
                 Self::unavailable(NativeIntegrationSurfaceUnavailableV1::Partial)
             }

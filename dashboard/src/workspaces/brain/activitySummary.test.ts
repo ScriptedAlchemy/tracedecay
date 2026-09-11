@@ -3,7 +3,8 @@ import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 import { ageTickIntervalMs, formatDurationMs, summarizeActivity, RATE_WINDOW_MS } from './activitySummary.ts';
 
 function pulse(family: string, at: number): LiveActivityPulse {
-  return { projectId: 'p1', family, streamId: 'code_index', at };
+  return { projectId: 'p1', family, streamId: 'code_index', at,
+    eventId: `fixture:${family}:${at}`, observationTime: String(at * 1000) };
 }
 
 const NOW = 1_000_000;

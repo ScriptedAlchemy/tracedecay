@@ -16,6 +16,24 @@ fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
 }
 
 #[test]
+fn retired_unused_import_scan_is_absent_while_diagnostic_reads_remain() {
+    let definitions = get_maximal_tool_definitions().expect("tool definitions");
+    eprintln!("maximal source catalog count: {}", definitions.len());
+
+    assert!(
+        definitions
+            .iter()
+            .all(|definition| definition.name != "tracedecay_unused_imports")
+    );
+    for name in ["tracedecay_diagnose", "tracedecay_diagnostics"] {
+        assert!(
+            definitions.iter().any(|definition| definition.name == name),
+            "{name} must remain available for compiler and published diagnostics"
+        );
+    }
+}
+
+#[test]
 fn stack_snapshot_requires_an_exact_selection_binding() {
     let definition = get_tool_definitions()
         .expect("tool definitions")
@@ -24,24 +42,63 @@ fn stack_snapshot_requires_an_exact_selection_binding() {
         .expect("stack snapshot definition");
     assert_eq!(
         definition.input_schema["properties"]["selection"]["$ref"],
-        "#/$defs/NativeIntegrationSelectionBindingV1"
+        "#/$defs/NativeIntegrationSelectionDeclarationV1"
     );
-    let selection = &definition.input_schema["$defs"]["NativeIntegrationSelectionBindingV1"];
+    let selection = &definition.input_schema["$defs"]["NativeIntegrationSelectionDeclarationV1"];
 
     assert_eq!(selection["oneOf"].as_array().map(Vec::len), Some(2));
     assert_eq!(
         selection["oneOf"][0]["properties"]["kind"]["const"],
         "declared_stack_edge"
     );
-    assert!(
-        selection["oneOf"][0]["properties"]["binding"]["required"]
-            .as_array()
-            .is_some_and(|required| required.contains(&json!("declared_revision")))
-    );
+    let required = selection["oneOf"][0]["properties"]["binding"]["required"]
+        .as_array()
+        .expect("declared stack fields");
+    assert!(required.contains(&json!("nodes")));
+    assert!(required.contains(&json!("edges")));
+    assert!(!required.contains(&json!("canonical_order")));
+    assert!(!required.contains(&json!("digest")));
     assert_eq!(
         selection["oneOf"][1]["properties"]["kind"]["const"],
         "independent_branch"
     );
+}
+
+/// `health_read` takes no parameters, so `{}` is the whole request.
+///
+/// The advertised MCP schema and the reviewed request contract are the same
+/// authority, and CLI and MCP reach it through one adapter. Grading the
+/// advertised schema and that adapter together is what keeps an argument a
+/// host may legitimately send from being accepted on one surface and refused
+/// on another.
+#[test]
+fn health_read_accepts_the_empty_argument_object_on_every_surface() {
+    let definition = get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .find(|definition| definition.name == "tracedecay_health_read")
+        .expect("health read is advertised");
+    assert_eq!(
+        definition.input_schema["required"]
+            .as_array()
+            .map_or(0, Vec::len),
+        0,
+        "the advertised health read schema must require no argument: {}",
+        definition.input_schema
+    );
+
+    let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(
+        "tracedecay_health_read",
+        json!({}),
+    )
+    .expect("the shared CLI/MCP adapter accepts the empty object");
+    assert_eq!(adapted.request, json!({}));
+    let request = tracedecay_daemon_protocol::parse_application_surface_request(
+        ApplicationSurfaceOperation::HealthRead,
+        adapted.request,
+    )
+    .expect("the reviewed health read contract accepts the empty object");
+    assert!(request.matches(ApplicationSurfaceOperation::HealthRead));
 }
 
 #[test]

@@ -1028,6 +1028,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
                         },
                         "canonical_path": fast_path,
                         "capabilities": ["claude_code_stream_json"],
+                        "routes": [],
                     },
                     {
                         "executable": {
@@ -1036,6 +1037,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
                         },
                         "canonical_path": slow_path,
                         "capabilities": ["claude_code_stream_json"],
+                        "routes": [],
                     },
                 ],
             },

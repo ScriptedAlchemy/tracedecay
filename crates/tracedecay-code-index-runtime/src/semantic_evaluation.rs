@@ -239,23 +239,13 @@ pub async fn build_daemon_semantic_evaluation_candidate(
     control: Arc<DaemonSemanticEvaluationControlV1>,
 ) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
     control.checkpoint()?;
-    let snapshot = control
+    let (snapshot, code) = control
         .interruptible(hotpath::future!(
-            scheduler.semantic_evaluation_snapshot_for_scope(scope),
+            scheduler.semantic_evaluation_generation_for_scope(project_root, scope),
             label = "daemon.semantic.evaluation.candidate.code_snapshot"
         ))
         .await?
-        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
-    let serving = control
-        .interruptible(hotpath::future!(
-            scheduler.serving_code_scope(project_root),
-            label = "daemon.semantic.evaluation.candidate.serving_code"
-        ))
-        .await?
-        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
-    let code = serving
-        .serving_generation
-        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+        .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
     if code.manifest().generation_id != snapshot.source_generation
         || code.projection().request().changes.manifest_digest != snapshot.source_manifest_digest
         || code.manifest().snapshot_digest != snapshot.snapshot_digest

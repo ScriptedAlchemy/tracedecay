@@ -111,15 +111,14 @@ fn application_surface_branch_sensitivity(
         AffectedTests, CallChain, CodeCallees, CodeCallers, CodeDeclaration, CodeDefinition,
         CodeExactOccurrence, CodeFacets, CodeImplementations, CodePhraseSearch, CodeReferences,
         CodeSignatureSearch, CodeSymbolSearch, CodeTimeline, CodeTypeDefinition, CodeTypeHierarchy,
-        ConfigurationAudit, ConfigurationBatch, ConfigurationExplain, ConfigurationGet,
-        ConfigurationList, ConfigurationObservedState, ConfigurationProtectedApply,
-        ConfigurationProtectedPreview, ConfigurationRollbackApply, ConfigurationRollbackPreview,
-        ConfigurationSet, ConfigurationUnset, ConfigurationWriteCredential, ContextScoutBudget,
-        ContextScoutCancel, ContextScoutCapability, ContextScoutClaim, ContextScoutDelivery,
-        ContextScoutExplain, ContextScoutFeedback, ContextScoutPause, ContextScoutRecent,
-        ContextScoutResume, ContextScoutStatus, DiagnosticsRead, FeedbackAdvisoryCycle,
-        FeedbackDiagnostics, FeedbackExpand, FeedbackGet, FeedbackImpact, FeedbackList,
-        FileDependents, FileMetadata, GitApply, GitBlame, GitDiff, GitHistory,
+        ConfigurationAudit, ConfigurationBatch, ConfigurationGet, ConfigurationList,
+        ConfigurationObservedState, ConfigurationProtectedApply, ConfigurationProtectedPreview,
+        ConfigurationRollbackApply, ConfigurationRollbackPreview, ConfigurationSet,
+        ConfigurationUnset, ContextScoutBudget, ContextScoutCancel, ContextScoutCapability,
+        ContextScoutClaim, ContextScoutDelivery, ContextScoutExplain, ContextScoutFeedback,
+        ContextScoutPause, ContextScoutRecent, ContextScoutResume, ContextScoutStatus,
+        DiagnosticsRead, FeedbackAdvisoryCycle, FeedbackDiagnostics, FeedbackExpand, FeedbackGet,
+        FeedbackImpact, FeedbackList, FileDependents, GitApply, GitBlame, GitDiff, GitHistory,
         GitHubStackSignalExpand, GitHunks, GitPreview, GitStatus, HealthDelta, HealthRead,
         ModuleApi, NativeIntegrationApply, NativeIntegrationApprove, NativeIntegrationCancel,
         NativeIntegrationPreflight, NativeIntegrationStackSnapshot, NativeIntegrationStatus,
@@ -133,12 +132,10 @@ fn application_surface_branch_sensitivity(
         // host-integration lifecycle, session identity, store identity, or
         // process observability — never the checkout, code graph, or files.
         ConfigurationList
-        | ConfigurationExplain
         | ConfigurationGet
         | ConfigurationSet
         | ConfigurationUnset
         | ConfigurationBatch
-        | ConfigurationWriteCredential
         | ConfigurationObservedState
         | ConfigurationProtectedPreview
         | ConfigurationProtectedApply
@@ -210,7 +207,6 @@ fn application_surface_branch_sensitivity(
         | SourceBody
         | SourceOutline
         | ModuleApi
-        | FileMetadata
         | HealthRead
         | HealthDelta
         | DiagnosticsRead => BranchSensitivity::Sensitive,
@@ -264,7 +260,6 @@ const MCP_TOOL_BINDING_SPECS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_admin_sync", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_port_status", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_port_order", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_simplify_scan", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_type_hierarchy", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_body", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_todos", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -278,7 +273,6 @@ const MCP_TOOL_BINDING_SPECS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_dead_code", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_circular", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_hotspots", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_unused_imports", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_unmounted_files", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_rank", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_largest", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -585,7 +579,8 @@ fn application_capability_for_tool(
     super::dispatch::McpDispatchMetadataError,
 > {
     let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
-    let catalog = crate::application_surface::application_surface_catalog_ref()?;
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_catalog_ref()?;
     Ok(catalog.capabilities().find(|capability| {
         capability.binding_ids().iter().any(|binding_id| {
             catalog.binding(binding_id).is_some_and(|binding| {
@@ -728,7 +723,6 @@ fn compute_tool_supports_live_cancellation(tool_name: &str) -> bool {
                 | "tracedecay_dead_code"
                 | "tracedecay_circular"
                 | "tracedecay_affected"
-                | "tracedecay_simplify_scan"
                 | "tracedecay_dependency_depth"
                 | "tracedecay_health"
                 | "tracedecay_dsm"
@@ -772,7 +766,6 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_configuration_set"
             | "tracedecay_configuration_unset"
             | "tracedecay_configuration_batch"
-            | "tracedecay_configuration_write_credential"
             | "tracedecay_configuration_protected_apply"
             | "tracedecay_configuration_rollback_apply"
             | "tracedecay_context_scout_pause"
@@ -870,6 +863,10 @@ fn cancellation_for_tool(
     CancellationContract::cooperative(points)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Dispatch catalog construction lists every retained tool as one discovery payload."
+)]
 fn build_mcp_dispatch_catalog()
 -> Result<McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     let mut contracts = Vec::new();
@@ -1047,44 +1044,60 @@ mod tests {
         }
     }
 
+    /// The budget that cut `tracedecay_context` at ten seconds in the #1203
+    /// dogfood run is this capability's own deadline contract — the retrieval
+    /// primitive declares `DeadlineContract::new(10_000, ..)` — and not
+    /// `TOOL_DISPATCH_CEILING`, the CLI request deadline, or any settlement or
+    /// ledger budget. `prepare_dispatch_control` hands this ceiling straight to
+    /// `DispatchControl`, and a caller deadline can only shorten it, so this
+    /// value alone decides when an interactive context read is refused.
     #[test]
-    fn exact_fact_routes_accept_selectors_without_registered_reader_dispatch() {
+    fn context_dispatches_under_its_own_ten_second_deadline_contract() {
+        let ceiling = canonical_tool_dispatch_ceiling("tracedecay_context").unwrap();
+        assert_eq!(ceiling, std::time::Duration::from_secs(10));
+        assert!(
+            ceiling < crate::mcp::tools::handlers::tool_dispatch_ceiling("tracedecay_context"),
+            "the capability contract, not the generic dispatch ceiling, bounds context"
+        );
+        assert!(
+            ceiling < tracedecay_daemon_protocol::DEFAULT_TOOL_REQUEST_DEADLINE,
+            "the CLI request deadline cannot be what refuses a context read"
+        );
+    }
+
+    #[test]
+    fn exact_fact_reads_dispatch_to_their_registered_project() {
         for tool_name in [
-            "tracedecay_fact_store_add",
             "tracedecay_fact_store_search",
             "tracedecay_fact_store_probe",
             "tracedecay_fact_store_related",
             "tracedecay_fact_store_reason",
             "tracedecay_fact_store_contradict",
             "tracedecay_fact_store_get",
-            "tracedecay_fact_store_update",
-            "tracedecay_fact_store_remove",
-            "tracedecay_fact_store_supersede",
             "tracedecay_fact_store_list",
             "tracedecay_memory_status",
+            "tracedecay_message_search",
         ] {
             assert!(tool_accepts_registered_project_selector(tool_name));
-            assert!(!tool_dispatches_registered_project_reader(tool_name));
+            assert!(tool_dispatches_registered_project_reader(tool_name));
+            assert!(!tool_is_selector_bound_effect(tool_name));
         }
+    }
+
+    #[test]
+    fn exact_fact_effects_keep_the_active_project_authority() {
         for tool_name in [
             "tracedecay_fact_store_add",
             "tracedecay_fact_store_update",
             "tracedecay_fact_store_remove",
             "tracedecay_fact_store_supersede",
+            "tracedecay_fact_feedback",
         ] {
+            assert!(tool_accepts_registered_project_selector(tool_name));
+            assert!(!tool_dispatches_registered_project_reader(tool_name));
             assert!(
                 tool_is_selector_bound_effect(tool_name),
                 "{tool_name} must stay selector-bound so writes are not dispatched into the selected store"
-            );
-        }
-        for tool_name in [
-            "tracedecay_fact_store_search",
-            "tracedecay_fact_store_get",
-            "tracedecay_memory_status",
-        ] {
-            assert!(
-                !tool_is_selector_bound_effect(tool_name),
-                "{tool_name} is a selector-bound read and must keep its existing selected-project route"
             );
         }
     }
@@ -1224,12 +1237,10 @@ mod tests {
         // apply. MCP render uses `cg.project_root()` only; owners do not
         // read the code graph.
         ("tracedecay_configuration_list", BranchSensitivity::Independent),
-        ("tracedecay_configuration_explain", BranchSensitivity::Independent),
         ("tracedecay_configuration_get", BranchSensitivity::Independent),
         ("tracedecay_configuration_set", BranchSensitivity::Independent),
         ("tracedecay_configuration_unset", BranchSensitivity::Independent),
         ("tracedecay_configuration_batch", BranchSensitivity::Independent),
-        ("tracedecay_configuration_write_credential", BranchSensitivity::Independent),
         ("tracedecay_configuration_observed_state", BranchSensitivity::Independent),
         ("tracedecay_configuration_protected_preview", BranchSensitivity::Independent),
         ("tracedecay_configuration_protected_apply", BranchSensitivity::Independent),

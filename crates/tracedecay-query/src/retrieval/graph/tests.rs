@@ -952,3 +952,79 @@ fn graph_lane_reports_missing_authority_without_substitution() {
         RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable { .. })
     ));
 }
+
+#[test]
+fn graph_evidence_ties_use_source_chunks_across_generations() {
+    let mut generations = Vec::new();
+    for (generation, alpha, zeta) in [
+        ("generation.a", "symbol.zzz", "symbol.aaa"),
+        ("generation.b", "symbol.aaa", "symbol.zzz"),
+    ] {
+        let mut request = graph_request(8, 2);
+        request.generation = id(generation);
+        request.seed_anchors[0].occurrence.generation = request.generation.clone();
+        let edges: Vec<_> = [alpha, zeta]
+            .into_iter()
+            .map(|target| CanonicalRelationEdgeV1 {
+                from_occurrence: id("symbol.seed"),
+                to_occurrence: id(target),
+                kind: RelationEdgeKindV1::Calls,
+                authority: EdgeAuthorityV1::SyntaxExact,
+                evidence_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+            })
+            .collect();
+        let chunks = vec![
+            projection_chunk(&request, "chunk.seed", "symbol.seed"),
+            projection_chunk(&request, "chunk.alpha", alpha),
+            projection_chunk(&request, "chunk.zeta", zeta),
+        ];
+        let cancellation = CancellationSignal::active("cancellation.graph-stable-ties").unwrap();
+        let publisher = HermeticCodeGraphProjectionStore::memory(&cancellation).unwrap();
+        publisher
+            .publish_code_graph(&request.generation, &edges, &chunks, &cancellation)
+            .unwrap();
+        let store = publisher.verified_store(&request.generation).unwrap();
+        let batch = read_projection(&store, &request, &cancellation);
+        let mut capped_request = request.clone();
+        capped_request.budget.max_candidates_per_lane = 1;
+        let capped = read_projection(&store, &capped_request, &cancellation);
+        assert_eq!(capped.candidates.len(), 1);
+        assert_eq!(capped.coverage.capped, 1);
+        assert_eq!(
+            capped.candidates[0].retriever_evidence_anchor,
+            id("code-graph:chunk:chunk.alpha")
+        );
+        assert_eq!(batch.candidates.len(), 2);
+        let mut pairs: Vec<_> = batch
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.clone(),
+                    batch.evidence_by_occurrence[&candidate.source_occurrence_id].clone(),
+                )
+            })
+            .collect();
+        pairs.sort_by(super::compare_graph_candidates);
+        assert_eq!(
+            pairs[0].0.source_occurrence_id.as_str(),
+            format!("code-graph:{alpha}")
+        );
+        let names: Vec<_> = pairs
+            .iter()
+            .map(|pair| pair.0.retriever_evidence_anchor.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                id("code-graph:chunk:chunk.alpha"),
+                id("code-graph:chunk:chunk.zeta")
+            ]
+        );
+        generations.push(names);
+    }
+    assert_eq!(generations[0], generations[1]);
+}

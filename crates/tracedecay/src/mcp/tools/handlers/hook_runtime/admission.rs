@@ -243,6 +243,8 @@ fn forget_hook_v2_admission_ledger_for_test(data_root: &Path, host: tracedecay_h
 pub(crate) enum HookV2AdmissionOutcomeV1 {
     Admitted {
         orchestration: tracedecay_daemon_service::HookOrchestrationAdmissionV1,
+        context_scout_address:
+            Option<Box<tracedecay_contracts::context_scout::ContextScoutAddressV1>>,
         ready_guidance: Value,
         feedback_notice: Value,
         github_stack_signal_available: bool,
@@ -276,6 +278,10 @@ pub(crate) async fn admit_hook_v2_envelope(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.admit")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Hook v2 admission is one envelope validate, lifecycle bind, and receipt."
+)]
 async fn admit_hook_v2_envelope_with_lifecycle(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -395,6 +401,9 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         }
         _ => None,
     };
+    let context_scout_address = claim_authority
+        .as_ref()
+        .map(|(address, _)| Box::new(*address));
     let ready_guidance = match (first_admission, cg.context_scout_owner(), claim_authority) {
         (true, Some(owner), Some((address, input_watermark))) => match owner
             .claim_ready_guidance_exact(envelope, address, input_watermark, snapshot.revision, now)
@@ -468,6 +477,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         };
     HookV2AdmissionOutcomeV1::Admitted {
         orchestration,
+        context_scout_address,
         ready_guidance,
         feedback_notice,
         github_stack_signal_available,
@@ -499,6 +509,7 @@ pub(super) async fn hook_v2_admit(
         {
             HookV2AdmissionOutcomeV1::Admitted {
                 orchestration,
+                context_scout_address,
                 ready_guidance,
                 feedback_notice,
                 github_stack_signal_available,
@@ -507,6 +518,7 @@ pub(super) async fn hook_v2_admit(
                 "status": "accepted",
                 "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
                 "orchestration": orchestration,
+                "context_scout_address": context_scout_address,
                 "ready_guidance": ready_guidance,
                 "feedback_notice": feedback_notice,
                 "github_stack_signal_available": github_stack_signal_available,

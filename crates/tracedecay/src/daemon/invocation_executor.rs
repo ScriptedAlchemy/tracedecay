@@ -285,6 +285,10 @@ impl InProcessDaemonInvocationExecutor {
 }
 
 impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvocationExecutor {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The executor resolves the invocation target against this server's scope before any surface or daemon payload is dispatched."
+    )]
     fn invoke(
         &self,
         invocation: tracedecay_contracts::ApplicationInvocation,
@@ -353,13 +357,13 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvo
                             .with_resolved_scope(scope)
                         }
                         ApplicationSurfaceOperation::FeedbackGet => {
-                            let typed = crate::application_surface::parse_application_surface_request(
+                            let typed = tracedecay_daemon_protocol::parse_application_surface_request(
                                 operation, payload,
                             )
                             .map_err(|_| {
                                 tracedecay_contracts::InvocationError::InvalidRequest
                             })?;
-                            let crate::application_surface::ApplicationSurfaceRequest::Feedback(
+                            let tracedecay_daemon_protocol::ApplicationSurfaceRequest::Feedback(
                                 request,
                             ) = typed
                             else {
@@ -787,5 +791,10 @@ pub(super) fn invocation_is_native_integration_operation(
             | DaemonInvocationOperation::NativeIntegrationApply
             | DaemonInvocationOperation::NativeIntegrationStatus
             | DaemonInvocationOperation::NativeIntegrationCancel
+            | DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+            | DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+            | DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+            | DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+            | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
     )
 }

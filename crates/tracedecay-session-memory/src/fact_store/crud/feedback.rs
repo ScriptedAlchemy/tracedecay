@@ -25,8 +25,8 @@ use super::{
     commit_batch_tx, commit_receipt_json, initial_batch, load_mutable_project_memory_fact_tx,
     payload_metadata, project_memory_commit_receipt_from_operation_tx,
     project_memory_feedback_action_label, project_memory_feedback_delta,
-    project_memory_update_feedback_projection_tx, query_fact_lineage_controlled_tx,
-    query_fact_lineage_tx, sanitize_payload,
+    project_memory_update_feedback_projection_tx, query_fact_before_supersession_tx,
+    query_fact_lineage_controlled_tx, query_fact_lineage_tx, sanitize_payload,
 };
 use serde_json::{Value, json};
 use tracedecay_domain::{
@@ -395,7 +395,11 @@ pub(in crate::fact_store) async fn project_memory_fact_feedback_history_tx(
     let projection =
         load_project_memory_projection_tx(transaction, query.target().owner(), &fact_id).await?;
     ensure_project_memory_read_active(read_control)?;
-    if projection.is_none() {
+    if projection.is_none()
+        && query_fact_before_supersession_tx(transaction, query.target().owner(), &fact_id)
+            .await?
+            .is_none()
+    {
         return Err(storage_message(
             PROJECT_MEMORY_READ_OPERATION,
             "feedback history target is missing",

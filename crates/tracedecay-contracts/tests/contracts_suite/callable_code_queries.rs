@@ -8,6 +8,12 @@ use tracedecay_contracts::retrieval::{
     CodeNavigationRequest, CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord,
     SymbolRelationRecord, TypeHierarchyRecord,
 };
+use tracedecay_contracts::surface_contracts::{
+    CodeCalleesSurfaceRequest, CodeCallersSurfaceRequest, CodeExactOccurrenceSurfaceRequest,
+    CodeFacetSurfaceRequest, CodeImplementationsSurfaceRequest, CodeNavigationSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeSignatureSearchSurfaceRequest,
+    CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
+};
 use tracedecay_contracts::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     AuthorityReceipt, AuthorizationService, CALLABLE_CODE_OPERATION_COUNT,
@@ -558,6 +564,74 @@ fn callable_code_service_accepts_a_bounded_unexpired_port_cursor() {
             .map(OpaqueCursor::as_str),
         Some("cursor.generation.fixture.page-2")
     );
+}
+
+#[test]
+fn callable_code_catalog_uses_the_requests_accepted_by_the_transport() {
+    let registry = tracedecay_contracts::sdk_executable_binding_registry().unwrap();
+    let navigation = schemars::schema_for!(CodeNavigationSurfaceRequest);
+    let requests = [
+        (
+            "code_exact_occurrence",
+            schemars::schema_for!(CodeExactOccurrenceSurfaceRequest),
+        ),
+        (
+            "code_phrase_search",
+            schemars::schema_for!(CodePhraseSearchSurfaceRequest),
+        ),
+        (
+            "code_callees",
+            schemars::schema_for!(CodeCalleesSurfaceRequest),
+        ),
+        (
+            "code_facets",
+            schemars::schema_for!(CodeFacetSurfaceRequest),
+        ),
+        (
+            "code_timeline",
+            schemars::schema_for!(CodeTimelineSurfaceRequest),
+        ),
+        ("code_declaration", navigation.clone()),
+        ("code_definition", navigation.clone()),
+        ("code_type_definition", navigation.clone()),
+        ("code_references", navigation),
+        (
+            "code_signature_search",
+            schemars::schema_for!(CodeSignatureSearchSurfaceRequest),
+        ),
+        (
+            "code_implementations",
+            schemars::schema_for!(CodeImplementationsSurfaceRequest),
+        ),
+        (
+            "code_type_hierarchy",
+            schemars::schema_for!(CodeTypeHierarchySurfaceRequest),
+        ),
+        (
+            "code_callers",
+            schemars::schema_for!(CodeCallersSurfaceRequest),
+        ),
+        (
+            "code_symbol_search",
+            schemars::schema_for!(CodeSymbolSearchSurfaceRequest),
+        ),
+    ];
+    for (operation, schema) in requests {
+        let operation_id =
+            tracedecay_tool_catalog::OperationId::new(format!("operation.application.{operation}"))
+                .unwrap();
+        let advertised = registry
+            .get(&operation_id)
+            .unwrap()
+            .binding()
+            .unwrap()
+            .request_schema();
+        assert_eq!(
+            advertised.body(),
+            &serde_json::to_value(schema).unwrap(),
+            "{operation}"
+        );
+    }
 }
 
 #[test]

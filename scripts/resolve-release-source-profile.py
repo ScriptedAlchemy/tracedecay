@@ -11,13 +11,19 @@ import tomllib
 
 
 def production_release_features(
-    _features: dict[str, object], _target: str | None
+    features: dict[str, object], target: str | None
 ) -> tuple[str, ...]:
     """Return the artifact feature set for a production-capable source tag."""
     # Hotpath 0.24 uses Cargo features as its process-wide activation
     # authority. Feature-enabled gauges, futures, and instrumented locks start
     # collectors independently of TraceDecay's process guard, so a release
     # executable cannot truthfully make those facilities dormant at runtime.
+    if (
+        target is not None
+        and target.endswith("-apple-darwin")
+        and "semantic-gpu-coreml" in features
+    ):
+        return ("production", "semantic-gpu-coreml")
     return ("production",)
 
 

@@ -1,8 +1,8 @@
 use tracedecay_domain::{
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
-    NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptV1,
-    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
-    NativeIntegrationTransactionStatusV1, RepositoryId,
+    CodeGenerationId, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationPhaseV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
+    NativeIntegrationReceiptV1, NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
+    NativeIntegrationTransactionStatusV1, RepositoryId, UtcMicros,
 };
 use tracedecay_store::{
     NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStoreError,
@@ -64,6 +64,16 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         preview_id.validate().map_err(invalid_domain)?;
         let snapshot = self.read_snapshot().await?;
         read_preview_from_transaction(&snapshot, preview_id).await
+    }
+
+    #[hotpath::skip]
+    pub async fn read_preview_by_digest(
+        &self,
+        preview_digest: &tracedecay_domain::ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>> {
+        preview_digest.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        read_preview_by_digest_from_transaction(&snapshot, preview_digest).await
     }
 
     /// Persists one issued approval commitment.
@@ -209,6 +219,16 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         read_receipt_from_transaction(&snapshot, transaction_id).await
     }
 
+    #[hotpath::skip]
+    pub async fn read_receipt_by_digest(
+        &self,
+        receipt_digest: &tracedecay_domain::ManifestDigest,
+    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>> {
+        receipt_digest.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        read_receipt_by_digest_from_transaction(&snapshot, receipt_digest).await
+    }
+
     #[hotpath::measure(future = true, label = "global_db.native_integration.persist.cas")]
     pub async fn compare_and_swap_status(
         &self,
@@ -348,6 +368,49 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
             records.push(decode_record(&row)?);
         }
         Ok(records)
+    }
+
+    /// Returns the exact analysis generations whose durable native preview or
+    /// unfinished transaction is still live at `observed_at`.
+    #[hotpath::skip]
+    pub async fn live_candidate_generation_bindings(
+        &self,
+        repository_id: &RepositoryId,
+        observed_at: UtcMicros,
+    ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>> {
+        repository_id.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT preview.preview_json
+                   FROM native_integration_previews AS preview
+                  WHERE preview.repository_id = ?1
+                    AND (preview.expires_at > ?2 OR EXISTS (
+                        SELECT 1 FROM native_integration_transactions AS txn
+                         WHERE txn.preview_id = preview.preview_id
+                           AND txn.terminal_outcome IS NULL
+                    ))
+                  ORDER BY preview.created_at, preview.preview_id",
+                params![repository_id.as_str(), observed_at.0],
+            )
+            .await
+            .map_err(unavailable)?;
+        let mut generations = Vec::new();
+        while let Some(row) = rows.next().await.map_err(unavailable)? {
+            let preview: NativeIntegrationPreviewV1 =
+                decode(&row.get::<String>(0).map_err(unavailable)?)?;
+            if let Some(analysis) = preview.analysis {
+                generations.extend([
+                    analysis.merge_base.generation_id,
+                    analysis.source.generation_id,
+                    analysis.destination.generation_id,
+                    analysis.candidate.generation_id,
+                ]);
+            }
+        }
+        generations.sort();
+        generations.dedup();
+        Ok(generations)
     }
 
     #[hotpath::skip]
@@ -577,6 +640,36 @@ where
     Ok(Some(preview))
 }
 
+async fn read_preview_by_digest_from_transaction<Q>(
+    transaction: &Q,
+    preview_digest: &tracedecay_domain::ManifestDigest,
+) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>>
+where
+    Q: QueryExecutor,
+{
+    let mut rows = transaction
+        .query(
+            "SELECT preview_json FROM native_integration_previews WHERE preview_digest = ?1",
+            params![preview_digest.as_str()],
+        )
+        .await
+        .map_err(unavailable)?;
+    let Some(row) = rows.next().await.map_err(unavailable)? else {
+        return Ok(None);
+    };
+    let preview: NativeIntegrationPreviewV1 = decode(&text(&row, 0, "preview commitment")?)?;
+    if preview.preview_digest != *preview_digest {
+        return Err(invalid(
+            "native integration preview digest key does not bind its payload",
+        ));
+    }
+    preview.validate().map_err(invalid_domain)?;
+    if rows.next().await.map_err(unavailable)?.is_some() {
+        return Err(invalid("duplicate native integration preview digest"));
+    }
+    Ok(Some(preview))
+}
+
 async fn read_approval_from_transaction<Q>(
     transaction: &Q,
     approval_id: &NativeIntegrationApprovalId,
@@ -693,6 +786,36 @@ where
     receipt.validate().map_err(invalid_domain)?;
     if rows.next().await.map_err(unavailable)?.is_some() {
         return Err(invalid("duplicate native integration receipt"));
+    }
+    Ok(Some(receipt))
+}
+
+async fn read_receipt_by_digest_from_transaction<Q>(
+    transaction: &Q,
+    receipt_digest: &tracedecay_domain::ManifestDigest,
+) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>>
+where
+    Q: QueryExecutor,
+{
+    let mut rows = transaction
+        .query(
+            "SELECT receipt_json FROM native_integration_receipts WHERE receipt_digest = ?1",
+            params![receipt_digest.as_str()],
+        )
+        .await
+        .map_err(unavailable)?;
+    let Some(row) = rows.next().await.map_err(unavailable)? else {
+        return Ok(None);
+    };
+    let receipt: NativeIntegrationReceiptV1 = decode(&text(&row, 0, "terminal receipt")?)?;
+    if receipt.receipt_digest != *receipt_digest {
+        return Err(invalid(
+            "native integration receipt digest key does not bind its payload",
+        ));
+    }
+    receipt.validate().map_err(invalid_domain)?;
+    if rows.next().await.map_err(unavailable)?.is_some() {
+        return Err(invalid("duplicate native integration receipt digest"));
     }
     Ok(Some(receipt))
 }

@@ -91,9 +91,9 @@ fn proxy_serve_handshake(
     let path = sanitize_serve_path_arg(path_arg);
     let explicit_path = path.is_some();
     let mut resolved_path = if explicit_path {
-        tracedecay::config::resolve_path(path)
+        tracedecay_configuration::resolve_path(path)
     } else {
-        tracedecay::config::resolve_path_with_discovery(None)
+        tracedecay_configuration::resolve_path_with_discovery(None)
     };
 
     let ambient_discovery =
@@ -111,7 +111,7 @@ fn proxy_serve_handshake(
     let auto_init_root = (!ambient_discovery
         && !initialized
         && tracedecay::config::cached_sync_config(&resolved_path).map_or_else(
-            |_| tracedecay::config::SyncConfig::default().auto_init,
+            |_| tracedecay_configuration::SyncConfig::default().auto_init,
             |config| config.auto_init,
         ))
     .then(|| tracedecay_runtime_core::worktree::git_worktree_root(&resolved_path))

@@ -25,7 +25,7 @@ mod census;
 mod disposition;
 mod effect_holder;
 mod effect_mutation;
-mod run_journal;
+pub(crate) mod run_journal;
 mod schema;
 
 pub use schema::{

@@ -15,13 +15,13 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracedecay_lsp::LspSessionRegistry;
 
-use super::project_open_owners::{
-    daemon_owned_project_source_access_at, project_open_retained_grant,
-};
+use super::project_open_owners::project_open_retained_grant;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_daemon_protocol::invocation_now_micros;
-use tracedecay_daemon_service::{DaemonInvocationService, DaemonRetainedRuntimeRegistrar};
+use tracedecay_daemon_service::{
+    DaemonInvocationService, DaemonRetainedRuntimeRegistrar, daemon_owned_project_source_access_at,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Clone)]

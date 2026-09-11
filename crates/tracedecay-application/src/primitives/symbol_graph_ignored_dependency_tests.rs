@@ -586,7 +586,24 @@ fn projection_manifest(
             .relations
             .push(file_import_relation(&projection, row));
     }
-    manifest.entities.push(symbol_entity(&client_file));
+    manifest.entities.push(symbol_entity(
+        &client_file,
+        "symbol.fixture.Widget",
+        "client::Widget",
+        "Widget",
+        'e',
+        '1',
+        0,
+    ));
+    manifest.entities.push(symbol_entity(
+        &client_file,
+        "symbol.fixture.WidgetFactory",
+        "client::WidgetFactory",
+        "WidgetFactory",
+        'a',
+        '2',
+        8,
+    ));
     let projection_node_count = manifest.entities.len();
     let current = manifest
         .entities
@@ -722,16 +739,25 @@ struct SymbolRecordFixture {
     metadata: Option<LineageSymbolRecordV1>,
 }
 
-fn symbol_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
-    let occurrence = SymbolOccurrenceId::new("symbol.fixture.Widget").expect("symbol");
+#[allow(clippy::too_many_arguments)]
+fn symbol_entity(
+    file: &SanitizedCodeFileV1,
+    occurrence: &str,
+    qualified_name: &str,
+    simple_name: &str,
+    identity_byte: char,
+    content_byte: char,
+    start_byte: u64,
+) -> GraphEntity {
+    let occurrence = SymbolOccurrenceId::new(occurrence).expect("symbol");
     let record = SymbolRecordFixture {
         occurrence: occurrence.clone(),
         binding: Some(CodeGraphSymbolBindingV1 {
             file: file.file_occurrence_id.clone(),
             logical_path: Some(file.logical_path.clone()),
             source_span: Some(SourceSpan {
-                start_byte: 0,
-                end_byte: 6,
+                start_byte,
+                end_byte: start_byte + simple_name.len() as u64,
             }),
             chunk: None,
             language_descriptor_revision: LanguageDescriptorRevision::new("language.typescript.v1")
@@ -739,9 +765,9 @@ fn symbol_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
         }),
         metadata: Some(LineageSymbolRecordV1 {
             occurrence: occurrence.clone(),
-            identity: digest::<SymbolIdentityDigest>('e'),
-            qualified_name: "client::Widget".to_owned(),
-            simple_name: "Widget".to_owned(),
+            identity: digest::<SymbolIdentityDigest>(identity_byte),
+            qualified_name: qualified_name.to_owned(),
+            simple_name: simple_name.to_owned(),
             kind: "struct".to_owned(),
             visibility: "public".to_owned(),
             branches: 0,
@@ -751,9 +777,12 @@ fn symbol_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
             line_span: 1,
             start_line: 0,
             signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: digest::<FileIdentityDigest>('f'),
-            content_digest: digest::<ContentDigest>('1'),
+            content_digest: digest::<ContentDigest>(content_byte),
         }),
     };
     GraphEntity::new(

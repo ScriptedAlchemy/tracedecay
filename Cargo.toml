@@ -52,6 +52,7 @@ members = [
     "crates/tracedecay-application",
 ]
 exclude = [
+    "vendor/hotpath-macros",
     ".worktrees",
     ".codex-worktrees",
 ]
@@ -79,6 +80,10 @@ grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg"
 grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
 grafeo-storage = { version = "=0.5.42", default-features = false, features = ["wal"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
+# Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
+# resolve the same object database and status implementation, so a feature
+# added for one is never missing for the other.
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 tracedecay-semantic-contracts = { path = "crates/tracedecay-semantic-contracts", version = "0.1.0" }
 
 [profile.bench]
@@ -201,6 +206,8 @@ opt-level = 3
 # `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
 # pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
+# Keep profiled async bodies in one frame; see vendor/hotpath-macros/PATCH.md.
+hotpath-macros = { path = "vendor/hotpath-macros" }
 tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
 # The vendored COBOL external scanner in 0.5.0 spins forever at end of input
 # whenever a token starts in the sequence-number area with no six-column line

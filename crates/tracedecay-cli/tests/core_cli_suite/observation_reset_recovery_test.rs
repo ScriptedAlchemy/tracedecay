@@ -1,7 +1,8 @@
 //! Retained-store recovery through the supported observation-authority reset:
 //! ingest → refuse → `storage reset-authority observations` → reopen →
-//! converge → the same session is describable and searchable again, and the
-//! doctor names the converging state on the way there.
+//! converge → the same session is describable and searchable again with the
+//! LCM content it had before the reset, and the doctor names where the
+//! re-derivation stands on the way there and reports complete/current after.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -12,7 +13,7 @@ use tracedecay_global_db::observation::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATIO
 
 use crate::common::{
     canonical_existing_path, git_program, initialize_tracedecay_cli_project,
-    spawn_tracedecay_daemon, stop_managed_daemon, tracedecay_command_with_home,
+    spawn_tracedecay_daemon_with, stop_managed_daemon, tracedecay_command_with_home,
 };
 
 /// How long the daemon may take to re-derive the reset store from the
@@ -20,8 +21,9 @@ use crate::common::{
 /// temporal refresh) before the journey is judged broken.
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Enough Codex rollouts that re-admission after the reset is observable as a
-/// converging state rather than finishing before the first diagnostic lands.
+/// Filler Codex rollouts beside the session under test, so the reopened
+/// authority re-derives a corpus rather than one transcript and search has to
+/// select the recovered session out of it.
 const ROLLOUT_COUNT: usize = 24;
 
 const SESSION_ID: &str = "codex-reset-recovery-session";
@@ -340,7 +342,7 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
     initialize_tracedecay_cli_project(&home, &project);
 
     // Baseline: the retained authority serves the ingested session.
-    wait_for_described_session(&home, &project, "before reset");
+    let baseline = wait_for_described_session(&home, &project, "before reset");
     assert_search_hits(&home, &project, false, "before reset");
     let sessions_db = project_sessions_db(&home);
     assert!(count(&sessions_db, "observations") > 0);
@@ -350,8 +352,19 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
         "a converged store records the swept Codex corpus and provider coverage"
     );
 
-    // Recovery runs offline: the daemon cannot open a refused store.
+    // Reopening unchanged history must settle without a spurious conflict.
+    assert_search_hits(&home, &project, true, "baseline catch_up");
     stop_managed_daemon(&home);
+    let reopen_log = home.join("ordinary-reopen.log");
+    let daemon = spawn_tracedecay_daemon_with(&home, |command| {
+        command.stderr(std::fs::File::create(&reopen_log).unwrap());
+    });
+    wait_for_described_session(&home, &project, "ordinary reopen");
+    assert_search_hits(&home, &project, true, "ordinary reopen catch_up");
+    drop(daemon);
+    assert_no_replay_conflicts(&reopen_log);
+
+    // Recovery runs offline: the daemon cannot open a refused store.
     make_observation_authority_refused(&sessions_db);
     replace_codex_rollout_identity(&home);
 
@@ -396,64 +409,59 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
     );
 
     // Reopen: the runtime re-derives the projection from the preserved
-    // transcripts. Until it has, every surface must say so — never a bare
-    // unavailable temporal store and never an empty page read as no data.
-    let _daemon = spawn_tracedecay_daemon(&home);
-    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
-    let mut observed_converging = false;
-    loop {
-        let envelope = describe(&home, &project);
-        if is_evidence(&envelope) {
-            // Once history is current the session may briefly describe at
-            // generation zero until its own refresh runs; the served
-            // generation is asserted by `wait_for_described_session` below.
-            break;
-        }
-        let message = problem_message(&envelope);
-        assert!(
-            !message.contains("TemporalStoreUnavailable"),
-            "while converging, describe must name the converging state, not a missing \
-             temporal store: {envelope}"
-        );
-        assert!(
-            message.contains("HistoricalConvergence") || message.contains("HistoricalRetry"),
-            "while converging, describe must name the refresh worker's state: {envelope}"
-        );
-        assert!(
-            message.contains("refresh worker backlog="),
-            "while converging, describe must carry the worker status: {envelope}"
-        );
-        let doctor = doctor(&home, &project);
-        assert!(
-            is_evidence(&doctor),
-            "doctor must answer evidence: {doctor}"
-        );
-        let report = payload(&doctor);
-        assert_eq!(
-            report["status"], "partial",
-            "a converging store is partial diagnostic evidence: {report}"
-        );
-        assert_eq!(report["projection"]["state"], "stale", "{report}");
-        assert!(
-            report["projection"]["reason"]
-                .as_str()
-                .is_some_and(|reason| reason.starts_with("historical_")),
-            "the doctor must name the historical convergence state: {report}"
-        );
-        observed_converging = true;
-        assert!(
-            Instant::now() < deadline,
-            "the reset store never converged; last answer: {envelope}"
-        );
-        std::thread::sleep(Duration::from_millis(250));
-    }
+    // transcripts. The doctor answers evidence throughout, so it is the
+    // surface that names where that stands: a store still converging is
+    // partial evidence whose projection carries the historical state, and a
+    // store that has already converged is complete and current — and only
+    // once its generations are rebuilt. Neither reading may be an unavailable
+    // projection or the reset store read as converged.
+    let reset_log = home.join("reset-reopen.log");
+    let daemon = spawn_tracedecay_daemon_with(&home, |command| {
+        command.stderr(std::fs::File::create(&reset_log).unwrap());
+    });
+    let reopened = doctor(&home, &project);
     assert!(
-        observed_converging,
-        "the journey must observe the converging state before the session returns; enlarge \
-         the fixture if re-derivation now completes before the first read"
+        is_evidence(&reopened),
+        "doctor must answer evidence: {reopened}"
     );
+    let report = payload(&reopened);
+    match report["projection"]["state"].as_str() {
+        Some("stale") => {
+            assert_eq!(
+                report["status"], "partial",
+                "a converging store is partial diagnostic evidence: {report}"
+            );
+            assert!(
+                report["projection"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with("historical_")),
+                "the doctor must name the historical convergence state: {report}"
+            );
+        }
+        Some("current") => {
+            assert_eq!(report["status"], "complete", "{report}");
+            assert!(
+                count(&sessions_db, "session_temporal_generations") > 0,
+                "a current projection must be a rebuilt one: {report}"
+            );
+        }
+        other => {
+            panic!("the reopened store must be converging or current, not {other:?}: {report}")
+        }
+    }
 
-    wait_for_described_session(&home, &project, "after reset");
+    // `tracedecay tool` honours the daemon's after-delay retry directive: a
+    // describe issued while history converges rides out the typed converging
+    // refusal inside the tool deadline and answers once the projection is
+    // current, so the journey reads the converged answer here rather than
+    // polling for the transient. The recovered session must carry the LCM
+    // content the reset preserved, byte for byte.
+    let recovered = wait_for_described_session(&home, &project, "after reset");
+    assert_eq!(
+        payload(&recovered)["description"],
+        payload(&baseline)["description"],
+        "the rebuilt authority must serve the session's preserved LCM content unchanged"
+    );
     assert_search_hits(&home, &project, false, "after reset");
     // Historical catch-up must reach a terminal state: the frontier the pass
     // persists is the whole reason a second pass has nothing left to do.
@@ -488,4 +496,25 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
         count(&sessions_db, "session_temporal_generations") > 0,
         "the temporal projection must be rebuilt from the preserved transcripts"
     );
+    assert!(
+        scheduling_cursor_count(&sessions_db) > 0,
+        "the rebuilt authority must record the swept Codex corpus and provider coverage again"
+    );
+    drop(daemon);
+    assert_no_replay_conflicts(&reset_log);
+}
+
+fn assert_no_replay_conflicts(log: &Path) {
+    let output = std::fs::read_to_string(log).unwrap();
+    for reason in [
+        "authority_write_failed",
+        "external_source_commit_failed",
+        "observation repository provenance collision",
+        "external source idempotency key conflicts",
+    ] {
+        assert!(
+            !output.contains(reason),
+            "reopen must settle on its first pass: {output}"
+        );
+    }
 }

@@ -103,6 +103,8 @@ impl RetrievalRequestMeta {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceLinesRequest {
+    /// Canonical file occurrence from `code_exact_occurrence` at
+    /// `items[].occurrence.file`; a logical path is not a file occurrence identity.
     pub file: FileOccurrenceId,
     pub span: SourceSpan,
     pub meta: RetrievalRequestMeta,
@@ -118,6 +120,10 @@ pub struct SourceReference {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceLinesResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
     pub references: Vec<SourceReference>,
 }
 
@@ -183,11 +189,12 @@ pub struct AnchorExpandResult {
     pub anchors: Vec<RetrievalAnchorId>,
 }
 
+/// The health read takes no parameters: it reports one serving status, with no
+/// page, projection, or temporal selection to make. The page and deadline
+/// controls every surface supplies travel in the dispatch envelope, not here.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct HealthReadRequest {
-    pub meta: RetrievalRequestMeta,
-}
+pub struct HealthReadRequest {}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -373,27 +380,6 @@ pub struct ModuleApiPrimitiveResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct FileMetadataPrimitiveRequest {
-    pub files: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileMetadataRecord {
-    pub file: String,
-    pub language: Option<String>,
-    pub indexed_at: Option<i64>,
-    pub byte_size: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FileMetadataPrimitiveResult {
-    pub files: Vec<FileMetadataRecord>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StorageStatusPrimitiveRequest {
     #[serde(default)]
     pub include_details: bool,
@@ -492,7 +478,6 @@ pub enum PrimitiveRequest {
     SourceBody(SourceBodyPrimitiveRequest),
     SourceOutline(SourceOutlinePrimitiveRequest),
     ModuleApi(ModuleApiPrimitiveRequest),
-    FileMetadata(FileMetadataPrimitiveRequest),
     HealthRead(HealthReadRequest),
     HealthDelta(HealthDeltaRequest),
     StorageStatus(StorageStatusPrimitiveRequest),

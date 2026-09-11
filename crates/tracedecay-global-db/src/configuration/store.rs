@@ -5,8 +5,8 @@ use super::contracts::{
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationOperationFuture,
-    ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1, CredentialWritePort,
-    DirectConfigurationMutation, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
+    ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1, DirectConfigurationMutation,
+    ScopeRevalidationEvidenceV1,
 };
 use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
@@ -20,10 +20,9 @@ use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationAuditEvent, ConfigurationAuditEventId,
     ConfigurationAuditEventKindV1, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
     ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
-    ConfigurationSnapshotV1, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
-    CredentialReferenceMetadataV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, ProtectedChange,
-    ProtectedChangePlan, ProtectedChangeSnapshotError, RedactedConfigurationChangeV1,
-    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
+    ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
+    ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
+    RedactedConfigurationChangeV1, RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY,
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1, ScopeSourceBinding,
     SettingKey, SourceKindV1, USER_CODE_INDEX_WORKERS_SETTING_KEY, UserProfileId,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
@@ -43,7 +42,6 @@ mod activation;
 mod audit;
 mod codec;
 mod control;
-mod credential;
 mod mutation;
 mod read;
 mod revision;
@@ -1039,6 +1037,45 @@ impl OwnedGlobalDbConfigurationControlStore {
                 .await
         })
     }
+
+    /// Reads the exact revision last observed by one retained component.
+    /// The revision is resolved through the canonical configuration history;
+    /// callers never retain a parallel activation baseline.
+    pub fn observed_component_configuration(
+        &self,
+        component: String,
+    ) -> ConfigurationOperationFuture<'_, Option<ConfigurationCurrentStateV1>> {
+        let db = self.database();
+        Box::pin(async move {
+            validate_component_name(&component).map_err(map_store_error)?;
+            let read = db
+                .read_snapshot()
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?;
+            let state = latest_component_activation_state(&read, &component)
+                .await
+                .map_err(map_store_error)?;
+            let Some(revision_id) = state.and_then(|state| {
+                state
+                    .observed_revision_id
+                    .or(state.last_working_revision_id)
+            }) else {
+                return Ok(None);
+            };
+            let revision = read_revision_from_executor(&read, &revision_id)
+                .await
+                .map_err(map_store_error)?
+                .ok_or_else(|| {
+                    ConfigurationError::validation_message(
+                        "observed component configuration revision is unavailable",
+                    )
+                })?;
+            Ok(Some(ConfigurationCurrentStateV1 {
+                revision_id: revision.revision_id,
+                snapshot: revision.snapshot,
+            }))
+        })
+    }
 }
 
 /// Forwards one owned-store method to a freshly registered borrowed store.
@@ -1169,22 +1206,6 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         actor: &AuthorizedActor,
     ) -> ConfigurationOperationFuture<'_, Vec<ComponentConfigurationState>> {
         forward_to_registered!(self, [actor], |store| store.observed_state(&actor))
-    }
-}
-
-impl CredentialWritePort for OwnedGlobalDbConfigurationControlStore {
-    fn write_reference(
-        &self,
-        authority: &ConfigurationMutationAuthority,
-        write: &WriteOnlyCredentialMutation,
-        expected_revision: &ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        forward_to_registered!(
-            self,
-            [authority, write, expected_revision],
-            mutating,
-            |store| store.write_reference(&authority, &write, &expected_revision)
-        )
     }
 }
 

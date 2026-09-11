@@ -168,6 +168,9 @@ pub(super) fn hermetic_ci_code_graph(
             start_line: u32::try_from(source[..start].lines().count() + 1)
                 .expect("fixture CI start line"),
             signature: Some(declaration.trim().to_owned()),
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: file_identity.clone(),
             content_digest: ContentDigest::new(digest("symbol-content", declaration))

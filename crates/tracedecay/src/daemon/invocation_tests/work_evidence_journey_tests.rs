@@ -256,7 +256,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     let project_id = id::<ProjectId>("project.work.evidence-journey");
     let repository_id = id::<RepositoryId>("repository.work.evidence-journey");
     let worktree_id = id::<WorktreeId>("worktree.work.evidence-journey");
-    let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let host = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
         profile.path(),
         &project,
         project_id.clone(),
@@ -333,18 +333,14 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         )
         .expect("mounted session retrieval");
     let evidence_retrieval =
-        crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::new(
-            retrieval,
-        ))
-        .with_federated_authority(Arc::new(
-            crate::daemon::work_evidence_retrieval::tests::StaticFederatedAuthority(Arc::new(
-                crate::daemon::work_evidence_retrieval::tests::federated_authority(id::<
-                    PrivacyDomainId,
-                >(
-                    "privacy.work.evidence-journey",
+        tracedecay_application::work::WorkTaskSessionEvidenceRetrievalV1::new(Arc::new(retrieval))
+            .with_federated_authority(Arc::new(
+                tracedecay_application::work::StaticFederatedAuthority(Arc::new(
+                    tracedecay_application::work::federated_authority(id::<PrivacyDomainId>(
+                        "privacy.work.evidence-journey",
+                    )),
                 )),
-            )),
-        ));
+            ));
 
     let actor = id::<ActorId>("actor.work.evidence-journey");
     let grant_digest = digest('d');
@@ -377,7 +373,8 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     )
     .expect("Work authority");
     let service = DaemonInvocationService::default();
-    let (proposal_routing, configuration_digest) = empty_work_proposal_routing(scope.clone());
+    let (proposal_routing, configuration_digest) =
+        empty_work_proposal_routing(scope.clone(), &grant);
     let policy_digest = mount_test_work_observability(
         &service,
         &project,

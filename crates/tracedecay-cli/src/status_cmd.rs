@@ -105,10 +105,10 @@ impl OnlineRefreshPlan {
         OnlineRefresh {
             worldwide_total: self
                 .worldwide_total
-                .then(tracedecay::cloud::fetch_worldwide_total)
+                .then(crate::cloud::fetch_worldwide_total)
                 .flatten(),
             country_flags: if self.country_flags {
-                tracedecay::cloud::fetch_country_flags()
+                crate::cloud::fetch_country_flags()
             } else {
                 Vec::new()
             },
@@ -469,7 +469,7 @@ async fn handle_status_command_within(
         }
     }
 
-    if !tracedecay::config::is_in_gitignore(&project_path) {
+    if !tracedecay_configuration::is_in_gitignore(&project_path) {
         let dir_name = tracedecay::config::active_data_dir_name(&project_path);
         if stderr_is_terminal {
             eprintln!(

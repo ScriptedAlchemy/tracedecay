@@ -186,6 +186,7 @@ pub struct ProjectRuntime {
     work: Option<RegisteredWorkRuntime>,
     retained: Option<RegisteredRetainedRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
+    source_edit: Option<Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1>>,
     #[cfg(any(test, feature = "test-helpers"))]
     test_marker: Option<Arc<dyn Any + Send + Sync>>,
     semantic: Option<tracedecay_semantic::DaemonSemanticRuntimeHandleV1>,
@@ -257,6 +258,7 @@ impl ProjectRuntime {
             || self.work.is_some()
             || self.retained.is_some()
             || self.lsp_owner.is_some()
+            || self.source_edit.is_some()
             || self.semantic.is_some()
             || self.semantic_owner_task.is_some()
             || self.semantic_activation_reconciler.is_some()
@@ -338,6 +340,7 @@ project_runtime_components!(
     RegisteredWorkRuntime => work,
     RegisteredRetainedRuntime => retained,
     DaemonLspInvocationOwner => lsp_owner,
+    Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1> => source_edit,
     tracedecay_semantic::DaemonSemanticRuntimeHandleV1 => semantic,
     RegisteredSemanticOwnerTaskV1 => semantic_owner_task,
     RegisteredSemanticActivationOwnerV1 => semantic_activation_reconciler,

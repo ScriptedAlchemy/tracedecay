@@ -555,7 +555,9 @@ fn evaluate_semantic(
             },
         )),
         RetrieverOutcome::Unavailable(
-            RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. },
+            RetrievalFailure::InvalidRequest { .. }
+            | RetrievalFailure::Internal { .. }
+            | RetrievalFailure::CandidateSourcesPruned { .. },
         ) => Err(SemanticNativeEvaluationErrorV1::Contract(
             "production exact-flat semantic execution failed".to_owned(),
         )),
@@ -1002,7 +1004,11 @@ impl SemanticNativeResourceSampleV1 {
         if self.cpu_time_us.is_none() {
             return Some("cpu_time_us");
         }
-        if self.peak_rss_bytes.is_none() {
+        // A zero peak is what an unavailable sampler reports, not a
+        // measurement, which is the same rule the evaluator and the pending
+        // diagnostic apply; the two layers must not disagree about whether
+        // this sample is complete.
+        if !self.peak_rss_bytes.is_some_and(|bytes| bytes > 0) {
             return Some("peak_rss_bytes");
         }
         if !self.model_bytes.is_some_and(|bytes| bytes != 0) {

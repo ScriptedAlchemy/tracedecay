@@ -155,6 +155,8 @@ describe("dashboard SSE wire bridge", () => {
   );
 
   it("projects accepted events to live pulses carrying their own scope identity", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1800000000000);
     vi.stubGlobal("EventSource", FakeEventSource);
     const connection = connectEvents("/api/events");
     const source = FakeEventSource.instances[0]!;
@@ -179,8 +181,16 @@ describe("dashboard SSE wire bridge", () => {
 
     expect(connection.activityRevision()).toBe(2);
     expect(connection.activity()).toMatchObject([
-      { projectId: "project.alpha", family: "project_registry_changed" },
-      { projectId: "project.beta", family: "project_registry_changed" },
+      {
+        projectId: "project.alpha", family: "project_registry_changed",
+        eventId: "run-1-1700000000000000:project_registry:1",
+        observationTime: "1700000000000001", at: 1800000000000,
+      },
+      {
+        projectId: "project.beta", family: "project_registry_changed",
+        eventId: "run-1-1700000000000000:project_registry:2",
+        observationTime: "1700000000000002", at: 1800000000000,
+      },
     ]);
 
     // A duplicate is one real occurrence: it must not pulse twice.

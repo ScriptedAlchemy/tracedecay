@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
-pub(crate) use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+pub(crate) use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 pub(crate) use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
@@ -59,6 +59,13 @@ pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) fn automation_project_context(
+    cg: &TraceDecay,
+) -> tracedecay_automation_runtime::ports::project_runtime::AutomationProjectContext {
+    cg.automation_project_context()
+        .expect("automation project context")
+}
 
 pub(crate) fn test_automation_run_control(interrupted: Arc<AtomicBool>) -> AutomationRunControl {
     let observed = Arc::clone(&interrupted);
@@ -284,8 +291,9 @@ pub(crate) async fn run_session_reflector_with_backend(
     AutomationRunError,
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    let context = automation_project_context(cg);
     tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        cg,
+        &context,
         config,
         run_control,
         &test_configuration_revision(),
@@ -306,8 +314,9 @@ pub(crate) async fn run_skill_writer_with_backend(
     AutomationRunError,
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    let context = automation_project_context(cg);
     tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-        cg,
+        &context,
         config,
         &test_configuration_revision(),
         backend,
@@ -325,8 +334,9 @@ pub(crate) async fn run_combined_review_with_backend(
     options: CombinedReviewAutomationOptions,
 ) -> tracedecay_domain::errors::Result<CombinedReviewDispatch> {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
+    let context = automation_project_context(cg);
     tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-        cg,
+        &context,
         config,
         &test_configuration_revision(),
         backend,
@@ -347,8 +357,9 @@ pub(crate) async fn run_memory_curator_with_backend(
     tracedecay_automation_runtime::automation::runner::MemoryCuratorAutomationRun,
     AutomationRunError,
 > {
+    let context = automation_project_context(cg);
     tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
-        cg,
+        &context,
         config,
         &test_configuration_revision(),
         backend,

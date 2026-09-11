@@ -37,6 +37,7 @@ impl_future_size!(A, B, C, D, E, F);
 impl_future_size!(A, B, C, D, E, F, G);
 impl_future_size!(A, B, C, D, E, F, G, H);
 impl_future_size!(A, B, C, D, E, F, G, H, I);
+impl_future_size!(A, B, C, D, E, F, G, H, I, J);
 
 /// Size in bytes of the future an `async fn` returns, without constructing it.
 fn future_size<Args, Fun: FutureSize<Args>>(function: Fun) -> usize {
@@ -117,10 +118,6 @@ fn awaited_sizes() -> Vec<(&'static str, usize)> {
             future_size(project_open_owners::spawn_semantic_owner_registration),
         ),
         (
-            "install_project_open_source_edit_preview_owner",
-            future_size(project_open_owners::install_project_open_source_edit_preview_owner),
-        ),
-        (
             "StoreAdministration::registered_project_session_database",
             future_size(StoreAdministration::registered_project_session_database),
         ),
@@ -186,5 +183,95 @@ fn project_open_future_sizes() {
             *size <= PHASE_CEILING,
             "{name} future is {size} B; ceiling {PHASE_CEILING} B"
         );
+    }
+}
+
+#[test]
+fn shared_owner_futures_stay_below_large_future_threshold() {
+    let owners = [
+        ("source edit", future_size(tracedecay_daemon_service::project_owner_registration::ProjectSourceEditOwnerV1::execute)),
+        ("production owner registration", future_size(crate::daemon::project_open_owners::register_project_open_production_owners)),
+        ("automation admission", future_size(crate::daemon::automation_effect::prepare)),
+        ("invocation admission", future_size(tracedecay_daemon_service::DaemonInvocationService::invoke_with_project_admission)),
+        ("Work dispatch", future_size(tracedecay_daemon_service::invocation::execute_work_application)),
+        ("observation persistence", future_size(<tracedecay_global_db::GlobalDbObservationStore as tracedecay_store::ObservationStore>::persist_observation)),
+        ("vector retirement", future_size(tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::retire_one_project_vector_generation)),
+    ];
+    for (name, size) in owners {
+        eprintln!("{size:>10} B  {name}");
+        assert!(size <= 16 * 1024, "{name} retains a {size} B future");
+    }
+}
+
+mod measured_body {
+    use std::mem::size_of_val;
+
+    macro_rules! measured_chain {
+    ($leaf:ident, $one:ident, $two:ident, $three:ident; $($options:tt)*) => {
+        #[hotpath::measure($($options)*)]
+        async fn $leaf() -> usize {
+            let data = [1_u8; 1024];
+            std::future::pending::<()>().await;
+            std::hint::black_box(data).len()
+        }
+        #[hotpath::measure($($options)*)]
+        async fn $one() -> usize { $leaf().await }
+        #[hotpath::measure($($options)*)]
+        async fn $two() -> usize { $one().await }
+        #[hotpath::measure($($options)*)]
+        async fn $three() -> usize { $two().await }
+    };
+}
+
+    measured_chain!(timing_leaf, timing_one, timing_two, timing_three;);
+    measured_chain!(logged_leaf, logged_one, logged_two, logged_three; log = true);
+    measured_chain!(future_leaf, future_one, future_two, future_three; future = true);
+    measured_chain!(both_leaf, both_one, both_two, both_three; future = true, log = true);
+
+    #[test]
+    fn nested_measurements_retain_one_body_frame_per_level() {
+        let chains = [
+            (size_of_val(&timing_leaf()), size_of_val(&timing_three())),
+            (size_of_val(&logged_leaf()), size_of_val(&logged_three())),
+            (size_of_val(&future_leaf()), size_of_val(&future_three())),
+            (size_of_val(&both_leaf()), size_of_val(&both_three())),
+        ];
+        for (leaf, nested) in chains {
+            // Three measurement guards may add metadata, but must not duplicate
+            // the full child state at every generated async forwarding layer.
+            assert!(nested <= leaf + 3 * 1024, "leaf={leaf}, nested={nested}");
+        }
+    }
+
+    struct DropCount<'a>(&'a std::sync::atomic::AtomicUsize);
+    impl Drop for DropCount<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[hotpath::measure(future = true, log = true)]
+    async fn cancellable(drops: &std::sync::atomic::AtomicUsize) {
+        let _drop = DropCount(drops);
+        std::future::pending::<()>().await;
+    }
+
+    #[test]
+    fn cancelling_a_borrowed_measured_body_drops_its_state_once() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Waker};
+
+        let drops = AtomicUsize::new(0);
+        let mut future = Box::pin(cancellable(&drops));
+        assert!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(future);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }

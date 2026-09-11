@@ -1,0 +1,821 @@
+/* Knowledge interior — night-glass CONCEPT cameras. HUD owns rail/register/status/stamp. */
+
+.kn-root {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 36%);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 40% 16%, #080f17 0%, #04080d 52%, #03060a 100%);
+}
+
+.kn-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  overflow: hidden;
+}
+
+.kn-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0;
+}
+
+.kn-tabs button {
+  appearance: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #9eb0be;
+  background: rgba(8, 12, 20, 0.72);
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 22%, var(--edge-subtle));
+  backdrop-filter: blur(8px);
+  padding: 10px 24px;
+  min-width: 136px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.kn-tabs button:hover {
+  color: var(--signal-cyan-hot);
+  border-color: color-mix(in oklab, var(--signal-cyan) 50%, var(--edge-subtle));
+}
+
+.kn-tabs button.is-on {
+  color: var(--signal-cyan-hot);
+  border-color: color-mix(in oklab, var(--signal-cyan) 70%, #9cf);
+  box-shadow:
+    0 0 12px color-mix(in oklab, var(--signal-cyan) 34%, transparent),
+    inset 0 0 8px color-mix(in oklab, var(--signal-cyan) 14%, transparent);
+  text-shadow: 0 0 8px color-mix(in oklab, var(--signal-cyan) 55%, transparent);
+}
+.kn-tabs button small { color: #71838e; font: 8px var(--font-mono); }
+.kn-tabs button.is-on small { color: var(--signal-cyan); }
+
+.kn-well {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 24%, var(--edge-subtle));
+  background: color-mix(in oklab, var(--night-substrate) 78%, #04070d);
+  box-shadow: inset 0 1px 0 rgba(180, 230, 255, 0.045);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+}
+
+.kn-well > header,
+.kn-table > header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px 6px;
+  border-bottom: 1px solid color-mix(in oklab, var(--signal-cyan) 14%, var(--edge-subtle));
+}
+
+.kn-well > header b,
+.kn-table > header b {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  color: var(--signal-cyan);
+  text-shadow: 0 0 10px color-mix(in oklab, var(--signal-cyan) 40%, transparent);
+}
+
+.kn-well > header span,
+.kn-table > header span {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #8b99a8;
+}
+
+/* Disabled sort chrome. Species only: no ranking is served. */
+.kn-sort {
+  font: inherit;
+  font-size: 11px;
+  background: transparent;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 18%, var(--edge-subtle));
+  border-radius: 1px;
+  color: #6e7d8c !important;
+  cursor: not-allowed;
+}
+
+.kn-sort i {
+  font-style: normal;
+  font-size: 8px;
+  color: #57636f;
+}
+
+.kn-constellation {
+  flex: 1.3;
+}
+
+.kn-fill {
+  flex: 1;
+}
+
+/* Night-glass well: near-black with one faint cool lift. Star grit is drawn in SVG;
+ * no colored nebula fog. */
+.kn-field {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background-color: #04070d;
+  background-image: radial-gradient(ellipse at 40% 42%, rgba(10, 29, 42, 0.32) 0%, transparent 64%);
+}
+
+.kn-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.kn-legend {
+  position: absolute;
+  max-width: 145px;
+  left: 10px;
+  bottom: 10px;
+  z-index: 2;
+  font-size: 9.5px;
+  color: #8b99a8;
+  background: rgba(6, 10, 18, 0.82);
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 16%, transparent);
+  padding: 6px 9px;
+  backdrop-filter: blur(8px);
+}
+
+.kn-legend b {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+.kn-leg-band {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  color: #c5d0da;
+  margin: 3px 0;
+}
+
+.kn-leg-band i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.kn-leg-scale {
+  font-size: 9px;
+  color: #8b99a8;
+  font-family: var(--font-mono);
+  margin-top: 6px;
+  letter-spacing: 0.06em;
+}
+
+.kn-leg-scale span {
+  color: var(--signal-cyan);
+  letter-spacing: 0.18em;
+  margin: 0 4px;
+}
+
+.kn-leg-note {
+  font-size: 9px !important;
+  color: #6e7d8c !important;
+  font-family: var(--font-mono);
+  margin-top: 5px;
+}
+
+.kn-camtag {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  background: rgba(6, 10, 18, 0.72);
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 16%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.kn-camtag b {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+
+.kn-camtag span {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #c5d0da;
+}
+
+.kn-table {
+  flex: 0 0 47%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 24%, var(--edge-subtle));
+  background: color-mix(in oklab, var(--night-substrate) 78%, #04070d);
+  box-shadow: inset 0 1px 0 rgba(180, 230, 255, 0.045);
+  border-radius: var(--radius-panel);
+  overflow: hidden;
+}
+
+.kn-table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.kn-table table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.kn-table th {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+  font-weight: 500;
+  text-align: left;
+  padding: 6px 12px;
+  border-bottom: 1px solid color-mix(in oklab, var(--signal-cyan) 12%, var(--edge-subtle));
+}
+
+.kn-table td {
+  padding: 12px;
+  font-family: var(--font-mono);
+  color: #8b99a8;
+}
+
+/* Typed-absent ledger rows. Schema chrome is real; every value is honestly empty. */
+.kn-ledger-row td {
+  padding: 9px 12px 8px;
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: #57636f;
+  border-bottom: 1px solid color-mix(in oklab, var(--signal-cyan) 7%, transparent);
+  background: linear-gradient(to bottom, rgba(120, 190, 235, 0.016), rgba(6, 10, 18, 0.12));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kn-ledger-row:nth-child(even) td {
+  background: linear-gradient(to bottom, rgba(120, 190, 235, 0.034), rgba(10, 16, 26, 0.2));
+}
+
+.kn-ledger-note {
+  font-style: normal;
+  color: color-mix(in oklab, var(--activity-amber) 66%, #5c5348);
+}
+
+.kn-cell-trust {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kn-cell-trust em {
+  font-style: normal;
+  color: #57636f;
+}
+
+.kn-cell-meter {
+  display: inline-block;
+  width: 42px;
+  height: 6px;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 22%, transparent);
+  background:
+    repeating-linear-gradient(
+      to right,
+      transparent 0 5px,
+      color-mix(in oklab, var(--signal-cyan) 16%, transparent) 5px 6px
+    ),
+    color-mix(in oklab, var(--signal-cyan) 4%, transparent);
+}
+
+.kn-table footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 12px 6px;
+  border-top: 1px solid color-mix(in oklab, var(--signal-cyan) 12%, var(--edge-subtle));
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #6e7d8c;
+}
+
+/* Disabled pagination chrome. Species only: zero pages, nothing to page. */
+.kn-pager {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  cursor: not-allowed;
+}
+
+.kn-pager em,
+.kn-pager button {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  color: #57636f;
+}
+
+.kn-pager button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.kn-pager .pg {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0;
+  color: #6e7d8c;
+}
+
+.kn-absent {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 24px;
+  color: #8b99a8;
+}
+
+.kn-absent-title {
+  color: #d7eaf4;
+  font-size: 15px;
+}
+
+.kn-absent p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 56ch;
+}
+
+.kn-badge {
+  display: inline-flex;
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border: 1px dashed #7c8b99;
+  color: #7c8b99;
+  border-radius: 1px;
+}
+
+.kn-inspect {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid color-mix(in oklab, var(--signal-cyan) 22%, var(--edge-subtle));
+  background: #080c14;
+  padding: 11px 14px 14px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.kn-inspect-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 8px;
+  padding-bottom: 4px;
+}
+
+.kn-inspect-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in oklab, var(--signal-cyan) 16%, var(--edge-subtle));
+}
+
+.kn-inspect-head span {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--signal-cyan);
+  text-shadow: 0 0 10px color-mix(in oklab, var(--signal-cyan) 40%, transparent);
+}
+
+.kn-inspect-head b {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  color: var(--activity-amber);
+}
+
+.kn-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.kn-title h2 {
+  margin: 0;
+  font-size: 13px;
+  color: #d7eaf4;
+  font-weight: 500;
+  font-style: normal;
+}
+
+.kn-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.kn-meter em {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #6e7d8c;
+}
+
+.kn-meter-bar {
+  display: inline-block;
+  width: 58px;
+  height: 9px;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 30%, transparent);
+  background:
+    repeating-linear-gradient(
+      to right,
+      transparent 0 6px,
+      color-mix(in oklab, var(--signal-cyan) 22%, transparent) 6px 7px
+    ),
+    color-mix(in oklab, var(--signal-cyan) 5%, transparent);
+}
+
+.kn-block { margin: 8px 0 0; }
+
+.kn-block .k {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kn-canon {
+  padding: 9px 12px;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 26%, var(--edge-subtle));
+  background: color-mix(in oklab, var(--signal-cyan) 4%, rgba(6, 10, 18, 0.6));
+  box-shadow: inset 0 0 14px color-mix(in oklab, var(--signal-cyan) 8%, transparent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: #9aa8b6;
+  font-style: normal;
+}
+
+.kn-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: #c5d0da;
+  margin: 2px 0;
+  min-width: 0;
+}
+
+.kn-row span:first-child {
+  color: #8b99a8;
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+}
+.kn-row .r {
+  text-align: right;
+  color: #d7eaf4;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 58%;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.kn-row .abs {
+  color: color-mix(in oklab, var(--activity-amber) 78%, #5c5348);
+  font-style: normal;
+  font-weight: 400;
+}
+
+.kn-avail {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.4;
+  margin: 2px 0;
+  min-width: 0;
+}
+
+.kn-avail i {
+  font-style: normal;
+  flex: 0 0 16px;
+  color: #57636f;
+}
+
+.kn-avail span {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #8b99a8;
+  overflow-wrap: break-word;
+}
+
+.kn-avail em {
+  flex: 0 1 auto;
+  text-align: right;
+  color: color-mix(in oklab, var(--activity-amber) 78%, #5c5348);
+  font-style: normal;
+}
+
+.kn-copy {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #9aa8b6;
+  margin: 12px 0 0;
+}
+
+.kn-foot {
+  flex: 0 0 auto;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+}
+
+.kn-foot .k {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+  margin-bottom: 4px;
+}
+
+.kn-hint {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 22%, transparent);
+  color: #9eb0be;
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+}
+
+.kn-chart {
+  position: relative;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 18%, var(--edge-subtle));
+  background: color-mix(in oklab, var(--signal-cyan) 3%, rgba(6, 10, 18, 0.6));
+  padding: 3px 6px 1px;
+}
+
+.kn-chart-svg {
+  display: block;
+  width: 100%;
+  height: 42px;
+}
+
+.kn-chart-svg line {
+  stroke: color-mix(in oklab, var(--signal-cyan) 16%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+.kn-chart-svg text {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  fill: #6e7d8c;
+  text-anchor: end;
+}
+
+.kn-chart-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  text-align: center;
+}
+
+.kn-chart-note span {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  color: var(--activity-amber);
+}
+
+.kn-chart-note em {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: #6e7d8c;
+}
+
+.kn-geom-card {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  margin-top: 4px;
+  border: 1px solid color-mix(in oklab, var(--signal-cyan) 16%, var(--edge-subtle));
+  background: color-mix(in oklab, var(--signal-cyan) 3%, rgba(6, 10, 18, 0.6));
+}
+
+.kn-geom-svg {
+  width: 72px;
+  height: 30px;
+  display: block;
+  background: radial-gradient(ellipse at 50% 50%, rgba(40, 70, 90, 0.35), #05080e);
+}
+
+.kn-geom-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.kn-geom-copy strong {
+  font-size: 11px;
+  font-weight: 500;
+  color: #d7eaf4;
+}
+
+.kn-geom-copy strong i {
+  font-style: normal;
+  color: var(--signal-cyan);
+  margin-right: 2px;
+}
+
+.kn-geom-copy span {
+  font-size: 11px;
+  color: #8b99a8;
+  line-height: 1.35;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kn-tabs button.is-on { box-shadow: none; text-shadow: none; }
+}
+
+.kn-table footer > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.kn-camera-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.kn-tabs button:focus-visible { outline: 2px solid #b8ebff; outline-offset: -4px; }
+
+@media (max-width: 1200px) {
+  .kn-root { display: block; overflow: auto; }
+  .kn-main { height: 800px; }
+  .kn-inspect { min-height: 670px; margin: 0 10px 10px; border: 1px solid var(--edge-subtle); }
+  .kn-inspect-body { flex: 1 0 auto; overflow: visible; }
+  .kn-tabs button { flex: 1; min-width: 0; padding: 10px 6px; }
+  .kn-table table { min-width: 600px; }
+  .kn-well > header { flex-wrap: wrap; gap: 4px; }
+}
+
+.kn-table-tools { display: flex; min-width: 0; gap: 8px; }
+.kn-table-tools input { width: 185px; min-width: 0; border: 1px solid var(--edge-subtle); background: #03070c; color: #8398a9; font: 10px var(--font-mono); padding: 3px 6px; }
+.kn-table-tools input::placeholder { color: #728493; }
+
+/* Stable source subjects and explicit authored-claim cameras. */
+.kn-controls { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 5px 10px; }
+.kn-route-state { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; padding:6px 8px; border:1px solid #203944; background:#050b11; color:#7f96a2; font:8px var(--font-mono); letter-spacing:.06em; }
+.kn-route-state label { display:flex; align-items:center; gap:4px; }
+.kn-route-state input,.kn-route-state select { max-width:120px; border:1px solid #294752; background:#071019; color:#c2dbe3; font:10px var(--font-mono); padding:3px 4px; }
+.kn-route-state > span { color:var(--signal-cyan); overflow-wrap:anywhere; }
+.kn-mode { flex: 0 0 auto; max-width: 100%; box-sizing: border-box; padding: 5px 8px; border: 1px solid #314b57; font: 8px var(--font-display); letter-spacing: .13em; color: #8196a1; }
+.kn-mode.is-fixture { color: var(--activity-amber); border-color: color-mix(in oklab, var(--activity-amber) 45%, #31414a); }
+.kn-subject-map { flex: 1.2; }
+.kn-atlas-wrap { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.kn-atlas-wrap > .repository-atlas { height: 100%; min-height: 0; }
+.kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-tools,
+.kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-inspect,
+.kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-minimap,
+.kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-footer { display: none; }
+.kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-stage,
+.kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-stage > canvas { min-height: 0; }
+.kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-caption { top: 10px; max-width: calc(100% - 20px); font-size: 8px; }
+.kn-map-label { position: absolute; z-index: 3; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 2px; max-width: 300px; padding: 6px 9px; background: rgba(4,10,16,.92); border: 1px solid #2a515f; }
+.kn-map-label strong { color: var(--signal-cyan); font: 8px var(--font-display); letter-spacing: .13em; }
+.kn-map-label span { color: #7e929e; font: 9px var(--font-mono); }
+.kn-map-label button { border:1px solid #315968; background:#07131a; color:#b9e9f3; cursor:pointer; font:8px var(--font-mono); padding:4px 5px; text-align:left; }
+.kn-map-label button:focus-visible { outline:2px solid #d4fbff; outline-offset:2px; }
+.kn-empty-ledger { flex: 1; display: grid; place-content: center; justify-items: center; gap: 5px; color: #71838e; }
+.kn-empty-ledger strong { color: var(--activity-amber); font: 9px var(--font-display); letter-spacing: .14em; }
+.kn-empty-ledger span { font: 10px var(--font-mono); }
+.kn-fixture-ledger th:nth-child(1) { width: 45%; }
+.kn-fixture-ledger th:nth-child(2) { width: 25%; }
+.kn-fixture-ledger th:nth-child(3) { width: 18%; }
+.kn-fixture-ledger th:nth-child(4) { width: 12%; }
+.kn-fixture-ledger table button { appearance: none; width: 100%; border: 0; background: transparent; color: #bdd5dd; font: inherit; line-height: 1.35; overflow-wrap: anywhere; text-align: left; cursor: pointer; }
+.kn-fixture-ledger tbody tr { border-bottom: 1px solid #172e38; }
+.kn-fixture-ledger tbody tr.is-selected { background: color-mix(in oklab, var(--signal-cyan) 9%, transparent); box-shadow: inset 3px 0 var(--signal-cyan); }
+.kn-state { display: inline-flex; padding: 2px 5px; border: 1px solid currentColor; font: 8px var(--font-mono); text-transform: uppercase; white-space: nowrap; }
+.kn-state.is-canonical { color: #7be3a5; }
+.kn-state.is-superseded { color: #a795d5; }
+.kn-state.is-contradicted { color: #f0b069; }
+.kn-source,
+.kn-related { appearance: none; width: 100%; margin: 3px 0; padding: 7px 8px; text-align: left; border: 1px solid #29444f; background: #09131b; color: #b5ccd5; cursor: pointer; display: grid; gap: 2px; }
+.kn-source b { font: 10px var(--font-mono); color: #d2edf4; }
+.kn-source span { font: 9px var(--font-mono); color: #7f96a2; overflow-wrap: anywhere; }
+.kn-source em { font: 8px var(--font-mono); color: var(--signal-cyan); font-style: normal; }
+.kn-related span { color: #9d8fc6; font: 8px var(--font-mono); text-transform: uppercase; }
+.kn-related b { color: #c5d9e0; font: 10px/1.4 var(--font-body); font-weight: 500; }
+.kn-source:hover,
+.kn-related:hover { border-color: var(--signal-cyan); }
+.kn-source:focus-visible,
+.kn-related:focus-visible,
+.kn-fixture-ledger button:focus-visible,
+.kn-geometry button:focus-visible,
+.kn-curation button:focus-visible,
+.kn-oplog button:focus-visible { outline: 2px solid #d4fbff; outline-offset: 2px; }
+.kn-geometry { position: relative; flex: 1; min-height: 420px; overflow: hidden; background: radial-gradient(circle at 48% 48%, rgba(29,76,91,.35), transparent 50%), #040a10; }
+.kn-geometry > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.kn-geometry > svg path { fill: none; stroke: #8171aa; stroke-width: .5; }
+.kn-geometry > svg path.is-contradiction { stroke: #d38b55; stroke-dasharray: 2 2; }
+.kn-geometry > button { position: absolute; transform: translate(-50%,-50%); width: 180px; min-height: 70px; appearance: none; border: 1px solid #375765; background: rgba(7,18,27,.94); color: #c4dbe3; padding: 10px 11px 9px 25px; text-align: left; cursor: pointer; box-shadow: 0 0 24px rgba(28,179,207,.08); }
+.kn-geometry > button i { position: absolute; left: 10px; top: 15px; width: 7px; height: 7px; border-radius: 50%; background: var(--signal-cyan); box-shadow: 0 0 9px var(--signal-cyan); }
+.kn-geometry > button b { display: block; color: #d4eef4; font: 11px/1.35 var(--font-body); }
+.kn-geometry > button span { display: block; margin-top: 5px; color: #8397a1; font: 8px var(--font-mono); text-transform: uppercase; }
+.kn-geometry > button.is-selected { border-color: var(--signal-cyan); box-shadow: 0 0 18px rgba(45,223,248,.25); }
+.kn-geometry > button.is-contradicted i { background: var(--activity-amber); box-shadow: 0 0 9px var(--activity-amber); }
+.kn-geometry-key { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 14px; padding: 6px 8px; border: 1px solid #253f4a; background: rgba(5,12,18,.9); color: #8195a0; font: 9px var(--font-mono); }
+.kn-curation { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; padding: 10px; }
+.kn-curation > section { min-width: 0; border: 1px solid #263f4a; background: #071019; padding: 9px; }
+.kn-curation > section > header { display: flex; justify-content: space-between; border-bottom: 1px solid #213843; padding-bottom: 7px; color: #80939d; font: 8px var(--font-mono); }
+.kn-curation button { appearance: none; width: 100%; margin-top: 8px; padding: 10px; border: 1px solid #2d4954; background: #0a151e; color: #c5dce4; text-align: left; cursor: pointer; display: grid; gap: 6px; }
+.kn-curation button.is-selected { border-color: var(--signal-cyan); box-shadow: inset 3px 0 var(--signal-cyan); }
+.kn-curation button strong { font: 11px var(--font-body); }
+.kn-curation button span { color: #8ea2ac; font: 10px/1.45 var(--font-body); }
+.kn-curation button em { color: var(--signal-cyan); font: 8px var(--font-mono); font-style: normal; }
+.kn-oplog { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 28px min(8vw,90px); position: relative; }
+.kn-oplog::before { content:""; position:absolute; top:28px; bottom:28px; left:calc(min(8vw,90px) + 7px); width:1px; background:linear-gradient(var(--signal-cyan),#4c3e72,var(--activity-amber)); }
+.kn-oplog li { position: relative; padding: 0 0 20px 29px; }
+.kn-oplog li > i { position:absolute; left:2px; top:12px; width:10px; height:10px; border-radius:50%; background:#071019; border:2px solid var(--signal-cyan); box-shadow:0 0 10px rgba(72,225,245,.4); }
+.kn-oplog button { appearance:none; width:min(680px,100%); display:grid; grid-template-columns:90px minmax(0,1fr); gap:4px 12px; padding:10px 12px; border:1px solid #2a4652; background:#08131c; color:#c9e0e7; text-align:left; cursor:pointer; }
+.kn-oplog button span { grid-row:1/3; color:var(--signal-cyan); font:10px var(--font-mono); }
+.kn-oplog button b { font:11px var(--font-body); font-weight:500; }
+.kn-oplog button em { color:#8399a4; font:9px var(--font-mono); font-style:normal; }
+@media(max-width:800px){.kn-controls{align-items:stretch;flex-direction:column}.kn-mode{align-self:flex-start}.kn-curation{grid-template-columns:1fr;overflow:auto}.kn-geometry>button{width:140px}.kn-geometry-key{flex-direction:column;gap:3px}}

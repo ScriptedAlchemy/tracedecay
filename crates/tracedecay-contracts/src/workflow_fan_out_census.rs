@@ -142,7 +142,7 @@ pub fn derive_workflow_fan_out_census(
         || attempts.keys().any(|identity| {
             !children
                 .iter()
-                .any(|child| &child.attempt_identity == identity)
+                .any(|child| projection.active_fan_out_attempt(&child.attempt_identity) == identity)
         })
         || evidence.non_duplicate_attempts.is_some_and(|classified| {
             classified
@@ -192,7 +192,7 @@ pub fn derive_workflow_fan_out_census(
         .map(|child| tracedecay_domain::WorkflowAttemptFrontierV1 {
             attempt: child.attempt_identity.clone(),
             completed: attempts
-                .get(&child.attempt_identity)
+                .get(projection.active_fan_out_attempt(&child.attempt_identity))
                 .and_then(|attempt| attempt.progress())
                 .map(|progress| progress.completed()),
         })
@@ -436,7 +436,8 @@ fn readiness_widths(
             !projection
                 .settled_fan_out_attempts()
                 .contains(&child.attempt_identity)
-                && !attempts.contains_key(&child.attempt_identity)
+                && !attempts
+                    .contains_key(projection.active_fan_out_attempt(&child.attempt_identity))
         })
         .map(|child| child.attempt_identity.clone())
         .collect::<BTreeSet<_>>();
@@ -506,7 +507,8 @@ fn provider_capacities(
                     .ok_or(WorkflowFanOutCensusError::InvalidInput)?
                     .3 += 1;
             }
-            if let Some(attempt) = attempts.get(&child.attempt_identity)
+            if let Some(attempt) =
+                attempts.get(projection.active_fan_out_attempt(&child.attempt_identity))
                 && generation.is_some()
                 && attempt_matches_work_snapshot(attempt, work_snapshot)
                 && attempt_active_in_interval(attempt, interval_started_at, observed_at)

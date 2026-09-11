@@ -8,7 +8,9 @@ use std::time::Instant;
 use thiserror::Error;
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_contracts::diagnostics::{
-    AnalyzerAdmittedDiagnosticProviderV1, DiagnosticProviderIdentity,
+    DiagnosticProviderIdentity, DiagnosticProviderIdentityParts,
+    FeedbackDiagnosticProviderAdmissionV1, ProviderDocumentIdentity, ProviderFreshness,
+    ProviderSourceIdentity,
 };
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackLspMethodClassV1, FeedbackLspStateV1, FeedbackOperationV1,
@@ -16,9 +18,10 @@ use tracedecay_contracts::feedback::observations::{
 };
 use tracedecay_contracts::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest, FeedbackCycleExecutionResult,
-    FeedbackCycleService, FeedbackExpandRequestV1, FeedbackImpactPort, FeedbackImpactPortOutcome,
-    FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture, FeedbackRuntimeStatePort,
-    FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
+    FeedbackCycleService, FeedbackDiagnosticsReadRequestV1, FeedbackExpandRequestV1,
+    FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
+    FeedbackPortFuture, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
+    GenerationBoundFeedbackDiagnosticsAdapter,
 };
 use tracedecay_contracts::retrieval::{
     AffectedTestsRequest, AffectedTestsResult, AffectedTestsRetrievalPort, AnchorExpandRequest,
@@ -34,7 +37,8 @@ use tracedecay_domain::feedback::{
     FeedbackImpactV1, FeedbackTriggerV1,
 };
 use tracedecay_domain::{
-    FileOccurrenceId, RelationEdgeKindV1, RetrievalAnchorId, SymbolOccurrenceId, canonical_sha256,
+    ContentDigest, FileOccurrenceId, RelationEdgeKindV1, RetrievalAnchorId, SymbolOccurrenceId,
+    canonical_sha256,
 };
 use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
@@ -108,20 +112,30 @@ pub struct FeedbackFindingHandlesV1 {
     pub expansion_handle: Option<String>,
 }
 
+/// Short-lived handles for reads over the committed cycle publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeedbackCycleReadHandlesV1 {
+    pub diagnostics_handle: String,
+    pub list_handle: String,
+}
+
 /// Transport-neutral result retaining reference-only evidence and read handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalFeedbackResultV1 {
     pub execution: FeedbackCycleExecutionResult,
+    pub read_handles: Option<FeedbackCycleReadHandlesV1>,
     pub finding_handles: Vec<FeedbackFindingHandlesV1>,
 }
 
 impl CanonicalFeedbackResultV1 {
     fn new(
         execution: FeedbackCycleExecutionResult,
+        read_handles: Option<FeedbackCycleReadHandlesV1>,
         finding_handles: Vec<FeedbackFindingHandlesV1>,
     ) -> Result<Self, ApplicationContractError> {
         let result = Self {
             execution,
+            read_handles,
             finding_handles,
         };
         result.validate()?;
@@ -146,15 +160,27 @@ impl CanonicalFeedbackResultV1 {
             && (self.execution.dedupe_key.is_some()
                 || self.execution.authority.is_some()
                 || self.execution.publication.is_some()
+                || self.read_handles.is_some()
                 || !self.finding_handles.is_empty())
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "overlay feedback durable output",
             });
         }
-        if self.execution.publication.is_none() && !self.finding_handles.is_empty() {
+        if self.execution.publication.is_none()
+            && (self.read_handles.is_some() || !self.finding_handles.is_empty())
+        {
             return Err(ApplicationContractError::Inconsistent {
-                field: "unpublished feedback expansion handles",
+                field: "unpublished feedback read handles",
+            });
+        }
+        if self.execution.publication.is_some()
+            && self.read_handles.as_ref().is_none_or(|handles| {
+                handles.diagnostics_handle.is_empty() || handles.list_handle.is_empty()
+            })
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "feedback cycle read handles",
             });
         }
         if self.execution.publication.is_some()
@@ -228,7 +254,8 @@ pub struct FeedbackCycleRuntime {
     publications: ProjectFeedbackStore,
     service: Arc<ProductionFeedbackCycleService>,
     lsp_input: FeedbackCycleLspInput,
-    provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
+    publication_selector: Arc<DiagnosticStoreFeedbackProvider<DatabaseDiagnosticStore>>,
+    provider_admissions: Vec<FeedbackDiagnosticProviderAdmissionV1>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
@@ -241,7 +268,7 @@ pub fn open_feedback_cycle_runtime(
     feedback: Arc<FeedbackRuntime>,
     runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
-    provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
+    provider_admissions: Vec<FeedbackDiagnosticProviderAdmissionV1>,
     project_root: PathBuf,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     affected_tests: Arc<dyn AffectedTestsRetrievalPort + Send + Sync>,
@@ -258,10 +285,36 @@ pub fn open_feedback_cycle_runtime(
 
     let publications = feedback.publication_store();
     let source_observations = feedback.source_observation_port();
+    let publication_selector = Arc::new(DiagnosticStoreFeedbackProvider::new(
+        DatabaseDiagnosticStore::new(database.clone()),
+    ));
     let diagnostics = GenerationBoundFeedbackDiagnosticsAdapter::new(
         DiagnosticStoreFeedbackProvider::new(DatabaseDiagnosticStore::new(database)),
         provider_admissions.clone(),
     )?;
+    let source_lsp_input = lsp_input;
+    let lsp_publication_selector = Arc::clone(&publication_selector);
+    let lsp_input: FeedbackCycleLspInput = Arc::new(move |request| {
+        let source_lsp_input = Arc::clone(&source_lsp_input);
+        let publication_selector = Arc::clone(&lsp_publication_selector);
+        Box::pin(async move {
+            let mut invocation = source_lsp_input(request).await?;
+            let selected = publication_selector
+                .current_publication_providers(
+                    &invocation.request.providers,
+                    &invocation.request.input,
+                )
+                .await
+                .map_err(|()| LspRuntimeFailure::new("feedback-diagnostic-publication-read"))?;
+            if !selected.is_empty() {
+                invocation.request.providers = selected;
+                invocation
+                    .validate()
+                    .map_err(|_| LspRuntimeFailure::new("feedback-provider-selection"))?;
+            }
+            Ok(invocation)
+        })
+    });
     let route_authorization = feedback.route_authorization();
     let impact = DirectFeedbackImpactAdapter::new(
         project_root,
@@ -287,6 +340,7 @@ pub fn open_feedback_cycle_runtime(
         publications,
         service: Arc::new(service),
         lsp_input,
+        publication_selector,
         provider_admissions,
         correlation_policy,
         source_observations,
@@ -298,7 +352,7 @@ impl FeedbackCycleRuntime {
         Arc::clone(&self.feedback)
     }
 
-    /// The same durable store used by the completed-publication dedupe port.
+    /// The same durable store used by the publication and completed-dedupe port.
     pub fn publication_store(&self) -> ProjectFeedbackStore {
         self.publications.clone()
     }
@@ -311,6 +365,13 @@ impl FeedbackCycleRuntime {
         Arc::clone(&self.source_observations)
     }
 
+    /// The request builder selected with this runtime's admitted providers.
+    /// Its document identity is resolved per invocation, while analyzer,
+    /// configuration, and policy admission remain the immutable runtime pin.
+    pub fn lsp_input(&self) -> FeedbackCycleLspInput {
+        Arc::clone(&self.lsp_input)
+    }
+
     /// Runs exactly one bounded feedback cycle and returns its terminal,
     /// canonical result. It never schedules retries or follow-up work.
     #[hotpath::measure(label = "usecases.feedback.run_once", future = true)]
@@ -319,14 +380,20 @@ impl FeedbackCycleRuntime {
         invocation: FeedbackCycleInvocation,
     ) -> Result<CanonicalFeedbackResultV1, FeedbackCycleRuntimeError> {
         invocation.validate()?;
-        if !self.admits_provider_set(&invocation.request.providers) {
+        if !self.admits_current_provider_set(&invocation.request).await
+            || !self.admits_provider_set(&invocation.request.providers)
+        {
             return Err(FeedbackCycleRuntimeError::ProviderSetMismatch);
         }
         let FeedbackCycleInvocation { context, request } = invocation;
         let requested_durability = request.input.request.durability();
         let execution = self.service.execute(&context, request).await?;
         crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
-        Ok(self.compose_canonical_result(execution, requested_durability)?)
+        Ok(compose_canonical_result(
+            &self.feedback,
+            execution,
+            requested_durability,
+        )?)
     }
 
     /// Runs one canonical feedback cycle with source-backed advisory findings.
@@ -339,7 +406,9 @@ impl FeedbackCycleRuntime {
         request: FeedbackCycleExecutionRequest,
         advisory: FeedbackCycleAdvisoryV1,
     ) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
-        if !self.admits_provider_set(&request.providers) {
+        if !self.admits_current_provider_set(&request).await
+            || !self.admits_provider_set(&request.providers)
+        {
             return Err(ApplicationContractError::Inconsistent {
                 field: "feedback cycle provider set",
             });
@@ -350,65 +419,15 @@ impl FeedbackCycleRuntime {
             .execute_with_advisory(context, request, advisory)
             .await?;
         crate::hotpath_observe::feedback_query(execution.cycle.findings.len());
-        self.compose_canonical_result(execution, requested_durability)
-    }
-
-    fn compose_canonical_result(
-        &self,
-        execution: FeedbackCycleExecutionResult,
-        requested_durability: FeedbackDurabilityV1,
-    ) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
-        if execution.cycle.durability != requested_durability {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "feedback result durability",
-            });
-        }
-        if execution.cycle.durability != FeedbackDurabilityV1::Durable
-            || execution.publication.is_none()
-        {
-            return CanonicalFeedbackResultV1::new(execution, Vec::new());
-        }
-
-        let observed_at = execution.usage.completed_at;
-        let mut finding_handles = Vec::with_capacity(execution.cycle.findings.len());
-        for finding in &execution.cycle.findings {
-            let get_handle = self
-                .feedback
-                .mint_get(
-                    feedback_handle_request_id("get", &execution, finding)?,
-                    finding.finding_id.clone(),
-                    observed_at,
-                )
-                .map_err(|_| ApplicationContractError::Inconsistent {
-                    field: "feedback get handle authority",
-                })?;
-            let expansion_handle = if let Some(request) = feedback_expansion_request(finding)? {
-                Some(
-                    self.feedback
-                        .mint_expand(
-                            feedback_handle_request_id("expand", &execution, finding)?,
-                            request,
-                            observed_at,
-                        )
-                        .map_err(|_| ApplicationContractError::Inconsistent {
-                            field: "feedback expansion handle authority",
-                        })?,
-                )
-            } else {
-                None
-            };
-            finding_handles.push(FeedbackFindingHandlesV1 {
-                finding_id: finding.finding_id.clone(),
-                retrieval_anchor_id: finding.retrieval_anchor_id.clone(),
-                get_handle,
-                expansion_handle,
-            });
-        }
-        CanonicalFeedbackResultV1::new(execution, finding_handles)
+        compose_canonical_result(&self.feedback, execution, requested_durability)
     }
 
     fn admits_provider_set(&self, providers: &[DiagnosticProviderIdentity]) -> bool {
-        providers.len() == self.provider_admissions.len()
+        !providers.is_empty()
+            && !providers
+                .iter()
+                .enumerate()
+                .any(|(index, identity)| providers[index.saturating_add(1)..].contains(identity))
             && providers.iter().all(|identity| {
                 self.provider_admissions
                     .iter()
@@ -417,6 +436,162 @@ impl FeedbackCycleRuntime {
                     == 1
             })
     }
+
+    async fn admits_current_provider_set(&self, request: &FeedbackCycleExecutionRequest) -> bool {
+        let Some(admitted) = self.providers_for_input(&request.input) else {
+            let analyzer_admissions = self
+                .provider_admissions
+                .iter()
+                .filter(|admission| {
+                    matches!(
+                        admission,
+                        FeedbackDiagnosticProviderAdmissionV1::Analyzer(_)
+                    )
+                })
+                .count();
+            return matches!(
+                request.input.request.content,
+                tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay { .. }
+            ) && request.providers.len() == analyzer_admissions;
+        };
+        match self
+            .publication_selector
+            .current_publication_providers(&admitted, &request.input)
+            .await
+        {
+            Ok(selected) if selected.is_empty() => admitted == request.providers,
+            Ok(selected) => selected == request.providers,
+            Err(()) => false,
+        }
+    }
+
+    fn providers_for_input(
+        &self,
+        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+    ) -> Option<Vec<DiagnosticProviderIdentity>> {
+        let tracedecay_domain::feedback::FeedbackContentIdentityV1::SavedContent {
+            file_digest,
+            ..
+        } = &input.request.content
+        else {
+            return None;
+        };
+        let generation = input.target.generation_id.clone()?;
+        let content_digest = ContentDigest::new(file_digest.as_str().to_owned()).ok()?;
+        self.provider_admissions
+            .iter()
+            .map(|admission| {
+                let provider = admission.identity();
+                DiagnosticProviderIdentity::new(DiagnosticProviderIdentityParts {
+                    scope: provider.scope.clone(),
+                    source: ProviderSourceIdentity::CleanGeneration {
+                        generation: generation.clone(),
+                    },
+                    document: ProviderDocumentIdentity {
+                        file: input.target.file.clone(),
+                        content_digest: content_digest.clone(),
+                        document_version: None,
+                    },
+                    producer: provider.producer.clone(),
+                    requested_capability: provider.requested_capability.clone(),
+                    freshness: ProviderFreshness::current(input.observed_at),
+                    coverage: provider.coverage.clone(),
+                    provenance: provider.provenance.clone(),
+                    configuration: provider.configuration.clone(),
+                    policy: provider.policy.clone(),
+                })
+                .ok()
+            })
+            .collect()
+    }
+}
+
+pub(crate) fn compose_canonical_result(
+    feedback: &FeedbackRuntime,
+    execution: FeedbackCycleExecutionResult,
+    requested_durability: FeedbackDurabilityV1,
+) -> Result<CanonicalFeedbackResultV1, ApplicationContractError> {
+    if execution.cycle.durability != requested_durability {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "feedback result durability",
+        });
+    }
+    if execution.cycle.durability != FeedbackDurabilityV1::Durable
+        || execution.publication.is_none()
+    {
+        return CanonicalFeedbackResultV1::new(execution, None, Vec::new());
+    }
+
+    let observed_at = execution.usage.completed_at;
+    let read_handles = FeedbackCycleReadHandlesV1 {
+        diagnostics_handle: feedback
+            .mint_diagnostics(
+                feedback_cycle_handle_request_id("diagnostics", &execution)?,
+                FeedbackDiagnosticsReadRequestV1 {
+                    head_commit_id: execution.cycle.scope.head_commit_id.clone(),
+                },
+                observed_at,
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "feedback diagnostics handle authority",
+            })?,
+        list_handle: feedback
+            .mint_list(
+                feedback_cycle_handle_request_id("list", &execution)?,
+                Some(execution.cycle.scope.head_commit_id.clone()),
+                100,
+                observed_at,
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "feedback list handle authority",
+            })?,
+    };
+    let mut finding_handles = Vec::with_capacity(execution.cycle.findings.len());
+    for finding in &execution.cycle.findings {
+        let get_handle = feedback
+            .mint_get(
+                feedback_handle_request_id("get", &execution, finding)?,
+                finding.finding_id.clone(),
+                observed_at,
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "feedback get handle authority",
+            })?;
+        let expansion_handle = if let Some(request) = feedback_expansion_request(finding)? {
+            Some(
+                feedback
+                    .mint_expand(
+                        feedback_handle_request_id("expand", &execution, finding)?,
+                        request,
+                        observed_at,
+                    )
+                    .map_err(|_| ApplicationContractError::Inconsistent {
+                        field: "feedback expansion handle authority",
+                    })?,
+            )
+        } else {
+            None
+        };
+        finding_handles.push(FeedbackFindingHandlesV1 {
+            finding_id: finding.finding_id.clone(),
+            retrieval_anchor_id: finding.retrieval_anchor_id.clone(),
+            get_handle,
+            expansion_handle,
+        });
+    }
+    CanonicalFeedbackResultV1::new(execution, Some(read_handles), finding_handles)
+}
+
+fn feedback_cycle_handle_request_id(
+    operation: &'static str,
+    execution: &FeedbackCycleExecutionResult,
+) -> Result<String, ApplicationContractError> {
+    let digest = canonical_sha256(&(
+        "tracedecay.feedback.canonical-cycle-handle-request.v1",
+        operation,
+        &execution.cycle.result_id,
+    ))?;
+    Ok(format!("feedback.{operation}.{}", digest.as_str()))
 }
 
 fn feedback_handle_request_id(
@@ -648,6 +823,7 @@ fn graph_read_failure(error: CodeGraphReadError) -> FeedbackImpactPortOutcome {
 }
 
 struct VerifiedImpactEvidenceV1 {
+    seed_symbols: Vec<SymbolOccurrenceId>,
     file_paths: Vec<String>,
     affected_callers: Vec<SymbolOccurrenceId>,
     complete: bool,
@@ -656,18 +832,45 @@ struct VerifiedImpactEvidenceV1 {
 #[hotpath::measure(label = "usecases.feedback.impact_evidence")]
 fn read_verified_impact_evidence_v1(
     reader: &CodeGraphInteractiveReader,
-    symbol: &SymbolOccurrenceId,
+    file: &FileOccurrenceId,
+    symbol: Option<&SymbolOccurrenceId>,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
 ) -> Result<Option<VerifiedImpactEvidenceV1>, CodeGraphReadError> {
-    let Some(seed) = reader
-        .symbol_summary(symbol, Arc::clone(&cancellation))
-        .map_err(map_projection_error)?
-    else {
-        return Ok(None);
+    let (mut seeds, seeds_complete) = if let Some(symbol) = symbol {
+        let Some(seed) = reader
+            .symbol_summary(symbol, Arc::clone(&cancellation))
+            .map_err(map_projection_error)?
+        else {
+            return Ok(None);
+        };
+        if seed.binding.as_ref().map(|binding| &binding.file) != Some(file) {
+            return Ok(None);
+        }
+        (vec![seed], true)
+    } else {
+        let mut seeds = reader
+            .symbols_in_file(
+                file,
+                FEEDBACK_IMPACT_MAX_SYMBOLS_V1.saturating_add(1),
+                Arc::clone(&cancellation),
+            )
+            .map_err(map_projection_error)?;
+        if seeds.is_empty() {
+            return Ok(None);
+        }
+        let complete = seeds.len() <= FEEDBACK_IMPACT_MAX_SYMBOLS_V1;
+        seeds.truncate(FEEDBACK_IMPACT_MAX_SYMBOLS_V1);
+        (seeds, complete)
     };
+    seeds.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+    seeds.dedup_by(|left, right| left.occurrence == right.occurrence);
+    let seed_symbols = seeds
+        .iter()
+        .map(|seed| seed.occurrence.clone())
+        .collect::<Vec<_>>();
     let graph_impact = reader
         .impact(
-            std::slice::from_ref(symbol),
+            &seed_symbols,
             &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
             FEEDBACK_IMPACT_DEPTH_V1,
             FEEDBACK_IMPACT_MAX_SYMBOLS_V1,
@@ -677,7 +880,7 @@ fn read_verified_impact_evidence_v1(
         .map_err(map_projection_error)?;
     let caller_impact = reader
         .impact(
-            std::slice::from_ref(symbol),
+            &seed_symbols,
             &[RelationEdgeKindV1::Calls],
             FEEDBACK_IMPACT_DEPTH_V1,
             FEEDBACK_IMPACT_MAX_SYMBOLS_V1,
@@ -685,7 +888,8 @@ fn read_verified_impact_evidence_v1(
             cancellation,
         )
         .map_err(map_projection_error)?;
-    let impacted_summaries = std::iter::once(&seed)
+    let impacted_summaries = seeds
+        .iter()
         .chain(graph_impact.impacted.iter().map(|node| &node.summary))
         .collect::<Vec<_>>();
     let mut file_paths = impacted_summaries
@@ -707,10 +911,31 @@ fn read_verified_impact_evidence_v1(
     affected_callers.sort();
     affected_callers.dedup();
     Ok(Some(VerifiedImpactEvidenceV1 {
+        seed_symbols,
         file_paths,
         affected_callers,
-        complete: graph_impact.complete && caller_impact.complete && bindings_complete,
+        complete: seeds_complete
+            && graph_impact.complete
+            && caller_impact.complete
+            && bindings_complete,
     }))
+}
+
+fn combined_affected_tests_state(states: &[FeedbackImpactStateV1]) -> FeedbackImpactStateV1 {
+    if states.is_empty()
+        || states
+            .iter()
+            .all(|state| *state == FeedbackImpactStateV1::Unavailable)
+    {
+        FeedbackImpactStateV1::Unavailable
+    } else if states
+        .iter()
+        .all(|state| *state == FeedbackImpactStateV1::Complete)
+    {
+        FeedbackImpactStateV1::Complete
+    } else {
+        FeedbackImpactStateV1::Partial
+    }
 }
 
 impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
@@ -736,9 +961,6 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 ) {
                     return FeedbackImpactPortOutcome::Unavailable;
                 }
-                let Some(symbol) = request.input.target.symbol.clone() else {
-                    return FeedbackImpactPortOutcome::Unavailable;
-                };
                 let Some(generation) = request.input.target.generation_id.clone() else {
                     return FeedbackImpactPortOutcome::Unavailable;
                 };
@@ -765,14 +987,15 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 };
                 let evidence = match read_verified_impact_evidence_v1(
                     &reader,
-                    &symbol,
+                    &request.input.target.file,
+                    request.input.target.symbol.as_ref(),
                     Arc::clone(&cancellation),
                 ) {
                     Ok(Some(evidence)) => evidence,
                     Ok(None) => return FeedbackImpactPortOutcome::Unavailable,
                     Err(error) => return graph_read_failure(error),
                 };
-                let (affected_files, graph_state) = match self
+                let (mut affected_files, graph_state) = match self
                     .resolved_affected_files(&generation, &evidence.file_paths)
                     .await
                 {
@@ -792,12 +1015,16 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                         return FeedbackImpactPortOutcome::Stale;
                     }
                 };
+                affected_files.push(request.input.target.file.clone());
+                affected_files.sort();
+                affected_files.dedup();
                 match context.admission_at(request.input.observed_at) {
                     RequestAdmission::Admitted => {}
                     RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                     RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
                 }
                 let affected_callers = evidence.affected_callers;
+                let seed_symbols = evidence.seed_symbols;
 
                 let Ok(page) = PageRequest::first(100) else {
                     return FeedbackImpactPortOutcome::Unavailable;
@@ -819,27 +1046,54 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 ) {
                     return FeedbackImpactPortOutcome::Unavailable;
                 }
-                let tests = self.tests.affected_tests(
-                    &RetrievalPortContext {
-                        request: context,
-                        operation: &self.tests_operation,
-                    },
-                    &AffectedTestsRequest {
-                        symbol,
-                        generation,
-                        meta,
-                    },
-                );
-                let (affected_tests, affected_tests_state) = match affected_tests_outcome(tests) {
-                    DirectAffectedTestsOutcome::Evidence { tests, state } => (tests, state),
-                    DirectAffectedTestsOutcome::Cancelled => {
-                        return FeedbackImpactPortOutcome::Cancelled;
+                let mut affected_tests = Vec::new();
+                let mut affected_tests_states = Vec::with_capacity(seed_symbols.len());
+                for symbol in seed_symbols {
+                    match context.admission_at(request.input.observed_at) {
+                        RequestAdmission::Admitted => {}
+                        RequestAdmission::Cancelled => {
+                            return FeedbackImpactPortOutcome::Cancelled;
+                        }
+                        RequestAdmission::TimedOut => {
+                            return FeedbackImpactPortOutcome::TimedOut;
+                        }
                     }
-                    DirectAffectedTestsOutcome::TimedOut => {
-                        return FeedbackImpactPortOutcome::TimedOut;
+                    let tests = self.tests.affected_tests(
+                        &RetrievalPortContext {
+                            request: context,
+                            operation: &self.tests_operation,
+                        },
+                        &AffectedTestsRequest {
+                            symbol,
+                            generation: generation.clone(),
+                            meta: meta.clone(),
+                        },
+                    );
+                    match affected_tests_outcome(tests) {
+                        DirectAffectedTestsOutcome::Evidence { tests, state } => {
+                            affected_tests.extend(tests);
+                            affected_tests_states.push(state);
+                        }
+                        DirectAffectedTestsOutcome::Cancelled => {
+                            return FeedbackImpactPortOutcome::Cancelled;
+                        }
+                        DirectAffectedTestsOutcome::TimedOut => {
+                            return FeedbackImpactPortOutcome::TimedOut;
+                        }
+                        DirectAffectedTestsOutcome::Stale => {
+                            return FeedbackImpactPortOutcome::Stale;
+                        }
                     }
-                    DirectAffectedTestsOutcome::Stale => return FeedbackImpactPortOutcome::Stale,
-                };
+                }
+                affected_tests.sort();
+                affected_tests.dedup();
+                let tests_within_bound = affected_tests.len() <= FEEDBACK_IMPACT_MAX_SYMBOLS_V1;
+                affected_tests.truncate(FEEDBACK_IMPACT_MAX_SYMBOLS_V1);
+                let mut affected_tests_state =
+                    combined_affected_tests_state(&affected_tests_states);
+                if !tests_within_bound && affected_tests_state == FeedbackImpactStateV1::Complete {
+                    affected_tests_state = FeedbackImpactStateV1::Partial;
+                }
 
                 // The impact is complete only when both the graph and the
                 // affected-test evidence report complete coverage.

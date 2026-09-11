@@ -93,6 +93,7 @@ pub const DAEMON_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::f
 /// Grace retained for forced task abort and join during daemon shutdown.
 pub const DAEMON_TASK_ABORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
+pub mod ast_grep;
 pub mod background_cpu;
 pub mod branch;
 pub mod branch_meta;
@@ -103,6 +104,7 @@ pub mod git;
 pub mod git_discovery;
 pub mod git_repository;
 pub mod lifecycle_lease;
+pub mod logging;
 pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;
@@ -113,6 +115,7 @@ pub mod runtime_identity;
 pub mod shard_runtime;
 pub mod sqlite_read_snapshot;
 pub mod storage;
+pub mod store_telemetry;
 pub mod sync;
 pub mod text;
 pub mod timeutil;

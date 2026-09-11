@@ -80,6 +80,23 @@ pub async fn load_session_activity(sessions_db: &dyn AutomationSessionStore) -> 
     }
 }
 
+/// Consecutive project-open failures after which one scheduler loop exits.
+///
+/// The next scheduler reconcile respawns the loop, so this bounds one futile
+/// retry streak rather than retiring the automation lane.
+pub const PROJECT_OPEN_FAILURE_ESCALATION: u32 = 6;
+
+/// Longest delay between retries after a project-open failure.
+pub const PROJECT_OPEN_BACKOFF_CEILING: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// Exponential project-open retry backoff, starting from one scheduler tick.
+pub fn project_open_backoff(consecutive_failures: u32) -> std::time::Duration {
+    let base = std::time::Duration::from_secs(super::config::DEFAULT_SCHEDULER_TICK_SECS);
+    let steps = consecutive_failures.saturating_sub(1).min(16);
+    base.saturating_mul(1_u32.checked_shl(steps).unwrap_or(u32::MAX))
+        .min(PROJECT_OPEN_BACKOFF_CEILING)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutomationScheduleDecision {
     skip_reason: Option<&'static str>,
@@ -221,7 +238,12 @@ impl AutomationTaskLock {
         stale_after_secs: Option<u64>,
         now_secs: i64,
     ) -> Result<Option<Self>> {
-        let lock_dir = dashboard_root.join("automation_locks");
+        // cap-std ambient opens walk each component. On macOS `/var` is a
+        // firmlink to `/private/var`; opening the unresolved tempfile spelling
+        // can ENOENT under concurrent create. Resolve the existing prefix first.
+        let lock_dir = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(
+            &dashboard_root.join("automation_locks"),
+        );
         let path = lock_dir.join(format!("{key}.lock"));
         let ownership_token = new_automation_task_lock_token()?;
         let error_path = path.clone();
@@ -814,27 +836,42 @@ fn new_automation_task_lock_token() -> Result<String> {
     Ok(hex::encode(random))
 }
 
+fn resolve_task_lock_parent(path: &Path) -> std::io::Result<PathBuf> {
+    let (parent, name) = path.parent().zip(path.file_name()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "automation task-lock path requires a parent and file name",
+        )
+    })?;
+    // Resolve OS directory aliases without hiding a final symlink from no-follow checks.
+    Ok(
+        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(parent)
+            .join(name),
+    )
+}
+
 fn try_acquire_task_lock_blocking(
     path: &Path,
     ownership_token: &str,
     stale_after_secs: Option<u64>,
     now_secs: i64,
 ) -> std::io::Result<Option<AutomationTaskLock>> {
+    let path = resolve_task_lock_parent(path)?;
     if let Some(parent) = path.parent() {
         tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
-    let coordination = acquire_task_lock_coordination(path)?;
+    let coordination = acquire_task_lock_coordination(&path)?;
     for attempt in 0..2 {
-        match create_task_lock_file(path, ownership_token, now_secs) {
+        match create_task_lock_file(&path, ownership_token, now_secs) {
             Ok(task_lock) => return Ok(Some(task_lock)),
             Err(TaskLockPublicationError::Definite(error))
                 if error.kind() == std::io::ErrorKind::AlreadyExists =>
             {
-                let Some(snapshot) = read_task_lock_snapshot(path)? else {
+                let Some(snapshot) = read_task_lock_snapshot(&path)? else {
                     continue;
                 };
                 if attempt == 0 && task_lock_is_reclaimable(&snapshot, stale_after_secs, now_secs) {
-                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)?;
+                    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&path)?;
                     continue;
                 }
                 return Ok(None);
@@ -973,7 +1010,8 @@ fn prepare_task_lock_publication(
     ownership_token: &str,
     now_secs: i64,
 ) -> std::result::Result<PreparedTaskLockPublication, TaskLockStagingCreationError> {
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lock")?;
+    let path = resolve_task_lock_parent(path)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
     let parent_path = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -990,7 +1028,7 @@ fn prepare_task_lock_publication(
             )
         })?;
     let parent = Dir::open_ambient_dir(parent_path, ambient_authority())?;
-    let staging_path = task_lock_staging_path(path, ownership_token)?;
+    let staging_path = task_lock_staging_path(&path, ownership_token)?;
     let staging_name = staging_path
         .file_name()
         .map(std::ffi::OsStr::to_os_string)
@@ -1169,7 +1207,8 @@ fn remove_owned_task_lock_blocking(path: &Path, ownership_token: &str) -> std::i
 }
 
 fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File> {
-    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(path);
+    let path = resolve_task_lock_parent(path)?;
+    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&path);
     tracedecay_runtime_core::storage::reject_symlink_components(
         &coordination_path,
         "automation task-lock coordination",
@@ -1201,7 +1240,12 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File>
             .follow(FollowSymlinks::No);
         #[cfg(unix)]
         options.mode(0o600);
-        let file = parent.open_with(file_name, &options)?.into_std();
+        // Concurrent acquirers race the first creation of this coordination
+        // file; the shared helper absorbs the spurious Darwin `ENOENT`.
+        let file = tracedecay_private_fs::capability_dir::open_or_create_with(
+            &parent, file_name, &options,
+        )?
+        .into_std();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1225,7 +1269,8 @@ struct AutomationTaskLockSnapshot {
 }
 
 fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTaskLockSnapshot>> {
-    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lock")?;
+    let path = resolve_task_lock_parent(path)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation task lock")?;
     let parent_path = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1430,6 +1475,47 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
+
+    #[test]
+    fn backoff_starts_at_one_tick_and_grows() {
+        let tick =
+            std::time::Duration::from_secs(super::super::config::DEFAULT_SCHEDULER_TICK_SECS);
+        assert_eq!(project_open_backoff(1), tick);
+        assert_eq!(project_open_backoff(2), tick * 2);
+        assert_eq!(project_open_backoff(3), tick * 4);
+    }
+
+    #[test]
+    fn backoff_is_capped_and_never_regresses() {
+        let mut previous = std::time::Duration::ZERO;
+        for attempt in 1..=64 {
+            let backoff = project_open_backoff(attempt);
+            assert!(backoff >= previous, "backoff must be monotonic");
+            assert!(
+                backoff <= PROJECT_OPEN_BACKOFF_CEILING,
+                "backoff must stay under its ceiling"
+            );
+            previous = backoff;
+        }
+        assert_eq!(project_open_backoff(64), PROJECT_OPEN_BACKOFF_CEILING);
+    }
+
+    #[test]
+    fn escalation_bounds_the_total_futile_retry_window() {
+        let total = (1..=PROJECT_OPEN_FAILURE_ESCALATION)
+            .map(project_open_backoff)
+            .sum::<std::time::Duration>();
+        let tick =
+            std::time::Duration::from_secs(super::super::config::DEFAULT_SCHEDULER_TICK_SECS);
+        assert!(
+            total > tick,
+            "escalation must allow more than one retry before exiting"
+        );
+        assert!(
+            total <= std::time::Duration::from_hours(1),
+            "a futile streak must not run for hours before escalating"
+        );
+    }
 
     fn session_evidence_task_config() -> AutomationTaskConfig {
         AutomationTaskConfig {
@@ -2164,6 +2250,30 @@ evidence about it",
         assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn task_lock_rejects_final_symlink_without_touching_target() {
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let lock_path = alias.join("task.lock");
+        let outside = temp.path().join("outside");
+        let token = "1".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
+        let contents = format!("pid=invalid\ncreated_at=1\ntoken={token}\n");
+        std::fs::write(&outside, &contents).unwrap();
+        std::os::unix::fs::symlink(&outside, &lock_path).unwrap();
+
+        assert!(read_task_lock_snapshot(&lock_path).is_err());
+        assert!(prepare_task_lock_publication(&lock_path, &token, 200).is_err());
+        assert!(remove_owned_task_lock_blocking(&lock_path, &token).is_err());
+        assert!(try_acquire_task_lock_blocking(&lock_path, &token, Some(0), 200).is_err());
+        assert!(lock_path.is_symlink());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), contents);
+        assert!(!tracedecay_runtime_core::storage::append_lock_path(&outside).exists());
+    }
+
     #[test]
     fn uncertain_old_task_lock_guard_preserves_replacement_token() {
         let temp = tempdir().unwrap();
@@ -2370,5 +2480,40 @@ evidence about it",
         assert!(lock_path.exists());
         drop(guard);
         assert_lock_released(&lock_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_task_locks_acquire_through_symlinked_dashboard_prefix() {
+        // cap-std ambient opens walk each component. A prefix symlink
+        // (`tmp/link` → `tmp/real`, or macOS `/var` → `/private/var`) must
+        // resolve before Dir::open_ambient_dir or concurrent acquires ENOENT.
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dashboard_root = link.join("dashboard");
+
+        let first_root = dashboard_root.clone();
+        let second_root = dashboard_root;
+        let first = tokio::spawn(async move {
+            AutomationTaskLock::try_acquire_keyed(&first_root, "concurrent-a", Some(10), 100).await
+        });
+        let second = tokio::spawn(async move {
+            AutomationTaskLock::try_acquire_keyed(&second_root, "concurrent-b", Some(10), 100).await
+        });
+        let first = first
+            .await
+            .expect("join first lock")
+            .expect("first lock acquire through prefix symlink");
+        let second = second
+            .await
+            .expect("join second lock")
+            .expect("second lock acquire through prefix symlink");
+        assert!(
+            first.is_some() && second.is_some(),
+            "distinct keys under a shared lock dir must both acquire"
+        );
     }
 }

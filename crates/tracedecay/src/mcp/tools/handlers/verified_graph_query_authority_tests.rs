@@ -34,7 +34,6 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         "tracedecay_dead_code",
         "tracedecay_circular",
         "tracedecay_hotspots",
-        "tracedecay_unused_imports",
         "tracedecay_rank",
         "tracedecay_largest",
         "tracedecay_coupling",
@@ -47,10 +46,13 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         "tracedecay_unsafe_patterns",
         "tracedecay_constructors",
         "tracedecay_field_sites",
-        "tracedecay_diagnostics",
+        // `tracedecay_diagnostics` is owned by the application surface; it
+        // reaches the daemon transport, never the in-process graph query.
         "tracedecay_affected",
         "tracedecay_diff_context",
-        "tracedecay_changelog",
+        // `tracedecay_changelog` is git-first and never awaits the query
+        // future; its typed coverage is asserted by
+        // `changelog_reports_absent_query_port_as_typed_coverage`.
         "tracedecay_commit_context",
         "tracedecay_health",
         "tracedecay_test_map",
@@ -79,8 +81,8 @@ fn lower_level_ports_without_query(cg: &TraceDecay) -> ToolCallRegistryOptions<'
 }
 
 /// Initializes the fixture project as a git repository with one commit, so
-/// handlers that validate git evidence before awaiting graph admission reach
-/// their graph wait instead of reporting the typed git refusal first.
+/// handlers that validate git evidence before reading the graph reach that
+/// read instead of reporting the typed git refusal first.
 fn init_committed_git_fixture(root: &std::path::Path) {
     for args in [
         &["init", "--initial-branch=main"][..],
@@ -107,13 +109,11 @@ fn init_committed_git_fixture(root: &std::path::Path) {
 }
 
 /// The minimal arguments that carry each handler past its request-shape
-/// validation, which by contract precedes graph admission: `changelog` proves
-/// its git evidence first and `run_affected_tests` requires an explicit
-/// caller-scoped manifest, while every other awaiting handler reaches the
-/// graph wait with empty arguments.
+/// validation, which by contract precedes graph admission: `run_affected_tests`
+/// requires an explicit caller-scoped manifest, and every other awaiting
+/// handler reaches the graph wait with empty arguments.
 fn query_authority_probe_args(tool_name: &str) -> serde_json::Value {
     match tool_name {
-        "tracedecay_changelog" => json!({ "from_ref": "HEAD", "to_ref": "HEAD" }),
         "tracedecay_run_affected_tests" => json!({ "changed_paths": ["src/lib.rs"] }),
         _ => json!({}),
     }
@@ -138,7 +138,7 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
     let options = lower_level_ports_without_query(&cg);
     let mut seen = 0usize;
     for tool_name in graph_handlers_that_await_query() {
-        let error = handle_tool_call_with_registry_options(
+        let outcome = handle_tool_call_with_registry_options(
             &cg,
             tool_name,
             query_authority_probe_args(tool_name),
@@ -146,8 +146,8 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
             None,
             options.clone(),
         )
-        .await
-        .expect_err(tool_name);
+        .await;
+        let error = outcome.expect_err(tool_name);
         let (reason_code, retryable, detail) = error
             .project_route_context()
             .unwrap_or_else(|| panic!("{tool_name} must be a typed project route, got {error}"));
@@ -163,6 +163,54 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
         seen += 1;
     }
     assert_eq!(seen, graph_handlers_that_await_query().len());
+    cg.close();
+}
+
+/// Changelog is git-first: its diff is the answer and the verified graph query
+/// only enriches it, so an absent query port is a typed
+/// `symbol_changes_coverage` section carrying the same `code_index_unavailable`
+/// token `CapabilityUnavailable` publishes — not the fail-closed refusal the
+/// handlers in `graph_handlers_that_await_query` return.
+#[tokio::test]
+async fn changelog_reports_absent_query_port_as_typed_coverage() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("authority isolation");
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("query-port-absent-changelog");
+    fs::create_dir_all(project.join("src")).expect("fixture sources");
+    fs::write(project.join("src/lib.rs"), "pub fn widget() {}\n").expect("write fixture");
+    init_committed_git_fixture(&project);
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.query-port-absent-changelog",
+    )
+    .await
+    .expect("registered fixture");
+
+    let result = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_changelog",
+        // JSON so the coverage section is asserted as fields, not Markdown.
+        json!({ "from_ref": "HEAD", "to_ref": "HEAD", "format": "json" }),
+        None,
+        None,
+        lower_level_ports_without_query(&cg),
+    )
+    .await
+    .expect("changelog must answer without a mounted verified graph query");
+    let payload: serde_json::Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("changelog json text"),
+    )
+    .expect("changelog payload");
+    assert_eq!(payload["status"], "partial");
+    assert_eq!(payload["symbol_changes_coverage"]["status"], "unavailable");
+    assert_eq!(
+        payload["symbol_changes_coverage"]["reason"],
+        "code_index_unavailable"
+    );
+    assert_eq!(payload["symbol_changes_coverage"]["retryable"], false);
     cg.close();
 }
 

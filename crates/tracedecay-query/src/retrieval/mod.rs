@@ -56,7 +56,7 @@ pub use self::query_authority::{
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 
 pub const QUERY_EXACT_RETRIEVER_REVISION_V1: &str = "retriever.exact.daemon.v1";
-pub const QUERY_LEXICAL_RETRIEVER_REVISION_V1: &str = "retriever.lexical.daemon.v1";
+pub const QUERY_LEXICAL_RETRIEVER_REVISION_V1: &str = "retriever.lexical.daemon.qualified-names.v1";
 pub const QUERY_GRAPH_RETRIEVER_REVISION_V1: &str = "retriever.graph.daemon.v1";
 pub const QUERY_SANITIZER_REVISION_V1: &str = "query-sanitizer.daemon.v1";
 pub const QUERY_NORMALIZATION_REVISION_V1: &str = "query-normalization.daemon.v1";

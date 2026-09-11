@@ -1,33 +1,15 @@
 //! Store-layout identity resolution: mapping a project root to its
 //! authoritative store layout.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
-use tracedecay_store::ProjectId;
 
 use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
 
 impl TraceDecay {
-    pub(in crate::tracedecay) fn registered_project_id(
-        store_layout: &StoreLayout,
-    ) -> Result<ProjectId> {
-        let project_id =
-            store_layout
-                .identity
-                .project_id
-                .as_ref()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "registered code runtime requires an authoritative project identity"
-                        .to_owned(),
-                })?;
-        ProjectId::new(project_id.clone()).map_err(|error| TraceDecayError::Config {
-            message: format!("invalid registered project identity: {error}"),
-        })
-    }
-
     #[hotpath::measure(label = "lifecycle.resolve_registered_layout", future = true)]
     pub(crate) async fn resolve_registered_configuration_layout(
         project_root: &Path,
@@ -87,111 +69,6 @@ impl TraceDecay {
             adoption,
         )
         .await
-    }
-
-    /// Candidate enrollment roots a registered project claims: its canonical
-    /// and display roots plus every registered alias.
-    pub(crate) fn registry_context_candidate_roots(
-        context: &tracedecay_global_db::ProjectRegistryContext,
-    ) -> Vec<PathBuf> {
-        let mut candidates = vec![
-            PathBuf::from(&context.project.canonical_root),
-            PathBuf::from(&context.project.display_root),
-        ];
-        candidates.extend(
-            context
-                .aliases
-                .iter()
-                .map(|alias| PathBuf::from(&alias.alias_path)),
-        );
-        candidates
-    }
-
-    /// Filters candidate roots down to the ones whose root-side evidence
-    /// names exactly `project_id`: a `.git/` repository identity marker with
-    /// that id, or (for roots without one) a deterministic path-derived
-    /// identity equal to it.
-    ///
-    /// This never creates or repairs a marker, so a caller that must not mount
-    /// a store the profile has not enrolled — a cross-project memory reader,
-    /// for one — can tell "not enrolled here" apart from "enrolled".
-    pub(crate) fn enrolled_project_roots(
-        candidates: impl IntoIterator<Item = PathBuf>,
-        project_id: &ProjectId,
-    ) -> Result<Vec<PathBuf>> {
-        let mut candidates = candidates.into_iter().collect::<Vec<_>>();
-        candidates.sort();
-        candidates.dedup();
-
-        let mut roots = Vec::new();
-        for candidate in candidates {
-            let candidate = tracedecay_runtime_core::worktree::repository_identity_root(&candidate)
-                .unwrap_or(candidate);
-            let Ok(canonical) = candidate.canonicalize() else {
-                continue;
-            };
-            if roots.contains(&canonical) {
-                continue;
-            }
-            let named_id = match storage::read_repository_identity_marker(&canonical)? {
-                Some(marker) => marker.project_id,
-                None => storage::default_profile_project_id(&canonical),
-            };
-            if named_id == project_id.as_str() {
-                roots.push(canonical);
-            }
-        }
-        Ok(roots)
-    }
-
-    #[hotpath::measure(label = "lifecycle.enrollment_roots", future = true)]
-    pub(crate) async fn registered_enrollment_roots(
-        project_root: &Path,
-        store_layout: &StoreLayout,
-        project_id: &ProjectId,
-        registry_database: &RegisteredGlobalDb,
-    ) -> Result<Vec<PathBuf>> {
-        let mut candidates = vec![
-            project_root.to_path_buf(),
-            store_layout.project_root.clone(),
-        ];
-        if let Some(context) = registry_database
-            .project_registry_context_by_id(project_id.as_str())
-            .await?
-        {
-            candidates.extend(Self::registry_context_candidate_roots(&context));
-        }
-
-        let mut roots = Self::enrolled_project_roots(candidates, project_id)?;
-        // Self-heal the sanctioned `.git/`-side anchor: a session mount for a
-        // registered project rewrites a missing repository identity marker in
-        // place (re-adoption after loss, first mount, or a moved checkout).
-        // A non-git root persists nothing — its identity is deterministic
-        // from the canonical path with the registry as the durable home.
-        // Nothing is ever written into the working tree.
-        let enrollment_root =
-            tracedecay_runtime_core::worktree::repository_identity_root(project_root)
-                .unwrap_or_else(|| project_root.to_path_buf());
-        match enrollment_root.canonicalize() {
-            Ok(canonical) => {
-                if storage::read_repository_identity_marker(&canonical)?.is_none() {
-                    storage::write_repository_identity_marker(&canonical, project_id.as_str())?;
-                }
-                if roots.is_empty() {
-                    roots.push(canonical);
-                }
-            }
-            Err(error) if roots.is_empty() => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "could not canonicalize project enrollment root '{}': {error}",
-                        enrollment_root.display()
-                    ),
-                });
-            }
-            Err(_) => {}
-        }
-        Ok(roots)
     }
 
     #[hotpath::measure(label = "lifecycle.resolve_store_layout", future = true)]
@@ -265,13 +142,14 @@ impl TraceDecay {
             Some(layout) => Ok(layout),
             None if allow_default_identity => {
                 if let Some(registry_database) = registry_database
-                    && let Some(layout) = Self::adopt_moved_nongit_project(
-                        project_root,
-                        &profile_root,
-                        registry_database,
-                        adoption,
-                    )
-                    .await?
+                    && let Some(layout) =
+                        tracedecay_application::project_adoption::adopt_moved_nongit_project(
+                            project_root,
+                            &profile_root,
+                            registry_database,
+                            adoption,
+                        )
+                        .await?
                 {
                     return Ok(layout);
                 }

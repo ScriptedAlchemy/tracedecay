@@ -4217,17 +4217,35 @@ pub fn register_project_semantic_runtime(
         .insert(project_root, handle);
 }
 
-/// Drop a retained project semantic handle.
-pub fn unregister_project_semantic_runtime(project_root: &Path) {
-    super::unregister_project_semantic_redundancy_generation(project_root);
-    project_semantic_handles()
+/// Everything a project's semantic unregistration released from the
+/// process-local registries, handed back so the caller decides where it is
+/// freed. The retained code generations and the query runtime cache are
+/// generation-sized; dropping them inside the registry locks (or inline on
+/// the daemon shutdown drain) is what held shutdown past its TERM grace.
+#[must_use = "drop this off the registry locks; it owns generation-sized memory"]
+pub struct RetiredProjectSemanticRuntimeV1 {
+    _generations: Vec<Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>>,
+    _handle: Option<DaemonSemanticRuntimeHandleV1>,
+    _runtime: Option<ProductionSemanticRuntimeV1>,
+}
+
+/// Remove a project's semantic handle, runtime, and redundancy state from the
+/// process-local registries. The removed owners are returned, not dropped.
+pub fn unregister_project_semantic_runtime(project_root: &Path) -> RetiredProjectSemanticRuntimeV1 {
+    let generations = super::unregister_project_semantic_redundancy_generation(project_root);
+    let handle = project_semantic_handles()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
-    project_semantic_production_runtimes()
+    let runtime = project_semantic_production_runtimes()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(project_root);
+    RetiredProjectSemanticRuntimeV1 {
+        _generations: generations,
+        _handle: handle,
+        _runtime: runtime,
+    }
 }
 
 pub fn project_semantic_production_runtime(
@@ -4342,40 +4360,68 @@ pub fn project_lifecycle_status(project_path: &Path) -> Option<SemanticModelLife
     None
 }
 
+/// Why a published code generation did or did not enter semantic projection.
+///
+/// Every decline was previously a bare `false` that each caller discarded, so
+/// a daemon whose runtime stopped scheduling sat at `installed` with no record
+/// of why nothing was queued (#753). The runtime's own declines are already
+/// named by `semantic_projection_schedule`; these are the handoff-boundary
+/// reasons that never reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedGenerationScheduleOutcomeV1 {
+    /// Semantic projection was queued for this generation.
+    Scheduled,
+    /// No semantic runtime is mounted on this scheduler — never mounted, or
+    /// retired by a remount — so no hook observed the generation at all.
+    RuntimeNotMounted,
+    /// The generation belongs to a different worktree than the mounted runtime.
+    ForeignWorktree,
+    /// The hook was built outside a Tokio runtime, so projection has no
+    /// executor to dispatch onto.
+    NoDispatchRuntime,
+    /// The fair projection scheduler refused the batch (queue capacity,
+    /// cancellation); `semantic_projection_schedule` carries the detail.
+    QueueRefused,
+    /// The hook panicked; the generation remains serving.
+    HookPanicked,
+    /// The code-index scheduler itself could not be reached: the worktree is
+    /// not mounted, or it is shutting down.
+    SchedulerUnavailable,
+    /// The mounted worktree has not sealed a serving generation yet, so there
+    /// is nothing to offer.
+    NoServingGeneration,
+}
+
+impl SavedGenerationScheduleOutcomeV1 {
+    #[must_use]
+    pub fn is_scheduled(self) -> bool {
+        matches!(self, Self::Scheduled)
+    }
+
+    /// Fixed, privacy-safe classification for the diagnostic record.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::RuntimeNotMounted => "runtime_not_mounted",
+            Self::ForeignWorktree => "foreign_worktree",
+            Self::NoDispatchRuntime => "no_dispatch_runtime",
+            Self::QueueRefused => "queue_refused",
+            Self::HookPanicked => "hook_panicked",
+            Self::SchedulerUnavailable => "scheduler_unavailable",
+            Self::NoServingGeneration => "no_serving_generation",
+        }
+    }
+}
+
 /// Hook invoked after a code generation publishes; must not block search.
 ///
 /// The serving owner transfers a shared handle because one decoded generation
 /// can be much larger than its captured source. Semantic retention and queued
 /// projection must clone this `Arc`, never the immutable generation payload.
-pub type SavedCodeGenerationScheduleHookV1 =
-    Arc<dyn Fn(Arc<CodeIndexPublishedGenerationV1>) -> bool + Send + Sync>;
-
-/// Daemon runtime retained when the saved-generation hook is constructed.
-///
-/// Serving publication deliberately invokes the hook from `spawn_blocking`
-/// while it owns the synchronous scheduler. Looking up a current Tokio runtime
-/// from that worker always fails, so the hook must carry the daemon runtime
-/// across the blocking handoff instead.
-#[derive(Clone)]
-struct SemanticProjectionDispatchRuntimeV1 {
-    handle: tokio::runtime::Handle,
-}
-
-impl SemanticProjectionDispatchRuntimeV1 {
-    fn capture() -> Option<Self> {
-        tokio::runtime::Handle::try_current()
-            .ok()
-            .map(|handle| Self { handle })
-    }
-
-    fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.handle.spawn(future)
-    }
-}
+pub type SavedCodeGenerationScheduleHookV1 = Arc<
+    dyn Fn(Arc<CodeIndexPublishedGenerationV1>) -> SavedGenerationScheduleOutcomeV1 + Send + Sync,
+>;
 
 /// Owned authorities and identities captured by a saved-generation hook.
 pub struct SavedGenerationScheduleHookParametersV1 {
@@ -4423,10 +4469,11 @@ pub fn production_saved_generation_schedule_hook(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(project_root.clone(), runtime.as_ref().clone());
-    let dispatch_runtime = SemanticProjectionDispatchRuntimeV1::capture();
+    // Capture before the synchronous publication hook crosses into spawn_blocking.
+    let dispatch_runtime = tokio::runtime::Handle::try_current().ok();
     Arc::new(move |generation| {
         if generation.snapshot().worktree.as_ref() != Some(&worktree_id) {
-            return false;
+            return SavedGenerationScheduleOutcomeV1::ForeignWorktree;
         }
         super::register_project_semantic_redundancy_generation(
             project_root.clone(),
@@ -4434,7 +4481,7 @@ pub fn production_saved_generation_schedule_hook(
         );
         let runtime = Arc::clone(&runtime);
         let Some(dispatch_runtime) = dispatch_runtime.clone() else {
-            return false;
+            return SavedGenerationScheduleOutcomeV1::NoDispatchRuntime;
         };
         let queued_bytes = generation
             .chunks()
@@ -4490,7 +4537,9 @@ pub fn production_saved_generation_schedule_hook(
                     "semantic projection could not be queued for this code generation"
                 );
             })
-            .is_ok()
+            .map_or(SavedGenerationScheduleOutcomeV1::QueueRefused, |_| {
+                SavedGenerationScheduleOutcomeV1::Scheduled
+            })
     })
 }
 
@@ -4512,7 +4561,7 @@ fn fair_schedule_failure(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
@@ -4579,7 +4628,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn saved_generation_dispatch_retains_daemon_runtime_across_blocking_handoff() {
-        let runtime = SemanticProjectionDispatchRuntimeV1::capture()
+        let runtime = tokio::runtime::Handle::try_current()
             .expect("daemon runtime is available while the hook is constructed");
         let (observed_tx, observed_rx) = oneshot::channel();
 
@@ -5059,7 +5108,7 @@ mod tests {
         Arc::new(fallback)
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn composition_calibration(
         request: &SemanticRetrievalRequestV1<'_>,
     ) -> SemanticCalibrationProfileV1 {
@@ -5314,7 +5363,7 @@ mod tests {
 
     // Binding a query runtime requires the concrete FastEmbed runtime; the
     // compiled-out stub fails compatibility verification by design.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[tokio::test]
     async fn atomically_current_generation_enables_semantic_lane() {
         let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
@@ -5410,7 +5459,7 @@ mod tests {
 
     // Binding a query runtime requires the concrete FastEmbed runtime; the
     // compiled-out stub fails compatibility verification by design.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[tokio::test]
     async fn live_request_cancellation_reaches_query_runtime_before_vector_scan() {
         struct PanicVectors;

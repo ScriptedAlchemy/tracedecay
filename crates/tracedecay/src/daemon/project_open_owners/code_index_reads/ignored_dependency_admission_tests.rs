@@ -19,10 +19,10 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::project_code_index_ignored_dependency_admission_port;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationPolicyV1, CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
 };
+use tracedecay_code_index_runtime::project_reads::project_code_index_ignored_dependency_admission_port;
 
 const PROJECT_ID: &str = "project.project-open-ignored-dependency";
 
@@ -271,6 +271,13 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
         .subscribe_serving_generation_changes(fixture.root())
         .await
         .expect("mounted serving owner");
+    assert!(
+        fixture
+            .registry
+            .request_complete_generation(fixture.root())
+            .await,
+        "mounted worktree admits complete-generation demand"
+    );
 
     let admitted = fixture
         .port(true)

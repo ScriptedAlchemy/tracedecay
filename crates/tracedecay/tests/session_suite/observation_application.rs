@@ -1,6 +1,6 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
     CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,

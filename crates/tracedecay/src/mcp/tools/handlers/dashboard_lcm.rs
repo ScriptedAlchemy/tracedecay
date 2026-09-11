@@ -78,6 +78,10 @@ impl DashboardLcmReadAdapter {
     }
 
     #[hotpath::measure(future = true, label = "mcp.lcm.total")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Dashboard LCM execute is one action match onto the session-memory authority."
+    )]
     async fn execute(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -767,6 +771,10 @@ fn initial_cursor(request: &DashboardLcmReadRequestV1) -> Option<String> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "LCM retrieval query is one hydrate-and-page of the selected session store."
+)]
 fn retrieval_query(
     request: &DashboardLcmReadRequestV1,
     cursor: Option<String>,

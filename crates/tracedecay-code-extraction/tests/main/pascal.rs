@@ -78,10 +78,6 @@ fn test_pascal_unit_declaration() {
     assert!(units[0].signature.as_ref().unwrap().contains("unit MyUnit"));
 }
 
-// ----------------------------
-// Uses clause
-// ----------------------------
-
 #[test]
 fn test_pascal_uses_in_implementation() {
     let result = extract(
@@ -169,10 +165,6 @@ end."#,
     assert_eq!(procs[0].name, "PrintHello");
 }
 
-// ----------------------------
-// Class type extraction
-// ----------------------------
-
 #[test]
 fn test_pascal_class_extends() {
     let result = extract(
@@ -199,10 +191,6 @@ end."#,
         "Should have Extends ref for TObject"
     );
 }
-
-// ----------------------------
-// Record type extraction
-// ----------------------------
 
 #[test]
 fn test_pascal_record_fields() {
@@ -1021,3 +1009,7 @@ end."#;
         "Should have at least one Contains edge"
     );
 }
+
+// ----------------------------
+// LanguageExtractor trait
+// ----------------------------

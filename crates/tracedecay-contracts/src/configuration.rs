@@ -12,9 +12,8 @@ pub use tracedecay_domain::configuration::ConfigurationSettlementAuthorityV1;
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationReceiptId,
-    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, CredentialKindV1,
-    CredentialReferenceId, ProtectedChange, RestartRequirementV1, RollbackModeV1, SettingKey,
-    SettingSensitivityV1,
+    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, ProtectedChange,
+    RestartRequirementV1, RollbackModeV1, SettingKey, SettingSensitivityV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -92,16 +91,6 @@ pub struct ConfigurationBatchRequestV1 {
     pub idempotency_key: ConfigurationIdempotencyKey,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationWriteCredentialRequestV1 {
-    pub expected_reference_id: Option<CredentialReferenceId>,
-    pub kind: CredentialKindV1,
-    pub write_handle: String,
-    pub expected_revision: ConfigurationRevisionId,
-    pub idempotency_key: ConfigurationIdempotencyKey,
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationObservedStateRequestV1 {}
@@ -150,6 +139,9 @@ pub struct SettingSummary {
 pub struct ResolvedSetting {
     pub key: SettingKey,
     pub effective_value: ConfigurationValueV1,
+    /// Current configuration revision accepted by mutation `expected_revision` CAS.
+    pub revision_id: ConfigurationRevisionId,
+    /// Content identity of the fully resolved configuration snapshot.
     pub snapshot_id: ConfigurationSnapshotId,
     pub effective_behavior_digest: ManifestDigest,
     pub resolution_provenance_digest: ManifestDigest,
@@ -198,12 +190,10 @@ pub struct ConfigurationAuditPage {
 #[serde(rename_all = "snake_case", tag = "operation", content = "request")]
 pub enum ConfigurationWireRequestV1 {
     List(ConfigurationListRequestV1),
-    Explain(ConfigurationGetRequestV1),
     Get(ConfigurationGetRequestV1),
     Set(ConfigurationSetRequestV1),
     Unset(ConfigurationUnsetRequestV1),
     Batch(ConfigurationBatchRequestV1),
-    WriteCredential(ConfigurationWriteCredentialRequestV1),
     ObservedState(ConfigurationObservedStateRequestV1),
     ProtectedPreview(ConfigurationProtectedPreviewRequestV1),
     ProtectedApply(ConfigurationProtectedApplyRequestV1),
@@ -225,9 +215,6 @@ pub fn configuration_wire_request_from_invocation_payload(
 ) -> Result<ConfigurationWireRequestV1, ApplicationContractError> {
     match operation {
         "configuration_list" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::List),
-        "configuration_explain" => {
-            wrap_configuration_inner(payload, ConfigurationWireRequestV1::Explain)
-        }
         "configuration_get" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::Get),
         "configuration_set" => wrap_configuration_inner(payload, ConfigurationWireRequestV1::Set),
         "configuration_unset" => {
@@ -235,9 +222,6 @@ pub fn configuration_wire_request_from_invocation_payload(
         }
         "configuration_batch" => {
             wrap_configuration_inner(payload, ConfigurationWireRequestV1::Batch)
-        }
-        "configuration_write_credential" => {
-            wrap_configuration_inner(payload, ConfigurationWireRequestV1::WriteCredential)
         }
         "configuration_observed_state" => {
             wrap_configuration_inner(payload, ConfigurationWireRequestV1::ObservedState)
@@ -292,22 +276,12 @@ const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
-const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
+const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 11] = [
     ConfigurationSurfaceSpec {
         name: "configuration_list",
         summary: "List configuration settings",
         description: "List typed settings visible through the retained configuration authority.",
         example: "List project configuration settings",
-        effect: EffectClass::Read,
-        paginated: false,
-        maximum_deadline_millis: 15_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "configuration_explain",
-        summary: "Explain effective configuration",
-        description: "Explain the resolved value and provenance for one typed setting.",
-        example: "Explain this configuration setting",
         effect: EffectClass::Read,
         paginated: false,
         maximum_deadline_millis: 15_000,
@@ -348,16 +322,6 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
         summary: "Apply configuration batch",
         description: "Apply one authorized atomic batch of typed configuration mutations.",
         example: "Apply these project configuration changes together",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 15_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "configuration_write_credential",
-        summary: "Write credential reference",
-        description: "Resolve an opaque credential handle into write-only reference metadata.",
-        example: "Rotate this configuration credential reference",
         effect: EffectClass::ConfigurationWrite,
         paginated: false,
         maximum_deadline_millis: 15_000,
@@ -510,11 +474,6 @@ fn configuration_executable_schemas(
         Vec<SettingSummary>
     );
     add!(
-        "configuration_explain",
-        ConfigurationGetRequestV1,
-        ResolvedSetting
-    );
-    add!(
         "configuration_get",
         ConfigurationGetRequestV1,
         ResolvedSetting
@@ -533,11 +492,6 @@ fn configuration_executable_schemas(
         "configuration_batch",
         ConfigurationBatchRequestV1,
         ConfigurationMutationReceipt
-    );
-    add!(
-        "configuration_write_credential",
-        ConfigurationWriteCredentialRequestV1,
-        tracedecay_domain::configuration::CredentialReferenceMetadataV1
     );
     add!(
         "configuration_observed_state",
@@ -715,7 +669,6 @@ fn capability(
             if matches!(
                 spec.name,
                 "configuration_list"
-                    | "configuration_explain"
                     | "configuration_get"
                     | "configuration_observed_state"
                     | "configuration_audit"

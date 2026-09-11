@@ -12,7 +12,7 @@ use inspection::{configuration_definition_digest, registered_store_is_empty};
 pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const CONFIGURATION_FORMAT_REVISION: i64 = 1;
 const FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
-    "sha256:99b8f5f5cebc584ab564181d8a67ee665031c20bbdf63b479c212d16a1c63746";
+    "sha256:c79fac916ce535c2b90bd46af0fec9dcd80bdb85ae7e226879dd6eb765e6ca63";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigurationSchemaError {
@@ -252,19 +252,6 @@ CREATE TABLE IF NOT EXISTS configuration_audit_redaction_keys (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     key_material BLOB NOT NULL CHECK (length(key_material) = 32),
     created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS configuration_credential_references (
-    reference_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    reference_digest TEXT NOT NULL,
-    operation_digest TEXT NOT NULL,
-    authorization_policy_epoch INTEGER NOT NULL,
-    authorization_policy_digest TEXT NOT NULL,
-    authority_revalidated_at INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    effective_deadline_at INTEGER NOT NULL,
-    rotation INTEGER NOT NULL
 );
 
 -- Activation is append-only evidence. The latest row per component exposes
@@ -507,12 +494,6 @@ BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); E
 CREATE TRIGGER IF NOT EXISTS configuration_audit_redaction_keys_immutable_delete
 BEFORE DELETE ON configuration_audit_redaction_keys
 BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_update
-BEFORE UPDATE ON configuration_credential_references
-BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_delete
-BEFORE DELETE ON configuration_credential_references
-BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_component_activation_events_immutable_update
 BEFORE UPDATE ON configuration_component_activation_events
 BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;
@@ -687,14 +668,6 @@ mod tests {
                       NULL, NULL, NULL, 1);
                   INSERT INTO configuration_audit_redaction_keys VALUES
                      (1, zeroblob(32), 1);
-                INSERT INTO configuration_credential_references VALUES
-                    ('credential.1', 'api_token',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad',
-                     1,
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae',
-                     1,
-                     1, 2, 0);
                  INSERT INTO configuration_component_activation_events (
                     component, desired_revision_id, observed_revision_id,
                     last_working_revision_id, restart_required, activation_error_code, occurred_at

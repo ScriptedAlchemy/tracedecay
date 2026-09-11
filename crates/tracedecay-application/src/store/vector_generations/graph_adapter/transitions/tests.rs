@@ -983,7 +983,8 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for PublicationAuthorityProbeRuntime {
     }
 }
 
-fn admitted_embedding() -> tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
+pub(in crate::store::vector_generations::graph_adapter) fn admitted_embedding()
+-> tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
     EmbeddingProjectionKeyV1 {
         model_artifact_digest: digest('1'),
         tokenizer_digest: digest('2'),
@@ -1012,7 +1013,7 @@ fn admitted_embedding() -> tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
     .unwrap()
 }
 
-fn prepared_generation(
+pub(in crate::store::vector_generations::graph_adapter) fn prepared_generation(
     source: &tracedecay_domain::CodeGenerationId,
     chunk: &str,
     digest_byte: char,

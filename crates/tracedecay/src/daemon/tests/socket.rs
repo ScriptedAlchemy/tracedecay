@@ -943,7 +943,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         email: "tracedecay@example.com".to_owned(),
         at: observed_at,
     };
-    let request = crate::application_surface::GitPreviewSurfaceRequest {
+    let request = tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::CommitIndex,
         preview_input_id: None,
         selected_hunk_digests: Vec::new(),
@@ -1004,7 +1004,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         "{preview_response:#}"
     );
 
-    let apply = crate::application_surface::GitApplySurfaceRequest {
+    let apply = tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
         preview_id: preview.preview_id.clone(),
         preview_digest: preview.preview_digest.clone(),
         idempotency_key: IdempotencyKey::new("idempotency.socket-git").expect("idempotency"),
@@ -1052,7 +1052,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
 
     let stale = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.stale",
-        crate::application_surface::GitApplySurfaceRequest {
+        tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
             preview_id: apply.preview_id.clone(),
             preview_digest: apply.preview_digest.clone(),
             idempotency_key: IdempotencyKey::new("idempotency.socket-stale").unwrap(),
@@ -1082,7 +1082,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     git(repository.path(), &["add", "packet.txt"]);
     let recovery_preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.recovery-preview",
-        crate::application_surface::GitPreviewSurfaceRequest {
+        tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
             operation: GitIndexTransactionOperationV1::CommitIndex,
             preview_input_id: None,
             selected_hunk_digests: Vec::new(),
@@ -1137,7 +1137,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .unwrap();
     let recovery_blocked = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.recovery-blocked",
-        crate::application_surface::GitApplySurfaceRequest {
+        tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
             preview_id: recovery_preview.preview_id,
             preview_digest: recovery_preview.preview_digest,
             idempotency_key: IdempotencyKey::new("idempotency.socket-recovery").unwrap(),
@@ -1395,10 +1395,12 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .expect("linked project registry context present");
     assert_eq!(
         context.project.canonical_root,
-        crate::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&primary)
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
+            &primary
+        )
     );
     assert!(context.aliases.iter().any(|alias| {
         alias.alias_path
-            == crate::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
+            == crate::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
     }));
 }

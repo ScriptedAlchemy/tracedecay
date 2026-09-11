@@ -5,9 +5,9 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use crate::config::retrieval::{
-    AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileCommitMetadataV1,
-    RetrievalProfileMutationCapabilityV1, RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1,
-    RetrievalRuntimeCompatibilityV1,
+    AcceptedRetrievalProfileV1, RetrievalProfileActivationErrorV1, RetrievalProfileCasV1,
+    RetrievalProfileCommitMetadataV1, RetrievalProfileMutationCapabilityV1,
+    RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
 use crate::semantic_runtime::{
     CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
@@ -256,9 +256,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         now: UtcMicros,
     ) -> Result<SemanticConfigurationTransitionV1, SemanticConfigurationBackendErrorV1> {
         let stored = self.current_record().await?;
-        if stored.state.configuration_revision() != &base_configuration.revision_id
-            || result_configuration.revision_id == base_configuration.revision_id
-        {
+        if result_configuration.revision_id == base_configuration.revision_id {
             return Err(SemanticConfigurationBackendErrorV1::Conflict);
         }
         let prior_active = stored.state.active().clone();
@@ -277,11 +275,12 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                 candidate_runtime,
                 RetrievalProfileCommitMetadataV1::new(
                     freshness_vector_digest,
+                    base_configuration.revision_id.clone(),
                     result_configuration.revision_id.clone(),
                     now,
                 ),
             )
-            .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
+            .map_err(transition_refusal("stage_activation.state_activate"))?;
         let transition = SemanticConfigurationTransitionV1::activation(
             base_configuration,
             result_configuration,
@@ -338,13 +337,12 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                 trigger.clone(),
                 RetrievalProfileCommitMetadataV1::new(
                     freshness_vector_digest,
+                    base_configuration.revision_id.clone(),
                     result_configuration.revision_id.clone(),
                     now,
                 ),
             )
-            .map_err(|_| {
-                SemanticConfigurationBackendErrorV1::RejectedAt("stage_rollback.state_rollback")
-            })?;
+            .map_err(transition_refusal("stage_rollback.state_rollback"))?;
         let transition = SemanticConfigurationTransitionV1::rollback(
             base_configuration,
             result_configuration,
@@ -405,7 +403,8 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .await?
             .ok_or(SemanticConfigurationBackendErrorV1::Unavailable)?;
         if current.epoch != base_epoch
-            || current.state.configuration_revision() != &transition.base_configuration.revision_id
+            || current.state.configuration_revision()
+                != &transition.expected_cas.expected_configuration_revision
         {
             return Err(SemanticConfigurationBackendErrorV1::Conflict);
         }
@@ -555,7 +554,7 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
                 load_pending(&transaction, &self.scope, &transition.transition_digest).await?;
             if current.epoch != pending.base_epoch
                 || current.state.configuration_revision()
-                    != &transition.base_configuration.revision_id
+                    != &transition.expected_cas.expected_configuration_revision
                 || pending.transition != *transition
             {
                 return Err(SemanticConfigurationBackendErrorV1::Conflict);
@@ -784,6 +783,25 @@ struct StoredState {
 struct PreparedCentralCommit {
     authority: ConfigurationMutationAuthority,
     mutation: DirectConfigurationMutation,
+}
+
+/// Classify a refused staged transition.
+///
+/// The scope compare-and-swap is the only guard left between a caller's read
+/// of the profile state and this stage, so a concurrent transition on this
+/// same scope surfaces as `CasConflict`. That is a lost race, not a malformed
+/// request: it stays a typed refusal but keeps the retryable `Conflict`
+/// classification the pre-scope-CAS revision guard used to give it. Every
+/// other refusal names its stage and remains non-retryable.
+fn transition_refusal(
+    stage: &'static str,
+) -> impl Fn(RetrievalProfileActivationErrorV1) -> SemanticConfigurationBackendErrorV1 {
+    move |error| match error {
+        RetrievalProfileActivationErrorV1::CasConflict => {
+            SemanticConfigurationBackendErrorV1::Conflict
+        }
+        _ => SemanticConfigurationBackendErrorV1::RejectedAt(stage),
+    }
 }
 
 fn current_activation_from_stored(

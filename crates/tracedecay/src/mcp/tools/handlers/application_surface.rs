@@ -1,20 +1,21 @@
+use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_contracts::{
-    ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, InvocationTarget,
-    RequestId, RetainedSurfaceOperation,
+    ApplicationOutcome, ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline,
+    InvocationTarget, RequestId, RetainedSurfaceOperation,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
-use crate::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
-};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
 use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
+};
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
@@ -106,8 +107,7 @@ pub(super) async fn handle_application_surface(
     executor: Option<&dyn DaemonInvocationExecutor>,
     target: InvocationTarget,
     protocol_request_id: Option<RequestId>,
-    protocol_deadline: Option<Deadline>,
-    protocol_cancellation: Option<CancellationSignal>,
+    request_controls: tracedecay_mcp::RequestControls<'_>,
 ) -> Result<tracedecay_mcp::ToolResult> {
     let ApplicationToolRequest {
         request: request_args,
@@ -117,7 +117,7 @@ pub(super) async fn handle_application_surface(
     let request = match parse_application_surface_request(operation, request_args) {
         Ok(request) => request,
         Err(error) => {
-            crate::application_surface::observe_surface_argument_rejection(
+            tracedecay_daemon_service::application_surface::observe_surface_argument_rejection(
                 executor,
                 tracedecay_tool_catalog::BindingSurface::Mcp,
                 operation,
@@ -135,8 +135,8 @@ pub(super) async fn handle_application_surface(
     let controls = complete_protocol_controls(
         operation,
         &request_id,
-        protocol_deadline,
-        protocol_cancellation,
+        request_controls.deadline.cloned(),
+        request_controls.cancellation.cloned(),
     )?;
     let result = match controls {
         Some((deadline, cancellation)) => {
@@ -172,15 +172,64 @@ pub(super) async fn handle_application_surface(
     }
     .map_err(application_surface_dispatch_error)?;
 
-    render_result(cg, result)
+    let served_stale = served_stale_code_graph_read(&result)?;
+    let mut rendered = render_result(cg, result)?;
+    if let Some(served) = served_stale.as_ref() {
+        super::append_code_graph_freshness(&mut rendered, served);
+    }
+    Ok(rendered)
+}
+
+#[derive(Deserialize)]
+struct CodeGraphFreshnessMarker {
+    generation: tracedecay_domain::CodeGenerationId,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
+}
+
+fn served_stale_code_graph_read(
+    result: &ApplicationSurfaceInvocationResult,
+) -> Result<Option<super::ServedStaleCodeGraphReadV1>> {
+    if !matches!(
+        result.operation,
+        ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers
+            | ApplicationSurfaceOperation::CodeCallees
+    ) {
+        return Ok(None);
+    }
+    let Ok(envelope) = &result.result else {
+        return Ok(None);
+    };
+    let ApplicationOutcome::Evidence(evidence) = &envelope.outcome else {
+        return Ok(None);
+    };
+    let Some(payload) = evidence.payload.as_ref() else {
+        return Ok(None);
+    };
+    let marker: CodeGraphFreshnessMarker = serde_json::from_value(payload.clone())?;
+    let tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+        sealed_at,
+        rebuild_in_flight,
+    } = marker.freshness
+    else {
+        return Ok(None);
+    };
+    Ok(Some(super::ServedStaleCodeGraphReadV1 {
+        generation: marker.generation.as_str().to_owned(),
+        sealed_at,
+        rebuild_in_flight,
+    }))
 }
 
 /// Map surface-resolution failures to typed reason codes so MCP clients see
 /// truthful unavailable/denied states instead of an untyped internal error.
 fn application_surface_dispatch_error(
-    error: crate::application_surface::ApplicationSurfaceAdapterError,
+    error: tracedecay_daemon_protocol::ApplicationSurfaceAdapterError,
 ) -> TraceDecayError {
-    use crate::application_surface::ApplicationSurfaceAdapterError as AdapterError;
+    use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError as AdapterError;
     let (reason_code, retryable) = match &error {
         AdapterError::DaemonUnavailable => ("application_surface_unavailable", true),
         // Keep the transport's own reason code (`daemon_connect_down` /
@@ -287,11 +336,10 @@ pub(super) fn render_retained_result(
     result: ApplicationResult<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1>,
     requested_format: RequestedOutputFormat,
 ) -> Result<tracedecay_mcp::ToolResult> {
-    let result = crate::application_surface::retained::result_value(result).map_err(|error| {
-        TraceDecayError::Config {
+    let result = tracedecay_daemon_service::application_surface::retained::result_value(result)
+        .map_err(|error| TraceDecayError::Config {
             message: format!("invalid retained application result: {error}"),
-        }
-    })?;
+        })?;
     render_result_parts(
         project_root,
         operation.as_str(),

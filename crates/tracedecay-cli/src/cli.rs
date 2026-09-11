@@ -1266,6 +1266,18 @@ pub enum SessionsAction {
         #[arg(long, conflicts_with = "project_id")]
         project_path: Option<String>,
     },
+    /// Check one previously scheduled session import or Git sync
+    SyncStatus {
+        /// Idempotency key returned when the sync was scheduled
+        #[arg(long)]
+        idempotency_key: String,
+        /// Registered project id whose session sync should be inspected
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Registered project root path or alias whose session sync should be inspected
+        #[arg(long, conflicts_with = "project_id")]
+        project_path: Option<String>,
+    },
     /// Search previously ingested session messages
     Search(Box<SessionsSearchArgs>),
     /// Run an explicit daemon-owned temporal refresh for one exact session scope

@@ -70,6 +70,10 @@ pub struct NativeSymbolRecordV1 {
     pub kind: String,
     pub path: String,
     pub span: SourceSpan,
+    pub start_line_zero_based: u32,
+    pub end_line_zero_based: u32,
+    pub line: u32,
+    pub end_line: u32,
     pub signature: Option<String>,
     pub is_async: bool,
 }
@@ -179,8 +183,8 @@ where
     // batching at this loop would not be a low-risk change.
     //
     // Keeping the per-row shape is only sound while each lookup is cheap. The
-    // production port `LatestCompleteNativeRecordReadPortV1`
-    // (src/daemon/code_index_scheduler/queries.rs) used to resolve every lookup
+    // production impl on `LatestCompleteCodeIndexV1`
+    // (code_index_scheduler/queries.rs) used to resolve every lookup
     // with a linear `.iter().find(..)` over the in-memory `files` / `chunks` /
     // `symbols` vectors, which made each lane O(candidates x records); it now
     // answers them from `HashMap` indices memoized per sealed generation, so
