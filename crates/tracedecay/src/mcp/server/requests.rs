@@ -1527,7 +1527,7 @@ impl McpServer {
     #[hotpath::measure(label = "mcp.server.tools_call", future = true)]
     #[expect(
         clippy::too_many_lines,
-        reason = "tools/call handling is one decode, dispatch, and typed-result write."
+        reason = "The response-gate lease and cancellation registrations are RAII-scoped to the frame and must span dispatch."
     )]
     pub(crate) async fn handle_tools_call(
         &self,
