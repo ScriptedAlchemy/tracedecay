@@ -21,7 +21,7 @@ import { projectById } from "../concept/neuronLab/interior";
 import type { BrainState, LabGrain } from "../concept/neuronLab/labUtil";
 import "./brain.css";
 import {useDemo} from "../app/workspace";
-import {RepositoryAtlas} from "../structure";
+import { SnapshotBrain } from "./SnapshotBrain";
 
 export const VIEWS: { id: BrainView; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -68,8 +68,13 @@ export function BrainPage(props: BrainPageProps) {
   const [appearance, setAppearance] = useState<BodyAppearance>(DEFAULT_BODY_APPEARANCE);
   const {mode} = useDemo();
   if(mode === "snapshot") {
-    const params = new URLSearchParams(location.search);
-    return <RepositoryAtlas context="brain" initialSelection={params.get("node") ?? params.get("path") ?? undefined} />;
+    return <SnapshotBrain
+      view={props.view}
+      setView={props.setView}
+      focusedId={props.focused.id}
+      setFocusedId={props.setFocusedId}
+      setScoped={props.setScoped}
+    />;
   }
   return (
     <BrainRendererBoundary
