@@ -106,6 +106,14 @@
 
 .brain-evidence-button { position:absolute;left:18px;top:14px;pointer-events:auto;z-index:3; }
 .aperture:has(.axis-x) .brain-evidence-button { top:52px; }
+.brain-field-key {
+  position:absolute; left:18px; top:96px; z-index:3; display:grid; gap:3px; max-width:258px;
+  padding:8px 10px; border-left:2px solid #55bed9; background:rgba(4,12,19,.88);
+  color:#8198a5; font:9px/1.35 var(--font-mono); pointer-events:none;
+}
+.brain-field-key b { color:#afe9f6; font:8px var(--font-display); letter-spacing:.12em; }
+.brain-field-key span { color:#9cb3c0; }
+.brain-field-key small { color:#657b88; font-size:8px; }
 .brain-evidence-button, .brain-evidence button, .brain-evidence input, .brain-evidence select {
   border:1px solid #355560;background:#050d14;color:#a4deeb;padding:7px 10px;font:11px var(--font-mono);cursor:pointer;
 }

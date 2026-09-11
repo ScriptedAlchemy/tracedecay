@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   HUB,
+  PROJECTS,
   RECENCY_AXIS,
   SIGNAL_FAMILIES,
   SYNAPSE_EVENT,
@@ -365,6 +366,12 @@ function BrainPageContent(props: BrainPageProps & {
         )}
         {showField && (
           <>
+            <div className="brain-field-key" aria-label="Registry field encoding">
+              <b>REGISTERED INDEXED PROJECTS · {PROJECTS.length} BODIES</b>
+              <span>BODY AREA · INDEXED MASS</span>
+              <span>HORIZONTAL POSITION · RECENCY</span>
+              <small>Idle field · activity is absent until an admitted event names an exact project.</small>
+            </div>
             <svg className="registry-label-leaders" aria-hidden="true">
               {labels.filter((b) => Math.hypot(b.labelDx, b.labelDy) > b.capR * 1.5).map((b) => (
                 <line key={b.project.id} x1={b.x} y1={b.y}

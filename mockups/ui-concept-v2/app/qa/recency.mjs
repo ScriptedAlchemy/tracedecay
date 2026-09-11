@@ -26,6 +26,7 @@ try {
     url.searchParams.set('surface','brain');url.searchParams.set('data','fixture');url.searchParams.set('view','overview');url.searchParams.set('dim','2d');
     await page.goto(url.href,{waitUntil:'networkidle'});
     const aperture=await page.locator('.aperture').boundingBox();
+    assert.match(await page.locator('.brain-field-key').innerText(), /REGISTERED INDEXED PROJECTS.*BODY AREA.*INDEXED MASS.*HORIZONTAL POSITION.*RECENCY/is, 'registry field must name its admission boundary and the two visual encodings');
     const actual=await page.locator('.project-label:not(.repo-label)').evaluateAll(nodes=>nodes.map(node=>({name:node.getAttribute('aria-label'),x:parseFloat(node.style.left)})));
     const ticks=await page.locator('.axis-x .tick').evaluateAll(nodes=>nodes.map(node=>({x:node.getBoundingClientRect().x,width:node.getBoundingClientRect().width})));
     const field=normal.layoutField(aperture.width,aperture.height), reordered=reversed.layoutField(aperture.width,aperture.height);
