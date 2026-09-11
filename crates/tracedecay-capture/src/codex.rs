@@ -14,7 +14,7 @@ use tracedecay_domain::{
 };
 
 use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64,
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
     parse_rfc3339_timestamp,
 };
 
@@ -859,7 +859,7 @@ pub fn codex_native_record_id(
     );
     ObservationId::new(format!(
         "codex.native.sha256:{}",
-        hex::encode(hasher.finalize())
+        sha256_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }

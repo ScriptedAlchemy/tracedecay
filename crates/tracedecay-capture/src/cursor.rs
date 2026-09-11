@@ -11,7 +11,7 @@ use tracedecay_domain::{
 use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
 use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64,
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
     parse_cursor_human_timestamp,
 };
 
@@ -527,7 +527,7 @@ pub fn observation_native_record_id(
         hasher.update(native_id.as_bytes());
         return ObservationId::new(format!(
             "{provider}.native.sha256:{}",
-            hex::encode(hasher.finalize())
+            sha256_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed);
     }
@@ -542,7 +542,7 @@ pub fn observation_native_record_id(
     );
     ObservationId::new(format!(
         "{provider}.native.sha256:{}",
-        hex::encode(hasher.finalize())
+        sha256_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }

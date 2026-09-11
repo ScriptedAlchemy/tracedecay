@@ -382,6 +382,10 @@ pub(crate) fn canonical_u64_string(value: Option<&Value>) -> Option<u64> {
     })
 }
 
+pub(crate) fn sha256_hex(digest: &[u8]) -> String {
+    tracedecay_domain::canonical_text::encode_lowercase_hex(digest)
+}
+
 fn validate_record_frame(
     record: &[u8],
     source_range: ClaudeByteRangeV1,
