@@ -13,10 +13,12 @@ use super::{
 };
 use tracedecay_runtime_core::{
     db::{
-        Database,
+        Database, DatabaseWriteTransaction,
         engine::{Executor, QueryExecutor},
     },
-    ports::registered_schema::RegisteredSchemaInstallationV1,
+    ports::registered_schema::{
+        RegisteredSchemaInstallationTransactionV1, RegisteredSchemaInstallationV1,
+    },
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::{
@@ -29,8 +31,6 @@ use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
     WORKFLOW_TABLE_CONTRACTS_V1,
 };
-
-use crate::sqlite_persist::PersistWriteTransaction;
 
 const REGISTRY_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS projects (
@@ -595,8 +595,6 @@ async fn install_registered_schema_stages(
     temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
-    commit_operation: &'static str,
-    rollback_operation: &'static str,
 ) -> tracedecay_domain::errors::Result<()> {
     Box::pin(install_registered_schema_stage_sequence(
         transaction,
@@ -614,9 +612,11 @@ async fn install_and_commit_registered_schema<T>(
     temporal_admission: session_temporal_schema::SessionTemporalSchemaAdmission,
     workflow_admission: WorkflowSchemaAdmission,
     force_exhaustive: bool,
+    commit_operation: &'static str,
+    rollback_operation: &'static str,
 ) -> tracedecay_domain::errors::Result<()>
 where
-    T: Executor + Sync + PersistWriteTransaction,
+    T: Executor + Sync + SchemaInstallTransaction,
 {
     let admission = install_registered_schema_stages(
         &transaction,
@@ -624,13 +624,14 @@ where
         temporal_admission,
         workflow_admission,
         force_exhaustive,
+        commit_operation,
+        rollback_operation,
     )
     .await;
     match admission {
-        Ok(()) => transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(commit_operation, error)),
+        Ok(()) => transaction.commit().await.map_err(|error| {
+            global_db_operation_error(commit_operation, std::io::Error::other(error))
+        }),
         Err(error) => match transaction.rollback().await {
             Ok(()) => Err(error),
             Err(rollback_error) => Err(global_db_operation_error(
@@ -638,6 +639,39 @@ where
                 std::io::Error::other(format!("{error}; rollback failed: {rollback_error}")),
             )),
         },
+    }
+}
+
+trait SchemaInstallTransaction: Sized {
+    fn commit(self) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    fn rollback(self) -> impl std::future::Future<Output = Result<(), String>> + Send;
+}
+
+impl SchemaInstallTransaction for RegisteredSchemaInstallationTransactionV1<'_> {
+    async fn commit(self) -> Result<(), String> {
+        RegisteredSchemaInstallationTransactionV1::commit(self)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn rollback(self) -> Result<(), String> {
+        RegisteredSchemaInstallationTransactionV1::rollback(self)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl SchemaInstallTransaction for DatabaseWriteTransaction<'_> {
+    async fn commit(self) -> Result<(), String> {
+        DatabaseWriteTransaction::commit(self)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn rollback(self) -> Result<(), String> {
+        DatabaseWriteTransaction::rollback(self)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
