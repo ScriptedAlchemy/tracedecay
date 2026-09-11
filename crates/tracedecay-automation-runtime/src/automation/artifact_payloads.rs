@@ -13,14 +13,14 @@ use super::artifact_optimizer::{
     codex_handoff_status, is_blocked_improvement_decision, optimizer_blockers,
     optimizer_diagnosis_summary, optimizer_ranked_changes, optimizer_recommendations,
 };
-use super::artifact_policy::TaskArtifactPolicy;
 use super::artifact_refs::{automation_run_artifact_api, automation_run_artifacts_api};
 use super::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
 use super::outcomes::{
     AutomationOutcomesSnapshot, outcome_eval_definitions, outcome_feedback_section,
 };
 use super::run_ledger::{AutomationRunArtifactKind, AutomationRunLedgerRecord};
-use super::text::truncate_chars_for_prompt;
+use tracedecay_automation::artifact_policy::TaskArtifactPolicy;
+use tracedecay_automation::text::truncate_chars_for_prompt;
 
 pub(super) struct ArtifactPayloadContext<'a> {
     pub(super) run_id: &'a str,
@@ -185,7 +185,7 @@ pub(super) fn generated_evals_payload(
         },
         "runner": {
             "type": "validation_replay",
-            "commands": ctx.policy.eval_replay_commands(),
+            "commands": [ctx.policy.eval_replay_command()],
             "artifact_api": automation_run_artifact_api(ctx.run_id, AutomationRunArtifactKind::GeneratedEvals),
             "inputs": {
                 "run_id": ctx.run_id,
@@ -431,7 +431,7 @@ pub(super) fn codex_handoff_payload(
             ],
         },
         "validation_requirements": {
-            "must_run_tests": ctx.policy.handoff_tests(),
+            "must_run_tests": [ctx.policy.handoff_test()],
             "automatic_application": true,
         },
         "artifact_manifest": {
@@ -455,11 +455,11 @@ pub(super) fn codex_handoff_payload(
         "eval_replay": {
             "artifact_kind": AutomationRunArtifactKind::GeneratedEvals.as_str(),
             "artifact_api": automation_run_artifact_api(ctx.run_id, AutomationRunArtifactKind::GeneratedEvals),
-            "commands": ctx.policy.eval_replay_commands(),
+            "commands": [ctx.policy.eval_replay_command()],
             "application": automatic_application,
         },
         "next_actions": ctx.policy.next_actions(ctx.record),
-        "tests_to_run": ctx.policy.handoff_tests(),
+        "tests_to_run": [ctx.policy.handoff_test()],
     })
 }
 
@@ -530,7 +530,7 @@ fn generated_eval_application_effect(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::super::artifact_policy::artifact_policy;
+    use tracedecay_automation::artifact_policy::artifact_policy;
     use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict};
     use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
     use super::*;

@@ -7,7 +7,6 @@ use super::artifact_payloads::{
     generated_eval_payloads, generated_evals_payload, improvement_gate_payload,
     optimizer_diagnosis_payload, traces_payload, validation_gate_payload,
 };
-use super::artifact_policy::artifact_policy;
 use super::artifact_refs::artifact_ref;
 use super::backend::{
     AgentTaskKind, AgentTaskRequest, AgentTaskResponse, prompt_version, task_key,
@@ -17,6 +16,7 @@ use super::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
     prepare_run_artifact, publish_run_artifact_chain, read_published_artifact_chain,
 };
+use tracedecay_automation::artifact_policy::artifact_policy;
 use tracedecay_domain::errors::Result;
 
 pub(crate) use super::artifact_refs::{sha256_bytes, sha256_json};
@@ -81,8 +81,8 @@ pub(crate) async fn write_improvement_artifacts(
             "policy": {
                 "optimizer_action": policy.optimizer_action,
                 "next_actions": policy.next_actions(record),
-                "handoff_tests": policy.handoff_tests(),
-                "eval_replay_commands": policy.eval_replay_commands(),
+                "handoff_tests": [policy.handoff_test()],
+                "eval_replay_commands": [policy.eval_replay_command()],
             },
             "request": request,
             "response": response,
