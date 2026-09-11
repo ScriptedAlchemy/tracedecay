@@ -859,7 +859,7 @@ impl RustExtractor {
             .and_then(|path| path.split("::").next())
             .or_else(|| {
                 (import.module_specifier == "self")
-                    .then(|| import.imported_name.as_deref())
+                    .then_some(import.imported_name.as_deref())
                     .flatten()
             })?;
         state.root_modules.get(module).map(String::as_str)
