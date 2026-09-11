@@ -190,6 +190,10 @@ pub(crate) async fn activate_manual_branch_head_with_lifecycle(
 }
 
 #[hotpath::measure(label = "daemon.pr_autotrack.activate_manual_branch", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Manual branch activation is one administration-backed lifecycle; the structural-lint lane owns further splits."
+)]
 async fn activate_manual_branch_with_administration(
     repo_root: &Path,
     data_root: &Path,
@@ -530,6 +534,10 @@ pub(crate) async fn retire_worktree_mount(
 }
 
 #[hotpath::measure(label = "daemon.pr_autotrack.reconcile", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "PR reconcile is one closed-PR and track-persist pass; the structural-lint lane owns further splits."
+)]
 async fn reconcile_project_with_administration(
     repo_root: &Path,
     data_root: &Path,

@@ -265,6 +265,10 @@ impl PreparedShutdownOwners {
 }
 
 #[hotpath::measure(label = "daemon.shutdown.phase.join", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Shutdown-phase join waits out one named owner group under the shared budget."
+)]
 async fn join_shutdown_phase(
     deadline: Instant,
     owners: Vec<(usize, &'static str, Option<String>, ShutdownJoinFactory)>,

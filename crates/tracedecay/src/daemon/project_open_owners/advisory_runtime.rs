@@ -584,6 +584,10 @@ async fn selected_feedback_generation(
         .await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Feedback refresh is one advisory cycle over the mounted project owners."
+)]
 async fn refresh_feedback_cycle(
     producer: &ProjectOpenScoutProducerV1,
     current: tracedecay_configuration::ConfigurationCurrentStateV1,
@@ -735,6 +739,10 @@ impl ConfigurationRuntimeRefreshPort for ProjectOpenFeedbackConfigurationRefresh
 /// delivery selection, `prepare_configured`, and a claim-authority mount for
 /// the enqueued generation. Every early return is a typed fail-closed state;
 /// none of them invents guidance.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Production hook cycle is one ingest-and-advise pass for the opened project."
+)]
 async fn run_production_hook_cycle(
     cycle: Arc<ProjectOpenAdvisoryFeedbackCycleV1>,
     request: HookOrchestrationRequestV1,
@@ -1092,6 +1100,10 @@ async fn refresh_project_open_feedback_configuration(
 
 /// Registers owners whose exact authority depends on a mounted code index.
 #[hotpath::measure(label = "daemon.project.owners.dependent", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Dependent-owner registration is one follow-on bind after production owners exist."
+)]
 pub(in crate::daemon) async fn register_project_open_dependent_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -1307,6 +1319,10 @@ async fn register_production_feedback_cycle(
     Ok((runtime, feedback_scope))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Advisory owner registration is one hook-and-feedback wiring for the opened project."
+)]
 async fn register_production_advisory_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,

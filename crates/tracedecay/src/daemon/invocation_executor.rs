@@ -285,6 +285,10 @@ impl InProcessDaemonInvocationExecutor {
 }
 
 impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvocationExecutor {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One invocation: admit, route, execute, and settle the response."
+    )]
     fn invoke(
         &self,
         invocation: tracedecay_contracts::ApplicationInvocation,

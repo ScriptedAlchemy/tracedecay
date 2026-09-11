@@ -715,6 +715,10 @@ impl DaemonHttpApplicationService {
     }
 
     #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Remote TLS bind is one certificate-load and listener-start sequence."
+    )]
     pub(super) async fn bind_with_remote_tls(
         registry: DaemonHttpApplicationRegistry,
         auth_token: &str,

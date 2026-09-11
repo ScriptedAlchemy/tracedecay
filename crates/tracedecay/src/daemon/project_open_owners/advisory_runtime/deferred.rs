@@ -59,6 +59,10 @@ fn cancelled_semantic_owner_state(detail: &'static str) -> SemanticOwnerStateV1 
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Deferred semantic registration is one background bind that must stay ordered with mount."
+)]
 pub(in crate::daemon) async fn spawn_semantic_owner_registration(
     invocation: DaemonInvocationState,
     project_root: PathBuf,
@@ -305,6 +309,10 @@ enum Attempt {
 }
 
 #[hotpath::measure(label = "daemon.project.owners.advisory_retry", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Deferred semantic mount is one generation-ready attach of the query authority."
+)]
 async fn try_mount(
     invocation: &DaemonInvocationState,
     project_root: &Path,
