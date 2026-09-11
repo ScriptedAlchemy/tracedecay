@@ -6,6 +6,7 @@
 //! link steps while keeping every test (names gain a module prefix, e.g.
 //! `lcm_compression::...`).
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

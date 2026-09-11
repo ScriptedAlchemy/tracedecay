@@ -810,12 +810,17 @@ async fn execute_context_scout_mutation(
                 tracedecay_contracts::context_scout::ContextScoutMutationResultV1 { outcome },
             )
         }
-        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Claimed(claim)) => {
-            serde_json::to_value(public_context_scout_claim(claim))
-        }
-        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Empty) => {
-            serde_json::to_value(ContextScoutClaimResultV1::Empty)
-        }
+        ContextScoutMutationResultV1::Claim(outcome) => match outcome.as_ref() {
+            ContextScoutDurableClaimOutcomeV1::Claimed(claim) => {
+                serde_json::to_value(public_context_scout_claim(claim))
+            }
+            ContextScoutDurableClaimOutcomeV1::Empty => {
+                serde_json::to_value(ContextScoutClaimResultV1::Empty)
+            }
+            ContextScoutDurableClaimOutcomeV1::Unavailable => {
+                return context_scout_mutation_unavailable(wire_request_id);
+            }
+        },
         ContextScoutMutationResultV1::Delivery { outcome, receipt } => {
             let Some(outcome) = context_scout_store_outcome(*outcome) else {
                 return context_scout_mutation_unavailable(wire_request_id);
@@ -824,9 +829,6 @@ async fn execute_context_scout_mutation(
                 outcome,
                 receipt: receipt.clone(),
             })
-        }
-        ContextScoutMutationResultV1::Claim(ContextScoutDurableClaimOutcomeV1::Unavailable) => {
-            return context_scout_mutation_unavailable(wire_request_id);
         }
     };
     let Ok(payload) = payload else {

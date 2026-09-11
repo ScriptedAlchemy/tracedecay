@@ -302,6 +302,10 @@ pub(super) async fn run_combined_scheduler_effect(
 /// carries every replay leg of the combined review, so it must not sit in
 /// the caller's poll frame.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Combined scheduler effect is one ordered pair of retained automation outcomes."
+)]
 fn run_combined_scheduler_effect_inner<'a>(
     admission: CombinedEffectAdmission,
     engine: &'a DaemonEngine,
@@ -467,6 +471,10 @@ fn run_combined_scheduler_effect_inner<'a>(
 /// path (it inlines both replay legs), so the caller's frame must hold only
 /// a pointer to it.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "An execute pair runs two retained effects under one settlement."
+)]
 fn run_execute_pair<'a>(
     run_id: String,
     run_control: AutomationRunControl,
@@ -622,6 +630,10 @@ pub(super) async fn prepare_combined_effects(
 /// Body of [`prepare_combined_effects`], boxed at definition for the same
 /// reason as [`run_combined_scheduler_effect_inner`].
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Combined-effect prepare builds one admission set from the tick's retained work."
+)]
 fn prepare_combined_effects_inner<'a>(
     engine: &'a DaemonEngine,
     memory: &'a TraceDecay,

@@ -322,6 +322,10 @@ impl McpServer {
     }
 
     #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Host-admission replay is one identity-bind and session-catch-up for the connection."
+    )]
     pub(crate) async fn replay_host_admission(
         &self,
         target_seq: Option<u64>,

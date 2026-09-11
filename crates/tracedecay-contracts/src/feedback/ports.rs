@@ -280,11 +280,11 @@ pub enum FeedbackCycleDedupeState {
 /// Exact durable publication proposed after the service has completed its
 /// final authorization and runtime checks. It is intentionally complete
 /// enough for a daemon-owned ledger to atomically compare the key, guard on
-/// the authoritative runtime and authorization state, and make the completed
+/// the authoritative runtime and authorization state, and make the inspectable
 /// result visible in one transaction.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct FeedbackCompletedPublicationV1 {
+pub struct FeedbackPublicationV1 {
     pub input: FeedbackEvaluationInputV1,
     pub dedupe_key: FeedbackDedupeKeyV1,
     pub result: FeedbackCycleResultV1,
@@ -293,7 +293,7 @@ pub struct FeedbackCompletedPublicationV1 {
     pub authority: AuthorityReceipt,
 }
 
-impl FeedbackCompletedPublicationV1 {
+impl FeedbackPublicationV1 {
     pub fn new(
         input: FeedbackEvaluationInputV1,
         dedupe_key: FeedbackDedupeKeyV1,
@@ -339,25 +339,27 @@ impl FeedbackCompletedPublicationV1 {
             || self.result.configuration_digest != self.input.request.configuration_digest
             || !matches!(
                 self.result.termination,
-                FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
+                FeedbackCycleTerminationV1::Clean
+                    | FeedbackCycleTerminationV1::Blocked
+                    | FeedbackCycleTerminationV1::IncompleteCoverage
             )
             || (self.result.termination == FeedbackCycleTerminationV1::Blocked
                 && self.result.total_findings == 0)
         {
             return Err(ApplicationContractError::Inconsistent {
-                field: "feedback completed publication",
+                field: "feedback publication",
             });
         }
         Ok(())
     }
 }
 
-/// Result of the daemon-serialized completed-publication compare-and-insert.
-/// `Duplicate` means another completed publication won the exact key race;
-/// `Cancelled`, `TimedOut`, and `Unavailable` must leave no reservation or
-/// completed row behind.
+/// Result of the daemon-serialized publication compare-and-insert.
+/// `Duplicate` means the same result, or another complete result with the same
+/// dedupe key, won the race. Incomplete publications never consume that key.
+/// `Cancelled`, `TimedOut`, and `Unavailable` leave no row behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FeedbackCycleDedupePublicationState {
+pub enum FeedbackPublicationRecordState {
     Recorded,
     Duplicate,
     Cancelled,
@@ -370,35 +372,33 @@ pub trait FeedbackCycleDedupePort {
     /// daemon-owned restart-safe ledger. It must not consume or reserve the key:
     /// doing so before the final authorization/watermark check would turn a
     /// failed attempt into a false replay. Both this lookup and
-    /// `record_completed` are keyed by the same canonical key and must be
-    /// linearized by the injected daemon/store implementation.
+    /// `record_publication` are linearized by the same daemon/store authority.
     fn lookup_completed<'a>(
         &'a self,
         context: &'a RequestContext,
         key: &'a FeedbackDedupeKeyV1,
     ) -> FeedbackPortFuture<'a, FeedbackCycleDedupeState>;
 
-    /// Atomically records only a fully validated completed publication. The
+    /// Atomically records a validated inspectable publication. The
     /// implementation rechecks the supplied runtime and authorization guards
-    /// in the same serialized operation as its insert/CAS; it must never
-    /// reserve a key for cancellation, timeout, unavailability, or a rejected
-    /// guard.
-    fn record_completed<'a>(
+    /// in the same serialized operation as its insert/CAS. Only clean and
+    /// blocked publications consume the completed-result dedupe key.
+    fn record_publication<'a>(
         &'a self,
         context: &'a RequestContext,
-        publication: &'a FeedbackCompletedPublicationV1,
-    ) -> FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState>;
+        publication: &'a FeedbackPublicationV1,
+    ) -> FeedbackPortFuture<'a, FeedbackPublicationRecordState>;
 }
 
 /// Authorized read of the newest already-committed publication in the exact
 /// request scope. Implementations must not return pending, uncommitted, stale,
 /// differently scoped, or no-longer-authorized evidence.
-pub trait FeedbackCompletedPublicationReadPort {
+pub trait FeedbackPublicationReadPort {
     fn latest_committed<'a>(
         &'a self,
         context: &'a RequestContext,
         observed_at: UtcMicros,
-    ) -> FeedbackPortFuture<'a, Option<FeedbackCompletedPublicationV1>>;
+    ) -> FeedbackPortFuture<'a, Option<FeedbackPublicationV1>>;
 }
 
 /// Best-effort, privacy-safe observation emission. Observation delivery can

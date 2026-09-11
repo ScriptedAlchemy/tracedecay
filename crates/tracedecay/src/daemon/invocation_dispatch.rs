@@ -589,6 +589,10 @@ pub(super) async fn resolve_multi_root_projects(
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Daemon invocation dispatch is one payload match onto the owning executor."
+)]
 pub(super) async fn execute_daemon_invocation(
     engine: &DaemonEngine,
     handshake: &DaemonHandshake,

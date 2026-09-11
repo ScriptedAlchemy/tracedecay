@@ -161,6 +161,10 @@ struct QueryAuthorityWaitInputs {
 /// every slot write records a seat, and the loop re-reads the exact state
 /// (`latest_generation_id`) on each wake. Subscribing before the first read is
 /// what keeps a seat that lands during it observable.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Query authority spawn waits for one generation and installs its readers."
+)]
 fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs) {
     let QueryAuthorityWaitInputs {
         invocation: authority_invocation,

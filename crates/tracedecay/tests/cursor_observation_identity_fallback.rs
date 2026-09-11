@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;

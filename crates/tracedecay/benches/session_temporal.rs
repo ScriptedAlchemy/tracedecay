@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 use std::env;
 
 use tracedecay::session_temporal_benchmark::{

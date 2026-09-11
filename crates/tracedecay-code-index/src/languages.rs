@@ -198,9 +198,14 @@ impl StaticLanguageRegistry {
             for alias in extra_aliases(&language) {
                 aliases.insert(alias.to_owned());
             }
-            // Rust v3 adds parser-backed grouped and relative import evidence.
-            // Pinning that behavior forces older file artifacts to be re-extracted.
-            let extractor_revision = if language == "rust" { 3 } else { 2 };
+            // Rust v3 adds parser-backed grouped and relative import evidence;
+            // TypeScript v3 adds variable type-relation evidence. Pinning these
+            // behaviors forces older file artifacts to be re-extracted.
+            let extractor_revision = if matches!(language.as_str(), "rust" | "typescript") {
+                3
+            } else {
+                2
+            };
             let descriptor = LanguageDescriptorV1 {
                 language: LanguageId::new(language.clone())
                     .expect("canonical language identity is valid"),

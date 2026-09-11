@@ -87,6 +87,10 @@ pub fn run_bench_with_toml(
 /// Numbers use compact units (`k`, `M`); savings percentages are colored by
 /// tier (green ≥80%, yellow ≥50%, red <50%). Matches the ANSI style used
 /// elsewhere in `tracedecay status`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Console report rendering walks every query row and aggregate field as one display unit."
+)]
 pub fn format_report_console(report: &BenchReport) -> String {
     use tracedecay_runtime_core::text::{format_number, format_token_count};
 

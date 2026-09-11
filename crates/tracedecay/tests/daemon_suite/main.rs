@@ -12,6 +12,7 @@
 //! classification, heartbeat staleness) is unit-tested inline in
 //! `src/daemon/git_watch.rs`.
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

@@ -58,6 +58,10 @@ impl StoreAdministration {
     /// before any runtime is retired or store directory is removed, so a
     /// failed cleanup stays fail-closed and a retry resumes safely.
     #[hotpath::measure(label = "daemon.branch_admin.remote_deletion", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Remote deletion is one fail-closed tombstone-then-retire lifecycle; phases must stay ordered together."
+    )]
     pub(in super::super) async fn execute_remote_deletion(
         &self,
         owners: &super::super::remote_deletion::RemoteDeletionRuntimeOwners,
@@ -649,6 +653,10 @@ impl StoreAdministration {
     }
 
     #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Project store removal is one destructive cleanup sequence after the tombstone is durable."
+    )]
     async fn remove_remote_deleted_project(
         &self,
         owners: &super::super::remote_deletion::RemoteDeletionRuntimeOwners,

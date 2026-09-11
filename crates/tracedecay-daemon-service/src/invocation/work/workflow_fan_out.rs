@@ -166,8 +166,8 @@ pub(super) fn reconcile_workflow_fan_out(
         }
         let newly_settled = terminal_planned
             .iter()
+            .filter(|&identity| !projection.settled_fan_out_attempts().contains(identity))
             .cloned()
-            .filter(|identity| !projection.settled_fan_out_attempts().contains(identity))
             .collect::<Vec<_>>();
         if !newly_settled.is_empty() {
             projection = apply_scheduler_command(

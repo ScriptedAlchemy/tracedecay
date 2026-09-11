@@ -341,6 +341,24 @@ async fn retained_partitioned_generation_reaches_semantics_without_a_decoded_sea
     );
 
     wait_for_semantic_delivery(&deliveries, &retained_generation).await;
+    let retained_text = registry
+        .latest_text_serving_for_root(fixture.path())
+        .await
+        .expect("retained text owner");
+    let snapshot = retained_text.metadata().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("retained scope");
+    let (candidate, code) = registry
+        .semantic_evaluation_generation_for_scope(fixture.path(), &scope)
+        .await
+        .expect("retained generation is eligible for semantic evaluation");
+    assert_eq!(candidate.source_generation, retained_generation);
+    assert_eq!(code.manifest().generation_id, retained_generation);
     assert_eq!(
         delivered_generations(&deliveries),
         vec![retained_generation.clone()],
@@ -358,12 +376,31 @@ async fn retained_partitioned_generation_reaches_semantics_without_a_decoded_sea
         Some(retained_generation.clone()),
         "the partitioned text owner remains the serving identity"
     );
-    registry.shutdown().await;
-
+    let reconcile_admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold stale-source reconcile");
     fixture.edit(
         "src/lib.rs",
         "pub fn retained_semantic_beta() -> u32 { 2 }\n",
     );
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        "source edit reaches the mounted freshness authority"
+    );
+    assert!(
+        registry
+            .semantic_evaluation_generation_for_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "source drift must refuse the retained semantic evaluation candidate"
+    );
+    drop(reconcile_admission);
+    registry.shutdown().await;
+
     let refreshed_deliveries: SemanticDeliveryLogV1 = Arc::new(Mutex::new(Vec::new()));
     let refreshed_registry = CodeIndexSchedulerRegistryV1::new(1);
     assert!(

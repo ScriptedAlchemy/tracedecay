@@ -17,6 +17,7 @@
 //! `store` drives a synthetic in-memory source so the shared
 //! persist-transcript store stack is measured without parse cost.
 
+#![allow(clippy::too_many_lines)]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
