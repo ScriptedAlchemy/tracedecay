@@ -6834,13 +6834,89 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
+    /// Resolve the current canonical generation for semantic evaluation.
+    ///
+    /// A partitioned restart deliberately restores text and graph through
+    /// lightweight owners without installing the decoded serving seat. Native
+    /// evaluation still needs the immutable full generation, so it opens the
+    /// active publication through the scheduler's shared decode cache after
+    /// proving the exact mounted scope and source-freshness witness. This never
+    /// seats graph serving or promotes a retained generation on its own.
+    pub async fn semantic_evaluation_generation_for_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<(
+        super::SemanticEvaluationCodeSnapshotV1,
+        Arc<CodeIndexPublishedGenerationV1>,
+    )> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (scheduler, source_freshness, shutting_down, wake, pending_wake) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = mounted.get(&project_root)?;
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                return None;
+            }
+            (
+                Arc::clone(&worktree.scheduler),
+                worktree.source_freshness.clone(),
+                Arc::clone(&worktree.shutting_down),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.pending_wake),
+            )
+        };
+        let freshness_root = project_root.clone();
+        let scope = scope.clone();
+        let task_shutting_down = Arc::clone(&shutting_down);
+        let result = tokio::task::spawn_blocking(move || {
+            if !source_freshness.ready_without_stat(&freshness_root, &task_shutting_down) {
+                return None;
+            }
+            let scheduler =
+                Self::lock_scheduler_unless_shutting_down(&scheduler, &task_shutting_down).ok()?;
+            if !scheduler.git_authority_available() {
+                return None;
+            }
+            let latest = scheduler.latest_complete()?;
+            if !source_freshness.ready_without_stat(&freshness_root, &task_shutting_down)
+                || !latest_matches_scope_identity(&latest, &scope)
+            {
+                return None;
+            }
+            Some((
+                latest.semantic_evaluation_snapshot(),
+                latest.generation_handle(),
+            ))
+        })
+        .await
+        .ok()
+        .flatten();
+        if result.is_none() && !shutting_down.load(Ordering::Acquire) {
+            Self::note_wake_if_idle(
+                &pending_wake,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+        }
+        result
+    }
+
     pub async fn semantic_evaluation_snapshot_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<super::SemanticEvaluationCodeSnapshotV1> {
-        self.latest_complete_fresh_for_scope(scope)
+        let root = {
+            let mounted = self.mounted.lock().await;
+            unique_mounted_for_scope(&mounted, scope)
+                .unique()?
+                .0
+                .clone()
+        };
+        self.semantic_evaluation_generation_for_scope(&root, scope)
             .await
-            .map(|latest| latest.semantic_evaluation_snapshot())
+            .map(|(snapshot, _)| snapshot)
     }
 
     pub async fn acquire_semantic_evaluation_publication_lease(
