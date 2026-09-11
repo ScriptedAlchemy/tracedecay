@@ -2059,6 +2059,18 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    /// The shared source-freshness fence for one mounted root, so tests can
+    /// drive its bounded proof window instead of waiting on wall time.
+    #[cfg(test)]
+    pub(crate) async fn source_freshness_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<super::SourceFreshnessFenceV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        Some(mounted.get(&project_root)?.source_freshness.clone())
+    }
+
     /// The exact-source currency witness for one mounted root, so tests can
     /// stage the unproven-seat state a restart restore leaves behind.
     #[cfg(test)]
@@ -5713,7 +5725,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .micros
                     != 0;
-            let source_change_pending = source_freshness.source_change_pending();
+            let proof_still_admits_seat = source_freshness.proof_still_admits_seat();
             let parked = convergence_park
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5757,7 +5769,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         graph_activation_enabled,
                         &code_graph_serving,
                     );
-                    let verifying = ready && refresh_in_flight && !source_change_pending;
+                    let verifying = ready && refresh_in_flight && proof_still_admits_seat;
                     let refreshing = refresh_in_flight && !verifying;
                     let rebuild_in_flight = refreshing;
                     let stale = hook_hint_count != Some(0);
@@ -5796,7 +5808,14 @@ impl CodeIndexSchedulerRegistryV1 {
                         coverage: if refreshing {
                             "partial_refresh_in_progress"
                         } else if verifying {
-                            "partial_source_verification"
+                            // A ready generation whose still-valid proof admits
+                            // the seat is complete. The worker is renewing that
+                            // proof, not replacing the generation; a partial
+                            // coverage here made every polling client wait out
+                            // the renewal as if nothing served. An aged-out or
+                            // never-proven seat is not `verifying`, so this
+                            // arm cannot claim coverage the lanes refuse.
+                            "complete"
                         } else if hook_hint_count.is_some() {
                             "complete"
                         } else {
@@ -5835,7 +5854,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 graph_activation_enabled,
                 &code_graph_serving,
             );
-            let verifying = ready && refresh_in_flight && !source_change_pending;
+            let verifying = ready && refresh_in_flight && proof_still_admits_seat;
             let refreshing = refresh_in_flight && !verifying;
             let rebuild_in_flight = refreshing;
             let staleness_state = if parked.is_some() && !ready {
@@ -5874,7 +5893,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 coverage: if refreshing {
                     "partial_refresh_in_progress"
                 } else if verifying {
-                    "partial_source_verification"
+                    // See the WouldBlock arm: renewing a proof that still
+                    // admits the seat does not punch a hole in a ready
+                    // generation's coverage. An unproven restore fails
+                    // `proof_still_admits_seat`, so it still reaches the
+                    // `partial_unverified_restore` arm below.
+                    "complete"
                 } else if !verified {
                     "partial_unverified_restore"
                 } else if hook_hint_count.is_some() {

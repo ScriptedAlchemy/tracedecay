@@ -5578,6 +5578,19 @@ impl SourceFreshnessFenceV1 {
         self.source_epoch.load(Ordering::Acquire) != state.reconciled_source_epoch
     }
 
+    /// Whether the last completed proof still admits the seat without probing
+    /// the worktree: a proof exists, no source change has been observed since
+    /// it completed, and its bounded window has not elapsed. This is the
+    /// probe-free half of [`Self::serves_recently_verified_source`], so a
+    /// status projection gated on it cannot claim currency in a window where
+    /// the retrieval lanes serve the retained generation stale.
+    fn proof_still_admits_seat(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.verified_against_source
+            && self.source_epoch.load(Ordering::Acquire) == state.reconciled_source_epoch
+            && state.last_reconciled_at.elapsed() < state.staleness_threshold
+    }
+
     fn ready_without_stat(&self, project_root: &Path, shutting_down: &AtomicBool) -> bool {
         let state = self.snapshot();
         self.snapshot_is_recently_verified(&state, project_root, shutting_down)

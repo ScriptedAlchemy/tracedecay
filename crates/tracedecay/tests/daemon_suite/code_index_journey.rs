@@ -362,9 +362,17 @@ pub async fn assert_project_identity(
     );
 }
 
-/// Reads typed freshness receipts until the daemon serves a complete, fresh
-/// generation that differs from `prior_generation`, carries the expected ref and
-/// source revision, and answers `query` from that same generation.
+/// Reads typed freshness receipts until the daemon serves a complete generation
+/// that differs from `prior_generation`, carries the expected ref and source
+/// revision, and answers `query` from that same generation.
+///
+/// Terminal accepts `staleness_state` `fresh` or `verifying`, because the
+/// scheduler reports `verifying` only while it renews a proof that still admits
+/// the seated generation: coverage stays `complete` and every retrieval lane
+/// keeps serving that generation as current. An aged-out proof or an unproven
+/// restore reports `refreshing` or `indexing` instead, so waiting on `fresh`
+/// alone only made this helper race a routine proof renewal that changes
+/// nothing it asserts.
 #[allow(clippy::too_many_arguments)]
 pub async fn wait_for_terminal_generation(
     socket: &Path,
@@ -387,9 +395,11 @@ pub async fn wait_for_terminal_generation(
                 .as_str()
                 .map(str::to_owned);
             let revision_matches = worktree["source_revision"].as_str() == expected_revision;
+            let source_is_current = worktree["staleness_state"] == "fresh"
+                || worktree["staleness_state"] == "verifying";
             let terminal = observed["code_index_freshness"]["status"] == "current"
                 && worktree["coverage"] == "complete"
-                && worktree["staleness_state"] == "fresh"
+                && source_is_current
                 && worktree["source_reference"] == expected_reference
                 && revision_matches
                 && generation.is_some()

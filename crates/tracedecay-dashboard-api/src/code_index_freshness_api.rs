@@ -308,6 +308,14 @@ pub async fn freshness(
     Json(envelope)
 }
 
+/// Wrap one scheduler freshness read in the dashboard envelope.
+///
+/// The envelope may not contradict the payload it carries: the `Partial` arm's
+/// reason asserts the scheduler's coverage is incomplete, so `Ready` must claim
+/// every state whose payload reports `coverage: "complete"`. That is `fresh`
+/// and `verifying` — the scheduler reports `verifying` only while renewing a
+/// proof that still admits the seat, so the retrieval lanes serve that
+/// generation complete for the whole window.
 async fn project_code_index_freshness(
     state: &DashboardState,
 ) -> DashboardEnvelopeV1<CodeIndexFreshnessPayloadV1> {
@@ -328,7 +336,10 @@ async fn project_code_index_freshness(
         Some(worktree)
             if worktree.latest_generation_id.is_some()
                 && worktree.coverage == "complete"
-                && worktree.staleness_state.as_deref() == Some("fresh") =>
+                && matches!(
+                    worktree.staleness_state.as_deref(),
+                    Some("fresh" | "verifying")
+                ) =>
         {
             DashboardEnvelopeV1::ready(
                 scope_from_state(state),

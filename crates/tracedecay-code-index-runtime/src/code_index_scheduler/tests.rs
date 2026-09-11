@@ -10091,11 +10091,18 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
     registry.shutdown().await;
 }
 
+/// The projection and the retrieval lanes must report one serving truth. An
+/// in-flight pass over a proof that still admits the seat is a renewal, so the
+/// projection may claim `verifying` with complete coverage — and a query in that
+/// same window must not answer stale. Once the proof ages past its bounded
+/// window the lanes serve the retained generation stale, so the projection must
+/// fall out of `complete` with them instead of claiming a currency no lane
+/// honours.
 #[tokio::test]
 async fn active_source_verification_does_not_queue_a_second_query_pass() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
 
@@ -10118,9 +10125,63 @@ async fn active_source_verification_does_not_queue_a_second_query_pass() {
         .await
         .expect("dashboard freshness");
     assert_eq!(projected.staleness_state.as_deref(), Some("verifying"));
-    assert_eq!(projected.coverage, "partial_source_verification");
+    assert_eq!(projected.coverage, "complete");
     assert!(!projected.rebuild_in_flight);
+    let served = registry
+        .execute_query_search(&scope, core_search_request("main"))
+        .await
+        .expect("a proven seat serves through its own proof renewal");
+    assert!(
+        !served.served_stale,
+        "the projection claimed complete coverage under `verifying`; the lanes must agree"
+    );
 
+    // Age the same seat's proof past its bounded window while the identical
+    // pass stays in flight. Occupying the single background-reconcile permit
+    // parks the worker at its dequeue point so it cannot renew the proof
+    // underneath the assertions, and no assertion waits on wall time.
+    let renewal_admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold expired-proof renewal at the worker dequeue point");
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source freshness fence");
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the seat's source proof");
+    }
+
+    let aged = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness over an aged proof");
+    assert_eq!(
+        aged.staleness_state.as_deref(),
+        Some("refreshing"),
+        "an in-flight pass over an aged proof renews a seat no lane serves as current"
+    );
+    assert_ne!(
+        aged.coverage, "complete",
+        "the projection must not claim complete coverage in a window the lanes serve stale"
+    );
+    let served_aged = registry
+        .execute_query_search(&scope, core_search_request("main"))
+        .await
+        .expect("the retained generation still answers while its proof is renewed");
+    assert!(
+        served_aged.served_stale,
+        "an aged proof serves the retained generation stale, which the projection must report"
+    );
+
+    drop(renewal_admission);
     drop(pass);
     registry.shutdown().await;
 }
