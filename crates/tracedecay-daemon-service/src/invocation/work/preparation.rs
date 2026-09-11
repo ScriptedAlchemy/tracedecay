@@ -1,17 +1,12 @@
 //! Backend-owned preparation of exact Work mutation commands.
 
-use std::sync::Arc;
-
 use tracedecay_contracts::{
     ApplicationProblem, RequestContext, RequestId, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::{
-    RegisteredWorkRuntime, work_product_problem, work_projection_problem, work_topology_problem,
-    work_topology_unavailable_problem,
-};
+use super::{RegisteredWorkRuntime, work_product_problem, work_projection_problem};
 
 pub(super) fn prepare_graph_mutation(
     registered: &RegisteredWorkRuntime,
@@ -48,37 +43,36 @@ pub(super) fn prepare_graph_mutation(
 }
 
 pub(super) fn prepare_duplicate_adjudication(
+    registered: &RegisteredWorkRuntime,
     services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
+    capability: &str,
+    use_case: &UseCaseId,
     request: tracedecay_contracts::PrepareWorkDuplicateAdjudicationRequestV1,
     canonical_request_id: &RequestId,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_domain::WorkDuplicateAdjudicationCommandV1, ApplicationProblem> {
-    let authority = tracedecay_domain::WorkAuthority::new(
-        context.scope().project_id.clone(),
-        context.scope().repository_id.clone(),
-        context.scope().worktree_id.clone(),
-        context.actor().clone(),
-        context.grant().digest.clone(),
-    )
-    .map_err(|_| invalid_work_product_request())?;
     require_attempt(services, context, &request.first_attempt)?;
     require_attempt(services, context, &request.second_attempt)?;
     let snapshot = services
         .projections()
         .snapshot(context, tracedecay_contracts::MAX_WORK_PROJECTION_PAGE_SIZE)
         .map_err(work_projection_problem)?;
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let topology = services
-        .topology()
-        .verified_snapshot(&authority, cancelled)
-        .map_err(|error| match work_topology_problem(error) {
-            Ok(_) => work_product_authority_unavailable(),
-            Err(problem) => problem,
-        })?;
-    let topology_generation = topology
-        .evidence_ref()
-        .map_err(|_| work_product_authority_unavailable())?;
+    let topology_generation = match current_work_product_attempt_topology(
+        registered,
+        context,
+        capability,
+        use_case,
+        observed_at,
+    )? {
+        tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(binding) => {
+            tracedecay_domain::WorkTopologyGenerationRefV1::new(binding.generation)
+                .map_err(|_| work_product_authority_unavailable())?
+        }
+        tracedecay_contracts::WorkAttemptTopologyStateV1::Absent => {
+            return Err(work_product_authority_unavailable());
+        }
+    };
     let command_id =
         tracedecay_domain::WorkCommandId::new(canonical_request_id.as_str().to_owned())
             .map_err(|_| work_product_authority_unavailable())?;
@@ -128,30 +122,6 @@ pub(super) fn current_work_product_revision_pins(
         configuration_revision_id: registered.proposal_routing.configuration_revision().clone(),
         catalog_generation_id,
     })
-}
-
-/// Executor topology from the verified Work event graph. Product-graph tasks
-/// must not mint this binding — a committed product item is not an attempt
-/// generation.
-pub(super) fn current_executor_attempt_topology(
-    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
-    authority: &tracedecay_domain::WorkAuthority,
-) -> Result<tracedecay_contracts::WorkAttemptTopologyStateV1, ApplicationProblem> {
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    match services.topology().verified_snapshot(authority, cancelled) {
-        Ok(topology) => {
-            let task_count = u32::try_from(topology.task_count()).map_err(|_| {
-                work_topology_unavailable_problem("the verified topology task count overflowed")
-            })?;
-            Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(
-                tracedecay_contracts::WorkAttemptTopologyBindingV1 {
-                    generation: topology.generation().as_str().to_owned(),
-                    task_count,
-                },
-            ))
-        }
-        Err(error) => work_topology_problem(error),
-    }
 }
 
 pub(super) fn current_work_product_attempt_topology(
