@@ -3008,6 +3008,15 @@ impl CodeIndexPublishedGenerationV1 {
     /// abstained rather than refused: retention marks the segments it can
     /// prove live and must stay able to plan a store that still holds a
     /// retired generation, whose own segments are then unreferenced.
+    ///
+    /// That abstention is deliberately asymmetric, and it is what keeps a
+    /// store holding a retired generation collectable: the generation's
+    /// segments become sweepable while its manifest is still retained, so a
+    /// retained retired manifest can outlive the segments it addresses. It is
+    /// fail-safe only because every decoding reader refuses that manifest at
+    /// the revision gate before requesting one segment — nothing can observe
+    /// the missing bytes. A future revision that decoded a retired manifest
+    /// instead of refusing it would have to mark its segments live here first.
     pub fn partitioned_segment_identities_from_reader(
         reader: impl Read,
     ) -> Result<Option<Vec<SealedGenerationSegmentIdentityV1>>, CodeIndexProductionErrorV1> {
