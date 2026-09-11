@@ -1418,10 +1418,8 @@ fn augment_callee_dispatch_page(
     scope: &tracedecay_contracts::CodeQueryScope,
     budget: RetrievalBudget,
     control: &dyn GraphExecutionControl,
-) -> Result<
-    NativeLanePageV1<SymbolRelationRecord>,
-    Box<NativeLaneOutcomeV1<SymbolRelationRecord>>,
-> {
+) -> Result<NativeLanePageV1<SymbolRelationRecord>, Box<NativeLaneOutcomeV1<SymbolRelationRecord>>>
+{
     let candidate_cap = usize::try_from(budget.max_candidates_per_lane).unwrap_or(usize::MAX);
     let mut page = NativeLanePageV1 {
         generation: page.generation,
