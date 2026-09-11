@@ -872,6 +872,48 @@ impl SessionTemporalRefreshWake {
         }
     }
 
+    /// Requests a fresh bounded historical-ingest cycle from the retained
+    /// owner and waits through its existing continuation passes.
+    #[hotpath::skip]
+    pub async fn wake_history_and_wait_until_idle(
+        &self,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let Some(state) = self.target() else {
+            return false;
+        };
+        if state.cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+        let before = state.pass_count.load(Ordering::Acquire);
+        state.mark_history_pending();
+        state.wake_history();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let idle = hotpath::future!(
+                enabled_idle_notification(&state),
+                label = "daemon.scheduler.session_temporal.history_idle_wait"
+            );
+            let settled = state.pass_count.load(Ordering::Acquire) > before
+                && !state.busy.load(Ordering::Acquire)
+                && !state.historical_dirty.load(Ordering::Acquire)
+                && !state.history_retry_pending();
+            if settled {
+                return matches!(
+                    state
+                        .telemetry
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .historical_state,
+                    SessionHistoricalServingState::Current
+                );
+            }
+            if tokio::time::timeout_at(deadline, idle).await.is_err() {
+                return false;
+            }
+        }
+    }
+
     pub fn status(&self) -> SessionTemporalRefreshWorkerStatus {
         self.target()
             .map_or_else(SessionTemporalRefreshWorkerStatus::missing, |state| {
