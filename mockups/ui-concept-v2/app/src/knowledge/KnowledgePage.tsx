@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Corners } from "../app/shell/Corners";
 import { useDemo, useWorkspaceState } from "../app/workspace";
 import { PACK } from "../data/pack";
@@ -145,6 +145,17 @@ function FixtureInspector(props: { fact: ExampleFact; node: AtlasNode; cam: Cam;
         <Row label="source count" value="2" />
         <Row label="production memory" value="not claimed" unavailable />
       </div>
+      <div className="kn-block">
+        <div className="k">TRUST HISTORY · SOURCE VERIFICATION</div>
+        <Row label="observed" value="2 retained source records · exact" />
+        <Row label="verification" value="fixture revision identity checked" />
+        <Row label="trust method" value="source-counted signal · not truth" />
+      </div>
+      <div className="kn-block">
+        <div className="k">REDACTION</div>
+        <Row label="content availability" value="shown fixture claim; no withheld value" />
+        <Row label="policy receipt" value="unavailable — fixture has no policy authority" unavailable />
+      </div>
     </InspectFrame>
   );
 }
@@ -178,13 +189,13 @@ function FixtureLedger(props: { selected: string; onSelect: (fact: ExampleFact) 
   );
 }
 
-function SubjectMap(props: { selection: string; onSelect: (node: AtlasNode) => void; fixture: boolean }) {
+function SubjectMap(props: { selection: string; onSelect: (node: AtlasNode) => void; fixture: boolean; fact?: ExampleFact; onSelectFact?: () => void }) {
   return (
     <section className="kn-well kn-subject-map" aria-label="Repository source subjects">
       <header><b>SOURCE SUBJECT MAP</b><span>{props.fixture ? "fixture claims attached" : "0 facts attached · structure only"}</span></header>
       <div className="kn-atlas-wrap">
         <RepositoryAtlas context="explorer" compact initialSelection={props.selection} onSelect={props.onSelect} />
-        <div className="kn-map-label"><strong>{props.fixture ? "AUTHORED CLAIM OVERLAY" : "EXTRACTED REPOSITORY SUBJECTS"}</strong><span>fixed source geometry · Git {atlasData.revision.slice(0, 8)}</span></div>
+        <div className="kn-map-label"><strong>{props.fixture ? "REPOSITORY STRUCTURE / CLAIM MEMBERSHIP" : "EXTRACTED REPOSITORY SUBJECTS"}</strong><span>fixed source geometry · Git {atlasData.revision.slice(0, 8)}</span>{props.fact ? <button type="button" onClick={props.onSelectFact}>MAP MEMBERSHIP · {props.fact.id}</button> : null}</div>
       </div>
     </section>
   );
@@ -198,7 +209,7 @@ function GeometryCamera(props: { selected: ExampleFact; onSelect: (fact: Example
   };
   return (
     <section className="kn-well kn-fill" aria-label="Authored example claim geometry">
-      <header><b>CLAIM GEOMETRY</b><span>AUTHORED EXAMPLE · fixed semantic positions</span></header>
+      <header><b>CLAIM GEOMETRY</b><span>READY · 3 memberships · authored projection</span></header>
       <div className="kn-geometry">
         <svg viewBox="0 0 100 100" aria-hidden="true"><path d="M23 55 Q38 28 53 32"/><path className="is-contradiction" d="M76 67 Q68 42 53 32"/></svg>
         {EXAMPLE_FACTS.map((fact) => <button type="button" key={fact.id} className={`${fact.id === props.selected.id ? "is-selected " : ""}is-${fact.state}`} style={{ left: `${positions[fact.id].x}%`, top: `${positions[fact.id].y}%` }} onClick={() => props.onSelect(fact)}><i/><b>{fact.subject}</b><span>{fact.state}</span></button>)}
@@ -212,7 +223,7 @@ function CurationCamera(props: { selected: ExampleFact; onSelect: (fact: Example
   const groups: FactState[] = ["superseded", "canonical", "contradicted"];
   return (
     <section className="kn-well kn-fill" aria-label="Authored example curation board">
-      <header><b>CURATION BOARD</b><span>AUTHORED EXAMPLE · explicit lifecycle states</span></header>
+      <header><b>CURATION BOARD</b><span>READY · 3 exact fixture receipts</span></header>
       <div className="kn-curation">{groups.map((state) => <section key={state}><header><b>{state.toUpperCase()}</b><span>{EXAMPLE_FACTS.filter((fact) => fact.state === state).length}</span></header>{EXAMPLE_FACTS.filter((fact) => fact.state === state).map((fact) => <button type="button" key={fact.id} className={fact.id === props.selected.id ? "is-selected" : ""} onClick={() => props.onSelect(fact)}><strong>{fact.subject}</strong><span>{fact.content}</span><em>{fact.sources.length} sources</em></button>)}</section>)}</div>
     </section>
   );
@@ -227,7 +238,7 @@ function OplogCamera(props: { onSelect: (fact: ExampleFact) => void }) {
   ];
   return (
     <section className="kn-well kn-fill" aria-label="Authored example knowledge oplog">
-      <header><b>CLAIM OPLOG</b><span>AUTHORED EXAMPLE · revision ordered</span></header>
+      <header><b>CLAIM OPLOG</b><span>READY · {events.length} exact fixture rows</span></header>
       <ol className="kn-oplog">{events.map((event, index) => <li key={`${event.fact.id}-${index}`}><i/><button type="button" onClick={() => props.onSelect(event.fact)}><span>{event.revision.slice(0, 8)}</span><b>{event.action}</b><em>{event.fact.subject}</em></button></li>)}</ol>
     </section>
   );
@@ -241,7 +252,7 @@ function SnapshotAbsence(props: { cam: Cam }) {
   };
   return (
     <section className="kn-well kn-fill" aria-label={`${props.cam.toLowerCase()} camera unavailable`}>
-      <header><b>{props.cam}</b><span>independent camera · not served</span></header>
+      <header><b>{props.cam}</b><span>UNAVAILABLE · independent authority not served</span></header>
       <div className="kn-absent"><span className="kn-badge">unavailable</span><div className="kn-absent-title">{props.cam.toLowerCase()} authority unavailable</div><p>{copy[props.cam as Exclude<Cam, "FACTS">]}</p></div>
     </section>
   );
@@ -264,6 +275,10 @@ export function KnowledgePage(_props: { state?: string; onState?: (id: string) =
   const [cam, setCam] = useWorkspaceState<Cam>("knowledge.camera", cameraFromUrl());
   const [atlasSelection, setAtlasSelection] = useWorkspaceState<string>("atlas.selection", explicitNode || "crates/tracedecay");
   const [factId, setFactId] = useWorkspaceState<string>("knowledge.fact.selection", factFromUrl()?.id ?? "runtime-direct-owner");
+  const [query, setQuery] = useState(() => new URLSearchParams(window.location.search).get("knowledge_query") ?? "");
+  const [filter, setFilter] = useState(() => new URLSearchParams(window.location.search).get("knowledge_filter") ?? "all");
+  const [sort, setSort] = useState(() => new URLSearchParams(window.location.search).get("knowledge_sort") ?? "subject");
+  const [page, setPage] = useState(() => new URLSearchParams(window.location.search).get("knowledge_page") ?? "1");
   const fact = FACT_BY_ID.get(factId) ?? EXAMPLE_FACTS[1];
   const node = nodeById.get(atlasSelection) ?? nodeById.get("crates/tracedecay") ?? atlasData.nodes[0];
 
@@ -293,6 +308,12 @@ export function KnowledgePage(_props: { state?: string; onState?: (id: string) =
     window.history.pushState(null, "", url);
   }
 
+  function updateFactsRoute(key: string, value: string) {
+    const url = new URL(window.location.href);
+    url.searchParams.set(key, value);
+    window.history.replaceState(null, "", url);
+  }
+
   function selectFact(next: ExampleFact) {
     if (next.id === fact.id) return;
     const current = new URL(window.location.href);
@@ -307,7 +328,11 @@ export function KnowledgePage(_props: { state?: string; onState?: (id: string) =
     setAtlasSelection(next.path);
   }
 
-  function selectSubject(next: AtlasNode) { setAtlasSelection(next.id); }
+  function selectSubject(next: AtlasNode) {
+    setAtlasSelection(next.id);
+    const attached = mode === "fixture" ? EXAMPLE_FACTS.find((candidate) => next.id === candidate.path || next.id.startsWith(`${candidate.path}/`)) : undefined;
+    if (attached) selectFact(attached);
+  }
 
   return (
     <div className="kn-root">
@@ -325,15 +350,22 @@ export function KnowledgePage(_props: { state?: string; onState?: (id: string) =
                   event.preventDefault(); selectCamera(CAMERAS[target]);
                   event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[target]?.focus();
                 }}
-                className={cam === camera ? "is-on" : ""} onClick={() => selectCamera(camera)}>{camera}</button>
+                className={cam === camera ? "is-on" : ""} onClick={() => selectCamera(camera)}>{camera} <small>{mode === "snapshot" ? (camera === "FACTS" ? "ABSENT" : "UNAVAILABLE") : camera === "FACTS" ? "3" : camera === "OPLOG" ? "4" : "READY"}</small></button>
             ))}
           </div>
           <span className={`kn-mode is-${mode}`}>{mode === "fixture" ? "AUTHORED EXAMPLE DATA" : "SNAPSHOT · FACTS ABSENT"}</span>
         </div>
+        <div className="kn-route-state" aria-label="Knowledge route controls">
+          <label>QUERY <input value={query} onChange={(event) => { setQuery(event.target.value); updateFactsRoute("knowledge_query", event.target.value); }} /></label>
+          <label>FILTER <select value={filter} onChange={(event) => { setFilter(event.target.value); updateFactsRoute("knowledge_filter", event.target.value); }}><option value="all">all claims</option><option value="canonical">canonical</option><option value="changed">changed</option></select></label>
+          <label>SORT <select value={sort} onChange={(event) => { setSort(event.target.value); updateFactsRoute("knowledge_sort", event.target.value); }}><option value="subject">subject</option><option value="state">state</option></select></label>
+          <label>PAGE <select value={page} onChange={(event) => { setPage(event.target.value); updateFactsRoute("knowledge_page", event.target.value); }}><option value="1">1</option></select></label>
+          <span>SELECTION · {fact.id}</span>
+        </div>
         <div id="kn-camera-panel" className="kn-camera-panel" role="tabpanel" aria-labelledby={`kn-tab-${cam}`}>
           {mode === "snapshot" ? (
             cam === "FACTS" ? <><SubjectMap selection={node.id} onSelect={selectSubject} fixture={false} /><EmptyFactsTable /></> : <SnapshotAbsence cam={cam} />
-          ) : cam === "FACTS" ? <><SubjectMap selection={node.id} onSelect={selectSubject} fixture /><FixtureLedger selected={fact.id} onSelect={selectFact} /></>
+          ) : cam === "FACTS" ? <><SubjectMap selection={node.id} onSelect={selectSubject} fixture fact={fact} onSelectFact={() => selectFact(fact)} /><FixtureLedger selected={fact.id} onSelect={selectFact} /></>
             : cam === "GEOMETRY" ? <GeometryCamera selected={fact} onSelect={selectFact} />
             : cam === "CURATION" ? <CurationCamera selected={fact} onSelect={selectFact} />
             : <OplogCamera onSelect={selectFact} />}
