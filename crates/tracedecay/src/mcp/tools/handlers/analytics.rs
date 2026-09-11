@@ -375,6 +375,10 @@ fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
     })
 }
 
+/// Provider usage is scoped to the active project only when the request is
+/// project-scoped and the sessions shard's `project_id` matches the active
+/// store identity; any other combination reads all-project usage rather than
+/// a neighbouring project's.
 async fn observatory_and_costs_sections(
     cg: &TraceDecay,
     gdb: &RegisteredGlobalDb,
