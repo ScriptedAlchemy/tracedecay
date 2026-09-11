@@ -226,14 +226,23 @@ impl DaemonLcmEffectService {
         )
         .await
         {
-            Ok(summary) if summary.source_range.as_ref() == Some(&required_native_source_range) => {
+            Ok(summary)
+                if summary.source_range.interval() == Some(&required_native_source_range) =>
+            {
                 summary
             }
-            Ok(_) => {
+            Ok(summary) => {
                 self.control.checkpoint()?;
                 let mut pending = pending;
-                pending.response =
-                    summary_unavailable(pending.response, "authoritative_summary_source_mismatch");
+                // An absent interval is its own typed state; only a present
+                // interval that binds a different range is a mismatch.
+                pending.response = summary_unavailable(
+                    pending.response,
+                    summary
+                        .source_range
+                        .absent_reason()
+                        .unwrap_or("authoritative_summary_source_mismatch"),
+                );
                 return Ok(pending);
             }
             Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {
@@ -1039,6 +1048,162 @@ mod tests {
         assert_eq!(claude.route, "claude_native_compaction");
     }
 
+    /// Ingests one recognizable Claude compact pair and returns the store's
+    /// session id. `leading_role` is the role of the rows before the pair:
+    /// `system` rows are policy anchors compression pins separately, so a
+    /// summary behind only those rows is owed no conversational interval.
+    async fn ingest_claude_compact_pair(
+        db: &RegisteredGlobalDb,
+        session_id: &str,
+        leading_role: &str,
+    ) {
+        let boundary_id = format!("{session_id}-boundary");
+        let summary_id = format!("{session_id}-summary");
+        let mut messages = Vec::new();
+        for ordinal in 1..=2 {
+            let mut record = message(session_id, ordinal);
+            record.provider = "claude".to_string();
+            record.message_id = format!("{session_id}-leading-{ordinal}");
+            record.role = leading_role.to_string();
+            messages.push(record);
+        }
+        let mut boundary = message(session_id, 3);
+        boundary.provider = "claude".to_string();
+        boundary.message_id = boundary_id.clone();
+        boundary.role = "system".to_string();
+        boundary.kind = Some("compaction".to_string());
+        boundary.metadata_json = Some(
+            canonical_envelope(
+                "claude",
+                session_id,
+                &boundary_id,
+                None,
+                vec![
+                    serde_json::json!({
+                        "kind": "boundary",
+                        "boundary_kind": "compaction_boundary"
+                    }),
+                    serde_json::json!({
+                        "kind": "compaction",
+                        "summary": {"preservedSegment": {"anchorUuid": summary_id}}
+                    }),
+                ],
+            )
+            .to_string(),
+        );
+        messages.push(boundary);
+        let mut summary = message(session_id, 4);
+        summary.provider = "claude".to_string();
+        summary.message_id = summary_id.clone();
+        summary.role = "user".to_string();
+        summary.text = "authoritative Claude compaction".to_string();
+        summary.metadata_json = Some(
+            canonical_envelope(
+                "claude",
+                session_id,
+                &summary_id,
+                Some(&boundary_id),
+                vec![serde_json::json!({
+                    "kind": "compaction",
+                    "summary": {
+                        "isCompactSummary": true,
+                        "isVisibleInTranscriptOnly": true
+                    }
+                })],
+            )
+            .to_string(),
+        );
+        messages.push(summary);
+        assert!(
+            db.upsert_transcript_batch(
+                &session("claude", session_id),
+                &messages,
+                &format!("/tmp/{session_id}.jsonl"),
+                ParseOffset::default(),
+            )
+            .await
+        );
+    }
+
+    /// An absent predecessor interval must never reach a published summary as
+    /// an unannotated empty range: a session's genuinely-first conversational
+    /// message has no predecessor, while an interval that is owed and missing
+    /// is unavailable and the caller refuses.
+    #[tokio::test]
+    async fn claude_native_summary_without_a_persisted_range_is_typed_absent() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-claude-absent-range").await;
+        let db = harness.registered.clone();
+        let owed_session = "claude-owed-range-session";
+        ingest_claude_compact_pair(&db, owed_session, "assistant").await;
+
+        let ingested = super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            owed_session,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            ingested.source_range.interval().is_some(),
+            "ordinary ingest must persist the conversational interval: {:?}",
+            ingested.source_range
+        );
+
+        // Model the #843 window: a preserved row whose interval the
+        // background rewrite has not produced yet.
+        let transaction = db.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "DELETE FROM lcm_raw_predecessor_ranges
+                 WHERE provider = 'claude' AND session_id = ?1",
+                params![owed_session],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let unavailable = super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            owed_session,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unavailable.source_range,
+            tracedecay_lcm::raw::LcmPredecessorRangeState::Unavailable
+        );
+        assert_eq!(
+            unavailable.source_range.absent_reason(),
+            Some("predecessor_interval_unavailable")
+        );
+
+        // A summary whose only earlier rows are policy anchors genuinely has
+        // no conversational predecessor, which is a different typed state.
+        let first_session = "claude-first-conversational-session";
+        ingest_claude_compact_pair(&db, first_session, "system").await;
+        let first = super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            first_session,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            first.source_range,
+            tracedecay_lcm::raw::LcmPredecessorRangeState::NoPredecessor
+        );
+        assert_eq!(
+            first.source_range.absent_reason(),
+            Some("no_predecessor_interval")
+        );
+    }
+
     #[tokio::test]
     async fn transcript_ingest_persists_native_compaction_raw_range() {
         let harness = RegisteredGlobalDbHarness::open("lcm-native-summary-range").await;
@@ -1103,10 +1268,12 @@ mod tests {
         assert_eq!(evidence.text, "production Codex compaction text");
         assert_eq!(
             evidence.source_range,
-            Some(tracedecay_lcm::LcmSummarySourceRange {
-                from_store_id: first,
-                to_store_id: last,
-            })
+            tracedecay_lcm::raw::LcmPredecessorRangeState::Interval(
+                tracedecay_lcm::LcmSummarySourceRange {
+                    from_store_id: first,
+                    to_store_id: last,
+                }
+            )
         );
         let converged =
             super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
@@ -1369,7 +1536,7 @@ mod tests {
         .unwrap();
         assert_eq!(second.text, "second authoritative Claude compaction");
         assert_eq!(
-            second.source_range.as_ref().unwrap().from_store_id,
+            second.source_range.interval().unwrap().from_store_id,
             first_summary_store_id
         );
     }

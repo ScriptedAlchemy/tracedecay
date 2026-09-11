@@ -20,7 +20,7 @@ use tracedecay_runtime_core::db::{
 };
 
 use super::cursor_agent::{CursorAgentSummaryConfig, summarize_with_cursor_agent};
-use super::{AuthoritativeSummary, SummaryResolutionError};
+use super::{AuthoritativeSummary, LcmPredecessorRangeState, SummaryResolutionError};
 
 /// One `session_messages` row offered to the recognizers.
 ///
@@ -303,7 +303,7 @@ async fn cursor_agent_summary(
     Ok(AuthoritativeSummary {
         text,
         route: "cursor_agent".to_string(),
-        source_range: Some(source_range),
+        source_range: LcmPredecessorRangeState::Interval(source_range),
     })
 }
 
@@ -341,7 +341,7 @@ async fn codex_app_server_summary(
             || "codex_app_server".to_string(),
             |model| format!("codex_app_server:{model}"),
         ),
-        source_range: Some(source_range),
+        source_range: LcmPredecessorRangeState::Interval(source_range),
     })
 }
 

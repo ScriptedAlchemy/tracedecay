@@ -4,6 +4,7 @@ use serde_json::Value;
 use tracedecay_domain::CanonicalObservationEnvelopeV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_lcm::raw::{LcmPredecessorRangeState, predecessor_range_state};
 use tracedecay_lcm::{LcmError, LcmSummaryRequest, LcmSummarySourceRange};
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
@@ -20,7 +21,11 @@ use provider_capabilities::{
 pub(super) struct AuthoritativeSummary {
     pub(super) text: String,
     pub(super) route: String,
-    pub(super) source_range: Option<LcmSummarySourceRange>,
+    /// Provenance of the summarized interval. A summary whose interval is
+    /// absent carries why — a session's genuinely-first message has no
+    /// predecessor, an owed-but-missing interval is unavailable — so the
+    /// caller can refuse instead of publishing provenance-free evidence.
+    pub(super) source_range: LcmPredecessorRangeState,
 }
 
 /// Borrows the pending response's summary request: native-evidence hits and
@@ -37,7 +42,7 @@ pub(super) async fn resolve_authoritative_summary(
     if let Some(summary) =
         native_summary_evidence(database, provider, session_id, Some(request)).await?
         && required_native_source_range
-            .is_none_or(|required| summary.source_range.as_ref() == Some(required))
+            .is_none_or(|required| summary.source_range.interval() == Some(required))
     {
         return Ok(summary);
     }
@@ -191,17 +196,32 @@ pub(super) async fn native_summary_evidence(
                     native_store_is_recognized(&snapshot, provider, session_id, from_store_id)
                         .await?
                 };
+                // A bound page reaches this row through its persisted range,
+                // so an interval that does not bind the required one is not a
+                // missing range: it is evidence that does not cover the page.
                 explicit_range
                     .or_else(|| starts_at_native_summary.then(|| required.source_range.clone()))
-            } else {
-                explicit_range.or_else(|| {
-                    previous_native_store_id.or(range_from).zip(range_to).map(
-                        |(from_store_id, to_store_id)| LcmSummarySourceRange {
-                            from_store_id,
-                            to_store_id,
-                        },
-                    )
+                    .map_or(LcmPredecessorRangeState::Unavailable, |interval| {
+                        LcmPredecessorRangeState::Interval(interval)
+                    })
+            } else if let Some(interval) = explicit_range {
+                LcmPredecessorRangeState::Interval(interval)
+            } else if let (Some(from_store_id), Some(to_store_id)) =
+                (previous_native_store_id.or(range_from), range_to)
+            {
+                LcmPredecessorRangeState::Interval(LcmSummarySourceRange {
+                    from_store_id,
+                    to_store_id,
                 })
+            } else if let Some(store_id) = store_id {
+                // No persisted interval: ask the range authority whether this
+                // row is its session's first conversational message or is
+                // owed an interval it does not have.
+                predecessor_range_state(&snapshot, provider, session_id, store_id).await?
+            } else {
+                // The recognized row is not in the raw authority at all, so
+                // no interval can be derived for it.
+                LcmPredecessorRangeState::Unavailable
             };
             previous_native_store_id = store_id.or(previous_native_store_id);
             if let Some(required_source) = required_source
@@ -209,7 +229,7 @@ pub(super) async fn native_summary_evidence(
                     &snapshot,
                     provider,
                     session_id,
-                    source_range.as_ref(),
+                    source_range.interval(),
                     required_source,
                 )
                 .await?
