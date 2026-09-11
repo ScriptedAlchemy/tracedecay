@@ -24,6 +24,7 @@ use crate::capabilities::{
     GatewayCapabilities, UpstreamCapabilities, is_supported_context_projection,
     negotiate_capabilities,
 };
+use crate::analyzer::broker::DiagnosticSeverity;
 use crate::catalog::{LspCatalogAdmission, LspCatalogAdmissionError};
 use crate::context::{
     ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
@@ -36,8 +37,8 @@ use crate::context::{
     TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 use crate::diagnostics::{
-    DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
-    GatewayDiagnostic, LspPosition, LspRange, MAX_DOCUMENT_DIAGNOSTICS,
+    DiagnosticMerge, DiagnosticSource, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition,
+    LspRange, MAX_DOCUMENT_DIAGNOSTICS,
 };
 use crate::dispatch::{dispatch_incoming, parse_incoming};
 use crate::gateway::{
