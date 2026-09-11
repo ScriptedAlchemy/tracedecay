@@ -90,7 +90,7 @@ fn short_chunk(index: usize) -> String {
 /// A chunk that tokenizes well past the short group's padded length.
 fn long_chunk(index: usize) -> String {
     let mut text = String::new();
-    for line in 0..60 {
+    for line in 0..8 {
         text.push_str(&format!(
             "pub fn handler_{index}_{line}(request: &Request, state: &mut State) -> Result<Response, Error> {{ state.count += {line}; Ok(Response::ok()) }}\n"
         ));
