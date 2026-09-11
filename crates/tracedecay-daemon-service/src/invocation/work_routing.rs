@@ -137,7 +137,7 @@ impl WorkRoutingSnapshotPortV1 for DaemonWorkProposalRoutingAuthorityV1 {
     ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1> {
         if context.validate().is_err()
             || context.scope() != &self.scope
-            || &context.grant().digest != &self.grant_digest
+            || context.grant().digest != self.grant_digest
             || !context.allows(
                 &self.generate_proposal_capability,
                 &self.generate_proposal_use_case,
