@@ -838,27 +838,17 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         .expect("serve selected target verification connection");
 
     let executor = Arc::new(ControlledCancellationExecutor::new());
-    let project_path = fixture
-        .handshake
-        .project_path
-        .as_deref()
-        .expect("fixture project");
-    let graph = super::super::open_project_for_handshake(
-        project_path,
-        &fixture.handshake,
-        &fixture.engine.store_administration,
-    )
-    .await
-    .expect("open controlled selector owner");
-    let controlled_key = ProjectServerKey::from_open_project(&graph, &fixture.handshake)
-        .expect("controlled selector-owner key");
-    let controlled_route = ProjectRouteKey::from_handshake(project_path, &fixture.handshake)
-        .expect("controlled selector-owner route");
+    // `tracedecay_fact_store_list` is a registered-project reader: the
+    // connection server resolves the selector, then hops to the selected
+    // project's retained owner. Replace that owner in place — a second key
+    // for the same project_id makes the resolver report ambiguous, and a
+    // replacement without profile identity is filtered out of the mount set.
+    let graph = target_server.cg().await;
     let profile_identity = fixture
         .engine
         .store_administration
         .profile_identity()
-        .expect("controlled selector-owner profile identity")
+        .expect("selected-project profile identity")
         .clone();
     let controlled = crate::mcp::McpServer::new_with_context(
         crate::mcp::server::McpServerConstructionContext::direct(graph, None)
@@ -873,8 +863,12 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
             .project_servers()
             .lock()
             .await;
-        owners.insert_route(controlled_route, controlled_key.clone(), controlled);
-        assert!(owners.mark_ready(&controlled_key));
+        assert!(
+            owners
+                .swap_ready_if(&target_key, controlled, |_| true)
+                .is_some(),
+            "selected-project owner must be replaced in place"
+        );
     }
 
     let (server_stream, client_stream) =
@@ -910,7 +904,7 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
     wait_for_count(
         &executor.started,
         1,
-        "selector-only request never reached the connection owner",
+        "selected reader never reached the selected-project owner",
     )
     .await;
     writer
