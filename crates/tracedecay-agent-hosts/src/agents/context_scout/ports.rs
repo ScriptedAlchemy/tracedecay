@@ -1126,7 +1126,7 @@ fn valid_opaque_address(address: ContextScoutAddressV1) -> bool {
 }
 
 fn digest_bytes(digest: &ManifestDigest) -> Option<[u8; 32]> {
-    let encoded = digest.as_str().strip_prefix("sha256:")?;
+    let encoded = digest.hex_suffix()?;
     let mut bytes = [0_u8; 32];
     hex::decode_to_slice(encoded, &mut bytes).ok()?;
     Some(bytes)
@@ -1267,7 +1267,7 @@ mod tests {
         let envelope = decode_bound_native_hook_event(
             HookHostV1::ClaudeCode,
             include_bytes!(
-                "../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+                "../../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
             ),
             &binding,
             NativeEnvelopeMaterialV1 {
