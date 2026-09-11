@@ -31,7 +31,7 @@ pub use lifecycle::MovedStoreAdoption;
 /// Why a `TraceDecay` instance has no Context Scout owner.
 #[derive(Clone)]
 pub(crate) enum ContextScoutOwnerLookupV1 {
-    Ready(Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>),
+    Ready(Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>),
     ReadOnly,
     Unregistered,
 }
@@ -116,7 +116,7 @@ impl TraceDecay {
 
     pub(crate) fn context_scout_owner(
         &self,
-    ) -> Option<Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>>
+    ) -> Option<Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>>
     {
         match self.context_scout_owner_lookup() {
             ContextScoutOwnerLookupV1::Ready(owner) => Some(owner),
@@ -134,7 +134,7 @@ impl TraceDecay {
             return ContextScoutOwnerLookupV1::Unregistered;
         };
         let mut owners =
-            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+            tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
                 project_id,
             );
         match owners.len() {
@@ -152,11 +152,11 @@ impl TraceDecay {
     #[hotpath::skip]
     pub(crate) async fn mount_current_context_scout_claim_authority(
         &self,
-        registry: Arc<tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
-        hook: &tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1,
-        pin: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+        registry: Arc<tracedecay_agent_hosts::agents::context_scout::ports::ProjectContextScoutAddressRegistryV1>,
+        hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
+        pin: tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutAuthorityPinV1,
         context: tracedecay_contracts::RequestContext,
-        lifecycle: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        lifecycle: tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
         address: ContextScoutAddressV1,
         input_watermark: [u8; 32],
         observed_at: tracedecay_domain::UtcMicros,
@@ -179,8 +179,8 @@ impl TraceDecay {
                     configuration_is_current,
                 )
                 .await,
-            tracedecay_agent_hosts::agents::context_scout_owner::ContextScoutClaimAdmissionV1::Mounted
-                | tracedecay_agent_hosts::agents::context_scout_owner::ContextScoutClaimAdmissionV1::Replaced
+            tracedecay_agent_hosts::agents::context_scout::owner::ContextScoutClaimAdmissionV1::Mounted
+                | tracedecay_agent_hosts::agents::context_scout::owner::ContextScoutClaimAdmissionV1::Replaced
         )
     }
 
@@ -191,8 +191,8 @@ impl TraceDecay {
     #[hotpath::skip]
     pub(crate) async fn resolve_current_context_scout_claim_authority(
         &self,
-        hook: &tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1,
-        lifecycle: &tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
+        lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
         let owner = self.context_scout_owner()?;
@@ -213,7 +213,7 @@ impl TraceDecay {
     #[hotpath::skip]
     async fn context_scout_configuration_is_current(
         &self,
-        pin: &tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
+        pin: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutAuthorityPinV1,
     ) -> bool {
         self.configuration_runtime
             .client()

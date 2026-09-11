@@ -191,7 +191,7 @@ pub(super) fn ensure_context_scout_owner_before_advertising(
     };
     if matches!(
         owner.startup_outcome(),
-        tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutDurableStartupOutcomeV1::Unavailable
+        tracedecay_agent_hosts::agents::context_scout::ContextScoutDurableStartupOutcomeV1::Unavailable
     ) {
         return Err(TraceDecayError::Config {
             message: "project Context Scout durable owner is unavailable".to_owned(),

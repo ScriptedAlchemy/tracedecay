@@ -36,7 +36,7 @@ use tracedecay_domain::{
 };
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopeBindingV1};
 
-use super::context_scout_v2::{
+use super::{
     ContextScoutControlV1, ContextScoutDeliverySelectionInputV1, ContextScoutEvidenceEnvelopeExt,
     ContextScoutLimitsV1, ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1,
     ContextScoutServiceStateV1, select_context_scout_delivery_window,

@@ -20,12 +20,12 @@ use tracedecay_hooks::{
 };
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
-use super::context_scout_model::context_scout_model_assistant_from_project_config;
-use super::context_scout_ports::{
+use super::model::context_scout_model_assistant_from_project_config;
+use super::ports::{
     AdmittedContextScoutHookV1, ContextScoutAuthorityPinV1, ContextScoutConfigurationPinV1,
     ContextScoutLifecycleAddressV1, ProjectContextScoutAddressRegistryV1,
 };
-use super::context_scout_v2::{
+use super::{
     ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1, ContextScoutControlV1,
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableRuntimeV1,
     ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1,
@@ -227,7 +227,7 @@ impl ProjectContextScoutOwnerV1 {
             || registry
                 .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
                 .await
-                != super::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+                != super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(
                     address,
                 )
         {
@@ -281,7 +281,7 @@ impl ProjectContextScoutOwnerV1 {
             .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
             .await;
         (resolved
-            == super::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+            == super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(
                 mounted.address,
             ))
         .then_some((mounted.address, mounted.input_watermark))
@@ -1097,7 +1097,7 @@ impl ContextScoutModelAssistantV1 for UnavailableConfiguredContextScoutModelV1 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::context_scout_ports::ContextScoutAddressBindOutcomeV1;
+    use super::super::ports::ContextScoutAddressBindOutcomeV1;
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
     use tracedecay_application::configuration::ConfigurationCurrentStateV1;
@@ -1123,14 +1123,14 @@ mod tests {
     fn state_transition_rejects_model_route_or_limit_drift() {
         let current = ContextScoutControlV1 {
             configuration_revision: [1; 32],
-            state: super::super::context_scout_v2::ContextScoutServiceStateV1::Active,
-            mode: super::super::context_scout_v2::ContextScoutRuntimeModeV1::ConfiguredModel,
+            state: super::super::ContextScoutServiceStateV1::Active,
+            mode: super::super::ContextScoutRuntimeModeV1::ConfiguredModel,
             model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
-            limits: super::super::context_scout_v2::ContextScoutLimitsV1::bounded_defaults(),
+            limits: super::super::ContextScoutLimitsV1::bounded_defaults(),
         };
         let paused = ContextScoutControlV1 {
             configuration_revision: [2; 32],
-            state: super::super::context_scout_v2::ContextScoutServiceStateV1::Paused,
+            state: super::super::ContextScoutServiceStateV1::Paused,
             ..current
         };
         assert!(context_scout_state_transition_is_exact(current, paused));
@@ -1145,7 +1145,7 @@ mod tests {
         ));
 
         let changed_limits = ContextScoutControlV1 {
-            limits: super::super::context_scout_v2::ContextScoutLimitsV1 {
+            limits: super::super::ContextScoutLimitsV1 {
                 max_candidates: paused.limits.max_candidates.saturating_add(1),
                 ..paused.limits
             },
