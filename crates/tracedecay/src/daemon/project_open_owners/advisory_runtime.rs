@@ -17,11 +17,11 @@ use tracedecay_application::advisory::{
     AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
     AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1,
     AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
-    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
-    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
-    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
-    ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
-    ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
+    CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1, CiSourceAccessAuthorityV1,
+    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
+    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
+    GitHubReviewRuntimeOwnerConfigV1, ProductionCiFailureDiscoveryOutcomeV1,
+    ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
     open_advisory_production_authorities, register_advisory_daemon_startup,
     register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
@@ -1319,6 +1319,37 @@ async fn register_production_feedback_cycle(
     Ok((runtime, feedback_scope))
 }
 
+/// Retained CI store and CI anchor store are built for the same feedback scope
+/// GitHub resolved; a rejected scope is typed unavailability, not a silent None.
+fn production_ci_observation_stores(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+    feedback_scope: &FeedbackScopeV1,
+) -> Result<(
+    Arc<dyn CiRetainedProviderObservationAuthorityV1>,
+    Arc<dyn CiCodeAnchorStoreV1>,
+)> {
+    let ci_retained = Arc::new(
+        ProjectCiRetainedObservationStoreV1::new(state.database.clone(), feedback_scope.clone())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project-open CI retained store rejected the feedback scope".to_owned(),
+            })?,
+    ) as _;
+    let ci_code_anchors = Arc::new(
+        ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+            project_root.to_path_buf(),
+            feedback_scope.clone(),
+            Arc::clone(&state.code_graph),
+            Arc::new(invocation.code_index_schedulers.clone()),
+        )
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open CI anchor store rejected the feedback scope".to_owned(),
+        })?,
+    ) as _;
+    Ok((ci_retained, ci_code_anchors))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Advisory owner registration is one hook-and-feedback wiring for the opened project."
@@ -1389,23 +1420,8 @@ async fn register_production_advisory_owner(
         .as_ref()
         .map(|github| github.target.pull_request_id.clone());
     let ci_discovery_config = ci_config.clone();
-    let ci_retained = Arc::new(
-        ProjectCiRetainedObservationStoreV1::new(state.database.clone(), feedback_scope.clone())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open CI retained store rejected the feedback scope".to_owned(),
-            })?,
-    ) as _;
-    let ci_code_anchors = Arc::new(
-        ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
-            project_root.to_path_buf(),
-            feedback_scope.clone(),
-            Arc::clone(&state.code_graph),
-            Arc::new(invocation.code_index_schedulers.clone()),
-        )
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project-open CI anchor store rejected the feedback scope".to_owned(),
-        })?,
-    ) as _;
+    let (ci_retained, ci_code_anchors) =
+        production_ci_observation_stores(invocation, project_root, state, &feedback_scope)?;
     let hook_notices = AdvisoryHookNoticeQueueV1::new(feedback_scope.clone());
     let (hook_project_id, hook_worktree_id) =
         tracedecay_agent_hosts::hooks::hook_scope_locators(&state.scope);
