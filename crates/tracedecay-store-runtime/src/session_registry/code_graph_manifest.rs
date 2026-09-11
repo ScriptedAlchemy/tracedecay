@@ -37,7 +37,13 @@ fn classify_sealed_generation_decode_error(
                 sealed_state_digest: sealed_state_digest.as_str().to_owned(),
             }
         }
-        error @ CodeIndexProductionErrorV1::SealedRowContractRefused { .. } => {
+        // A row shape or an envelope revision this build no longer reads is
+        // the same typed state to replay: the sealed bytes are intact, this
+        // build just cannot derive a graph from them, so replay reports
+        // unavailability and the generation is rebuilt rather than declared
+        // corrupt.
+        error @ (CodeIndexProductionErrorV1::SealedRowContractRefused { .. }
+        | CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_)) => {
             GraphDbError::SealedRevisionIncompatible {
                 sealed_state_digest: sealed_state_digest.as_str().to_owned(),
                 message: error.to_string(),

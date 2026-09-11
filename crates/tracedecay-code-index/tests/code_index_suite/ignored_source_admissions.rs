@@ -450,8 +450,8 @@ fn sealed_state_digest_changes_when_ignored_source_roster_changes() {
 }
 
 #[test]
-fn sealed_format_refuses_superseded_revisions_beside_partitioned_revision_seven() {
-    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 7);
+fn sealed_format_refuses_superseded_revisions_beside_the_partitioned_revision() {
+    assert_eq!(SEALED_GENERATION_FORMAT_REVISION_V1, 8);
     let generation = publish(request_with_ignored_sources(vec![admission(
         PRIMARY_IGNORED_PATH,
     )]));
@@ -479,7 +479,7 @@ fn sealed_format_refuses_superseded_revisions_beside_partitioned_revision_seven(
         "superseded revision reached the wrong rejection: {error}"
     );
 
-    for incompatible_revision in [4, 8] {
+    for incompatible_revision in [4, 10] {
         let mut incompatible = sealed_envelope(&generation);
         incompatible["generation"]["format_revision"] = Value::from(incompatible_revision);
         let incompatible =
@@ -492,15 +492,21 @@ fn sealed_format_refuses_superseded_revisions_beside_partitioned_revision_seven(
             .expect_err("adjacent sealed-generation revisions are incompatible");
     }
 
-    let mut partitioned = sealed_envelope(&generation);
-    partitioned["generation"]["format_revision"] =
-        Value::from(SEALED_GENERATION_FORMAT_REVISION_V1);
-    let partitioned =
-        serde_json::to_vec(&partitioned).expect("partitioned-format generation manifest");
-    assert!(
-        CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&partitioned)
-            .expect("partitioned revision classification")
-            .is_none(),
-        "the monolithic decoder must refuse revision seven without a segment resolver"
-    );
+    // Every manifest revision belongs to the partitioned decoder, including
+    // the retired seven: this decoder owns the monolithic envelope and the
+    // floor below it, so it abstains rather than claiming bytes it cannot
+    // resolve segments for. The partitioned reader then admits the current
+    // revision and refuses the retired one with the typed rebuild error.
+    for manifest_revision in [SEALED_GENERATION_FORMAT_REVISION_V1, 7] {
+        let mut partitioned = sealed_envelope(&generation);
+        partitioned["generation"]["format_revision"] = Value::from(manifest_revision);
+        let partitioned =
+            serde_json::to_vec(&partitioned).expect("partitioned-format generation manifest");
+        assert!(
+            CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&partitioned)
+                .expect("partitioned revision classification")
+                .is_none(),
+            "the monolithic decoder must abstain from manifest revision {manifest_revision}"
+        );
+    }
 }
