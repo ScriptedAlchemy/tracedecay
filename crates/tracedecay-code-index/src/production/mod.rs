@@ -13,8 +13,8 @@ use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError}
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1, ComponentVersion,
-    CoverageSummaryV1, FileOccurrenceId, GenerationTestAttributionV1, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
+    CoverageSummaryV1, ExtractorRevision, FileOccurrenceId, GenerationTestAttributionV1,
+    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
     RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
     SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
@@ -515,6 +515,7 @@ impl SharedPhysicalCodeArtifactPoolV1 {
         &self,
         key: &ManifestDigest,
         file: &ReceiptBoundCodeFileV1,
+        extractor_revision: &ExtractorRevision,
         worker: &crate::hotpath_observe::WorkerBusyGuard,
     ) -> Option<Arc<FileGenerationArtifactsV1>> {
         crate::hotpath_observe::measure_hot_loop!("code_index.artifact_pool.reuse", {
@@ -522,7 +523,11 @@ impl SharedPhysicalCodeArtifactPoolV1 {
                 let _coordination = worker.pool_coordination();
                 upgrade_weak_under_lock(&self.state, |state| state.artifacts.get(key).cloned())
             }?;
-            let rebound = Arc::new(artifact.rematerialize_for_file(file).ok()?);
+            let rebound = Arc::new(
+                artifact
+                    .rematerialize_for_file(file, extractor_revision)
+                    .ok()?,
+            );
             {
                 let _coordination = worker.pool_coordination();
                 let mut state = self
@@ -584,9 +589,13 @@ impl FileGenerationArtifactsV1 {
     fn rematerialize_for_file(
         &self,
         file: &ReceiptBoundCodeFileV1,
+        extractor_revision: &ExtractorRevision,
     ) -> Result<Self, ChunkingFailureV1> {
         crate::hotpath_observe::measure_hot_loop!("code_index.artifact_pool.rematerialize", {
             let target = file.validated_file();
+            if &self.extraction.extractor_revision != extractor_revision {
+                return Err(ChunkingFailureV1::GenerationMismatch);
+            }
             let artifacts = self.artifacts.rematerialize_for_generation(
                 target.generation_id.clone(),
                 target.file.file_occurrence_id.clone(),
@@ -611,6 +620,7 @@ impl FileGenerationArtifactsV1 {
         scope: &CodeIndexGenerationScopeV1,
         generation_id: &CodeGenerationId,
         file: &SanitizedCodeFileV1,
+        extractor_revision: &ExtractorRevision,
     ) -> Result<Self, ChunkingFailureV1> {
         if self.authority.project_id != config.project_id
             || self.authority.repository_id != config.repository
@@ -620,6 +630,7 @@ impl FileGenerationArtifactsV1 {
             || self.authority.content_digest != file.content_digest
             || self.extraction.content_digest != file.content_digest
             || self.extraction.file_occurrence_id != file.file_occurrence_id
+            || &self.extraction.extractor_revision != extractor_revision
         {
             return Err(ChunkingFailureV1::GenerationMismatch);
         }
@@ -1905,9 +1916,12 @@ where
             })?;
             let physical_reuse_key =
                 Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
-            if let Some(reused) =
-                physical_artifacts.reuse(&physical_reuse_key, &receipt_bound, worker)
-            {
+            if let Some(reused) = physical_artifacts.reuse(
+                &physical_reuse_key,
+                &receipt_bound,
+                &descriptor.extractor_revision,
+                worker,
+            ) {
                 crate::hotpath_observe::add_reused_parses(1);
                 Self::checkpoint(control)?;
                 return Ok((physical_reuse_key, reused));
@@ -1951,6 +1965,7 @@ where
                 file,
                 captured,
                 parser,
+                &descriptor.extractor_revision,
                 control,
             ) {
                 Ok((parse_artifacts, parsed_len)) => {
@@ -2157,6 +2172,16 @@ where
                                     "increment plan refers to a missing current file".to_owned(),
                                 )
                             })?;
+                        let language = current_file.language.as_ref().ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "present snapshot file has no declared language".to_owned(),
+                            )
+                        })?;
+                        let descriptor = intake.registry().descriptor(language).ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "validated snapshot language has no descriptor".to_owned(),
+                            )
+                        })?;
                         let carried = if let Some(captured) = captured_files.get(file_occurrence_id)
                         {
                             let receipt_bound = intake
@@ -2174,13 +2199,17 @@ where
                                     },
                                 )
                                 .map_err(CodeIndexProductionErrorV1::Intake)?;
-                            prior.rematerialize_for_file(&receipt_bound)
+                            prior.rematerialize_for_file(
+                                &receipt_bound,
+                                &descriptor.extractor_revision,
+                            )
                         } else {
                             prior.rematerialize_carried_forward(
                                 config,
                                 &scope,
                                 &manifest.generation_id,
                                 current_file,
+                                &descriptor.extractor_revision,
                             )
                         };
                         if let Ok(artifact) = carried {

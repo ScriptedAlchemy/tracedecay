@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::{
-    ALPHA_LIB_V1, CodeIndexSchedulerRegistryV1, GitFixture, SharedCodeIndexBytePoolV1, published,
+    CodeIndexSchedulerRegistryV1, GitFixture, SharedCodeIndexBytePoolV1, published,
     replace_scheduler_chunker_revision, rewrite_active_rust_extractor_revision, scheduler,
     test_project_id, wait_for_queryable_text_generation_change, wait_for_quiescent_owner_pass,
 };
@@ -12,7 +12,10 @@ use crate::code_index_scheduler::scoped_code_index_store_root;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "mod inner;\npub use inner::*;\n"),
+        ("src/inner.rs", "pub fn exported() {}\n"),
+    ]);
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
@@ -110,6 +113,29 @@ async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
     assert!(
         !current_status.rebuild_in_flight,
         "status must clear rebuild liveness after the replacement becomes current"
+    );
+    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let latest = scheduler
+        .lock()
+        .expect("scheduler lock")
+        .latest_complete()
+        .expect("replacement generation");
+    assert!(
+        latest
+            .generation
+            .imports()
+            .iter()
+            .any(|row| row.is_public && row.is_glob),
+        "replacement must persist the current Rust public-glob import shape"
     );
 
     registry.shutdown().await;

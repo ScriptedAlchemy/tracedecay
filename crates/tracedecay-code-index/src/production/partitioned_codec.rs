@@ -2717,6 +2717,21 @@ impl CodeIndexPublishedGenerationV1 {
                 .get(&current_snapshot_file.file_occurrence_id)
                 .and_then(|(prior_file, prior_descriptor)| {
                     (*prior_file == current_snapshot_file).then_some(())?;
+                    let language = current_snapshot_file.language.as_ref()?;
+                    let current_extractor_revision = self
+                        .manifest
+                        .extractor_revisions
+                        .iter()
+                        .find(|(candidate, _)| candidate == language)
+                        .map(|(_, revision)| revision)?;
+                    let prior_extractor_revision = parent
+                        .as_ref()?
+                        .manifest
+                        .extractor_revisions
+                        .iter()
+                        .find(|(candidate, _)| candidate == language)
+                        .map(|(_, revision)| revision)?;
+                    (prior_extractor_revision == current_extractor_revision).then_some(())?;
                     // The reuse gate is fail-closed: the prior descriptor's
                     // occurrences, rebound to this generation, must still open
                     // with exactly the symbols this build produced. The
