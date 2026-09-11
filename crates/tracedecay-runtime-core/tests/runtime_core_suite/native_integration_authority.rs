@@ -7,7 +7,8 @@ use tempfile::TempDir;
 use tracedecay_domain::GitOidV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git_repository::{
-    GitNativeIntegrationMode, GitNativePreflightDisposition, GitRepositoryAuthority,
+    GitNativeIntegrationMode, GitNativePreflightCaptureError, GitNativePreflightDisposition,
+    GitRepositoryAuthority,
 };
 
 struct RepositoryFixture {
@@ -211,6 +212,78 @@ fn two_parent_merge_and_cherry_pick_materialize_the_previewed_tree() {
             }
         );
     }
+}
+
+#[test]
+fn synthetic_candidate_tree_is_streamed_in_order_before_object_memory_drops() {
+    let fixture = RepositoryFixture::new();
+    let (source, destination) = fixture.setup_divergence(false);
+    let authority = GitRepositoryAuthority::discover(fixture.path()).unwrap();
+    let cancellation = CancellationToken::new();
+
+    let (preview, paths) = authority
+        .preflight_native_integration_with_candidate(
+            "refs/heads/feature",
+            "refs/heads/main",
+            &source,
+            &destination,
+            GitNativeIntegrationMode::TwoParentMerge,
+            &cancellation,
+            |preflight, candidate| {
+                assert_eq!(
+                    candidate.tree().expect("candidate tree"),
+                    preflight.candidate_tree.clone().expect("eligible tree")
+                );
+                let mut paths = Vec::new();
+                candidate
+                    .visit_blobs(|path, _bytes| {
+                        paths.push(path.to_owned());
+                        Ok::<(), std::convert::Infallible>(())
+                    })
+                    .expect("visit candidate blobs");
+                Ok::<_, std::convert::Infallible>(paths)
+            },
+        )
+        .expect("preflight and capture");
+    assert_eq!(
+        paths.expect("eligible capture"),
+        vec!["feature.txt", "main.txt", "shared.txt"]
+    );
+
+    let candidate = preview.candidate_tree.expect("candidate tree");
+    let object_exists = Command::new("git")
+        .args(["cat-file", "-e", candidate.as_str()])
+        .current_dir(fixture.path())
+        .status()
+        .expect("git cat-file");
+    assert!(
+        !object_exists.success(),
+        "preflight must not persist the synthetic candidate in the real ODB"
+    );
+
+    let cancelled = CancellationToken::new();
+    let result = authority.preflight_native_integration_with_candidate(
+        "refs/heads/feature",
+        "refs/heads/main",
+        &source,
+        &destination,
+        GitNativeIntegrationMode::TwoParentMerge,
+        &cancelled,
+        |_, candidate| {
+            candidate
+                .visit_blobs(|_, _| {
+                    cancelled.cancel();
+                    Ok::<(), std::convert::Infallible>(())
+                })
+                .map_err(|_| "cancelled candidate traversal")
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(GitNativePreflightCaptureError::Capture(
+            "cancelled candidate traversal"
+        ))
+    ));
 }
 
 #[test]
