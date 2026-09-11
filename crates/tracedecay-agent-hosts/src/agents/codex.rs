@@ -95,7 +95,7 @@ impl AgentIntegration for CodexIntegration {
     #[hotpath::measure(label = "hosts.agent.codex.project_install")]
     fn activate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -111,7 +111,7 @@ impl AgentIntegration for CodexIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -120,7 +120,7 @@ impl AgentIntegration for CodexIntegration {
 
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -259,10 +259,10 @@ impl AgentIntegration for CodexIntegration {
 
     fn host_component_registration(
         &self,
-        _component: super::host_bundle_v2::HostBundleComponentV1,
+        _component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
         // Codex owns activation. The staged source bundle alone is not an
         // installed plugin, but it truthfully reports a repairable host-native
@@ -286,11 +286,11 @@ impl AgentIntegration for CodexIntegration {
 
     fn host_component_registration_for_lifecycle(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
         match self.host_component_registration(component, ctx) {
             State::Current => {
@@ -350,14 +350,14 @@ impl AgentIntegration for CodexIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
         let mut paths = self.host_registration_paths(home);
         // `~/.codex/agents` is Core registration surface: current exports plus
         // the ownership manifest (and prior-manifest direct children) so a
         // transaction that retires stale exports can still roll them back.
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::Core) {
             // `agent_targets` lives in automation-runtime and reads agent
             // bytes through the host I/O bundle this crate owns, so preview,
             // backup, and activate all inventory the same surface.
@@ -447,14 +447,14 @@ impl AgentIntegration for CodexIntegration {
     /// [`plugin_registry`] for the full rulings.
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         if mcp_registry::is_mcp_only_component_set(components) {
             let codex_cli = mcp_registry::require_codex_cli()?;
             return mcp_registry::codex_mcp_add_with(&codex_cli, &ctx.home, &ctx.tracedecay_bin);
         }
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::Core) {
             return self.activate_deployed_host_registration(ctx);
         }
         Ok(())
@@ -465,14 +465,14 @@ impl AgentIntegration for CodexIntegration {
     /// `Core`-bearing set keeps the manual plugin-removal guidance.
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         if mcp_registry::is_mcp_only_component_set(components) {
             let codex_cli = mcp_registry::require_codex_cli()?;
             return mcp_registry::codex_mcp_remove_with(&codex_cli, &ctx.home);
         }
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::Core) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::Core) {
             return self.deactivate_deployed_host_registration(ctx);
         }
         Ok(())
