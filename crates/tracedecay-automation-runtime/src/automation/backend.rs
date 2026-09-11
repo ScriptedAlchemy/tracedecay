@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_report_records_transient_transient_success_attempts() {
+    async fn retry_report_records_transient_success_attempts() {
         let backend = FlakyBackend::timing_out(2);
         let policy = BackendRetryPolicy::new(
             3,
