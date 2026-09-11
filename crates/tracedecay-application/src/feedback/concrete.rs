@@ -24,13 +24,13 @@ use tracedecay_contracts::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
     FEEDBACK_GET_CAPABILITY_ID_V1, FEEDBACK_GET_USE_CASE_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
-    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackCompletedPublicationReadPort,
-    FeedbackCompletedPublicationV1, FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState,
-    FeedbackCycleDedupeState, FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1,
-    FeedbackExpandRequestV1, FeedbackExpandResultV1, FeedbackFindingReadV1, FeedbackGetRequestV1,
-    FeedbackGetResultV1, FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort,
-    FeedbackPortFuture, FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService,
-    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, feedback_surface_operation,
+    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackCycleDedupePort, FeedbackCycleDedupeState,
+    FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1,
+    FeedbackExpandResultV1, FeedbackFindingReadV1, FeedbackGetRequestV1, FeedbackGetResultV1,
+    FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort, FeedbackPortFuture,
+    FeedbackPublicationReadPort, FeedbackPublicationRecordState, FeedbackPublicationV1,
+    FeedbackReadPortContext, FeedbackReadPortFuture, FeedbackReadService, FeedbackRouteAdmission,
+    FeedbackRouteAuthorizationPort, feedback_surface_operation,
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, ApplicationProblem, AuthorityReceipt,
@@ -39,7 +39,9 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
     RetryDirective, now_micros,
 };
-use tracedecay_domain::feedback::{FeedbackDedupeKeyV1, FeedbackFindingId, FeedbackFindingV1};
+use tracedecay_domain::feedback::{
+    FeedbackCycleTerminationV1, FeedbackDedupeKeyV1, FeedbackFindingId, FeedbackFindingV1,
+};
 use tracedecay_domain::{ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
 use tracedecay_store::DiagnosticStore;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -64,7 +66,7 @@ use tracedecay_session_memory::response_handles::{
     store_response_handle,
 };
 
-const PUBLICATION_LEDGER_METADATA_KEY: &str = "feedback.completed-publications.v1";
+const PUBLICATION_LEDGER_METADATA_KEY: &str = "feedback.publications.v1";
 const OBSERVATION_LEDGER_METADATA_KEY: &str = "feedback.observations.v1";
 const PUBLICATION_LEDGER_SCHEMA_VERSION: u16 = 1;
 const OBSERVATION_LEDGER_SCHEMA_VERSION: u16 = 3;
@@ -149,7 +151,7 @@ pub struct FeedbackRuntime {
 #[serde(deny_unknown_fields)]
 struct StoredPublicationLedgerV1 {
     schema_version: u16,
-    publications: Vec<FeedbackCompletedPublicationV1>,
+    publications: Vec<FeedbackPublicationV1>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -846,6 +848,11 @@ impl FeedbackCycleDedupePort for ProjectFeedbackStore {
                 Ok(publications) => {
                     if publications.iter().any(|publication| {
                         publication.dedupe_key == *key
+                            && matches!(
+                                publication.result.termination,
+                                FeedbackCycleTerminationV1::Clean
+                                    | FeedbackCycleTerminationV1::Blocked
+                            )
                             && publication_matches_context(publication, context)
                     }) {
                         FeedbackCycleDedupeState::Duplicate
@@ -858,42 +865,42 @@ impl FeedbackCycleDedupePort for ProjectFeedbackStore {
         })
     }
 
-    fn record_completed<'a>(
+    fn record_publication<'a>(
         &'a self,
         context: &'a RequestContext,
-        publication: &'a FeedbackCompletedPublicationV1,
-    ) -> FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState> {
+        publication: &'a FeedbackPublicationV1,
+    ) -> FeedbackPortFuture<'a, FeedbackPublicationRecordState> {
         if publication.validate().is_err() {
-            return Box::pin(async { FeedbackCycleDedupePublicationState::Unavailable });
+            return Box::pin(async { FeedbackPublicationRecordState::Unavailable });
         }
         match context.admission_at(publication.authority.revalidated_at) {
             RequestAdmission::Admitted => {}
             RequestAdmission::Cancelled => {
-                return Box::pin(async { FeedbackCycleDedupePublicationState::Cancelled });
+                return Box::pin(async { FeedbackPublicationRecordState::Cancelled });
             }
             RequestAdmission::TimedOut => {
-                return Box::pin(async { FeedbackCycleDedupePublicationState::TimedOut });
+                return Box::pin(async { FeedbackPublicationRecordState::TimedOut });
             }
         }
         Box::pin(async move {
             if !publication_matches_context(publication, context) {
-                return FeedbackCycleDedupePublicationState::Unavailable;
+                return FeedbackPublicationRecordState::Unavailable;
             }
             match self.record_publication(publication.clone()).await {
-                Ok(true) => FeedbackCycleDedupePublicationState::Recorded,
-                Ok(false) => FeedbackCycleDedupePublicationState::Duplicate,
-                Err(_) => FeedbackCycleDedupePublicationState::Unavailable,
+                Ok(true) => FeedbackPublicationRecordState::Recorded,
+                Ok(false) => FeedbackPublicationRecordState::Duplicate,
+                Err(_) => FeedbackPublicationRecordState::Unavailable,
             }
         })
     }
 }
 
-impl FeedbackCompletedPublicationReadPort for FeedbackRuntime {
+impl FeedbackPublicationReadPort for FeedbackRuntime {
     fn latest_committed<'a>(
         &'a self,
         context: &'a RequestContext,
         observed_at: UtcMicros,
-    ) -> FeedbackPortFuture<'a, Option<FeedbackCompletedPublicationV1>> {
+    ) -> FeedbackPortFuture<'a, Option<FeedbackPublicationV1>> {
         if context.admission_at(observed_at) != RequestAdmission::Admitted {
             return Box::pin(async { None });
         }
@@ -1280,9 +1287,7 @@ impl ProjectFeedbackStore {
     }
 
     #[hotpath::measure(label = "usecases.feedback.load_publications", future = true)]
-    async fn load_publications(
-        &self,
-    ) -> Result<Vec<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
+    async fn load_publications(&self) -> Result<Vec<FeedbackPublicationV1>, FeedbackRuntimeError> {
         let Some(encoded) = self
             .database
             .get_metadata(PUBLICATION_LEDGER_METADATA_KEY)
@@ -1300,7 +1305,7 @@ impl ProjectFeedbackStore {
     async fn scoped_publications(
         &self,
         context: &RequestContext,
-    ) -> Result<Vec<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
+    ) -> Result<Vec<FeedbackPublicationV1>, FeedbackRuntimeError> {
         let publications = self.load_publications().await?;
         Ok(publications
             .into_iter()
@@ -1315,7 +1320,7 @@ impl ProjectFeedbackStore {
     pub async fn doctor_latest_publication(
         &self,
         context: &RequestContext,
-    ) -> Result<Option<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
+    ) -> Result<Option<FeedbackPublicationV1>, FeedbackRuntimeError> {
         let publication = self
             .scoped_publications(context)
             .await?
@@ -1332,14 +1337,14 @@ impl ProjectFeedbackStore {
     #[hotpath::measure(label = "usecases.feedback.record_publication", future = true)]
     async fn record_publication(
         &self,
-        publication: FeedbackCompletedPublicationV1,
+        publication: FeedbackPublicationV1,
     ) -> Result<bool, FeedbackRuntimeError> {
         publication
             .validate()
             .map_err(|_| FeedbackRuntimeError::Corrupt)?;
         let transaction = self
             .database
-            .begin_write_transaction("record feedback completed publication")
+            .begin_write_transaction("record feedback publication")
             .await
             .map_err(|_| FeedbackRuntimeError::Store)?;
         let mut rows = transaction
@@ -1362,10 +1367,18 @@ impl ProjectFeedbackStore {
             .map(decode_ledger)
             .transpose()?
             .unwrap_or_default();
-        if publications
-            .iter()
-            .any(|stored| stored.dedupe_key == publication.dedupe_key)
-        {
+        if publications.iter().any(|stored| {
+            stored.result.result_id == publication.result.result_id
+                || (stored.dedupe_key == publication.dedupe_key
+                    && matches!(
+                        stored.result.termination,
+                        FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
+                    )
+                    && matches!(
+                        publication.result.termination,
+                        FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
+                    ))
+        }) {
             transaction
                 .rollback()
                 .await
@@ -1412,7 +1425,7 @@ impl ProjectFeedbackStore {
     fn finding_view(
         &self,
         context: &RequestContext,
-        publication: &FeedbackCompletedPublicationV1,
+        publication: &FeedbackPublicationV1,
         finding: &FeedbackFindingV1,
         observed_at: UtcMicros,
     ) -> Result<FeedbackFindingReadV1, FeedbackRuntimeError> {
@@ -1622,9 +1635,7 @@ where
     }
 }
 
-fn decode_ledger(
-    encoded: &str,
-) -> Result<Vec<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
+fn decode_ledger(encoded: &str) -> Result<Vec<FeedbackPublicationV1>, FeedbackRuntimeError> {
     let ledger: StoredPublicationLedgerV1 =
         serde_json::from_str(encoded).map_err(|_| FeedbackRuntimeError::Corrupt)?;
     if ledger.schema_version != PUBLICATION_LEDGER_SCHEMA_VERSION
@@ -1899,7 +1910,7 @@ fn apply_pending_worker_drops(
 }
 
 fn publication_matches_context(
-    publication: &FeedbackCompletedPublicationV1,
+    publication: &FeedbackPublicationV1,
     context: &RequestContext,
 ) -> bool {
     let scope = context.scope();
@@ -1914,8 +1925,8 @@ fn publication_matches_context(
 }
 
 fn publication_order(
-    left: &FeedbackCompletedPublicationV1,
-    right: &FeedbackCompletedPublicationV1,
+    left: &FeedbackPublicationV1,
+    right: &FeedbackPublicationV1,
 ) -> std::cmp::Ordering {
     left.authority
         .revalidated_at
@@ -1924,9 +1935,9 @@ fn publication_order(
 }
 
 fn latest_finding<'a>(
-    publications: &'a [FeedbackCompletedPublicationV1],
+    publications: &'a [FeedbackPublicationV1],
     finding_id: &FeedbackFindingId,
-) -> Option<(&'a FeedbackCompletedPublicationV1, &'a FeedbackFindingV1)> {
+) -> Option<(&'a FeedbackPublicationV1, &'a FeedbackFindingV1)> {
     publications
         .iter()
         .filter_map(|publication| {
