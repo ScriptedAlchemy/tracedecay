@@ -43,6 +43,7 @@ pub mod workflow_receipt;
 pub mod workflow_run;
 
 pub use automation::*;
+pub use canonical_text::sha256_hex_suffix;
 pub use code_intelligence::*;
 pub use configuration::*;
 pub use diagnostics::*;
