@@ -19,6 +19,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
 use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_domain::sha256_hex_suffix;
 
 use crate::code_index_journey::{
     ExactIndexIdentity, RECEIPT_TIMEOUT, assert_exact_identity, assert_project_identity,
@@ -203,10 +204,8 @@ fn read_active_generation(home: &Path, project: &Path) -> CodeIndexPublishedGene
                 length,
             } => (digest, size_bytes, offset, length),
         };
-        let digest_hex = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .expect("sealed segment digest is sha256");
+        let digest_hex =
+            sha256_hex_suffix(digest.as_str()).expect("sealed segment digest is sha256");
         let segment = fs::read(segments_root.join(format!("segment-{digest_hex}.json")))
             .expect("sealed generation segment");
         assert_eq!(
