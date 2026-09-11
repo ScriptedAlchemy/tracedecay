@@ -1079,6 +1079,16 @@ impl DaemonInvocationService {
     }
 }
 
+fn missing_work_runtime_problem(
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
+    request_id: String,
+) -> DaemonInvocationResponse {
+    if publication == Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Ready) {
+        return super::work::concealed_application_problem(request_id);
+    }
+    super::work::missing_registered_owner_problem(publication, request_id)
+}
+
 #[cfg(test)]
 mod future_size_guard {
     use super::*;
@@ -1113,14 +1123,4 @@ mod future_size_guard {
              any large payload arm in the dispatch match",
         );
     }
-}
-
-fn missing_work_runtime_problem(
-    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
-    request_id: String,
-) -> DaemonInvocationResponse {
-    if publication == Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Ready) {
-        return super::work::concealed_application_problem(request_id);
-    }
-    super::work::missing_registered_owner_problem(publication, request_id)
 }
