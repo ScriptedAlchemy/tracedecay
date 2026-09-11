@@ -658,7 +658,7 @@ fn branch_generation_observation(
             .parked
             .as_ref()
             .map(|parked| parked.reason.as_str())
-            .or_else(|| match freshness.code_graph_serving.as_ref() {
+            .or(match freshness.code_graph_serving.as_ref() {
                 Some(CodeGraphServingReadinessV1::Refused { reason }) => Some(reason.as_str()),
                 Some(CodeGraphServingReadinessV1::Unavailable { reason })
                     if !freshness.rebuild_in_flight =>

@@ -13931,7 +13931,7 @@ fn reparse_matches_full_parse_chunks() {
 /// budget: the waiter still blocks on the seating signal, and a seat that
 /// arrives at any time before the ceiling succeeds. The bound exists only so
 /// a worktree that can never seat fails with a diagnostic instead of hanging.
-const SERVING_SEAT_FAILURE_CEILING: Duration = Duration::from_secs(120);
+const SERVING_SEAT_FAILURE_CEILING: Duration = Duration::from_mins(2);
 
 async fn serving_seat_wait_diagnostic(
     registry: &CodeIndexSchedulerRegistryV1,
