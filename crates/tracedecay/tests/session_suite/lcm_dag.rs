@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmGrepRequest, LcmGrepSort, LcmScope,

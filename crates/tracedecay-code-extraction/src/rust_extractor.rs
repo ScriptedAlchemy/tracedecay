@@ -1,19 +1,30 @@
 /// Tree-sitter based Rust source code extractor.
 ///
 /// Parses Rust source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::local_node_id;
 use crate::complexity::{RUST_COMPLEXITY, count_complexity};
+use crate::extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1, import_module_kind,
+};
 use crate::types::{
-    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
-    Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, SourceSpan,
+    UnresolvedRef, Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Rust source files using tree-sitter.
 pub struct RustExtractor;
+
+#[derive(Default)]
+struct ShadowedCallNames {
+    names: Vec<String>,
+}
 
 /// Internal state used during AST traversal.
 ///
@@ -25,6 +36,8 @@ struct ExtractionState<'s> {
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
+    imports: Vec<ExtractedImportEvidenceV1>,
+    root_modules: BTreeMap<String, String>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
@@ -43,6 +56,8 @@ impl<'s> ExtractionState<'s> {
             edges: Vec::new(),
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
+            imports: Vec::new(),
+            root_modules: BTreeMap::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes(),
@@ -82,22 +97,26 @@ impl<'s> ExtractionState<'s> {
 impl RustExtractor {
     /// `file_path` is used for qualified names and node IDs (not for I/O).
     pub fn extract(file_path: &str, source: &str) -> ExtractionResult {
+        Self::extract_artifact(file_path, source).result
+    }
+
+    fn extract_artifact(file_path: &str, source: &str) -> ExtractionArtifactV1 {
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
                 let start = Instant::now();
                 let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
-                return Self::build_result(state, start);
+                return Self::build_artifact(state, start);
             }
         };
-        Self::extract_tree(
+        Self::extract_tree_artifact(
             file_path,
             source,
             &tree,
             crate::parsed_extraction::ParsedExtractionScope::FullDocument,
         )
-        .result
+        .artifact
     }
 
     fn extract_tree(
@@ -106,8 +125,18 @@ impl RustExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree_artifact(file_path, source, tree, scope).into_parsed()
+    }
+
+    fn extract_tree_artifact(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        state.root_modules = Self::root_module_names(&state, tree.root_node());
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -145,8 +174,8 @@ impl RustExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            Self::build_artifact(state, start),
             scope,
             metrics,
         )
@@ -255,6 +284,7 @@ impl RustExtractor {
         }
 
         Self::extract_call_sites(state, node, &id);
+        Self::suppress_shadowed_calls(state, node, &id);
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
@@ -635,6 +665,14 @@ impl RustExtractor {
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
+        let first_import = state.imports.len();
+        let top_level_argument = node
+            .parent()
+            .filter(|parent| parent.kind() == "source_file")
+            .and_then(|_| node.child_by_field_name("argument"));
+        if let Some(argument) = top_level_argument {
+            Self::extract_use_bindings(state, argument, None, visibility == Visibility::Pub);
+        }
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
         let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &path, node);
 
@@ -675,14 +713,226 @@ impl RustExtractor {
             });
         }
 
-        state.unresolved_refs.push(UnresolvedRef {
-            from_node_id: id,
-            reference_name: path,
-            reference_kind: EdgeKind::Uses,
-            line: start_line,
-            column: start_column,
-            file_path: state.file_path.clone(),
+        // Named bindings cannot account for wildcard members. Retain the original
+        // declaration as unresolved evidence rather than dropping those dependencies.
+        if top_level_argument.is_none() || state.imports.len() == first_import || path.contains('*')
+        {
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: id.clone(),
+                reference_name: path,
+                reference_kind: EdgeKind::Uses,
+                line: start_line,
+                column: start_column,
+                file_path: state.file_path.clone(),
+            });
+        }
+        if top_level_argument.is_some() {
+            for import in &state.imports[first_import..] {
+                if let Some(local_name) = import.local_name.as_deref() {
+                    if import.module_specifier == "self"
+                        && import.imported_name.as_deref() == Some(local_name)
+                        && state.root_modules.contains_key(local_name)
+                    {
+                        continue;
+                    }
+                    let from_node_id = Self::use_binding_anchor(state, import)
+                        .unwrap_or(id.as_str())
+                        .to_owned();
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id,
+                        reference_name: local_name.to_owned(),
+                        reference_kind: EdgeKind::Uses,
+                        line: import.start_line,
+                        column: import.start_column,
+                        file_path: state.file_path.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn extract_use_bindings(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        prefix: Option<&str>,
+        is_public: bool,
+    ) {
+        match node.kind() {
+            "scoped_use_list" => {
+                let path = node
+                    .child_by_field_name("path")
+                    .map(|path| state.node_text(path));
+                let combined = Self::join_use_path(prefix, path);
+                if let Some(list) = node.child_by_field_name("list") {
+                    Self::extract_use_bindings(state, list, combined.as_deref(), is_public);
+                }
+            }
+            "use_list" => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    Self::extract_use_bindings(state, child, prefix, is_public);
+                }
+            }
+            "use_as_clause" => {
+                let Some(path) = node.child_by_field_name("path") else {
+                    return;
+                };
+                let Some(alias) = node.child_by_field_name("alias") else {
+                    return;
+                };
+                let full_path = Self::join_use_path(prefix, Some(state.node_text(path)));
+                if let Some(full_path) = full_path {
+                    Self::push_use_binding(
+                        state,
+                        &full_path,
+                        state.node_text(alias),
+                        node,
+                        is_public,
+                    );
+                }
+            }
+            "use_wildcard" => {
+                let text = state.node_text(node);
+                let module = node
+                    .child_by_field_name("path")
+                    .map(|path| state.node_text(path))
+                    .or(prefix)
+                    .or_else(|| text.strip_suffix("::*"));
+                if let Some(module) = module {
+                    Self::push_glob_binding(state, module, node, is_public);
+                }
+            }
+            _ => {
+                let full_path = Self::join_use_path(prefix, Some(state.node_text(node)));
+                if let Some(full_path) = full_path {
+                    let local_name = full_path.rsplit("::").next().unwrap_or(full_path.as_str());
+                    Self::push_use_binding(state, &full_path, local_name, node, is_public);
+                }
+            }
+        }
+    }
+
+    fn join_use_path(prefix: Option<&str>, path: Option<&str>) -> Option<String> {
+        match (prefix, path) {
+            (Some(prefix), Some("self")) => Some(prefix.to_owned()),
+            (Some(prefix), Some(path)) => Some(format!("{prefix}::{path}")),
+            (Some(prefix), None) => Some(prefix.to_owned()),
+            (None, Some(path)) if !path.is_empty() => Some(path.to_owned()),
+            (None, _) => None,
+        }
+    }
+
+    fn push_use_binding(
+        state: &mut ExtractionState<'_>,
+        full_path: &str,
+        local_name: &str,
+        evidence_node: TsNode<'_>,
+        is_public: bool,
+    ) {
+        let (module_specifier, imported_name) = match full_path.rsplit_once("::") {
+            Some(parts) => parts,
+            None if Self::declares_module(state, full_path) => ("self", full_path),
+            None => return,
+        };
+        let module_specifier = Self::canonical_rust_import_module(state, module_specifier);
+        let Some(module_kind) = import_module_kind("rust", &module_specifier) else {
+            return;
+        };
+        state.imports.push(ExtractedImportEvidenceV1 {
+            logical_path: state.file_path.clone(),
+            module_specifier,
+            imported_name: Some(imported_name.to_owned()),
+            local_name: Some(local_name.to_owned()),
+            is_public,
+            is_glob: false,
+            namespace: ImportNamespaceV1::Value,
+            module_kind,
+            span: SourceSpan {
+                start_byte: evidence_node.start_byte() as u64,
+                end_byte: evidence_node.end_byte() as u64,
+            },
+            start_line: evidence_node.start_position().row as u32,
+            start_column: evidence_node.start_position().column as u32,
         });
+    }
+
+    fn push_glob_binding(
+        state: &mut ExtractionState<'_>,
+        module: &str,
+        evidence_node: TsNode<'_>,
+        is_public: bool,
+    ) {
+        let module_specifier = Self::canonical_rust_import_module(state, module);
+        let Some(module_kind) = import_module_kind("rust", &module_specifier) else {
+            return;
+        };
+        state.imports.push(ExtractedImportEvidenceV1 {
+            logical_path: state.file_path.clone(),
+            module_specifier,
+            imported_name: Some("*".to_owned()),
+            local_name: None,
+            is_public,
+            is_glob: true,
+            namespace: ImportNamespaceV1::Value,
+            module_kind,
+            span: SourceSpan {
+                start_byte: evidence_node.start_byte() as u64,
+                end_byte: evidence_node.end_byte() as u64,
+            },
+            start_line: evidence_node.start_position().row as u32,
+            start_column: evidence_node.start_position().column as u32,
+        });
+    }
+
+    fn canonical_rust_import_module(state: &ExtractionState<'_>, module: &str) -> String {
+        let first = module.split("::").next().unwrap_or(module);
+        if matches!(first, "crate" | "self" | "super") || !Self::declares_module(state, first) {
+            module.to_owned()
+        } else {
+            format!("self::{module}")
+        }
+    }
+
+    fn declares_module(state: &ExtractionState<'_>, name: &str) -> bool {
+        state.root_modules.contains_key(name)
+    }
+
+    fn use_binding_anchor<'a>(
+        state: &'a ExtractionState<'_>,
+        import: &ExtractedImportEvidenceV1,
+    ) -> Option<&'a str> {
+        let module = import
+            .module_specifier
+            .strip_prefix("self::")
+            .and_then(|path| path.split("::").next())
+            .or_else(|| {
+                (import.module_specifier == "self")
+                    .then_some(import.imported_name.as_deref())
+                    .flatten()
+            })?;
+        state.root_modules.get(module).map(String::as_str)
+    }
+
+    fn root_module_names(
+        state: &ExtractionState<'_>,
+        root: TsNode<'_>,
+    ) -> BTreeMap<String, String> {
+        let mut cursor = root.walk();
+        root.named_children(&mut cursor)
+            .filter(|child| child.kind() == "mod_item")
+            .filter_map(|child| {
+                let name = child.child_by_field_name("name")?;
+                let name = state.node_text(name).to_owned();
+                let id = local_node_id(
+                    &state.file_path,
+                    state.source,
+                    &NodeKind::Module,
+                    &name,
+                    child,
+                );
+                Some((name, id))
+            })
+            .collect()
     }
 
     /// Extract a const item node.
@@ -1190,6 +1440,7 @@ impl RustExtractor {
     fn extract_single_variant(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
         let text = state.node_text(node);
+        let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
@@ -1215,7 +1466,7 @@ impl RustExtractor {
             start_column,
             end_column,
             signature: Some(text.trim().trim_end_matches(',').to_string()),
-            docstring: None,
+            docstring,
             visibility: Visibility::Pub,
             is_async: false,
             branches: 0,
@@ -1311,6 +1562,78 @@ impl RustExtractor {
                         Self::extract_call_sites(state, child, fn_node_id);
                     }
                 }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Import rows are file-scoped, so a local binding makes the same bare
+    /// call name ambiguous for its whole owning function. Withhold that call
+    /// rather than claiming statement-level resolution the artifact lacks.
+    fn suppress_shadowed_calls(
+        state: &mut ExtractionState<'_>,
+        function: TsNode<'_>,
+        fn_node_id: &str,
+    ) {
+        let mut shadows = ShadowedCallNames::default();
+        Self::collect_shadowed_names(state, function, function, &mut shadows);
+        state.unresolved_refs.retain(|reference| {
+            reference.from_node_id != fn_node_id
+                || reference.reference_kind != EdgeKind::Calls
+                || !shadows.names.contains(&reference.reference_name)
+        });
+    }
+
+    fn collect_shadowed_names(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        if matches!(
+            node.kind(),
+            "parameter" | "let_declaration" | "for_expression"
+        ) && let Some(pattern) = node.child_by_field_name("pattern")
+        {
+            Self::record_binding_pattern(state, pattern, shadows);
+        }
+        if node.kind() == "closure_expression"
+            && let Some(parameters) = node.child_by_field_name("parameters")
+        {
+            Self::record_binding_pattern(state, parameters, shadows);
+        }
+        if node != function && node.kind() == "function_item" {
+            return;
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::collect_shadowed_names(state, cursor.node(), function, shadows);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn record_binding_pattern(
+        state: &ExtractionState<'_>,
+        pattern: TsNode<'_>,
+        shadows: &mut ShadowedCallNames,
+    ) {
+        if pattern.kind() == "identifier" {
+            shadows.names.push(state.node_text(pattern).to_owned());
+            return;
+        }
+        // Only walk the parser's binding field. Destructuring property and
+        // default-value subtrees may add names, deliberately withholding an
+        // ambiguous edge rather than inventing one.
+        let mut cursor = pattern.walk();
+        if cursor.goto_first_child() {
+            loop {
+                Self::record_binding_pattern(state, cursor.node(), shadows);
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -1462,6 +1785,24 @@ impl RustExtractor {
         kind: EdgeKind,
     ) {
         let n = cursor.node();
+        // A scoped type carries its own namespace (`fmt::Result`). Emitting it
+        // whole, and not descending into its `path`/`name` children, is what
+        // keeps resolution honest: the bare `Result` child would bind a
+        // same-named local type through the simple-name index, inventing an
+        // edge to a type the source never named. Resolution narrows a
+        // qualified name to its simple form itself when it looks cross-file,
+        // so nothing is lost by naming the reference exactly.
+        if n.kind() == "scoped_type_identifier" {
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: from_id.to_string(),
+                reference_name: state.node_text(n).to_string(),
+                reference_kind: kind,
+                line: n.start_position().row as u32,
+                column: n.start_position().column as u32,
+                file_path: state.file_path.clone(),
+            });
+            return;
+        }
         if n.kind() == "type_identifier" || n.kind() == "primitive_type" {
             state.unresolved_refs.push(UnresolvedRef {
                 from_node_id: from_id.to_string(),
@@ -1588,14 +1929,18 @@ impl RustExtractor {
         inner.split('(').next().unwrap_or(inner).trim().to_string()
     }
 
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState<'_>, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
+    /// Build the graph and parser-backed import evidence accumulated in one traversal.
+    fn build_artifact(state: ExtractionState<'_>, start: Instant) -> ExtractionArtifactV1 {
+        ExtractionArtifactV1 {
+            result: ExtractionResult {
+                nodes: state.nodes,
+                edges: state.edges,
+                unresolved_refs: state.unresolved_refs,
+                errors: state.errors,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            imports: state.imports,
+            schema_evidence: None,
         }
     }
 }
@@ -1613,6 +1958,10 @@ impl crate::LanguageExtractor for RustExtractor {
         RustExtractor::extract(file_path, source)
     }
 
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        RustExtractor::extract_artifact(file_path, source)
+    }
+
     fn extract_parsed(
         &self,
         file_path: &str,
@@ -1621,5 +1970,15 @@ impl crate::LanguageExtractor for RustExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         RustExtractor::extract_tree(file_path, source, tree, scope)
+    }
+
+    fn extract_parsed_artifact(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        RustExtractor::extract_tree_artifact(file_path, source, tree, scope)
     }
 }

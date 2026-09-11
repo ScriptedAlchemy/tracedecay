@@ -30,7 +30,6 @@ export interface ActivationOverlayOptions {
   realNodes: readonly string[];
   strands: readonly Strand[];
   field: ActivationField;
-  neighborsOf: ReadonlyMap<string, string[]>;
   theme: ThemeBox;
   focus: FocusState;
   /** Repaint the renderer. A no-op once the scene is gone. */
@@ -48,9 +47,6 @@ export interface ActivationOverlay {
   settle(): void;
   /** One static composition of the resting field. */
   repaintResting(): void;
-  /** A node was struck by the pointer: it fires now, its neighbourhood one
-   * synaptic delay later, along real caller/reference edges only. */
-  fireNeighborhood(node: string): void;
   stop(): void;
 }
 
@@ -59,7 +55,6 @@ export function createActivationOverlay({
   realNodes,
   strands,
   field,
-  neighborsOf,
   theme,
   focus,
   paint,
@@ -93,34 +88,38 @@ export function createActivationOverlay({
         const lit = heat > 0
           ? lerpRgbTuple(resting, colors.hot, Math.min(1, heat))
           : resting;
-        const shared = { x: attrs['x'], y: attrs['y'], label: '' };
-        // Sigma draws each companion as a hard-edged disc, so a corona is
-        // really three concentric steps and every step is a visible edge.
-        // The old radii (1.55x and 2.9x the body) made those edges read as
-        // banding rather than falloff, and turned a modest graph into a field
-        // of lollipops. Pulled in tight, the resting glow is a rim on the
-        // body instead of a second object beside it -- and a strike still
-        // has all the room it needs to swell.
+        const shared = { x: attrs['x'], y: attrs['y'], label: null, type: 'glow', owner: node };
+        const haloAlpha = 0.045 + 0.07 * vitality + 0.22 * heat;
+        const bloomAlpha = 0.012 + 0.022 * vitality + 0.08 * heat;
+        // The companion program fades these extents radially. Their size and
+        // brightness still derive only from measured vitality and real heat.
         upsert(graph, haloId, {
           ...shared,
           // Tight enough to read as a luminous rim, not a second donut body.
           size: size * (1.11 + 0.55 * heat),
-          color: rgba(lit, 0.045 + 0.07 * vitality + 0.22 * heat),
+          color: rgba(lit, haloAlpha),
+          glowRgb: lit,
+          glowAlpha: haloAlpha,
           zIndex: 1,
         });
         upsert(graph, bloomId, {
           ...shared,
           size: size * (1.68 + 1.3 * heat),
-          color: rgba(lit, 0.012 + 0.022 * vitality + 0.08 * heat),
+          color: rgba(lit, bloomAlpha),
+          glowRgb: lit,
+          glowAlpha: bloomAlpha,
           zIndex: 0,
         });
         // Impact flare: a wide, faint ring pops on strike and expands as the
         // bloom settles, so a firing is legible even in peripheral vision.
         if (heat > 0.5) {
+          const ringAlpha = 0.075 * heat;
           upsert(graph, ringId, {
             ...shared,
             size: size * (2.1 + 2.2 * (1 - heat)),
-            color: rgba(colors.hot, 0.075 * heat),
+            color: rgba(colors.hot, ringAlpha),
+            glowRgb: colors.hot,
+            glowAlpha: ringAlpha,
             zIndex: 1,
           });
         } else if (graph.hasNode(ringId)) {
@@ -236,18 +235,6 @@ export function createActivationOverlay({
     repaintResting: () => {
       syncGlow();
       paint();
-    },
-    fireNeighborhood: (node: string) => {
-      // Traveling activation: the struck node fires now; its neighborhood
-      // fires one synaptic delay later (real caller/reference edges only).
-      field.strike([node], 1);
-      const neighbors = neighborsOf.get(node) ?? [];
-      // Under reduced motion the synaptic delay collapses: the neighbourhood is
-      // lit in the same paint as the struck node, so the propagation is still
-      // fully legible as a state without anything travelling across the screen.
-      if (isReduced()) field.strike(neighbors, 0.55);
-      else setTimeout(() => { field.strike(neighbors, 0.55); wake(); }, 140);
-      wake();
     },
     stop: () => {
       stopped = true;

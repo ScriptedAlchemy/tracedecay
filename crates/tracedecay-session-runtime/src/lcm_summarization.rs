@@ -4,6 +4,7 @@ use serde_json::Value;
 use tracedecay_domain::CanonicalObservationEnvelopeV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_lcm::raw::{LcmPredecessorRangeState, predecessor_range_state};
 use tracedecay_lcm::{LcmError, LcmSummaryRequest, LcmSummarySourceRange};
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
@@ -20,7 +21,11 @@ use provider_capabilities::{
 pub(super) struct AuthoritativeSummary {
     pub(super) text: String,
     pub(super) route: String,
-    pub(super) source_range: Option<LcmSummarySourceRange>,
+    /// Provenance of the summarized interval. A summary whose interval is
+    /// absent carries why — a session's genuinely-first message has no
+    /// predecessor, an owed-but-missing interval is unavailable — so the
+    /// caller can refuse instead of publishing provenance-free evidence.
+    pub(super) source_range: LcmPredecessorRangeState,
 }
 
 /// Borrows the pending response's summary request: native-evidence hits and
@@ -37,7 +42,7 @@ pub(super) async fn resolve_authoritative_summary(
     if let Some(summary) =
         native_summary_evidence(database, provider, session_id, Some(request)).await?
         && required_native_source_range
-            .is_none_or(|required| summary.source_range.as_ref() == Some(required))
+            .is_none_or(|required| summary.source_range.interval() == Some(required))
     {
         return Ok(summary);
     }
@@ -101,24 +106,7 @@ pub(super) async fn native_summary_evidence(
     } else {
         (
             "SELECT message.message_id, message.text, message.kind, message.metadata_json,
-                    COALESCE(source_range.from_store_id, (
-                        SELECT predecessor.store_id
-                        FROM lcm_raw_messages AS predecessor
-                        WHERE predecessor.provider = message.provider
-                          AND predecessor.session_id = message.session_id
-                          AND predecessor.store_id < raw.store_id
-                        ORDER BY predecessor.store_id
-                        LIMIT 1
-                    )),
-                    COALESCE(source_range.to_store_id, (
-                        SELECT predecessor.store_id
-                        FROM lcm_raw_messages AS predecessor
-                        WHERE predecessor.provider = message.provider
-                          AND predecessor.session_id = message.session_id
-                          AND predecessor.store_id < raw.store_id
-                        ORDER BY predecessor.store_id DESC
-                        LIMIT 1
-                    )), raw.store_id
+                    source_range.from_store_id, source_range.to_store_id, raw.store_id
              FROM session_messages AS message
              LEFT JOIN lcm_raw_messages AS raw
                ON raw.provider = message.provider
@@ -175,18 +163,17 @@ pub(super) async fn native_summary_evidence(
         else {
             continue;
         };
-        // Envelope decoding is best-effort rather than a gate: a provider that
-        // records raw metadata instead of a canonical envelope still has to be
-        // recognizable, so failure to decode leaves `envelope` empty and lets
-        // the recognizers decide.
-        let envelope = decode_canonical_observation_metadata(metadata.clone());
+        let envelope = match decode_canonical_observation_metadata(metadata.clone())? {
+            CanonicalObservationMetadata::Envelope(envelope) => Some(envelope),
+            CanonicalObservationMetadata::Unrecognized => None,
+        };
         let candidate = NativeSummaryCandidate {
             provider,
             message_id: &message_id,
             text: &text,
             kind: kind.as_deref(),
             metadata: &metadata,
-            envelope: envelope.as_ref(),
+            envelope: envelope.as_deref(),
         };
         let mut route = None;
         for recognizer in &recognizers {
@@ -209,17 +196,32 @@ pub(super) async fn native_summary_evidence(
                     native_store_is_recognized(&snapshot, provider, session_id, from_store_id)
                         .await?
                 };
+                // A bound page reaches this row through its persisted range,
+                // so an interval that does not bind the required one is not a
+                // missing range: it is evidence that does not cover the page.
                 explicit_range
                     .or_else(|| starts_at_native_summary.then(|| required.source_range.clone()))
-            } else {
-                explicit_range.or_else(|| {
-                    previous_native_store_id.or(range_from).zip(range_to).map(
-                        |(from_store_id, to_store_id)| LcmSummarySourceRange {
-                            from_store_id,
-                            to_store_id,
-                        },
-                    )
+                    .map_or(LcmPredecessorRangeState::Unavailable, |interval| {
+                        LcmPredecessorRangeState::Interval(interval)
+                    })
+            } else if let Some(interval) = explicit_range {
+                LcmPredecessorRangeState::Interval(interval)
+            } else if let (Some(from_store_id), Some(to_store_id)) =
+                (previous_native_store_id.or(range_from), range_to)
+            {
+                LcmPredecessorRangeState::Interval(LcmSummarySourceRange {
+                    from_store_id,
+                    to_store_id,
                 })
+            } else if let Some(store_id) = store_id {
+                // No persisted interval: ask the range authority whether this
+                // row is its session's first conversational message or is
+                // owed an interval it does not have.
+                predecessor_range_state(&snapshot, provider, session_id, store_id).await?
+            } else {
+                // The recognized row is not in the raw authority at all, so
+                // no interval can be derived for it.
+                LcmPredecessorRangeState::Unavailable
             };
             previous_native_store_id = store_id.or(previous_native_store_id);
             if let Some(required_source) = required_source
@@ -227,7 +229,7 @@ pub(super) async fn native_summary_evidence(
                     &snapshot,
                     provider,
                     session_id,
-                    source_range.as_ref(),
+                    source_range.interval(),
                     required_source,
                 )
                 .await?
@@ -288,14 +290,17 @@ async fn native_store_is_recognized(
     let Some(metadata) = metadata else {
         return Ok(false);
     };
-    let envelope = decode_canonical_observation_metadata(metadata.clone());
+    let envelope = match decode_canonical_observation_metadata(metadata.clone())? {
+        CanonicalObservationMetadata::Envelope(envelope) => Some(envelope),
+        CanonicalObservationMetadata::Unrecognized => None,
+    };
     let candidate = NativeSummaryCandidate {
         provider,
         message_id: &message_id,
         text: &text,
         kind: kind.as_deref(),
         metadata: &metadata,
-        envelope: envelope.as_ref(),
+        envelope: envelope.as_deref(),
     };
     for recognizer in native_summary_recognizers(provider) {
         if recognizer.recognizes(snapshot, &candidate).await? {
@@ -305,11 +310,34 @@ async fn native_store_is_recognized(
     Ok(false)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CanonicalObservationMetadata {
+    Envelope(Box<CanonicalObservationEnvelopeV1>),
+    Unrecognized,
+}
+
+/// Decode persisted observation metadata.
+///
+/// A nested `canonical_envelope` is the persisted pairing authority: if that
+/// key is present it must decode, and a broken envelope is a typed error
+/// rather than a silent fallthrough onto the stripped metadata. Providers
+/// that never persist the nested key still decode the whole object, and a
+/// missing or non-envelope object is [`CanonicalObservationMetadata::Unrecognized`].
 pub(super) fn decode_canonical_observation_metadata(
     mut metadata: Value,
-) -> Option<CanonicalObservationEnvelopeV1> {
-    metadata.as_object_mut()?.remove("ingest_protection");
-    serde_json::from_value(metadata).ok()
+) -> Result<CanonicalObservationMetadata, LcmError> {
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok(CanonicalObservationMetadata::Unrecognized);
+    };
+    object.remove("ingest_protection");
+    if let Some(envelope) = object.remove("canonical_envelope") {
+        return serde_json::from_value(envelope)
+            .map(|envelope| CanonicalObservationMetadata::Envelope(Box::new(envelope)))
+            .map_err(|error| LcmError::Db(format!("canonical_envelope decode failed: {error}")));
+    }
+    Ok(serde_json::from_value(metadata)
+        .map(|envelope| CanonicalObservationMetadata::Envelope(Box::new(envelope)))
+        .unwrap_or(CanonicalObservationMetadata::Unrecognized))
 }
 
 async fn native_source_membership_is_exact(
@@ -369,5 +397,35 @@ pub(super) enum SummaryResolutionError {
 impl From<LcmError> for SummaryResolutionError {
     fn from(error: LcmError) -> Self {
         Self::Storage(error)
+    }
+}
+
+#[cfg(test)]
+mod decode_canonical_observation_metadata_tests {
+    use super::{CanonicalObservationMetadata, decode_canonical_observation_metadata};
+    use serde_json::json;
+
+    #[test]
+    fn nested_envelope_decode_failure_is_typed() {
+        let error = decode_canonical_observation_metadata(json!({
+            "canonical_envelope": {"not": "an envelope"}
+        }))
+        .expect_err("broken nested envelope must not fall through");
+        assert!(
+            error
+                .to_string()
+                .contains("canonical_envelope decode failed"),
+            "typed envelope failure: {error}"
+        );
+    }
+
+    #[test]
+    fn missing_nested_envelope_stays_unrecognized() {
+        let decoded = decode_canonical_observation_metadata(json!({"source": "codex"}))
+            .expect("absent nested envelope is not a decode error");
+        assert!(matches!(
+            decoded,
+            CanonicalObservationMetadata::Unrecognized
+        ));
     }
 }

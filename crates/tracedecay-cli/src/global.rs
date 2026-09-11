@@ -10,7 +10,9 @@ pub(crate) fn classify_project_storage(project_root: &Path) -> ProjectStorageLoc
 
 pub(crate) async fn classify_project_storage_with_registry(
     project_root: &Path,
-    registry: Option<&tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime>,
+    registry: Option<
+        &tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime,
+    >,
     profile_root: Option<&Path>,
 ) -> tracedecay_domain::errors::Result<ProjectStorageLocation> {
     let location = classify_project_storage(project_root);
@@ -87,7 +89,7 @@ pub(crate) fn try_flush(
     }
 
     config.last_flush_attempt_at = now;
-    if let Some(worldwide_total) = tracedecay::cloud::flush_pending(config.pending_upload) {
+    if let Some(worldwide_total) = crate::cloud::flush_pending(config.pending_upload) {
         config.pending_upload = 0;
         config.last_upload_at = now;
         config.last_worldwide_total = worldwide_total;
@@ -112,7 +114,7 @@ pub(crate) fn check_for_update(
             return;
         }
         config.cached_latest_version.clone()
-    } else if let Some(v) = tracedecay::cloud::fetch_latest_version() {
+    } else if let Some(v) = crate::cloud::fetch_latest_version() {
         config.cached_latest_version = v.clone();
         config.last_version_check_at = now;
         if let Err(err) = config.save_if_exists() {
@@ -126,9 +128,9 @@ pub(crate) fn check_for_update(
     // The status page (skip_suppression=true) warns on any newer version;
     // the CLI only warns on minor+ bumps to avoid nagging on patch releases.
     let dominated = if skip_suppression {
-        tracedecay::cloud::is_newer_version(current_version, &latest)
+        crate::cloud::is_newer_version(current_version, &latest)
     } else {
-        tracedecay::cloud::is_newer_minor_version(current_version, &latest)
+        crate::cloud::is_newer_minor_version(current_version, &latest)
     };
 
     if dominated && (skip_suppression || elapsed_since(now, config.last_version_warning_at) >= 900)

@@ -35,6 +35,29 @@ pub(super) async fn run_git_sync(
     Ok(())
 }
 
+pub(super) async fn run_sync_status(
+    project_id: Option<String>,
+    project_path: Option<String>,
+    idempotency_key: String,
+) -> tracedecay_domain::errors::Result<()> {
+    let project_root = resolve_cli_project_root(None, project_id, project_path).await?;
+    let outcome = call_daemon_tool(
+        &project_root,
+        "tracedecay_admin_cli",
+        json!({
+            "action": "sessions_sync_status",
+            "idempotency_key": idempotency_key,
+        }),
+    )
+    .await?;
+    if let SessionSyncPollState::Pending { operation_id, .. } =
+        session_sync_poll_state("session sync", &outcome)?
+    {
+        println!("session sync is still running ({operation_id}); no cancellation was requested");
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub(super) enum SessionSyncPollState {
     Pending {
@@ -186,8 +209,11 @@ pub(super) async fn await_session_sync_completion(
             } => {
                 if tokio::time::Instant::now() >= client_deadline {
                     return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                        message: format!(
-                            "{label} operation {operation_id} did not reach a terminal state"
+                        message: session_sync_timeout_message(
+                            project_root,
+                            label,
+                            &operation_id,
+                            &idempotency_key,
                         ),
                     });
                 }
@@ -205,6 +231,29 @@ pub(super) async fn await_session_sync_completion(
             }
         }
     }
+}
+
+fn session_sync_timeout_message(
+    project_root: &Path,
+    label: &str,
+    operation_id: &str,
+    idempotency_key: &str,
+) -> String {
+    let project_root = project_root.to_string_lossy();
+    let status_command = shell_words::join([
+        "tracedecay",
+        "sessions",
+        "sync-status",
+        "--idempotency-key",
+        idempotency_key,
+        "--project-path",
+        project_root.as_ref(),
+    ]);
+    format!(
+        "{label} observation ended after 35 seconds; background status is unknown and no \
+         cancellation was requested (operation {operation_id}). Check status with: \
+         {status_command}"
+    )
 }
 
 /// Resolves the `--since` argument (ISO-8601 or unix seconds) to a unix-second
@@ -237,7 +286,35 @@ fn resolve_git_sync_since(since: Option<&str>) -> tracedecay_domain::errors::Res
 mod tests {
     use serde_json::json;
 
-    use super::{SessionSyncPollState, session_sync_poll_state};
+    use std::path::Path;
+
+    use super::{SessionSyncPollState, session_sync_poll_state, session_sync_timeout_message};
+
+    #[test]
+    fn session_sync_timeout_preserves_the_resume_key_and_scope_without_claiming_cancellation() {
+        let message = session_sync_timeout_message(
+            Path::new("/repo/it's an example"),
+            "session import",
+            "operation.fixture",
+            "session-sync.fixture's key",
+        );
+
+        assert!(message.contains("background status is unknown"));
+        assert!(message.contains("no cancellation was requested"));
+        let command = message.split_once("Check status with: ").unwrap().1;
+        assert_eq!(
+            shell_words::split(command).unwrap(),
+            [
+                "tracedecay",
+                "sessions",
+                "sync-status",
+                "--idempotency-key",
+                "session-sync.fixture's key",
+                "--project-path",
+                "/repo/it's an example",
+            ]
+        );
+    }
 
     #[test]
     fn session_sync_admission_is_pending_until_truthful_completion() {

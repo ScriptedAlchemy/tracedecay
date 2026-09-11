@@ -8,7 +8,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_agent_hosts::hooks::hint_outcomes::HintOutcomeStats;
 use tracedecay_agent_hosts::hooks::hint_outcomes::settlement::{
     HintOutcomeSettlement, settle_project_hint_outcomes,

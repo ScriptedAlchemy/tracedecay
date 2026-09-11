@@ -17,7 +17,8 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
 use super::AutomationSchedulerHandle;
-use super::DaemonEngine;
+#[cfg(unix)]
+use super::engine::DaemonEngine;
 #[cfg(unix)]
 use super::explicit_git_state;
 #[cfg(unix)]
@@ -41,6 +42,7 @@ mod remote_project_recovery;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;
+#[cfg(unix)]
 mod runtime_identity;
 mod scheduler_config;
 mod scheduler_shutdown;
@@ -655,8 +657,8 @@ async fn apply_project_setting_via_surface(
         tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
@@ -675,7 +677,7 @@ async fn apply_project_setting_via_surface(
         format!("daemon-test-setting-{}", request_id.as_str()),
     )
     .expect("configuration idempotency key");
-    let request = crate::application_surface::ApplicationSurfaceRequest::Configuration(
+    let request = tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
         tracedecay_contracts::ConfigurationWireRequestV1::Batch(
             tracedecay_contracts::ConfigurationBatchRequestV1 {
                 mutations: vec![
@@ -698,7 +700,7 @@ async fn apply_project_setting_via_surface(
     ))
     .expect("surface cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             tracedecay_tool_catalog::BindingSurface::Cli,
             operation,
             request_id,
@@ -709,11 +711,13 @@ async fn apply_project_setting_via_surface(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
-    Box::pin(crate::application_surface::execute_application_surface(
-        operation,
-        dispatched,
-        Some(&executor),
-    ))
+    Box::pin(
+        tracedecay_daemon_service::application_surface::execute_application_surface(
+            operation,
+            dispatched,
+            Some(&executor),
+        ),
+    )
     .await
     .expect("configuration batch application invocation")
     .result

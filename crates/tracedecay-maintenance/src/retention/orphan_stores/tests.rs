@@ -26,6 +26,13 @@ const OCCUPIED_RENAME_RAW_OS_ERROR: i32 = 17;
 #[cfg(windows)]
 const OCCUPIED_RENAME_RAW_OS_ERROR: i32 = 183;
 
+/// Same shape as the production convenience caller
+/// (`unbounded_collection_control`): a far-future monotonic deadline so
+/// functional sweep assertions do not race a one-second wall clock.
+fn functional_sweep_deadline() -> MonotonicDeadline {
+    MonotonicDeadline::at(Instant::now() + Duration::from_hours(24))
+}
+
 async fn open_registered_db(
     profile_root: &Path,
 ) -> (
@@ -3408,7 +3415,7 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
         std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
     }
     let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+    let deadline = functional_sweep_deadline();
 
     let first = sweep_unregistered_store_page(
         &db,
@@ -3467,6 +3474,56 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
             && !profile_root.join("projects/proj_page_b").exists()
             && !profile_root.join("projects/proj_page_c").exists(),
         "both bounded pages must eventually reclaim their disjoint directories"
+    );
+}
+
+/// A deadline already elapsed at entry must not inspect or advance a cursor
+/// page. `DeadlineExceeded` is distinct from a successful empty page.
+#[tokio::test]
+async fn unregistered_store_sweep_elapsed_deadline_does_not_advance_page_state() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    for name in ["proj_page_a", "proj_page_b", "proj_page_c"] {
+        std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
+    }
+    let cancellation = CancellationToken::new();
+
+    let report = sweep_unregistered_store_page(
+        &db,
+        &profile_root,
+        UnregisteredStoreSweepRequestV1 {
+            cursor: None,
+            limit: 2,
+            retention_secs: 0,
+            now: 1_700_000_000,
+            apply: true,
+            cancellation: &cancellation,
+            deadline: MonotonicDeadline::at(Instant::now()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        report.completion,
+        UnregisteredSweepCompletionV1::DeadlineExceeded
+    );
+    assert!(report.plan.collect.is_empty());
+    assert!(report.outcome.collected.is_empty());
+    assert!(report.next_cursor.is_none());
+    assert!(
+        profile_root.join("projects/proj_page_a").is_dir()
+            && profile_root.join("projects/proj_page_b").is_dir()
+            && profile_root.join("projects/proj_page_c").is_dir(),
+        "an already-elapsed deadline must not reclaim any page directory"
+    );
+    assert!(
+        !profile_root
+            .join("maintenance/unregistered-project-directory-inventory-v2")
+            .exists(),
+        "an already-elapsed deadline must not create portable inventory state"
     );
 }
 
@@ -3816,7 +3873,7 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
         std::fs::create_dir_all(profile_root.join("projects").join(project_id)).unwrap();
     }
     let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+    let deadline = functional_sweep_deadline();
     let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
     let page =
         super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
@@ -3873,6 +3930,88 @@ fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
         "a torn record must never be joined with the subsequent append"
     );
     assert!(recovered.ends_with('\n'));
+}
+
+/// An already-elapsed deadline must not report a successful resume page.
+/// Tail recovery may still truncate the unterminated suffix; the real
+/// project is not fabricated onto the log.
+#[test]
+fn portable_inventory_elapsed_deadline_does_not_resume_torn_final_entry() {
+    use std::io::Write;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let project_ids = (0..32)
+        .map(|index| format!("proj_torn_deadline_{index}"))
+        .collect::<Vec<_>>();
+    for project_id in &project_ids {
+        std::fs::create_dir_all(profile_root.join("projects").join(project_id)).unwrap();
+    }
+    let cancellation = CancellationToken::new();
+    let deadline = functional_sweep_deadline();
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let page =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+            .unwrap()
+            .expect("first bounded page creates partial inventory");
+    let cursor = page
+        .next_cursor
+        .expect("the inventory has unscanned source entries");
+    let inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
+    let inventory_before_torn_append = String::from_utf8(std::fs::read(&inventory_path).unwrap())
+        .expect("the production inventory is UTF-8");
+    let target = project_ids
+        .iter()
+        .find(|project_id| {
+            !inventory_before_torn_append
+                .lines()
+                .skip(1)
+                .any(|recorded| recorded == project_id.as_str())
+        })
+        .expect("the first bounded source slice does not contain every project")
+        .clone();
+    let torn = target[..target.len() - 1].to_owned();
+    assert!(tracedecay_runtime_core::storage::validate_project_id(&torn).is_ok());
+    let mut output = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&inventory_path)
+        .unwrap();
+    output.write_all(torn.as_bytes()).unwrap();
+    output.sync_data().unwrap();
+    drop(output);
+    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
+
+    let expired = MonotonicDeadline::at(Instant::now());
+    let interrupted = || expired.is_elapsed_at(Instant::now());
+    assert!(
+        super::unregistered_page::read_project_directory_page(
+            &profile_root,
+            Some(&cursor),
+            64,
+            &interrupted,
+        )
+        .unwrap()
+        .is_none(),
+        "an already-elapsed deadline must not report a resumed page"
+    );
+    let recovered = String::from_utf8(std::fs::read(&inventory_path).unwrap()).unwrap();
+    assert_eq!(
+        recovered, inventory_before_torn_append,
+        "interruption after tail recovery must leave only committed records"
+    );
+    assert!(
+        !recovered
+            .lines()
+            .any(|recorded| recorded == target.as_str()),
+        "interruption must not fabricate the repaired project record"
+    );
+    assert!(
+        !recovered.contains(&format!("{torn}{target}")),
+        "a torn record must never be joined with the subsequent append"
+    );
 }
 
 /// The canonical sidecar writer lock is process-safe, rather than merely the
@@ -4247,7 +4386,7 @@ async fn unregistered_store_sweep_reports_failed_legacy_restore() {
             now: 1_700_000_000,
             apply: true,
             cancellation: &cancellation,
-            deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+            deadline: functional_sweep_deadline(),
         },
     )
     .await
@@ -4283,6 +4422,57 @@ async fn unregistered_store_sweep_reports_failed_legacy_restore() {
             action: CollectionRecoveryAction::RetainedForRecovery,
         }]
     );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        b"new live bytes"
+    );
+    assert_eq!(
+        std::fs::read(quarantine.join("payload.bin")).unwrap(),
+        b"legacy quarantine bytes"
+    );
+}
+
+/// Expiry before the quarantine entry is processed is not a fabricated
+/// recovery failure: `DeadlineExceeded` carries the empty accumulated list.
+#[tokio::test]
+async fn unregistered_store_sweep_elapsed_deadline_reports_empty_legacy_restore_failures() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let projects = profile_root.join("projects");
+    let data_root = projects.join("proj_paged_retained");
+    let quarantine = projects.join(".tracedecay-orphan-quarantine-proj_paged_retained-42-7");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"new live bytes").unwrap();
+    std::fs::create_dir_all(&quarantine).unwrap();
+    std::fs::write(quarantine.join("payload.bin"), b"legacy quarantine bytes").unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let cancellation = CancellationToken::new();
+
+    let report = sweep_unregistered_store_page(
+        &db,
+        &profile_root,
+        UnregisteredStoreSweepRequestV1 {
+            cursor: None,
+            limit: 2,
+            retention_secs: 0,
+            now: 1_700_000_000,
+            apply: true,
+            cancellation: &cancellation,
+            deadline: MonotonicDeadline::at(Instant::now()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        report.completion,
+        UnregisteredSweepCompletionV1::DeadlineExceeded
+    );
+    assert!(
+        report.outcome.errors.is_empty(),
+        "interruption before the quarantine entry must not fabricate restore failures"
+    );
+    assert!(report.outcome.recovery_receipts.is_empty());
     assert_eq!(
         std::fs::read(data_root.join("payload.bin")).unwrap(),
         b"new live bytes"

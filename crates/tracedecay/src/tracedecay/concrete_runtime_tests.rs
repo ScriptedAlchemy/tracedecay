@@ -130,7 +130,11 @@ async fn source_reads_reuse_the_cross_session_cache() {
                 .expect("verified source-read fixture generation"),
         ),
     });
-    let adapter = SourceReadAdapter::new(graph, code_graph, scope).expect("source adapter");
+    let source_context = graph
+        .source_read_context()
+        .expect("registered source context");
+    let adapter = SourceReadAdapter::new(Arc::new(source_context), code_graph, scope)
+        .expect("source adapter");
     let request = SourceReadPrimitiveRequest {
         file: "src/lib.rs".to_owned(),
         mode: SourceReadModeV1::Lines,

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[allow(dead_code, unused_imports)]
-#[path = "../tests/observability_runtime_contract.rs"]
+#[path = "../tests/application_suite/observability_runtime_contract.rs"]
 mod observability_runtime_contract;
 
 #[path = "hotpath_coverage.rs"]

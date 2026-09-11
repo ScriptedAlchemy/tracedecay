@@ -199,27 +199,7 @@ fn seed_profile(temp: &TempDir) -> (PathBuf, PathBuf) {
 
         fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let identity_path = profile.join("profile-identity.json");
-    fs::write(
-        &identity_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema_version": 1,
-            "brain_id": BRAIN_ID,
-            "profile_id": PROFILE_ID,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    // Windows analogue of the mode above: the identity record reader refuses
-    // a file that merely inherited the temporary directory's ACEs.
-    #[cfg(windows)]
-    drop(tracedecay_private_fs::windows::make_private_file(&identity_path).unwrap());
+    crate::profile_backup_rehearsal_test::write_profile_identity(&profile, BRAIN_ID, PROFILE_ID);
     for (name, value) in [("enrollment.json", "{}"), ("config.toml", "[profile]\n")] {
         fs::write(profile.join(name), value).unwrap();
     }

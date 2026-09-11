@@ -9,7 +9,7 @@
 //! loading), and it must do so whether or not the restarted code index mints a
 //! new generation identifier for the unchanged source bytes.
 
-#![cfg(feature = "semantic-fastembed")]
+#![cfg(all(feature = "semantic-fastembed", not(windows)))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

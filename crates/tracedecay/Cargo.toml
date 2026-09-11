@@ -85,13 +85,13 @@ default = ["production"]
 # `hotpath-alloc` installs the counting global allocator, `hotpath-cpu` adds
 # on-CPU sampling, and `hotpath-mcp` exposes the live query server (port 6771
 # by default, `HOTPATH_MCP_PORT` overrides). `hotpath/tokio` is required by
-# `hotpath::tokio_runtime!` and the tokio lock wrappers; the daemon serves its
-# HTTP application surface with axum 0.8 and reaches GitHub through ureq 3, and
-# hotpath instruments both natively, so no second HTTP stack is introduced.
+# `hotpath::tokio_runtime!` and the tokio lock wrappers, and `hotpath/ureq-3`
+# by the GitHub client reached from here, so no second HTTP stack is
+# introduced. The axum 0.8 server layer is selected by the crates that mount
+# routers — `tracedecay-daemon-service` and `tracedecay-dashboard-api`.
 hotpath = [
     "hotpath/hotpath",
     "hotpath/tokio",
-    "hotpath/axum-0-8",
     "hotpath/ureq-3",
     "tracedecay-application/hotpath",
     "tracedecay-automation-runtime/hotpath",
@@ -99,6 +99,7 @@ hotpath = [
     "tracedecay-code-index/hotpath",
     "tracedecay-code-index-runtime/hotpath",
     "tracedecay-contracts/hotpath",
+    "tracedecay-daemon-service/hotpath",
     "tracedecay-dashboard-api/hotpath",
     "tracedecay-global-db/hotpath",
     "tracedecay-graph-db/hotpath",
@@ -197,6 +198,7 @@ lang-fsharp = ["tracedecay-code-index/lang-fsharp"]
 lang-quint = ["tracedecay-code-index/lang-quint"]
 lang-toml = ["tracedecay-code-index/lang-toml"]
 lang-lean = ["tracedecay-code-index/lang-lean"]
+
 # Integration fixture surface. `HostAdmissionTestRuntimeV1` and the registered
 # database scaffolding it owns are assembled by the composition root, so they
 # live in the product library rather than a test crate. This feature keeps them
@@ -248,11 +250,10 @@ rmcp-benchmark = [
     "rmcp/transport-async-rw",
 ]
 
-# SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
-# image defaults disabled. Runtime inference still loads only from locally
-# verified artifact bytes; daemon-owned acquisition uses hf-hub against the
-# immutable catalog pins, never query-time ambient cache discovery. The
-# adapter itself lives in `tracedecay-semantic`, which owns the pins.
+# SEMANTIC FastEmbed adapter (Plan 31). On non-Windows targets it bundles ORT
+# while leaving FastEmbed's image defaults disabled. Windows keeps the feature
+# alias but `tracedecay-semantic` resolves it to the typed unavailable backend.
+# The adapter itself lives in `tracedecay-semantic`, which owns the pins.
 semantic-fastembed = [
     "tracedecay-semantic/semantic-fastembed",
     "tracedecay-application/semantic-fastembed",
@@ -267,11 +268,10 @@ semantic-model2vec = [
     "tracedecay-application/semantic-model2vec",
     "tracedecay-code-index-runtime/semantic-model2vec",
 ]
-# Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner
-# request: CoreML on macOS, CUDA on Linux). Not part of `production`; a
-# default build, and a GPU-featured build left at the runtime default
-# (`TRACEDECAY_EMBED_EXECUTION_PROVIDER` unset), stay byte-identical to the
-# CPU-only adapter. See `tracedecay-semantic/src/execution_provider.rs`.
+# GPU execution providers for the FastEmbed/ORT runtime. Not part of the
+# cross-platform `production` feature: release resolution adds CoreML only to
+# macOS artifacts. Compiled providers are selected automatically unless
+# `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu` opts out.
 semantic-gpu-coreml = [
     "tracedecay-semantic/semantic-gpu-coreml",
     "tracedecay-application/semantic-gpu-coreml",
@@ -308,8 +308,6 @@ axum = "0.8"
 # `tokio` always: `hotpath::wrap::tokio::sync::Mutex` names the lock type in
 # both modes (the plain tokio mutex until a binary selects the backend).
 hotpath = { workspace = true, features = ["tokio"] }
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["service", "tokio"] }
 tower = "0.5"
 tree-sitter = "0.26"
 constant_time_eq = "0.5.0"
@@ -360,10 +358,8 @@ tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 clap = { version = "4.6", features = ["derive"] }
-semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_path_to_error = "0.1"
 base64 = "0.22"
 toml = "1"
 ureq = { version = "3", features = ["json"] }
@@ -377,7 +373,7 @@ sha2 = "0.11"
 glob = "0.3"
 walkdir = "2"
 ignore = "0.4"
-gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix.workspace = true
 dirs = "6"
 hex = "0.4"
 fs2 = "0.4"
@@ -395,8 +391,6 @@ schemars = "1.2.1"
 futures-util = "0.3.33"
 tokio-util = { version = "0.7.19", features = ["codec"] }
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 # `kill(2)` for the daemon integration suites' physical-restart journeys
 # (tests/daemon_suite). Store-locality detection moved with the locator
@@ -405,6 +399,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 libc = "0.2"
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 sha2 = "0.11"
 hex = "0.4"
 regex = "1.12.3"
@@ -581,6 +577,14 @@ required-features = ["test-helpers"]
 [[test]]
 name = "transcript_ingest_suite"
 path = "tests/transcript_ingest_suite/main.rs"
+required-features = ["test-helpers"]
+
+# Reproducible claude-observation pipeline baseline. The `#[ignore]`d
+# measurement is driven by `scripts/run-claude-observation-benchmark.sh`; the
+# evidence-directory contract checks run with the suite.
+[[test]]
+name = "claude_observation_benchmark"
+path = "tests/claude_observation_benchmark/main.rs"
 required-features = ["test-helpers"]
 
 # Former standalone default-feature singles, compiled as modules of one binary.

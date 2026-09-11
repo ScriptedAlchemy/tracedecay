@@ -6,6 +6,7 @@
 //! link steps while keeping every test (names gain a module prefix, e.g.
 //! `lcm_compression::...`).
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -25,6 +26,7 @@ mod observation_application;
 mod observation_projection;
 mod observation_store;
 mod observation_workflow_projection;
+mod session_runtime;
 mod temporal_application;
 mod temporal_benchmark;
 #[cfg(unix)]

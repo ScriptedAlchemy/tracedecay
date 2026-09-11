@@ -53,6 +53,22 @@ pub enum LcmPrivacyRescanOutcomeV1 {
     Completed(LcmPrivacyRescanReceiptV1),
 }
 
+impl From<LcmPrivacyRescanOutcomeV1> for tracedecay_privacy::PrivacyLcmRemediationOutcomeV1 {
+    fn from(outcome: LcmPrivacyRescanOutcomeV1) -> Self {
+        match outcome {
+            LcmPrivacyRescanOutcomeV1::AlreadyCurrent => Self::AlreadyCurrent,
+            LcmPrivacyRescanOutcomeV1::Completed(receipt) => Self::Completed {
+                detector_revision: receipt.detector_revision,
+                scanned_rows: receipt.scanned_rows,
+                clean_rows: receipt.clean_rows,
+                remediated_rows: receipt.remediated_rows,
+                protected_rows: receipt.protected_rows,
+                unavailable_payload_rows: receipt.unavailable_payload_rows,
+            },
+        }
+    }
+}
+
 /// Counts of one completed at-rest rescan pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LcmPrivacyRescanReceiptV1 {

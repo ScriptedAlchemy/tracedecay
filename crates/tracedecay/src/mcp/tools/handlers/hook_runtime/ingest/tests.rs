@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::host_admission::HostAdmissionTestRuntimeV1;
+use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::structured_hook_error_data;
 
 use super::*;

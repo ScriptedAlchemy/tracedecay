@@ -200,7 +200,9 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     ));
     assert_eq!(admitted.feedback_notice, Some(notice.clone()));
 
-    let rendered = render_host_delivery(None, Some(&notice), false).unwrap();
+    let rendered = render_host_delivery(None, None, Some(&notice), false)
+        .expect("feedback notice serializes")
+        .expect("feedback notice renders");
     assert!(rendered.starts_with("TraceDecay feedback ready for authorized lookup: "));
     let encoded = rendered.split_once(": ").unwrap().1;
     assert_eq!(
@@ -209,6 +211,30 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
         )
         .unwrap(),
         notice
+    );
+}
+
+#[test]
+fn context_scout_address_is_rendered_for_the_admitted_host() {
+    let address = ContextScoutAddressV1 {
+        profile_id: [1; 16],
+        provider_id: [2; 16],
+        protected_session_id: [3; 32],
+        thread_id: [4; 16],
+        turn_id: [5; 16],
+        agent_id: [6; 16],
+        logical_message_id: [7; 16],
+        project_id: [8; 16],
+    };
+    let rendered = render_host_delivery(None, Some(&address), None, false)
+        .expect("authorized Scout address serializes")
+        .expect("authorized Scout address renders");
+    let encoded = rendered
+        .strip_prefix("TraceDecay Context Scout address for authorized operations: ")
+        .expect("bounded address prefix");
+    assert_eq!(
+        serde_json::from_str::<ContextScoutAddressV1>(encoded).unwrap(),
+        address
     );
 }
 
@@ -227,7 +253,9 @@ fn github_stack_wakeup_is_content_free() {
     let admitted = daemon_admission_response(&response);
     assert!(admitted.github_stack_signal_available);
 
-    let rendered = render_host_delivery(None, None, true).expect("stack wakeup renders");
+    let rendered = render_host_delivery(None, None, None, true)
+        .expect("stack wakeup serialization succeeds")
+        .expect("stack wakeup renders");
 
     assert_eq!(
         rendered,
@@ -827,7 +855,6 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
             &first_envelope,
             &binding,
             UtcMicros(10),
-            Instant::now(),
         ),
         SpoolAppendOutcomeV1::Accepted,
     );
@@ -839,7 +866,6 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
             &binding,
             &retry_envelope,
             UtcMicros(99),
-            Instant::now(),
         ),
         PendingEnvelopeV1::Exact(first_envelope),
     );

@@ -2079,3 +2079,53 @@ impl RegisteredGlobalDb {
         Ok(removed)
     }
 }
+
+/// Resolves enrolled checkout roots for a registered project and self-heals
+/// the sanctioned `.git/` identity marker when the mount root is a git repo.
+pub async fn registered_enrollment_roots(
+    registry: &RegisteredGlobalDb,
+    project_root: &Path,
+    store_layout: &tracedecay_runtime_core::storage::StoreLayout,
+    project_id: &tracedecay_domain::ProjectId,
+) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
+    let mut candidates = vec![
+        project_root.to_path_buf(),
+        store_layout.project_root.clone(),
+    ];
+    if let Some(context) = registry
+        .project_registry_context_by_id(project_id.as_str())
+        .await?
+    {
+        candidates.extend(super::registry_context_candidate_roots(&context));
+    }
+
+    let mut roots =
+        tracedecay_runtime_core::storage::enrolled_project_roots(candidates, project_id)?;
+    let enrollment_root = tracedecay_runtime_core::worktree::repository_identity_root(project_root)
+        .unwrap_or_else(|| project_root.to_path_buf());
+    match enrollment_root.canonicalize() {
+        Ok(canonical) => {
+            if tracedecay_runtime_core::storage::read_repository_identity_marker(&canonical)?
+                .is_none()
+            {
+                tracedecay_runtime_core::storage::write_repository_identity_marker(
+                    &canonical,
+                    project_id.as_str(),
+                )?;
+            }
+            if roots.is_empty() {
+                roots.push(canonical);
+            }
+        }
+        Err(error) if roots.is_empty() => {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "could not canonicalize project enrollment root '{}': {error}",
+                    enrollment_root.display()
+                ),
+            });
+        }
+        Err(_) => {}
+    }
+    Ok(roots)
+}

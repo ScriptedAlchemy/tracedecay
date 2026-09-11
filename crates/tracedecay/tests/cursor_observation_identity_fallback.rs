@@ -1,6 +1,8 @@
+#![allow(clippy::too_many_lines)]
+
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_capture::cursor::{
     cursor_observation_identity, cursor_projected_message_id,
     normalize_cursor_observation_with_message_id,

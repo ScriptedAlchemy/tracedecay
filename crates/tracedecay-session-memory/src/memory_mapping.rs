@@ -52,13 +52,18 @@ pub fn read_scope(
     (options.memory_scope, options.project_selector.as_ref())
 }
 
-pub fn validate_reason_entities(
+pub fn normalize_reason_entities(
     entities: &[String],
-) -> Result<(), RetainedSurfaceExecutionErrorV1> {
-    if entities.is_empty() || entities.windows(2).any(|pair| pair.first() >= pair.get(1)) {
+) -> Result<Vec<String>, RetainedSurfaceExecutionErrorV1> {
+    if entities.is_empty() {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
-    Ok(())
+    let mut entities = entities.to_vec();
+    entities.sort();
+    if entities.windows(2).any(|pair| pair.first() == pair.get(1)) {
+        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+    }
+    Ok(entities)
 }
 
 pub fn ensure_profile_request_scope(
@@ -511,9 +516,18 @@ pub fn projection(
     projection: &ProjectMemoryFactProjectionV1,
 ) -> Result<FactProjectionV1, RetainedSurfaceExecutionErrorV1> {
     match projection {
-        ProjectMemoryFactProjectionV1::Available(fact) => Ok(FactProjectionV1::Available {
-            fact: Box::new(available_fact(fact)?),
-        }),
+        ProjectMemoryFactProjectionV1::Available(fact) => {
+            let fact_projection = Box::new(available_fact(fact)?);
+            match fact.superseded_by() {
+                Some(superseded_by) => Ok(FactProjectionV1::Superseded {
+                    fact: fact_projection,
+                    superseded_by: superseded_by.clone(),
+                }),
+                None => Ok(FactProjectionV1::Available {
+                    fact: fact_projection,
+                }),
+            }
+        }
         ProjectMemoryFactProjectionV1::Unavailable(fact) => Ok(FactProjectionV1::Unavailable {
             status: unavailable_fact(fact)?,
         }),
@@ -1099,7 +1113,9 @@ pub fn map_memory_error(error: MemoryApplicationError) -> RetainedSurfaceExecuti
         MemoryApplicationError::OwnerMismatch { .. } => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        MemoryApplicationError::Store(error) => map_store_error(error),
+        MemoryApplicationError::Store(error) | MemoryApplicationError::Cancelled(error) => {
+            map_store_error(error)
+        }
         error @ (MemoryApplicationError::InvalidAuthorityResult { .. }
         | MemoryApplicationError::InvalidEvidenceAnchor(_)
         | MemoryApplicationError::EvidenceAnchor(_)) => {

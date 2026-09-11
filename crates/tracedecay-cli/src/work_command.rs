@@ -12,7 +12,7 @@ pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::er
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;
-    let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
+    let project_root = tracedecay_configuration::resolve_path_with_discovery(invocation.project);
     let operation = invocation.operation;
     // The application round-trip timed apart from `cli.work.invoke` so daemon
     // latency is separable from request parsing, render, and delivery

@@ -2,7 +2,7 @@
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorLineageRefV2, AnchorProvenanceRelationV2, AnchorSourceGenerationV2, ClaudeSourceCursorV1,
     FactOwnerV1, ObservationScopeV1, ObservationSourceGenerationV1, ProjectId, RetrievalAnchorId,

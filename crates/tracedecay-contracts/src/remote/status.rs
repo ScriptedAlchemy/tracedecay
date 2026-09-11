@@ -1,5 +1,7 @@
 //! Canonical operational truth for the Remote Brain production surface.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
@@ -123,22 +125,12 @@ pub enum RemoteOperationalStatusReadV1 {
     Unavailable,
 }
 
-/// Named read of the mounted Remote Brain operational plane.
-///
-/// Absence of an implementor is [`RemoteOperationalStatusReadV1::Unavailable`],
+/// Live read of the mounted Remote Brain operational plane. The composition
+/// root installs exactly one closure backed by the session-runtime owner;
+/// absence at a consumer is [`RemoteOperationalStatusReadV1::Unavailable`],
 /// never an empty success.
-pub trait RemoteOperationalStatusReadPort: Send + Sync {
-    fn read(&self) -> RemoteOperationalStatusReadV1;
-}
-
-impl<F> RemoteOperationalStatusReadPort for F
-where
-    F: Fn() -> RemoteOperationalStatusReadV1 + Send + Sync,
-{
-    fn read(&self) -> RemoteOperationalStatusReadV1 {
-        self()
-    }
-}
+pub type RemoteOperationalStatusReaderV1 =
+    Arc<dyn Fn() -> RemoteOperationalStatusReadV1 + Send + Sync + 'static>;
 
 impl RemoteOperationalStatusReadV1 {
     /// Projects the Doctor operational read from the same observation, so the

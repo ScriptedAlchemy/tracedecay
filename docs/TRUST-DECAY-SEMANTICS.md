@@ -52,7 +52,7 @@ by `(fact_id, owner_kind, project_id)`:
 |---|---|---|
 | `trust_score` | persisted per-fact trust, `CHECK`-constrained to `[0, 1]` (or `NULL`) | replayed from lineage events on every commit (see §2) |
 | `updated_at` | last mutation time — the input to the ranking decay factor | every commit that touches this fact (create, edit, feedback, curation) |
-| `retrieval_count` / `access_count` | scan count vs. returned-count | `project_memory_update_retrieval_projection_tx`, on every search/probe/reason/related hit |
+| `retrieval_count` / `access_count` | scan count vs. returned-count | `project_memory_update_retrieval_projection_tx`, on search hits via `track_explicit_search` |
 | `last_retrieved_at` / `last_recalled_at` | last scan / last time a search actually returned the fact | the same retrieval-projection update |
 | `helpful_count` / `unhelpful_count` / `last_feedback_at` | feedback tallies | `project_memory_update_feedback_projection_tx`, on every feedback event |
 

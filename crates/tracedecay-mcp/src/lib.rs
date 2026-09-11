@@ -1,13 +1,16 @@
 //! Portable MCP catalog, rendering, JSON-RPC transport, and server-adjacent
 //! protocol helpers.
 //!
-//! This crate owns daemon-free MCP surface: JSON-RPC contracts, concrete
+//! This crate owns the MCP surface itself: JSON-RPC contracts, concrete
 //! stdio/channel/replay transports, tool definitions, response truncation,
 //! canonical application-result presentation, request-deadline decoding,
-//! tool-error classification, hook-event plan decoding, and construction
-//! ports that need MCP-adjacent types. Server construction, connection
-//! lifecycle adapters, and handlers that reach daemon internals stay in the
-//! composition root.
+//! tool-error classification, hook-event plan decoding, connection scheduling,
+//! typed RMCP adaptation, request lifecycle state, and tool handlers that
+//! translate transport requests into business-owner calls.
+//!
+//! Handlers reach daemon state through [`McpToolContext`], filled by the
+//! composition root with the authorities admitted for the call. Product
+//! dependency construction and concrete lifecycle adapters stay in that root.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
@@ -39,24 +42,30 @@
 
 pub mod analysis;
 pub mod application_output;
+mod broker_stream_transport;
 mod catalog_error;
 pub mod context_headings;
 pub mod handlers;
 pub mod hook_events;
 pub mod hook_runtime;
-pub mod host_cli;
 pub mod jsonrpc;
 pub mod lifecycle;
 pub mod path_tree;
 pub mod project_access;
 pub mod response_handles;
+pub mod server;
 pub mod tool_call_deadline;
+pub mod tool_context;
 pub mod tool_errors;
 pub mod tools;
 pub mod transport;
 pub mod workflow;
 
 pub use analysis::{is_ident_byte, line_number_at, skip_ascii_whitespace};
+pub use broker_stream_transport::{
+    BrokerResponseLifecycle, BrokerSelectedResponseAuthority, BrokerSelectedResponseLease,
+    BrokerStreamTransport, BrokerWorkDeliverySettlement,
+};
 pub use catalog_error::McpCatalogError;
 pub use context_headings::{
     CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
@@ -66,10 +75,10 @@ pub use context_headings::{
 };
 pub use handlers::{
     CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, effective_path, generic_tool_result,
-    handle_multi_root, rendered_tool_result, require_node_id, require_object_args,
-    require_positive_limit, retained_problem_envelope, retained_safe_diagnostic,
-    take_internal_context_memory_analytics, text_tool_result, tool_json, tool_json_with_md,
-    unique_file_paths, validated_retained_response,
+    handle_multi_root, handle_work, handle_workflow, rendered_tool_result, require_node_id,
+    require_object_args, require_positive_limit, retained_problem_envelope,
+    retained_safe_diagnostic, take_internal_context_memory_analytics, text_tool_result, tool_json,
+    tool_json_with_md, unique_file_paths, validated_retained_response,
 };
 pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,
@@ -84,6 +93,11 @@ pub use tool_call_deadline::{
     TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, caller_tool_call_deadline_from_meta,
     tool_call_deadline_meta,
 };
+pub use tool_context::{
+    AdmittedCodeIndex, AdmittedProjectStore, McpAdmittedProjectV1, McpDoctorReportV1,
+    McpProjectIdentityV1, McpRequestAuthoritiesV1, McpSemanticOwnerV1, McpToolBinding,
+    McpToolBindingError, McpToolContext, RequestControls,
+};
 pub use tool_errors::{
     mark_semantic_tool_error, semantic_failure_reason, serialize_response_line,
     structured_hook_error_data, tool_error_response, tool_result_has_semantic_error,
@@ -96,9 +110,9 @@ pub use tools::{
     explore_call_budget, format_capable_tool_names, get_maximal_tool_definitions,
     get_maximal_tool_definitions_with_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    internal_daemon_tool_definition, project_catalog_discovery_scope, render_tool_cli_help,
-    resolve_property_schema, retain_host_available_tool_definitions, short_tool_name,
-    tool_defaults_to_markdown,
+    internal_daemon_tool_definition, mcp_input_schema, project_catalog_discovery_scope,
+    render_tool_cli_help, resolve_property_schema, retain_host_available_tool_definitions,
+    short_tool_name, tool_defaults_to_markdown,
 };
 pub use workflow::{
     MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile, TestRunControl,

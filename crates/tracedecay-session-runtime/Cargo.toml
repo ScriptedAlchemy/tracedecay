@@ -57,6 +57,8 @@ tracedecay-application = { path = "../tracedecay-application", version = "0.1.0"
 hex = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }

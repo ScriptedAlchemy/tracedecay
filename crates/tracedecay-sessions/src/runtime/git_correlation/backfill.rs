@@ -357,13 +357,15 @@ impl GitReflogSource for SystemGit {
     }
 
     fn commit_log(&self, worktree: &std::path::Path, branch: &str, since: i64) -> Option<String> {
+        // --since parses approximate dates: small epoch values become wall-clock
+        // times. --max-age accepts the raw timestamp; Git dates are unsigned.
         Self::output(
             worktree,
             &[
                 "log",
                 branch,
                 "--pretty=%H %ct",
-                &format!("--since={since}"),
+                &format!("--max-age={}", since.max(0)),
             ],
         )
     }

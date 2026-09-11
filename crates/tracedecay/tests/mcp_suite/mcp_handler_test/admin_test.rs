@@ -5,7 +5,7 @@ use std::fs;
 #[cfg(feature = "test-transport")]
 use std::path::Path;
 #[cfg(feature = "test-transport")]
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::get_tool_definitions;
 
 #[cfg(feature = "test-transport")]

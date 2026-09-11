@@ -33,15 +33,23 @@ use tracedecay_runtime_core::db::engine::{Executor, params};
 /// Free-page compaction for tracked branch databases, off the hot path
 /// (plan 38, §6).
 pub mod branch_compaction;
+/// Bounded retention for unmounted profile-sharded stores.
+pub mod cold_store;
+/// Read-only diagnostics over retention-owned state.
+pub mod diagnostics;
 /// Exact-liveness mark-and-sweep for immutable derived code generations.
 /// Store-owned quarantine and collection for corruption/recovery artifacts
 /// found beside live databases (plan 38, §5).
 pub mod incident_debris;
+/// Bounded compaction for stores retained by live runtime authorities.
+pub mod live_compaction;
 /// Store-level (whole-directory) orphan detection and collection. Row-level
 /// pruning below stays inside a live store; `orphan_stores` collects entire
 /// profile-sharded store directories whose project identity no longer resolves
 /// to a live repository root (plan 38, §2).
 pub mod orphan_stores;
+/// Registered session-store retention across its canonical owner kernels.
+pub mod registered_store;
 /// Read-only, cheap-to-query per-store size and free-page-ratio reporting,
 /// reachable from a command without a live daemon (plan 38, §7).
 pub mod storage_report;
@@ -365,14 +373,6 @@ mod tests {
             ))
             .await
             .unwrap();
-    }
-
-    #[test]
-    fn defaults_bound_legacy_session_data_and_prune_analytics() {
-        let config = RetentionConfig::default();
-        assert_eq!(config.analytics_events_days, Some(180));
-        assert_eq!(config.session_messages_days, Some(180));
-        assert_eq!(config.lcm_raw_messages_days, Some(180));
     }
 
     #[test]

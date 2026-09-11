@@ -144,6 +144,21 @@ describe('prepareField', () => {
     expect(Math.min(...sizes)).toBeLessThan(ceiling);
   });
 
+  it('keeps repository hubs a fixed categorical size regardless of checkout count', () => {
+    const { graph } = prepare([
+      { id: 'small-repo', label: 'small', kind: 'repository', degree: 2 },
+      { id: 'large-repo', label: 'large', kind: 'repository', degree: 40 },
+      { id: 'project', label: 'project', kind: 'project', degree: 40 },
+    ]);
+
+    expect(graph.getNodeAttribute('small-repo', 'size')).toBe(
+      graph.getNodeAttribute('large-repo', 'size'),
+    );
+    expect(graph.getNodeAttribute('large-repo', 'size') as number).toBeLessThan(
+      graph.getNodeAttribute('project', 'size') as number,
+    );
+  });
+
   it('shrinks bodies for a narrow canvas instead of fusing them', () => {
     const nodes = Array.from({ length: 20 }, (_, index) => ({
       id: `n${index}`,

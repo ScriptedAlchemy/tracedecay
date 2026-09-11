@@ -22,8 +22,8 @@ use tracedecay_domain::{
 
 use crate::exact_sql::{ExactSqlTransaction, ExactSqlValue};
 use crate::work::{
-    RegisteredWorkQuery, WorkSqliteStorage, authority_params_owned, exact_sql_integer,
-    exact_sql_statement, exact_sql_text, registered_work_query,
+    ACTIVE_ATTEMPT_PREDICATE, RegisteredWorkQuery, WorkSqliteStorage, authority_params_owned,
+    exact_sql_integer, exact_sql_statement, exact_sql_text, registered_work_query,
 };
 use crate::workflow::WorkflowSqliteAuthority;
 
@@ -60,14 +60,17 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Vec<WorkRunLiveAttemptV1>, WorkRunControlStorageError> {
+        let sql = format!(
+            "SELECT attempt.attempt_payload FROM work_attempts_v1 AS attempt
+             WHERE attempt.project_id = ?1 AND attempt.repository_id = ?2
+               AND attempt.worktree_id = ?3 AND attempt.actor_id = ?4
+               AND attempt.policy_digest = ?5 AND attempt.task_id = ?6
+               AND attempt.run_id = ?7 AND {ACTIVE_ATTEMPT_PREDICATE}
+             ORDER BY attempt.rowid"
+        );
         let rows = registered_work_query(
             self.handle(),
-            "SELECT attempt_payload FROM work_attempts_v1
-             WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-               AND actor_id = ?4 AND policy_digest = ?5
-               AND task_id = ?6 AND run_id = ?7
-               AND terminal = 0
-             ORDER BY rowid",
+            &sql,
             authority_params_owned(authority)
                 .into_iter()
                 .chain(run_params(task_id, run_id))
@@ -98,17 +101,28 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         };
         attempts
             .into_iter()
+            .filter(|attempt| {
+                projection.as_ref().is_none_or(|projection| {
+                    projection
+                        .planned_fan_out_attempt(attempt.identity())
+                        .is_none_or(|planned| {
+                            projection.active_fan_out_attempt(planned) == attempt.identity()
+                        })
+                })
+            })
             .map(|attempt| {
                 let step_id = match projection.as_ref() {
                     None => None,
                     Some(projection) => {
+                        let planned_attempt =
+                            projection.planned_fan_out_attempt(attempt.identity());
                         let mut matching_steps = projection
                             .fan_out_plans()
                             .values()
                             .filter(|plan| {
                                 plan.children
                                     .iter()
-                                    .any(|child| &child.attempt_identity == attempt.identity())
+                                    .any(|child| Some(&child.attempt_identity) == planned_attempt)
                             })
                             .map(|plan| plan.step_id.clone());
                         let step = matching_steps.next();
@@ -321,13 +335,19 @@ fn run_admission_from(
     task_id: &TaskId,
     run_id: &RunId,
 ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError> {
+    let sql = format!(
+        "SELECT attempt.attempt_payload,
+                ({ACTIVE_ATTEMPT_PREDICATE}) AS active
+         FROM work_attempts_v1 AS attempt
+         WHERE attempt.project_id = ?1 AND attempt.repository_id = ?2
+           AND attempt.worktree_id = ?3 AND attempt.actor_id = ?4
+           AND attempt.policy_digest = ?5 AND attempt.task_id = ?6
+           AND attempt.run_id = ?7
+         ORDER BY attempt.rowid"
+    );
     let rows = registered_work_query(
         source,
-        "SELECT attempt_payload, terminal FROM work_attempts_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5
-           AND task_id = ?6 AND run_id = ?7
-         ORDER BY rowid",
+        &sql,
         authority_params_owned(authority)
             .into_iter()
             .chain(run_params(task_id, run_id))
@@ -345,7 +365,7 @@ fn run_admission_from(
         let payload =
             exact_sql_text(&row.values, 0).ok_or(WorkRunControlStorageError::Unavailable)?;
         let attempt = attempt_from_payload(payload)?;
-        let terminal =
+        let active =
             exact_sql_integer(&row.values, 1).ok_or(WorkRunControlStorageError::Unavailable)?;
         match (&deadline, &topology) {
             (None, None) => {
@@ -359,8 +379,10 @@ fn run_admission_from(
             (Some(_), Some(_)) => return Err(WorkRunControlStorageError::AuthorityConflict),
             _ => return Err(WorkRunControlStorageError::Unavailable),
         }
-        if terminal == 0 {
-            live_attempts.push(attempt.identity().attempt_id().clone());
+        match active {
+            0 => {}
+            1 => live_attempts.push(attempt.identity().attempt_id().clone()),
+            _ => return Err(WorkRunControlStorageError::Unavailable),
         }
         total_attempts = total_attempts
             .checked_add(1)

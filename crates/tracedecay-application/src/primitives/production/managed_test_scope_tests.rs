@@ -35,7 +35,9 @@ impl LspCodeIndexProjectionIdentityPort for SealedIdentity {
                 repository: id("repository.managed-test"),
                 worktree: Some(id("worktree.managed-test")),
                 reference: Some(id("ref.main")),
-                source_revision: Some(id("commit.sealed")),
+                freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                head_commit_id: Some(id("commit.head")),
+                source_revision: None,
                 code_generation_id: id::<CodeGenerationId>("generation.managed.test.9"),
                 snapshot_digest: id::<ManifestDigest>(&digest('a')),
                 invalidation_digest: id::<ManifestDigest>(&digest('b')),
@@ -48,7 +50,7 @@ impl LspCodeIndexProjectionIdentityPort for SealedIdentity {
 }
 
 #[tokio::test]
-async fn managed_test_currentness_uses_sealed_scope_without_live_git() {
+async fn managed_test_currentness_uses_live_head_for_dirty_sealed_generation() {
     let directory = tempfile::tempdir().expect("temporary non-git directory");
     let scope = ResolvedScope::new(
         id::<ProjectId>("project.managed-test"),
@@ -66,9 +68,9 @@ async fn managed_test_currentness_uses_sealed_scope_without_live_git() {
     let current = authority
         .current_identity()
         .await
-        .expect("sealed identity is current without a Git repository");
+        .expect("dirty sealed identity is current under the live HEAD");
 
-    assert_eq!(current.head_commit_id, id("commit.sealed"));
+    assert_eq!(current.head_commit_id, id("commit.head"));
     assert_eq!(
         current.code_generation_id,
         id::<CodeGenerationId>("generation.managed.test.9")

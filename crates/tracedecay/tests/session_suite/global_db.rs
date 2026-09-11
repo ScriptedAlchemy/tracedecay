@@ -2,7 +2,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_lcm::LcmStorageKind;
 use tracedecay_sessions::admission::HostAdmissionScope;

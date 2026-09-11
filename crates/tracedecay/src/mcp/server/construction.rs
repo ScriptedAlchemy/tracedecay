@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use crate::tracedecay::TraceDecay;
 use tracedecay_contracts::{
     ProfileIdentityReadPort, SessionTemporalRefreshWakePort,
-    remote::status::RemoteOperationalStatusReadPort,
+    remote::status::RemoteOperationalStatusReaderV1,
 };
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -63,25 +63,8 @@ pub(crate) type RetainedProjectServerFuture = Pin<
             + 'static,
     >,
 >;
-/// Named project-server resolution port.
-///
-/// The composition root installs a daemon-built implementor that returns the
-/// retained `McpServer`. Construction and routed handlers resolve through
-/// this trait instead of naming a `Fn` alias.
-pub(crate) trait McpProjectServerResolvePort: Send + Sync {
-    fn resolve(&self, request: RetainedProjectGraphRequest) -> RetainedProjectServerFuture;
-}
-
-impl<F> McpProjectServerResolvePort for F
-where
-    F: Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static,
-{
-    fn resolve(&self, request: RetainedProjectGraphRequest) -> RetainedProjectServerFuture {
-        self(request)
-    }
-}
-
-pub(crate) type RetainedProjectServerResolver = Arc<dyn McpProjectServerResolvePort>;
+pub(crate) type RetainedProjectServerResolver =
+    Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static>;
 
 pub(crate) fn install_retained_project_server_resolver(
     resolve: impl Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static,
@@ -99,7 +82,7 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
         let resolver = Arc::clone(&resolver);
         let expected_profile_id = expected_profile_id.clone();
         Box::pin(async move {
-            let server = resolver.resolve(request).await?;
+            let server = resolver(request).await?;
             let graph = match server {
                 Some(server) => {
                     let profile_matches = server
@@ -116,8 +99,7 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
                 }
                 None => None,
             };
-            Ok(graph
-                .map(|graph| graph as Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime>))
+            Ok(graph.map(|graph| Arc::new(crate::dashboard::dashboard_project_context(&graph))))
         })
     })
 }
@@ -162,7 +144,7 @@ pub(crate) struct McpServerConstructionContext {
     /// Live Remote Brain operational read composed from the mounted remote
     /// authorities. Daemon-owned servers install it; direct servers leave it
     /// absent and remote operator surfaces report typed unavailable.
-    pub(crate) remote_operational_status: Option<Arc<dyn RemoteOperationalStatusReadPort>>,
+    pub(crate) remote_operational_status: Option<RemoteOperationalStatusReaderV1>,
     pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
@@ -170,13 +152,14 @@ pub(crate) struct McpServerConstructionContext {
         Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub(crate) dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
+    pub(crate) dashboard_pr_autotrack_reader:
+        Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_reconcile_sink: Option<super::CodeIndexReconcileSink>,
     pub(crate) code_index_freshness_probe_sink: Option<super::CodeIndexFreshnessProbeSink>,
-    pub(crate) diagnostics_change_generation: Option<super::DiagnosticsChangeGenerationResolver>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
@@ -187,6 +170,10 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_ignored_dependency_admission:
         Option<CodeIndexIgnoredDependencyAdmissionPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
+    /// The one checkout this server answers for, resolved once by project open
+    /// through the daemon code-index authority. `None` on a direct server and
+    /// on the core server that answers before project-open publication.
+    pub(crate) admitted_project_scope: Option<tracedecay_contracts::ResolvedScope>,
     pub(crate) retained_project_server_resolver: Option<super::RetainedProjectServerResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
@@ -200,7 +187,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) project_server_live: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
-        Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
+        Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
 }
 
 pub(crate) struct McpServerWriters {
@@ -260,8 +247,14 @@ impl McpServerWriters {
 impl McpServerConstructionContext {
     #[hotpath::measure(label = "mcp.server.construction.direct")]
     pub(crate) fn direct(cg: impl Into<Arc<TraceDecay>>, scope_prefix: Option<String>) -> Self {
+        let cg = cg.into();
+        // A direct context serves the checkout its opened project already
+        // holds, the same scope daemon project-open publishes. An unregistered
+        // graph has no scope; dispatch then fails closed with the typed
+        // `admitted_project_scope_unresolved` refusal.
+        let admitted_project_scope = crate::mcp::tools::handlers::opened_project_scope(&cg).ok();
         Self {
-            cg: cg.into(),
+            cg,
             scope_prefix,
             profile_root: None,
             profile_identity: None,
@@ -288,12 +281,12 @@ impl McpServerConstructionContext {
             dashboard_code_index_freshness_reader: None,
             dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
+            dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
             code_index_freshness_probe_sink: None,
-            diagnostics_change_generation: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -302,6 +295,7 @@ impl McpServerConstructionContext {
             verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
+            admitted_project_scope,
             retained_project_server_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
@@ -394,12 +388,12 @@ impl McpServerConstructionContext {
             dashboard_code_index_freshness_reader: None,
             dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
+            dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
             code_index_freshness_probe_sink: None,
-            diagnostics_change_generation: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -408,6 +402,7 @@ impl McpServerConstructionContext {
             verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
+            admitted_project_scope: None,
             retained_project_server_resolver: None,
             project_routes,
             application_invocation_executor: None,
@@ -461,12 +456,12 @@ impl McpServerConstructionContext {
             dashboard_code_index_freshness_reader: None,
             dashboard_explorer_semantic_reader: None,
             dashboard_feedback_status_reader: None,
+            dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
             code_index_freshness_probe_sink: None,
-            diagnostics_change_generation: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -475,6 +470,7 @@ impl McpServerConstructionContext {
             verified_graph_query_port: None,
             code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
+            admitted_project_scope: None,
             retained_project_server_resolver: None,
             project_routes,
             application_invocation_executor: None,
@@ -515,14 +511,6 @@ impl McpServerConstructionContext {
         sink: super::CodeIndexFreshnessProbeSink,
     ) -> Self {
         self.code_index_freshness_probe_sink = Some(sink);
-        self
-    }
-
-    pub(crate) fn with_diagnostics_change_generation(
-        mut self,
-        resolver: super::DiagnosticsChangeGenerationResolver,
-    ) -> Self {
-        self.diagnostics_change_generation = Some(resolver);
         self
     }
 
@@ -582,6 +570,17 @@ impl McpServerConstructionContext {
         self
     }
 
+    /// Records the checkout project open resolved for this route, so handler
+    /// dispatch can bind every scoped authority to one admitted scope instead
+    /// of re-deriving identity from the request path.
+    pub(crate) fn with_admitted_project_scope(
+        mut self,
+        scope: tracedecay_contracts::ResolvedScope,
+    ) -> Self {
+        self.admitted_project_scope = Some(scope);
+        self
+    }
+
     pub(crate) fn with_application_invocation_executor(
         mut self,
         executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
@@ -634,7 +633,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_remote_operational_status(
         mut self,
-        provider: Arc<dyn RemoteOperationalStatusReadPort>,
+        provider: RemoteOperationalStatusReaderV1,
     ) -> Self {
         self.remote_operational_status = Some(provider);
         self
@@ -661,6 +660,14 @@ impl McpServerConstructionContext {
         reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     ) -> Self {
         self.dashboard_feedback_status_reader = Some(reader);
+        self
+    }
+
+    pub(crate) fn with_dashboard_pr_autotrack_reader(
+        mut self,
+        reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
+    ) -> Self {
+        self.dashboard_pr_autotrack_reader = Some(reader);
         self
     }
 

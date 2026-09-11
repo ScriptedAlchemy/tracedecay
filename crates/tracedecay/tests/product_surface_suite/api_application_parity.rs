@@ -4,11 +4,6 @@ use axum::body::Body;
 use axum::extract::Extension;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
-use tracedecay::application_surface::{
-    ApplicationSurfaceRequest, FeedbackSurfaceRequest, GitApplySurfaceRequest,
-    GitPreviewSurfaceRequest, GitReadSurfaceRequest, parse_application_surface_request,
-    resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
-};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
@@ -20,7 +15,14 @@ use tracedecay_contracts::{
     IdempotencyKey, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_daemon_protocol::{
+    ApplicationSurfaceRequest, FeedbackSurfaceRequest, parse_application_surface_request,
+};
+use tracedecay_daemon_protocol::{
     BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
+};
+use tracedecay_daemon_service::application_surface::{
+    GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
+    resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
@@ -29,9 +31,10 @@ use tracedecay_domain::{
     RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
-use tracedecay_mcp::get_tool_definitions;
+use tracedecay_mcp::{get_tool_definitions, mcp_input_schema};
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingSurface, ProfileId, SchemaId, SurfaceOperationName,
+    ApplicationSurfaceOperation, BindingSurface, OperationId, ProfileId, SchemaId,
+    SurfaceOperationName,
 };
 
 const PARITY_FIXTURE: &str = include_str!(
@@ -42,7 +45,7 @@ const PARITY_FIXTURE: &str = include_str!(
 /// `CallableCodeSurfaceMeta`, and therefore a `cursor` continuation that every
 /// transport must accept identically. Mirrors
 /// the `HttpPageProjection::MetaCursor` arm of `http_page_projection` in
-/// `src/application_surface.rs`; the
+/// `tracedecay-daemon-service/src/application_surface.rs`; the
 /// drift guard below fails as soon as one of them stops being pinned, stops
 /// binding a surface, or stops advertising its cursor over MCP.
 const CURSOR_CARRYING_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
@@ -111,8 +114,8 @@ async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner
             cancellation: CancellationSignal::active("cancel.feedback-http-parity")
                 .expect("cancellation"),
         }));
-    let catalog =
-        tracedecay::application_surface::application_surface_catalog().expect("catalog snapshot");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
+        .expect("catalog snapshot");
     let resolver = CatalogBindingResolver::new(&catalog);
 
     for (route, operation) in [
@@ -226,7 +229,7 @@ async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner
 fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
     let fixture = parity_fixture();
     let unpinned = unpinned_operations(&fixture);
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
 
@@ -243,12 +246,6 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
             );
             continue;
         }
-        let resolution = BindingResolution {
-            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
-            operation: SurfaceOperationName::new(operation.as_str()).expect("operation"),
-            protocol_revision: 1,
-            negotiated_features: BTreeSet::new(),
-        };
         let mut direct = Vec::new();
         for surface in expected["bindings"]
             .as_object()
@@ -302,6 +299,13 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
             (BindingSurface::Mcp, "mcp"),
             (BindingSurface::Http, "http"),
         ] {
+            let resolution = BindingResolution {
+                profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
+                operation: SurfaceOperationName::new(operation.name_for_surface(surface))
+                    .expect("operation"),
+                protocol_revision: 1,
+                negotiated_features: BTreeSet::new(),
+            };
             match expected["bindings"][surface_name].as_str() {
                 Some(binding_id) => {
                     let resolved = resolver
@@ -365,10 +369,12 @@ fn the_parity_golden_accounts_for_every_catalog_operation() {
 #[test]
 fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
     let fixture = parity_fixture();
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
     let definitions = get_tool_definitions().expect("tool definitions");
+    let mcp_registry =
+        tracedecay_contracts::mcp_executable_binding_registry().expect("MCP registry");
 
     for operation in CURSOR_CARRYING_CODE_OPERATIONS {
         let expected = &fixture["operations"][operation.as_str()];
@@ -406,21 +412,37 @@ fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
             );
         }
 
-        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let tool_name = operation.mcp_tool_name();
         let definition = definitions
             .iter()
             .find(|definition| definition.name == tool_name)
             .unwrap_or_else(|| panic!("{tool_name} definition"));
-        assert!(
-            definition.input_schema["properties"]["meta"]["properties"]["cursor"].is_object(),
-            "{tool_name} must advertise its continuation cursor over MCP"
+        let operation_id =
+            OperationId::new(format!("operation.application.{}", operation.as_str()))
+                .expect("operation ID");
+        let canonical = mcp_input_schema(
+            mcp_registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .expect("MCP executable")
+                .request_schema()
+                .body(),
+        );
+        let mut projected = definition.input_schema.clone();
+        projected["properties"]
+            .as_object_mut()
+            .expect("request properties")
+            .remove("format");
+        assert_eq!(
+            projected, canonical,
+            "{tool_name} must advertise its canonical continuation request"
         );
     }
 }
 
 #[test]
 fn extended_primitive_reads_bind_cli_mcp_and_http() {
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
     for operation in [
@@ -437,22 +459,22 @@ fn extended_primitive_reads_bind_cli_mcp_and_http() {
         ApplicationSurfaceOperation::SourceBody,
         ApplicationSurfaceOperation::SourceOutline,
         ApplicationSurfaceOperation::ModuleApi,
-        ApplicationSurfaceOperation::FileMetadata,
         ApplicationSurfaceOperation::HealthRead,
         ApplicationSurfaceOperation::StorageStatus,
         ApplicationSurfaceOperation::DiagnosticsRead,
     ] {
-        let resolution = BindingResolution {
-            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
-            operation: SurfaceOperationName::new(operation.as_str()).expect("operation"),
-            protocol_revision: 1,
-            negotiated_features: BTreeSet::new(),
-        };
         for surface in [
             BindingSurface::Cli,
             BindingSurface::Mcp,
             BindingSurface::Http,
         ] {
+            let resolution = BindingResolution {
+                profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
+                operation: SurfaceOperationName::new(operation.name_for_surface(surface))
+                    .expect("operation"),
+                protocol_revision: 1,
+                negotiated_features: BTreeSet::new(),
+            };
             assert!(
                 resolver.resolve_binding(surface, &resolution).is_some(),
                 "{} must bind on {surface:?}",
@@ -495,7 +517,7 @@ fn mcp_primitive_definitions_use_application_contracts() {
             &[][..],
         ),
     ] {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let tool_name = operation.mcp_tool_name();
         let definition = definitions
             .iter()
             .find(|definition| definition.name == tool_name)
@@ -516,10 +538,12 @@ fn mcp_primitive_definitions_use_application_contracts() {
                 "{tool_name} must declare {property}"
             );
         }
-        let required = definition.input_schema["required"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{tool_name} required properties"))
-            .iter()
+        let required = definition
+            .input_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
             .map(|property| property.as_str().expect("required property name"))
             .collect::<BTreeSet<_>>();
         assert_eq!(
@@ -527,7 +551,7 @@ fn mcp_primitive_definitions_use_application_contracts() {
             expected_required.iter().copied().collect::<BTreeSet<_>>(),
             "{tool_name} required properties"
         );
-        tracedecay::application_surface::parse_application_surface_request(operation, request)
+        tracedecay_daemon_protocol::parse_application_surface_request(operation, request)
             .unwrap_or_else(|error| panic!("{tool_name} must parse: {error}"));
     }
 }
@@ -554,7 +578,7 @@ fn handle_gated_feedback_tools_are_advertised_over_mcp() {
 
 #[test]
 fn handle_gated_feedback_capabilities_follow_catalog_availability() {
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .expect("application catalog");
     for capability_id in [
         "capability.application.feedback.affected-tests",

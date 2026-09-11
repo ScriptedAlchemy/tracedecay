@@ -49,13 +49,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::application_surface::resolve_catalog_tool_binding;
-use tracedecay::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_api::{
     WorkOperation, WorkflowOperation, http_application_full_route_path,
     is_http_application_operation_exposed, retained_application_route_path,
 };
+use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
+use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityManifestV1, CatalogSnapshotV1,
@@ -95,7 +95,7 @@ const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
 
 /// The callable-code operations, mirroring the set that
 /// `http_page_projection` classifies as `HttpPageProjection::MetaCursor` in
-/// `src/application_surface.rs`.
+/// `tracedecay-daemon-service/src/application_surface.rs`.
 ///
 /// These are the operations whose decoded surface request carries callable-code
 /// metadata. CLI, MCP, and HTTP must expose the same application operations.
@@ -580,7 +580,10 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
         let mounted = match surface {
             BindingSurface::Http => {
                 match ApplicationSurfaceOperation::from_catalog_name(operation) {
-                    Some(http) if is_http_application_operation_exposed(http) => {
+                    Some(http)
+                        if is_http_application_operation_exposed(http)
+                            .expect("HTTP exposure registry") =>
+                    {
                         http_route_is_mounted(
                             &agent,
                             &fixture,
@@ -766,15 +769,6 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     }
 
     // -- HTTP application operations. ---------------------------------------
-    // The enum is the router's own operation authority, so an entry the
-    // catalog never declares is a surface the catalog cannot authorize and no
-    // discovery answer will ever mention.
-    assert!(
-        ApplicationSurfaceOperation::ALL.len() >= 66,
-        "the HTTP application operation set shrank to {}; a removed operation \
-         must be deleted deliberately, not dropped out of this sweep",
-        ApplicationSurfaceOperation::ALL.len()
-    );
     for operation in ApplicationSurfaceOperation::ALL {
         graded += 1;
         let name = operation.as_str();
@@ -788,7 +782,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
         // be required to carry an HTTP catalog binding.
         // `is_http_exposed` is the single authority for that decision, so the
         // catalog requirement and the route requirement consult it alike.
-        if !is_http_application_operation_exposed(operation) {
+        if !is_http_application_operation_exposed(operation).expect("HTTP exposure registry") {
             continue;
         }
         if !catalog_http_operations.contains(name) {

@@ -38,8 +38,7 @@ pub(super) async fn user_review(
         session_id,
         run_id,
         AutomationTrigger::HostReceipt,
-    )
-    .await?;
+    )?;
     Ok(json!({
         "action": "user_review",
         "status": "completed",
@@ -49,7 +48,7 @@ pub(super) async fn user_review(
     }))
 }
 
-async fn run_user_review(
+fn run_user_review(
     _profile_root: &std::path::Path,
     _session_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     _provider: &str,
@@ -100,6 +99,10 @@ async fn apply_projectless_hermes_receipt_plan(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.replay")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Projectless Hermes replay is one receipt pass without a mounted project route."
+)]
 async fn replay_projectless_hermes_receipts(
     broker: &SharedHostAdmissionBroker,
     profile_root: &Path,
@@ -205,6 +208,20 @@ async fn replay_projectless_hermes_receipts(
     for seq in retained_leases.into_iter().rev() {
         replay.defer(seq).await?;
     }
+    if target_outcome.is_none()
+        && let Some(seq) = target_seq
+    {
+        // The concurrent profile worker may have already committed this
+        // seq. `HostAdmissionRuntime::commit` returns Ok(0) when
+        // `seq <= committed_through` without requiring a lease; that is
+        // the spool watermark, not an inferred ExactDuplicate. Any other
+        // commit result is the broker's typed failure (lost / never
+        // committed). `accepted_for_replay` stays only for a full drain.
+        target_outcome = Some(match replay.commit(seq).await {
+            Ok(_) => HostAdmissionOutcome::replay_completed(true, false),
+            Err(outcome) => outcome,
+        });
+    }
     Ok(terminal_outcome
         .or(target_outcome)
         .or(retained_outcome)
@@ -258,8 +275,7 @@ async fn continue_projectless_hermes_review(
         session_id,
         Some(format!("user_host_receipt_{}", ready.pending.generation)),
         tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::HostReceipt,
-    )
-    .await?;
+    )?;
     if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
         && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
         && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded

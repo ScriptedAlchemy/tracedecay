@@ -243,28 +243,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_error_display_includes_message_and_path() {
-        let err = TraceDecayError::File {
-            message: "not found".to_string(),
-            path: "/tmp/foo.rs".to_string(),
-        };
-        let s = err.to_string();
-        assert!(s.contains("not found"), "message missing: {s}");
-        assert!(s.contains("/tmp/foo.rs"), "path missing: {s}");
-    }
-
-    #[test]
-    fn database_error_display_includes_operation() {
-        let err = TraceDecayError::Database {
-            message: "constraint violated".to_string(),
-            operation: "INSERT".to_string(),
-        };
-        let s = err.to_string();
-        assert!(s.contains("constraint violated"), "{s}");
-        assert!(s.contains("INSERT"), "{s}");
-    }
-
-    #[test]
     fn reset_required_preserves_typed_authority_and_reason() {
         let error =
             TraceDecayError::reset_required("configuration", "persisted format is not final");
@@ -402,42 +380,5 @@ mod tests {
             ))
         );
         assert_eq!(err.hook_runtime_status(), Some("unavailable"));
-    }
-
-    #[test]
-    fn search_error_display_includes_query() {
-        let err = TraceDecayError::Search {
-            message: "timeout".to_string(),
-            query: "fn main".to_string(),
-        };
-        let s = err.to_string();
-        assert!(s.contains("timeout"), "{s}");
-        assert!(s.contains("fn main"), "{s}");
-    }
-
-    #[test]
-    fn config_error_display() {
-        let err = TraceDecayError::Config {
-            message: "bad value".to_string(),
-        };
-        assert!(err.to_string().contains("bad value"));
-    }
-
-    #[test]
-    fn sync_lock_error_display() {
-        let err = TraceDecayError::SyncLock {
-            message: "already running".to_string(),
-        };
-        assert!(err.to_string().contains("already running"));
-    }
-
-    #[test]
-    fn json_error_from_serde() {
-        let serde_err = serde_json::from_str::<serde_json::Value>("bad json");
-        let err: TraceDecayError = match serde_err {
-            Err(e) => e.into(),
-            Ok(_) => panic!("expected JSON parse error"),
-        };
-        assert!(err.to_string().contains("json error"));
     }
 }

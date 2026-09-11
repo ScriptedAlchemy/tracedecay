@@ -479,7 +479,7 @@ restored topology still describes the rows.
 onto the fork's `fix/catalog-version-guard` branch (ported over the
 out-of-place checkpoint and close-skip storage rewrite that landed in
 the meantime) and the five `grafeo-*` revs in `[patch.crates-io]` now
-point at that lineage. The reopen tests in `tests/runtime_contract.rs`
+point at that lineage. The reopen tests in `tests/graph_db_suite/runtime_contract.rs`
 assert `Available` — restored, within the same admission bound that
 proves no rebuild ran — and the fork gates the semantics with
 `vector_index_reopen`, `vector_index_restore_cost`, and

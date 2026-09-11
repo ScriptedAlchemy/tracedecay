@@ -1,21 +1,25 @@
 use std::collections::BTreeSet;
 
-use tracedecay::catalog_composition::{
-    CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
+use tracedecay::mcp::tools::{
+    default_catalog_discovery_authority, get_catalog_filtered_tool_definitions_with_budget,
 };
 use tracedecay_api::{
     http_application_full_route_path, http_route_documents, is_http_application_operation_exposed,
     retained_application_route_path,
 };
+use tracedecay_contracts::catalog_composition::{
+    CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
+};
 use tracedecay_contracts::{
-    ApplicationContractError, ApplicationHandlerDescriptor, ApplicationHandlerDescriptors,
-    ApplicationOperation, ResultContractRef, RetainedSurfaceOperation,
-    application_catalog_contributions, application_handler_descriptors,
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationHandlerDescriptor,
+    ApplicationHandlerDescriptors, ApplicationOperation, ResultContractRef,
+    RetainedSurfaceOperation, application_catalog_contributions, application_handler_descriptors,
     retrieval::catalog::symbol_search_contribution,
 };
+use tracedecay_mcp::{ToolRegistryMode, explore_call_budget, project_catalog_discovery_scope};
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, BindingSurface, CapabilityId, ProfileBudget, ProfileId,
-    ProfileKind, SchemaId, SchemaRef, ScopeDimension, UseCaseId,
+    ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogContributionV1,
+    ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef, ScopeDimension, UseCaseId,
 };
 
 #[test]
@@ -223,7 +227,8 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
         .iter()
         .filter(|(binding, _)| {
             match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
-                Some(operation) => !is_http_application_operation_exposed(operation),
+                Some(operation) => !is_http_application_operation_exposed(operation)
+                    .expect("HTTP exposure registry"),
                 None => RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
                     .is_none(),
             }
@@ -403,4 +408,77 @@ fn inconsistent(field: &'static str) -> Result<(), CatalogCompositionError> {
     Err(CatalogCompositionError::Application(
         ApplicationContractError::Inconsistent { field },
     ))
+}
+
+// Growth tripwire only, not an MCP client or protocol limit. The complete
+// final-V2 profile measures 626,799 bytes with every application, Work, and
+// workflow tool projecting its canonical request schema through
+// `tracedecay_mcp::mcp_input_schema` (the CAS-gated configuration writes bound
+// their value unions). This reviewed 640 KiB ceiling leaves about 4% headroom;
+// raising it requires another serialized tools/list measurement and a stated
+// reason for the additional payload.
+const DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES: usize = 640 * 1024;
+
+/// The composed catalog's default profile must stay inside its reviewed budget
+/// and keep the MCP `tools/list` payload it produces inside the measured
+/// ceiling. The composed snapshot lives in `tracedecay-contracts`; the tool
+/// registry it feeds lives here, so the joined measurement belongs in the root
+/// suite.
+#[test]
+fn default_profile_capacity_tracks_composed_runtime() {
+    let snapshot = build_application_catalog_snapshot().expect("application catalog");
+    let contributions = application_catalog_contributions().expect("application contributions");
+    let default_profile_id =
+        ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("default profile id");
+    let default_profile = snapshot
+        .profile(&default_profile_id)
+        .expect("default application profile");
+    let default_binding_count = contributions
+        .iter()
+        .flat_map(CatalogContributionV1::bindings)
+        .filter(|binding| {
+            default_profile.includes_capability(binding.capability_id())
+                && default_profile.enables_surface(binding.surface())
+        })
+        .count();
+    assert!(default_binding_count > 0);
+    assert!(default_binding_count <= default_profile.budget().maximum_bindings() as usize);
+
+    let definitions = get_catalog_filtered_tool_definitions_with_budget(
+        0,
+        explore_call_budget(0),
+        &default_profile_id,
+        &default_catalog_discovery_authority().expect("default discovery authority"),
+        &project_catalog_discovery_scope(),
+        ToolRegistryMode::DeterministicMaximal,
+    )
+    .expect("default-profile MCP definitions");
+    let measured_bytes = serde_json::to_vec(&serde_json::json!({ "tools": &definitions }))
+        .expect("serialize default-profile tools/list response")
+        .len();
+    let mut contributors = definitions
+        .iter()
+        .map(|definition| {
+            (
+                definition.name.as_str(),
+                serde_json::to_vec(definition)
+                    .expect("serialize tool definition")
+                    .len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    contributors.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+    let largest_contributors = contributors
+        .iter()
+        .take(10)
+        .map(|(name, bytes)| format!("{name}={bytes}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    assert!(
+        measured_bytes <= DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES,
+        "default-profile MCP tools/list payload measured {measured_bytes} bytes, exceeding \
+         the {DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES}-byte regression ceiling; \
+         largest serialized tool definitions: {largest_contributors}"
+    );
 }

@@ -966,15 +966,15 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
       phase: 'bulk_commit',
       completed_files: 250,
       total_files: 500,
-      completed_lexical_bytes: 32 * 1024 * 1024,
-      total_lexical_bytes: 64 * 1024 * 1024,
+      completed_lexical_units: 32 * 1024 * 1024,
+      total_lexical_units: 64 * 1024 * 1024,
     });
     expect(activeProgress?.files_per_second).toBe(250);
     expect(activeProgress?.estimated_remaining_seconds).toBe(120);
 
     const unavailableProgress = unavailableRate.payload.worktrees[0]?.progress;
     expect(unavailableProgress?.files_per_second).toBeNull();
-    expect(unavailableProgress?.lexical_bytes_per_second).toBeNull();
+    expect(unavailableProgress?.lexical_units_per_second).toBeNull();
     expect(unavailableProgress?.estimated_remaining_seconds).toBeNull();
     expect(unavailableProgress?.blocked_reason).toBe('retry_backoff');
 

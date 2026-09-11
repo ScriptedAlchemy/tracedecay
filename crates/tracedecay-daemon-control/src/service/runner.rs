@@ -39,7 +39,7 @@ impl ServicePlatform {
 
 impl ServiceRunner {
     pub(super) fn current() -> Result<Self> {
-        let path_var = std::env::var_os("PATH");
+        let path_var = tracedecay_runtime_core::config::host_program_search_path();
         match ServicePlatform::current()? {
             ServicePlatform::Systemd => Self::systemd(require_service_program_on_path(
                 "systemctl",

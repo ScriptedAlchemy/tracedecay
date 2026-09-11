@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex, TryLockError};
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 use fastembed::{
     RerankInitOptionsUserDefined, RerankerModel, TextRerank, TokenizerFiles,
     UserDefinedRerankingModel,
@@ -35,6 +35,14 @@ pub const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str = "tracedecay.rerank-runtime-com
 const CODE_CHUNK_ANCHOR_PREFIX: &str = "code-chunk:";
 const CODE_SYMBOL_ANCHOR_PREFIX: &str = "code-symbol:";
 
+#[derive(Clone, Copy)]
+enum SupportedRerankerModelV1 {
+    BgeBase,
+    BgeV2M3,
+    JinaV1TurboEn,
+    JinaV2BaseMultilingual,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RerankArtifactAdmissionErrorV1 {
     IncompatiblePins,
@@ -44,13 +52,13 @@ pub enum RerankArtifactAdmissionErrorV1 {
 
 #[derive(Clone)]
 struct AdmittedRerankArtifactV1 {
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     artifact: AdmittedArtifactV1,
     pins: RerankCompatibilityPinsV1,
     max_batch_size: u32,
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     max_sequence_length: u32,
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     max_threads: u32,
     resident_byte_ceiling: u64,
 }
@@ -71,13 +79,13 @@ impl AdmittedRerankArtifactV1 {
             resources
         };
         Ok(Self {
-            #[cfg(feature = "semantic-fastembed")]
+            #[cfg(all(feature = "semantic-fastembed", not(windows)))]
             artifact,
             pins,
             max_batch_size: resources.max_batch_size,
-            #[cfg(feature = "semantic-fastembed")]
+            #[cfg(all(feature = "semantic-fastembed", not(windows)))]
             max_sequence_length: resources.max_sequence_length,
-            #[cfg(feature = "semantic-fastembed")]
+            #[cfg(all(feature = "semantic-fastembed", not(windows)))]
             max_threads: resources.max_threads,
             resident_byte_ceiling: resources.max_resident_bytes,
         })
@@ -128,8 +136,7 @@ pub fn validate_reranker_manifest_pins(
     {
         return Err(RerankArtifactAdmissionErrorV1::IncompatiblePins);
     }
-    #[cfg(feature = "semantic-fastembed")]
-    supported_reranker_model(&payload.upstream.name, &payload.artifact_id)
+    supported_reranker_identity(&payload.upstream.name, &payload.artifact_id)
         .ok_or(RerankArtifactAdmissionErrorV1::IncompatibleArtifact)?;
     Ok(payload.resource_ceiling)
 }
@@ -171,12 +178,12 @@ pub(super) fn warm_reranker_executor(
     FastEmbedRerankExecutorV1::new(authority).map(Arc::new)
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 struct FastEmbedRerankSessionV1 {
     model: TextRerank,
 }
 
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 struct FastEmbedRerankSessionV1;
 
 impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
@@ -238,7 +245,7 @@ impl AdmittedNativeRerankExecutorV1 for FastEmbedRerankExecutorV1 {
     }
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn open_session(
     authority: &AdmittedRerankArtifactV1,
 ) -> Result<FastEmbedRerankSessionV1, LocalRerankFailureV1> {
@@ -264,7 +271,7 @@ fn open_session(
         .map_err(|_| LocalRerankFailureV1::Unavailable(SanitizedStageFailure::AuthorityUnavailable))
 }
 
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 fn open_session(
     _authority: &AdmittedRerankArtifactV1,
 ) -> Result<FastEmbedRerankSessionV1, LocalRerankFailureV1> {
@@ -273,7 +280,7 @@ fn open_session(
     ))
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn member_bytes(
     authority: &AdmittedRerankArtifactV1,
     role: ArtifactMemberRoleV1,
@@ -284,7 +291,7 @@ fn member_bytes(
         .map_err(|_| LocalRerankFailureV1::Unavailable(SanitizedStageFailure::AuthorityUnavailable))
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn run_session(
     session: &mut FastEmbedRerankSessionV1,
     query: &str,
@@ -335,7 +342,7 @@ fn run_session(
         .collect())
 }
 
-#[cfg(not(feature = "semantic-fastembed"))]
+#[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
 fn run_session(
     _session: &mut FastEmbedRerankSessionV1,
     _query: &str,
@@ -348,20 +355,34 @@ fn run_session(
     ))
 }
 
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 fn supported_reranker_model(upstream: &str, artifact_id: &str) -> Option<RerankerModel> {
+    Some(match supported_reranker_identity(upstream, artifact_id)? {
+        SupportedRerankerModelV1::BgeBase => RerankerModel::BGERerankerBase,
+        SupportedRerankerModelV1::BgeV2M3 => RerankerModel::BGERerankerV2M3,
+        SupportedRerankerModelV1::JinaV1TurboEn => RerankerModel::JINARerankerV1TurboEn,
+        SupportedRerankerModelV1::JinaV2BaseMultilingual => {
+            RerankerModel::JINARerankerV2BaseMultiligual
+        }
+    })
+}
+
+fn supported_reranker_identity(
+    upstream: &str,
+    artifact_id: &str,
+) -> Option<SupportedRerankerModelV1> {
     match [upstream, artifact_id] {
         values if values.contains(&"BAAI/bge-reranker-base") => {
-            Some(RerankerModel::BGERerankerBase)
+            Some(SupportedRerankerModelV1::BgeBase)
         }
         values if values.contains(&"rozgo/bge-reranker-v2-m3") => {
-            Some(RerankerModel::BGERerankerV2M3)
+            Some(SupportedRerankerModelV1::BgeV2M3)
         }
         values if values.contains(&"jinaai/jina-reranker-v1-turbo-en") => {
-            Some(RerankerModel::JINARerankerV1TurboEn)
+            Some(SupportedRerankerModelV1::JinaV1TurboEn)
         }
         values if values.contains(&"jinaai/jina-reranker-v2-base-multilingual") => {
-            Some(RerankerModel::JINARerankerV2BaseMultiligual)
+            Some(SupportedRerankerModelV1::JinaV2BaseMultilingual)
         }
         _ => None,
     }
@@ -533,7 +554,7 @@ impl ProductionCodeRerankAuthorityV1 {
         self.executor.as_ref()
     }
 
-    #[cfg(all(test, feature = "semantic-fastembed"))]
+    #[cfg(all(test, feature = "semantic-fastembed", not(windows)))]
     pub(crate) fn executor_handle(&self) -> &Arc<dyn MountedRerankExecutorV1> {
         &self.executor
     }
@@ -550,5 +571,13 @@ impl ProductionCodeRerankAuthorityV1 {
         let mut views = GenerationBoundCodeRerankViewsV1::new(generation, query);
         BoundedRerankRuntimeV1::new(&mut views, self.executor.as_ref())
             .rerank(request, policy, pre_rerank, control)
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn from_executor_for_test(
+        pins: RerankCompatibilityPinsV1,
+        executor: Arc<dyn MountedRerankExecutorV1>,
+    ) -> Self {
+        Self { pins, executor }
     }
 }

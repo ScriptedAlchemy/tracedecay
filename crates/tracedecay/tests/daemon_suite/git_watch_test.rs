@@ -410,10 +410,7 @@ async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() 
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             isolated = search(&harness, &project, "wt_only").await;
-            if ["exact", "lexical", "graph"]
-                .iter()
-                .all(|lane| isolated["coverage"][lane] == "complete")
-            {
+            if crate::common::incomplete_code_index_query_lanes(&isolated).is_empty() {
                 return;
             }
             tokio::task::yield_now().await;

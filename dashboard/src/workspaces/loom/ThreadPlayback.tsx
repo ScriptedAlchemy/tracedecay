@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 import type { ReactNode } from 'react';
 import type { LcmMessageV1, LcmSummaryNodeV1 } from '../../contracts/generated.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
@@ -6,15 +6,13 @@ import { Legend } from '../../ui/instrument.tsx';
 import { formatStamp } from '../../ui/format.ts';
 import { orderChainMessages } from './weave.ts';
 import {
-  initialPlaybackState,
   LOOM_PLAYBACK_SPEEDS,
-  playbackTickMillis,
-  reconcilePlaybackState,
   returnToLive,
   seekPlayback,
   stepPlayback,
   type LoomPlaybackFrame,
   type LoomPlaybackSpeed,
+  type LoomPlaybackState,
 } from './playback.ts';
 
 /**
@@ -25,43 +23,25 @@ import {
  * does not imply an SSE subscription that this route does not provide.
  */
 export function ThreadPlayback({
-  messages,
+  children,
+  frames,
+  state,
+  setState,
   summaryNodes,
   totalMessages,
   hasMoreMessages,
   hasMoreSummaryNodes,
 }: {
-  messages: readonly LcmMessageV1[];
+  children: (toolbar: ReactNode, scrubber: ReactNode) => ReactNode;
+  frames: readonly LoomPlaybackFrame[];
+  state: LoomPlaybackState;
+  setState: Dispatch<SetStateAction<LoomPlaybackState>>;
   summaryNodes: readonly LcmSummaryNodeV1[];
   totalMessages: number;
   hasMoreMessages: boolean;
   hasMoreSummaryNodes: boolean;
 }) {
-  const frames = useMemo(() => playbackFrames(messages), [messages]);
-  const signature = frames.map((frame) => frame.id).join('\u0000');
-  const [state, setState] = useState(() => initialPlaybackState(frames.length));
   const active = frames[state.cursor] ?? null;
-  const activeId = active?.id ?? null;
-  const priorActiveId = useRef<string | null>(activeId);
-
-  // A refetch can append or remove a page member. Stable identity wins over a
-  // numeric cursor; live following is the explicit exception and takes tail.
-  useEffect(() => {
-    const previousActiveId = priorActiveId.current;
-    setState((previous) => reconcilePlaybackState(previous, previousActiveId, frames));
-  }, [frames, signature]);
-
-  useEffect(() => {
-    priorActiveId.current = activeId;
-  }, [activeId]);
-
-  useEffect(() => {
-    if (!state.playing || frames.length === 0) return;
-    const timer = window.setTimeout(() => {
-      setState((previous) => stepPlayback(previous, frames.length, 1));
-    }, playbackTickMillis(state.speed));
-    return () => window.clearTimeout(timer);
-  }, [frames.length, state.playing, state.speed, state.cursor]);
 
   if (frames.length === 0) {
     return (
@@ -77,26 +57,15 @@ export function ThreadPlayback({
     ? []
     : active.summaryNodeIds.map((id) => summaryNodes.find((node) => node.node_id === id) ?? null);
 
-  return (
-    <section className="flex flex-col gap-2" aria-label="Session replay">
-      <Legend
-        trailing={
-          <span className="td-value shrink-0 text-3xs text-text-muted tabular-nums">
-            {state.cursor + 1} / {frames.length} loaded turns
-          </span>
-        }
-      >
-        replay
-      </Legend>
-
+  const toolbar = (
       <div
         role="toolbar"
         aria-label="Replay controls"
-        className="flex flex-wrap items-center gap-1 border border-edge-subtle bg-surface-1 p-1"
+        className="flex flex-wrap items-center gap-1"
       >
         <PlaybackButton
           label={state.playing ? 'Pause replay' : 'Play replay'}
-          disabled={!state.playing && state.cursor >= latest}
+          disabled={!state.playing && (state.cursor < 0 || state.cursor >= latest)}
           onClick={() => {
             setState((previous) => ({
               ...previous,
@@ -109,7 +78,7 @@ export function ThreadPlayback({
         </PlaybackButton>
         <PlaybackButton
           label="Step to previous stored event"
-          disabled={state.cursor === 0}
+          disabled={state.cursor <= 0}
           onClick={() => setState((previous) => stepPlayback(previous, frames.length, -1))}
         >
           prev
@@ -121,7 +90,7 @@ export function ThreadPlayback({
         >
           next
         </PlaybackButton>
-        <label className="flex min-h-[var(--touch-target-min)] items-center gap-1 px-1 text-3xs text-text-secondary">
+        <label className="flex min-h-8 items-center gap-1 px-1 text-3xs text-text-secondary">
           speed
           <select
             aria-label="Replay speed"
@@ -144,25 +113,32 @@ export function ThreadPlayback({
             label="Return replay to latest loaded event"
             onClick={() => setState((previous) => returnToLive(previous, frames.length))}
           >
-            return to latest
+            RETURN TO LOADED TAIL
           </PlaybackButton>
         )}
+        <span className="text-3xs text-text-muted">{state.cursor + 1} / {frames.length} loaded turns</span>
       </div>
-
-      <label className="flex flex-col gap-1 text-3xs text-text-muted">
+  );
+  const scrubber = (
+      <label className="flex items-center gap-2 text-3xs text-text-muted">
         Seek loaded event
         <input
           aria-label="Seek loaded event"
           type="range"
+          className="min-w-0 flex-1"
           min={0}
           max={latest}
           step={1}
-          value={state.cursor}
+          value={Math.max(state.cursor, 0)}
           onChange={(event) => {
             setState((previous) => seekPlayback(previous, frames.length, Number(event.currentTarget.value)));
           }}
         />
       </label>
+  );
+  return (
+    <section className="flex flex-col gap-2" aria-label="Session replay">
+      {children(toolbar, scrubber)}
 
       {active ? (
         <div className="flex flex-col gap-1 border border-edge-subtle bg-surface-0 px-2 py-1.5">
@@ -182,6 +158,7 @@ export function ThreadPlayback({
         </div>
       ) : null}
 
+      <details><summary className="text-3xs text-text-muted">Replay evidence · {linkedNodes.length} linked compaction boundaries</summary>
       <CompactionLinks nodes={linkedNodes} linkCount={active?.summaryNodeIds.length ?? 0} />
 
       <p className="text-3xs leading-relaxed text-text-muted">
@@ -190,16 +167,19 @@ export function ThreadPlayback({
         viewing pace, not recorded elapsed time.{' '}
         {hasMoreMessages
           ? `${totalMessages.toLocaleString()} turns exist for this session; later pages remain outside this replay until the canonical transcript page is opened.`
-          : `This response contains all ${totalMessages.toLocaleString()} recorded turns.`}{' '}
+          : totalMessages === frames.length
+            ? `This response contains all ${totalMessages.toLocaleString()} recorded turns.`
+            : `${frames.length} of ${totalMessages.toLocaleString()} recorded turns are loaded; no further page is advertised by this response.`}{' '}
         {hasMoreSummaryNodes
           ? 'More compaction boundaries exist outside this response page.'
           : 'Compaction links are kept separate from the event cursor unless the store linked them to this raw turn.'}
       </p>
+      </details>
     </section>
   );
 }
 
-function playbackFrames(messages: readonly LcmMessageV1[]): LoomPlaybackFrame[] {
+export function playbackFrames(messages: readonly LcmMessageV1[]): LoomPlaybackFrame[] {
   return orderChainMessages(messages).map((message) => ({
     id: message.message_id,
     ordinal: message.ordinal,
@@ -274,7 +254,7 @@ function PlaybackButton({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="td-hit border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary disabled:text-text-muted"
+      className="min-h-8 min-w-8 border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary disabled:text-text-muted"
     >
       {children}
     </button>

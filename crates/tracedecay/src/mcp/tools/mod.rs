@@ -7,8 +7,6 @@ pub(crate) mod binding;
 pub(crate) mod catalog_discovery;
 pub mod dispatch;
 pub(crate) mod handlers;
-#[cfg(test)]
-mod plugin_conformance_tests;
 
 use std::collections::HashSet;
 use std::sync::LazyLock;

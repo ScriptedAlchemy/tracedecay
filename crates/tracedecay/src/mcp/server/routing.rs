@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tracedecay_mcp::server::{McpConnectionState, McpResponseLease};
 
 use crate::mcp::project_route::{
     HookProjectRouteCache, ProjectRouteFailure, ProjectRouteFailureKind, WorkspaceProjectRoute,
@@ -49,9 +50,11 @@ impl SelectedProjectResponseLease {
     pub(crate) fn revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
         &self.revoked
     }
+}
 
-    pub(crate) fn is_revoked(&self) -> bool {
-        self.revoked.is_cancelled()
+impl McpResponseLease for SelectedProjectResponseLease {
+    fn revoked(&self) -> &tracedecay_session_memory::context::CancellationToken {
+        &self.revoked
     }
 }
 
@@ -158,6 +161,26 @@ impl ConnectionRouteState {
 
     pub(crate) fn clear_selected_request_server(&mut self) {
         self.selected_request_server = None;
+    }
+}
+
+impl McpConnectionState for ConnectionRouteState {
+    type ResponseLease = SelectedProjectResponseLease;
+
+    fn memory_request_scope(&self) -> &str {
+        ConnectionRouteState::memory_request_scope(self)
+    }
+
+    fn fork_for_independent_read(&self) -> Self {
+        ConnectionRouteState::fork_for_independent_read(self)
+    }
+
+    fn fork_for_connection_owned_read(&self) -> Self {
+        ConnectionRouteState::fork_for_connection_owned_read(self)
+    }
+
+    fn take_selected_response_lease(&mut self) -> Option<Self::ResponseLease> {
+        ConnectionRouteState::take_selected_response_lease(self)
     }
 }
 
@@ -388,7 +411,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{resolve_initialize_roots_project_path, select_initialize_project_path};
-    use crate::host_admission::HostAdmissionTestRuntimeV1;
+    use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_sessions::admission::HostAdmissionScope;
 
     fn run_git(root: &Path, args: &[&str]) {

@@ -1160,8 +1160,12 @@ fn classify_external_source_error(
 ) -> HostAdmissionOutcome {
     tracing::warn!(%error, "registered external-source commit failed");
     match error {
-        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
+        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::Dispatch { .. }
+        | tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::ReadUnavailable { .. } => {
             HostAdmissionOutcome::retained_unavailable("external_source_runtime_unavailable")
+        }
+        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::SubmitRejected { .. } => {
+            HostAdmissionOutcome::retained_unavailable("external_source_runtime_rejected")
         }
         _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
     }

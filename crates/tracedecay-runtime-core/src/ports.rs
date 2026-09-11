@@ -340,17 +340,6 @@ pub mod registered_schema {
             }
         }
 
-        #[test]
-        fn installer_signature_borrows_only_the_sealed_installation_capability() {
-            fn installer<'a>(
-                _: &'a RegisteredSchemaInstallationV1,
-            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-                Box::pin(async { Ok(()) })
-            }
-
-            let _: Installer = installer;
-        }
-
         /// The port stays fail-closed: with no installer registered, the open
         /// path yields a `Database` error naming the missing registrar. This
         /// guards the production contract that an uninitialised profile or

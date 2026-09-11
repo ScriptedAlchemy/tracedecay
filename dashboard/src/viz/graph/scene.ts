@@ -1,10 +1,7 @@
 import { cssColorToRgb, type ActivationField } from './activation.ts';
 import { createActivationOverlay } from './activationOverlay.ts';
-import {
-  frameEmergentField,
-  loadForceAtlas2,
-  settleEmergentField,
-} from './emergentField.ts';
+import { frameEmergentField } from './emergentField.ts';
+import { settleEmergentOffThread } from './emergentLayout.ts';
 import { kindColor } from './kindColor.ts';
 import { buildDendrites, prepareField, type FieldFrame, type PreparedField } from './layout.ts';
 import { frameMeasuredField } from './measuredField.ts';
@@ -26,6 +23,10 @@ export interface GraphScene {
   /** Repaint the current composition. Static: no loop is started. */
   repaint(): void;
   resize(): void;
+  focusNode(node: string | null): void;
+  zoomIn(): void;
+  zoomOut(): void;
+  fit(): void;
   settle(): void;
   wake(): void;
   retheme(): void;
@@ -46,7 +47,9 @@ export interface SceneRequest {
   extent: FieldExtent | undefined;
   field: ActivationField;
   selectedId: () => string | null | undefined;
+  inspectedId: () => string | null | undefined;
   onSelect: (id: string | null) => void;
+  onInspect: (id: string | null) => void;
   isReduced: () => boolean;
 }
 
@@ -60,20 +63,18 @@ export function buildMeasuredScene(request: SceneRequest): GraphScene {
 /**
  * Build the scene for a field whose shape is the finding.
  *
- * The graph is constructed first, then the layout engine is loaded, and only
+ * The graph is constructed first, then settled in a bounded worker, and only
  * then is anything drawn: Sigma is not constructed until the coordinates are
  * final, so there is no frame in which the seed circle is on screen. Resolves
- * to `null` when the caller cancelled while the engine was in flight — the
- * resolved module is dropped rather than handed to a component that is gone.
+ * to `null` when the caller cancels the worker job. Termination stops the
+ * calculation, and no result reaches a component that is gone.
  */
 export async function buildEmergentScene(
   request: SceneRequest,
-  cancelled: () => boolean,
+  signal: AbortSignal,
 ): Promise<GraphScene | null> {
   const { theme, prepared } = prepare(request);
-  const forceAtlas2 = await loadForceAtlas2();
-  if (cancelled()) return null;
-  settleEmergentField(prepared, forceAtlas2);
+  if (!await settleEmergentOffThread(prepared, signal) || signal.aborted) return null;
   return compose(request, theme, prepared, frameEmergentField(prepared));
 }
 
@@ -95,7 +96,8 @@ function compose(
   prepared: PreparedField,
   frame: FieldFrame,
 ): GraphScene {
-  const { container, edges, field, isReduced, onSelect, selectedId } = request;
+  const { container, edges, field, inspectedId, isReduced, onInspect, onSelect, selectedId } =
+    request;
   const { graph, realNodes, neighborsOf, nodeCount, denseField, roominess } = prepared;
   const strands = buildDendrites(graph, edges.length);
   const focus = createFocusState();
@@ -117,7 +119,6 @@ function compose(
     realNodes,
     strands,
     field,
-    neighborsOf,
     theme,
     focus,
     paint,
@@ -136,13 +137,14 @@ function compose(
     roominess,
     frame,
     selectedId,
-    onNodeClick: (node) => {
-      onSelect(node);
-      overlay.fireNeighborhood(node);
-    },
+    // Selection is reader intent, never an admitted activity event.
+    onNodeClick: onSelect,
     onStageClick: () => onSelect(null),
+    onInspect,
     onFocusChange: () => overlay.wake(),
   });
+  const initialInspection = inspectedId();
+  if (initialInspection != null) renderer.focusNode(initialInspection);
 
   // One static composition of the resting field, so the graph is fully
   // rendered before anything ever fires.
@@ -156,6 +158,18 @@ function compose(
     repaint: paint,
     resize: () => {
       if (alive) renderer?.resize();
+    },
+    focusNode: (node) => {
+      if (alive) renderer?.focusNode(node);
+    },
+    zoomIn: () => {
+      if (alive) renderer?.zoomIn(isReduced());
+    },
+    zoomOut: () => {
+      if (alive) renderer?.zoomOut(isReduced());
+    },
+    fit: () => {
+      if (alive) renderer?.fit(isReduced());
     },
     settle: () => {
       if (alive) overlay.settle();

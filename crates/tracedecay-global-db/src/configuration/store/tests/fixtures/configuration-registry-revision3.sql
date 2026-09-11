@@ -243,18 +243,6 @@ CREATE TABLE configuration_audit_redaction_keys (
     key_material BLOB NOT NULL CHECK (length(key_material) = 32),
     created_at INTEGER NOT NULL
 );
-CREATE TABLE configuration_credential_references (
-    reference_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    reference_digest TEXT NOT NULL,
-    operation_digest TEXT NOT NULL,
-    authorization_policy_epoch INTEGER NOT NULL,
-    authorization_policy_digest TEXT NOT NULL,
-    authority_revalidated_at INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    effective_deadline_at INTEGER NOT NULL,
-    rotation INTEGER NOT NULL
-);
 CREATE TABLE configuration_component_activation_events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
     component TEXT NOT NULL,
@@ -479,12 +467,6 @@ BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); E
 CREATE TRIGGER configuration_audit_redaction_keys_immutable_delete
 BEFORE DELETE ON configuration_audit_redaction_keys
 BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); END;
-CREATE TRIGGER configuration_credential_references_immutable_update
-BEFORE UPDATE ON configuration_credential_references
-BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
-CREATE TRIGGER configuration_credential_references_immutable_delete
-BEFORE DELETE ON configuration_credential_references
-BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
 CREATE TRIGGER configuration_component_activation_events_immutable_update
 BEFORE UPDATE ON configuration_component_activation_events
 BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;

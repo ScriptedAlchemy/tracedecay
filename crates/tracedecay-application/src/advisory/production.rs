@@ -31,9 +31,6 @@ pub type AdvisoryProductionProviderAuthoritiesV1 = AdvisoryProviderAuthoritiesV1
     OwnedGlobalDbConfigurationControlStore,
 >;
 
-pub type AdvisoryProductionHookDeliveryPortV1 =
-    Arc<dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync>;
-
 pub type AdvisoryProductionStartupRegistrationV1 = AdvisoryDaemonStartupRegistrationV1<
     Arc<ProjectGitHubAnchorAuthorityV1>,
     Arc<ProjectGitHubAnchorAuthorityV1>,
@@ -48,7 +45,8 @@ pub type AdvisoryProductionStartupRegistrationV1 = AdvisoryDaemonStartupRegistra
 /// those references without opening or cleaning up another store.
 pub struct AdvisoryProductionAuthoritiesV1 {
     pub providers: AdvisoryProductionProviderAuthoritiesV1,
-    pub hook_delivery_port: AdvisoryProductionHookDeliveryPortV1,
+    pub hook_delivery_port:
+        Arc<dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync>,
 }
 
 impl AdvisoryProductionAuthoritiesV1 {
@@ -56,7 +54,7 @@ impl AdvisoryProductionAuthoritiesV1 {
         self,
     ) -> (
         AdvisoryProductionProviderAuthoritiesV1,
-        AdvisoryProductionHookDeliveryPortV1,
+        Arc<dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync>,
     ) {
         (self.providers, self.hook_delivery_port)
     }

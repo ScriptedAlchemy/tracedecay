@@ -65,6 +65,48 @@ fn rebuild(history: &[WorkflowRunEvent]) -> Result<WorkflowRunProjection, Workfl
     WorkflowRunProjection::rebuild(history).map_err(|_| WorkflowRunStorageError::InvalidHistory)
 }
 
+pub(crate) fn append_in_transaction(
+    transaction: &ExactSqlTransaction,
+    request: &WorkflowRunAppendRequest,
+) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
+    let payload = encode_json(&request.event).map_err(|_| WorkflowRunStorageError::Unavailable)?;
+    let digest =
+        canonical_sha256(&request.event).map_err(|_| WorkflowRunStorageError::Unavailable)?;
+    let sequence = i64::try_from(request.event.sequence())
+        .map_err(|_| WorkflowRunStorageError::Unavailable)?;
+    let history = history_tx(transaction, request.event.run_id())?;
+    if let Some(existing) = history
+        .iter()
+        .find(|event| event.command_id() == request.event.command_id())
+    {
+        return if existing == &request.event {
+            rebuild(&history).map(WorkflowRunAppendOutcome::Replayed)
+        } else {
+            Err(WorkflowRunStorageError::IdempotencyConflict)
+        };
+    }
+    if history.last().map(WorkflowRunEvent::sequence) != request.expected_sequence {
+        return Err(WorkflowRunStorageError::VersionConflict);
+    }
+    execute_tx(
+        transaction,
+        "INSERT INTO workflow_run_journal (
+             run_id, sequence, command_id, event_payload, event_digest
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        vec![
+            ExactSqlValue::Text(request.event.run_id().as_str().to_owned()),
+            ExactSqlValue::Integer(sequence),
+            ExactSqlValue::Text(request.event.command_id().as_str().to_owned()),
+            ExactSqlValue::Text(payload),
+            ExactSqlValue::Text(digest.as_str().to_owned()),
+        ],
+    )
+    .map_err(run_journal_unavailable)?;
+    let mut appended = history;
+    appended.push(request.event.clone());
+    rebuild(&appended).map(WorkflowRunAppendOutcome::Appended)
+}
+
 impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
     fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let transaction = self
@@ -83,70 +125,25 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         &self,
         request: &WorkflowRunAppendRequest,
     ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
-        let payload =
-            encode_json(&request.event).map_err(|_| WorkflowRunStorageError::Unavailable)?;
-        let digest =
-            canonical_sha256(&request.event).map_err(|_| WorkflowRunStorageError::Unavailable)?;
-        let sequence = i64::try_from(request.event.sequence())
-            .map_err(|_| WorkflowRunStorageError::Unavailable)?;
         let transaction = self
             .handle()
             .begin_immediate()
             .map_err(run_journal_unavailable)?;
-        let history = match history_tx(&transaction, request.event.run_id()) {
-            Ok(history) => history,
-            Err(error) => {
-                let _ = transaction.rollback();
-                return Err(error);
+        let outcome = append_in_transaction(&transaction, request);
+        match outcome {
+            Ok(appended @ WorkflowRunAppendOutcome::Appended(_)) => transaction
+                .commit()
+                .map(|_| appended)
+                .map_err(run_journal_unavailable),
+            Ok(replayed @ WorkflowRunAppendOutcome::Replayed(_)) => {
+                transaction.rollback().map_err(run_journal_unavailable)?;
+                Ok(replayed)
             }
-        };
-        if let Some(existing) = history
-            .iter()
-            .find(|event| event.command_id() == request.event.command_id())
-        {
-            let outcome = if existing == &request.event {
-                rebuild(&history).map(WorkflowRunAppendOutcome::Replayed)
-            } else {
-                Err(WorkflowRunStorageError::IdempotencyConflict)
-            };
-            let _ = transaction.rollback();
-            return outcome;
-        }
-        if history.last().map(WorkflowRunEvent::sequence) != request.expected_sequence {
-            let _ = transaction.rollback();
-            return Err(WorkflowRunStorageError::VersionConflict);
-        }
-        if let Err(error) = execute_tx(
-            &transaction,
-            "INSERT INTO workflow_run_journal (
-                 run_id, sequence, command_id, event_payload, event_digest
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            vec![
-                ExactSqlValue::Text(request.event.run_id().as_str().to_owned()),
-                ExactSqlValue::Integer(sequence),
-                ExactSqlValue::Text(request.event.command_id().as_str().to_owned()),
-                ExactSqlValue::Text(payload),
-                ExactSqlValue::Text(digest.as_str().to_owned()),
-            ],
-        ) {
-            let _ = transaction.rollback();
-            return Err(run_journal_unavailable(error));
-        }
-        let mut appended = history;
-        appended.push(request.event.clone());
-        // Rebuild before commit: an event that does not extend a valid
-        // history must never become durable.
-        let projection = match rebuild(&appended) {
-            Ok(projection) => projection,
             Err(error) => {
-                let _ = transaction.rollback();
-                return Err(error);
+                transaction.rollback().map_err(run_journal_unavailable)?;
+                Err(error)
             }
-        };
-        transaction
-            .commit()
-            .map(|_| WorkflowRunAppendOutcome::Appended(projection))
-            .map_err(run_journal_unavailable)
+        }
     }
 
     #[hotpath::measure(label = "rusqlite.workflow.projections_scan")]
@@ -266,11 +263,9 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         };
         let mut binding = None;
         for plan in projection.fan_out_plans().values() {
-            if !plan
-                .children
-                .iter()
-                .any(|child| &child.attempt_identity == identity)
-            {
+            if !plan.children.iter().any(|child| {
+                projection.planned_fan_out_attempt(identity) == Some(&child.attempt_identity)
+            }) {
                 continue;
             }
             let candidate = WorkflowFanOutAttemptBindingV1 {

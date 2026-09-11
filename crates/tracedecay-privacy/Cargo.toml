@@ -22,6 +22,17 @@ serde_yaml_ng = "0.10"
 sha2 = "0.11"
 thiserror = "2"
 toml = "1"
+tracing = "0.1"
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 url = "2"
+
+[dev-dependencies]
+hex = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0", features = ["test-helpers"] }

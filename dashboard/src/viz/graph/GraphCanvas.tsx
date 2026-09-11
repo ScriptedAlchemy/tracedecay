@@ -26,8 +26,8 @@ export type { GraphCanvasEdge, GraphCanvasEncoding, GraphCanvasNode } from './ty
  * Deterministic ForceAtlas2 settle (laid out once, never animated), nodes
  * sized by degree and lit by their real vitality, relations drawn as curved
  * connective tissue rather than chords. Everything that moves is a response to
- * a real event: an activation strike from the live stream, a search that hit,
- * or the pointer. At rest the field is completely still and the render loop is
+ * a real event: an activation strike from the live stream. Pointer focus only
+ * isolates the neighborhood. At rest the field is completely still and the render loop is
  * asleep. The synchronized list next to the canvas remains the accessible
  * surface.
  *
@@ -41,6 +41,9 @@ export function GraphCanvas({
   edges,
   selectedId,
   onSelect,
+  inspectedId,
+  onInspect,
+  cameraControls = false,
   height = 320,
   fill = false,
   activation,
@@ -55,12 +58,17 @@ export function GraphCanvas({
   edges: GraphCanvasEdge[];
   selectedId?: string | null;
   onSelect?: (id: string | null) => void;
+  /** Focus shared with the caller's accessible list or inspector. */
+  inspectedId?: string | null;
+  /** Receives pointer focus from the canvas. Focus never creates activity. */
+  onInspect?: (id: string | null) => void;
+  /** Text camera controls for fields whose spatial exploration is meaningful. */
+  cameraControls?: boolean;
   height?: number;
   /** Occupy the parent's full height instead of a fixed one. The parent must
    * establish the height (e.g. `flex-1 min-h-0`). */
   fill?: boolean;
-  /** External synapse field; when omitted the canvas owns a local one fed by
-   * selection strikes. */
+  /** External synapse field; when omitted the canvas owns an idle local one. */
   activation?: ActivationField;
   /** Extra classes merged onto the canvas element itself (not the figure) --
    * for a caller that needs to guarantee a minimum rendered height on a
@@ -130,6 +138,7 @@ export function GraphCanvas({
   /** Bumped whenever a collapse killed a live renderer, so the mount effect can
    * rebuild even when the box it measures never appeared to change. */
   const [teardownGeneration, setTeardownGeneration] = useState(0);
+  const [layoutPendingFor, setLayoutPendingFor] = useState<readonly GraphCanvasNode[] | null>(null);
   /**
    * The topology whose layout engine failed to load, if one did.
    *
@@ -233,6 +242,10 @@ export function GraphCanvas({
   selectedIdRef.current = selectedId;
   const onSelectRef = useRef<((id: string | null) => void) | undefined>(onSelect);
   onSelectRef.current = onSelect;
+  const inspectedIdRef = useRef<string | null | undefined>(inspectedId);
+  inspectedIdRef.current = inspectedId;
+  const onInspectRef = useRef<((id: string | null) => void) | undefined>(onInspect);
+  onInspectRef.current = onInspect;
   // The app's persisted three-state motion control, not the bare OS query this
   // used to read: pinning "Reduced" had no effect on the field, which is the one
   // surface in the product where motion is actually the point. Held in a ref for
@@ -249,6 +262,12 @@ export function GraphCanvas({
   useEffect(() => {
     sceneRef.current?.repaint();
   }, [selectedId]);
+
+  // The accessible list and the WebGL field are two views of the same focus.
+  // Applying list focus only repaints isolation; it never strikes the field.
+  useEffect(() => {
+    sceneRef.current?.focusNode(inspectedId ?? null);
+  }, [inspectedId]);
 
   // A caller-owned field is struck from entirely outside this component: the
   // Brain's SSE effect calls `field.strike(...)` when a real event lands, with
@@ -294,6 +313,7 @@ export function GraphCanvas({
     if (!hasBox) return;
 
     let cancelled = false;
+    const layoutAbort = new AbortController();
     let detach: (() => void) | null = null;
     const request: SceneRequest = {
       container,
@@ -304,7 +324,9 @@ export function GraphCanvas({
       // field a caller owns must not cost a teardown and a fresh layout.
       field: fieldRef.current ?? field,
       selectedId: () => selectedIdRef.current,
+      inspectedId: () => inspectedIdRef.current,
       onSelect: (id) => onSelectRef.current?.(id),
+      onInspect: (id) => onInspectRef.current?.(id),
       isReduced: () => reducedRef.current,
     };
     const install = (scene: GraphScene): void => {
@@ -346,22 +368,33 @@ export function GraphCanvas({
       // already the caller's measurement.
       install(buildMeasuredScene(request));
     } else {
-      // Fetches a layout engine before it can compose, so the cleanup below
-      // has to be able to reach a build that is still in flight: cancelling
-      // drops the resolved module instead of installing a scene into a
-      // container this effect no longer owns.
-      void buildEmergentScene(request, () => cancelled).then(
+      // Cancel the bounded worker when this topology loses its container;
+      // no late result may install a scene into a newer or collapsed field.
+      setLayoutPendingFor(nodes);
+      const cancelLayout = (): void => layoutAbort.abort();
+      teardownRef.current = cancelLayout;
+      void buildEmergentScene(request, layoutAbort.signal).then(
         (scene) => {
+          if (cancelled || layoutAbort.signal.aborted) {
+            scene?.teardown();
+            return;
+          }
+          setLayoutPendingFor(null);
           if (scene) install(scene);
         },
         () => {
-          if (!cancelled) setEngineFailedFor(nodes);
+          if (!cancelled && !layoutAbort.signal.aborted) {
+            setLayoutPendingFor(null);
+            setEngineFailedFor(nodes);
+          }
         },
       );
     }
 
     return () => {
       cancelled = true;
+      layoutAbort.abort();
+      if (!detach) teardownRef.current = null;
       detach?.();
     };
   }, [nodes, edges, extent, hasBox, teardownGeneration]);
@@ -408,23 +441,20 @@ export function GraphCanvas({
       </GraphUnavailable>
     );
   }
-  // Scale tier guard: this Sigma canvas owns graphs up
-  // to ~5k nodes. Larger brains (the profile holds stores up to 1.6M nodes)
-  // belong to the GPU tier — render the truthful tier state, never a frozen
-  // tab pretending to cope.
+  // This canvas admits at most 5,000 nodes. Larger returned sets retain their
+  // DOM evidence; no alternate renderer is mounted for them.
   if (nodes.length > 5_000) {
     return (
       <GraphUnavailable>
-        {nodes.length.toLocaleString()} symbols exceeds this renderer's tier —
-        the GPU canvas (cosmos.gl adapter) owns brains this large; narrow the
-        neighborhood to explore here
+        {nodes.length.toLocaleString()} symbols exceeds this canvas's 5,000-symbol limit.
+        Narrow the neighborhood to draw it here.
       </GraphUnavailable>
     );
   }
   if (engineFailedFor === nodes) {
     return (
       <GraphUnavailable>
-        the force layout could not be loaded, so the{' '}
+        the force layout could not be completed, so the{' '}
         {nodes.length.toLocaleString()}-symbol graph canvas has no positions to
         draw — {fallbackDescription ?? 'read the field description below'}
       </GraphUnavailable>
@@ -445,7 +475,7 @@ export function GraphCanvas({
     );
   }
   return (
-    <figure className={cn('flex flex-col gap-1.5', fill && 'h-full min-h-0')}>
+    <figure className={cn('relative flex flex-col gap-1.5', fill && 'h-full min-h-0')}>
       <div
         ref={attachContainer}
         style={fill ? undefined : { height }}
@@ -469,6 +499,45 @@ export function GraphCanvas({
           `Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`
         }
       />
+      {layoutPendingFor === nodes ? (
+        <p role="status" data-state="loading" className="absolute left-3 top-3 bg-surface-0/90 p-2 text-2xs text-text-secondary">
+          Calculating graph positions. The symbol list remains available.
+        </p>
+      ) : null}
+      {cameraControls ? (
+        <div
+          role="group"
+          aria-label="Graph camera controls"
+          className="absolute right-3 top-3 z-10 flex border border-edge-subtle bg-surface-0/90 shadow-sm backdrop-blur-sm"
+        >
+          <button
+            type="button"
+            aria-label="Zoom in graph"
+            disabled={layoutPendingFor === nodes}
+            onClick={() => sceneRef.current?.zoomIn()}
+            className="td-hit border-r border-edge-subtle px-2 py-1 text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            aria-label="Zoom out graph"
+            disabled={layoutPendingFor === nodes}
+            onClick={() => sceneRef.current?.zoomOut()}
+            className="td-hit border-r border-edge-subtle px-2 py-1 text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            onClick={() => sceneRef.current?.fit()}
+            disabled={layoutPendingFor === nodes}
+            className="td-hit px-2 py-1 text-2xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          >
+            Fit
+          </button>
+        </div>
+      ) : null}
       <figcaption className="flex flex-col gap-1.5 text-2xs text-text-muted">
         <GraphEncodingKey encoding={encoding} />
         {unknownDegreeCount > 0 ? (
@@ -494,8 +563,7 @@ export function GraphCanvas({
           {caption ?? (
             <>
               {nodes.length} symbols · {edges.length} relations · hover isolates
-              a neighbourhood · click fires it and the glow decays with the
-              activation
+              a neighbourhood · activity glow follows supplied events
             </>
           )}
         </div>

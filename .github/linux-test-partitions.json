@@ -1,0 +1,193 @@
+{
+  "partitions": [
+    {
+      "name": "root-lib",
+      "timeout_minutes": 40,
+      "macos_group": "root-lib",
+      "packages": ["tracedecay", "tracedecay-cli", "tracedecay-search-eval"],
+      "targets": ["lib"],
+      "features": ["tracedecay/test-helpers"]
+    },
+    {
+      "name": "root-sessions",
+      "timeout_minutes": 80,
+      "macos_group": "root-suites",
+      "packages": ["tracedecay", "tracedecay-cli", "tracedecay-search-eval"],
+      "targets": [
+        "test:session_suite",
+        "test:transcript_ingest_suite",
+        "test:storage_suite",
+        "test:storage_runtime_rusqlite_suite"
+      ],
+      "executables": ["bins", "example:tracedecay-host-cli-fixture"],
+      "features": ["tracedecay/test-helpers"]
+    },
+    {
+      "name": "root-journeys",
+      "timeout_minutes": 75,
+      "macos_group": "root-suites",
+      "packages": ["tracedecay", "tracedecay-cli", "tracedecay-search-eval"],
+      "targets": [
+        "test:runtime_acceptance_suite",
+        "test:memory_suite",
+        "test:automation_runner_test",
+        "test:daemon_suite",
+        "test:graph_suite",
+        "test:agent_suite",
+        "test:hermes_suite",
+        "test:hooks_lsp_suite",
+        "test:product_surface_suite",
+        "test:search_quality_suite",
+        "test:cursor_observation_identity_fallback",
+        "test:claude_observation_benchmark",
+        "bins",
+        "test:core_cli_suite",
+        "test:work_route_exposure_conformance"
+      ],
+      "executables": ["example:tracedecay-host-cli-fixture"],
+      "features": ["tracedecay/test-helpers"]
+    },
+    {
+      "name": "root-dashboard-api",
+      "timeout_minutes": 70,
+      "macos_group": "contracts-dashboard-api",
+      "packages": ["tracedecay"],
+      "targets": ["test:dashboard_api_test"],
+      "features": ["tracedecay/test-transport"]
+    },
+    {
+      "name": "runtime",
+      "timeout_minutes": 65,
+      "macos_group": "runtime-storage",
+      "packages": [
+        "tracedecay-application",
+        "tracedecay-automation-runtime",
+        "tracedecay-code-index-runtime",
+        "tracedecay-configuration",
+        "tracedecay-daemon-service",
+        "tracedecay-dashboard-api",
+        "tracedecay-global-db",
+        "tracedecay-graph-query",
+        "tracedecay-host-admission",
+        "tracedecay-maintenance",
+        "tracedecay-mcp",
+        "tracedecay-session-memory",
+        "tracedecay-session-runtime",
+        "tracedecay-source-edit",
+        "tracedecay-store-runtime"
+      ],
+      "features": [
+        "tracedecay-application/test-helpers",
+        "tracedecay-automation-runtime/test-helpers",
+        "tracedecay-automation-runtime/test-transport",
+        "tracedecay-code-index-runtime/test-helpers",
+        "tracedecay-code-index-runtime/test-transport",
+        "tracedecay-daemon-service/test-helpers",
+        "tracedecay-dashboard-api/test-transport",
+        "tracedecay-global-db/test-helpers",
+        "tracedecay-graph-query/test-helpers",
+        "tracedecay-host-admission/test-helpers",
+        "tracedecay-maintenance/test-helpers",
+        "tracedecay-mcp/test-transport",
+        "tracedecay-session-runtime/test-helpers",
+        "tracedecay-store-runtime/test-helpers"
+      ]
+    },
+    {
+      "name": "core-storage",
+      "timeout_minutes": 50,
+      "macos_group": "runtime-storage",
+      "packages": [
+        "tracedecay-code-index",
+        "tracedecay-code-index-retention",
+        "tracedecay-graph-db",
+        "tracedecay-lcm",
+        "tracedecay-lsp",
+        "tracedecay-query",
+        "tracedecay-runtime-core",
+        "tracedecay-semantic",
+        "tracedecay-session-temporal-store",
+        "tracedecay-sessions"
+      ],
+      "features": [
+        "tracedecay-code-index/test-helpers",
+        "tracedecay-code-index/eval-helpers",
+        "tracedecay-graph-db/test-helpers",
+        "tracedecay-graph-db/eval-helpers",
+        "tracedecay-lcm/test-helpers",
+        "tracedecay-query/test-helpers",
+        "tracedecay-runtime-core/test-helpers",
+        "tracedecay-runtime-core/test-transport",
+        "tracedecay-semantic/test-helpers",
+        "tracedecay-session-temporal-store/test-helpers",
+        "tracedecay-sessions/test-helpers"
+      ]
+    },
+    {
+      "name": "core-contracts",
+      "timeout_minutes": 55,
+      "macos_group": "contracts-dashboard-api",
+      "packages": [
+        "tracedecay-agent-hosts",
+        "tracedecay-api",
+        "tracedecay-automation",
+        "tracedecay-capture",
+        "tracedecay-code-extraction",
+        "tracedecay-contracts",
+        "tracedecay-daemon-control",
+        "tracedecay-daemon-identity",
+        "tracedecay-daemon-protocol",
+        "tracedecay-domain",
+        "tracedecay-framing",
+        "tracedecay-hooks",
+        "tracedecay-host-integration",
+        "tracedecay-policy",
+        "tracedecay-privacy",
+        "tracedecay-private-fs",
+        "tracedecay-rusqlite-runtime",
+        "tracedecay-sdk",
+        "tracedecay-semantic-contracts",
+        "tracedecay-store",
+        "tracedecay-temporal-query",
+        "tracedecay-tool-catalog"
+      ],
+      "features": [
+        "tracedecay-code-extraction/test-helpers",
+        "tracedecay-daemon-protocol/test-helpers",
+        "tracedecay-framing/test-helpers",
+        "tracedecay-rusqlite-runtime/test-transport",
+        "tracedecay-temporal-query/test-helpers"
+      ]
+    }
+  ],
+  "macos_budget_basis": "Each group's budget is (1 min job setup + Linux warm compile x2 + Linux warm tests + 8 min cold-dependency allowance) x1.25, in minutes from run 34309279328 (ubuntu-24.04-arm, 4 vCPU). The 3-vCPU floor is compile x4/3; the one macOS measurement, run 34303181887, compiled the library chain beneath the root crate in 19.0 min against 9.3 on Arm (2.05x) and ran the whole suite in 19.9 min against ~19 across the Arm partitions (x1), so the budget takes the 2x. No group has run on macOS yet: replace these with measured wall time plus headroom after the first hosted run.",
+  "macos_groups": [
+    {
+      "name": "root-lib",
+      "timeout_minutes": 60,
+      "budget_basis": "(1 + 14.7 compile x2 + 7.5 tests + 8) x1.25 = 57.4; the root chain, library test target and 1675 tests are the lane's floor, so nothing shares this job"
+    },
+    {
+      "name": "root-suites",
+      "timeout_minutes": 65,
+      "budget_basis": "root-sessions 15.3 compile + 3.1 tests, then root-journeys on the same resolution adds only its own suites, 2.7 compile + 2.7 tests: (1 + 18.0 x2 + 5.8 + 8) x1.25 = 63.5"
+    },
+    {
+      "name": "runtime-storage",
+      "timeout_minutes": 85,
+      "budget_basis": "runtime 15.6 compile + 2.4 tests, core-storage 10.4 + 1.9 on a different feature resolution: (1 + 26.0 x2 + 4.3 + 8) x1.25 = 81.6"
+    },
+    {
+      "name": "contracts-dashboard-api",
+      "timeout_minutes": 80,
+      "budget_basis": "root-dashboard-api 12.7 compile + 0.8 tests, core-contracts 13.9 + 0.6 on a different feature resolution: (1 + 26.6 x2 + 1.4 + 8) x1.25 = 79.5"
+    }
+  ],
+  "not_run": {
+    "tracedecay::mcp_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay::transport_acceptance_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay-cli::host_journeys_suite": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay-cli::work_loop_journey": "test-transport acceptance suite; compile-checked by the feature-gates job, not yet confirmed green as a test lane",
+    "tracedecay-global-db::schema_convergence_hotpath": "requires hotpath-alloc, which no test lane enables; the hotpath workflows own it"
+  }
+}

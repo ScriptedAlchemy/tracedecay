@@ -22,7 +22,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, sha256_hex};
-use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, set_owner_private_file_mode};
+use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
 #[path = "profile_backup/error.rs"]
 mod error;
@@ -898,32 +898,45 @@ fn copy_verified_file(
     verify_file(destination, expected)
 }
 
-/// Copies one backup artifact byte-for-byte, keeps it private to the current
-/// user, and syncs it.
+/// Copies one backup artifact byte-for-byte into a destination the
+/// private-filesystem authority creates, then syncs it.
 ///
 /// `fs::copy` carries the Unix mode across but not the Windows DACL: the copy
 /// inherits its destination directory's ACEs, and the private record readers
 /// (`profile-identity.json` on both the backup and the rehearsed profile)
-/// refuse that shape. Tightening after the copy gives every host the same
-/// owner-private artifact.
+/// refuse that shape. Creating the destination through
+/// [`tracedecay_private_fs::create_private_file`] gives every host the same
+/// owner-private artifact from the first byte. It also creates exclusively, so
+/// a destination that already exists is refused instead of being overwritten
+/// and re-owned: both call sites publish into a staging directory this attempt
+/// just created, and taking ownership of foreign material is never a copy.
 pub(super) fn copy_private_file(
     source: &Path,
     destination: &Path,
 ) -> Result<(), ProfileBackupError> {
-    fs::copy(source, destination).map_err(|error| {
+    let mut reader = File::open(source).map_err(|error| {
         ProfileBackupError::unavailable(format!(
+            "open backup file '{}' for copy: {error}",
+            source.display()
+        ))
+    })?;
+    let mut writer = tracedecay_private_fs::create_private_file(destination).map_err(|error| {
+        ProfileBackupError::unavailable(format!(
+            "create private backup file '{}': {error}",
+            destination.display()
+        ))
+    })?;
+    let copied = std::io::copy(&mut reader, &mut writer).and_then(|_| writer.sync_all());
+    drop(writer);
+    if let Err(error) = copied {
+        let _ = fs::remove_file(destination);
+        return Err(ProfileBackupError::unavailable(format!(
             "copy backup file '{}' to '{}': {error}",
             source.display(),
             destination.display()
-        ))
-    })?;
-    set_owner_private_file_mode(destination).map_err(|error| {
-        ProfileBackupError::unavailable(format!(
-            "restrict backup file '{}': {error}",
-            destination.display()
-        ))
-    })?;
-    sync_file(destination)
+        )));
+    }
+    Ok(())
 }
 
 fn verify_file(path: &Path, expected: &ProfileBackupEntry) -> Result<(), ProfileBackupError> {
@@ -1049,12 +1062,6 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), ProfileBackupError>
         ProfileBackupError::unavailable(format!("write '{}': {error}", path.display()))
     })?;
     file.sync_all().map_err(|error| {
-        ProfileBackupError::unavailable(format!("sync '{}': {error}", path.display()))
-    })
-}
-
-fn sync_file(path: &Path) -> Result<(), ProfileBackupError> {
-    tracedecay_private_fs::framed_log::sync_file_at(path).map_err(|error| {
         ProfileBackupError::unavailable(format!("sync '{}': {error}", path.display()))
     })
 }

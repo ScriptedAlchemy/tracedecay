@@ -1,3 +1,5 @@
+// Its own test binary, not a domain_suite module: the root crate's
+// runtime_acceptance_suite mounts this file by path as a crate-root sibling.
 use std::fmt::Debug;
 
 use serde::{Serialize, de::DeserializeOwned};

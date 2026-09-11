@@ -1550,7 +1550,7 @@ impl RetainedCodeGraphRuntimeV1 {
     }
 
     /// Discard one interrupted publication whose completion just refused with
-    /// a deterministic conflict verdict: the journaled pending replay row and
+    /// a deterministic verdict: the journaled pending replay row and
     /// the partial store contents its dead publisher left behind. Every
     /// refusal from the compare-and-swap-shaped discard means the journal
     /// moved since the diagnosis — the caller re-reads and proceeds, so a
@@ -1562,7 +1562,7 @@ impl RetainedCodeGraphRuntimeV1 {
         context: &GraphPublicationOperationContextV1<'_>,
         registration: GraphDbRegistration,
         pending: &GraphPublicationReplayRecordV1,
-        conflict: &GraphDbError,
+        cause: &GraphDbError,
     ) -> std::result::Result<(), GraphDbError> {
         let outcome = self.graph_registry.discard_interrupted_publication(
             registration,
@@ -1576,9 +1576,9 @@ impl RetainedCodeGraphRuntimeV1 {
                     event = "code_graph_interrupted_publication_discarded",
                     generation = %discarded.publication.key.generation,
                     sequence = discarded.sequence.get(),
-                    error = %conflict,
+                    error = %cause,
                     "discarded an interrupted graph publication whose completion \
-                     conflicts deterministically; the journal position is open for \
+                     refused deterministically; the journal position is open for \
                      a fresh publication"
                 );
             }
@@ -1590,7 +1590,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     event = "code_graph_interrupted_publication_discard_refused",
                     generation = %pending.publication.key.generation,
                     sequence = pending.sequence.get(),
-                    error = %conflict,
+                    error = %cause,
                     "the interrupted graph publication moved before its discard; \
                      continuing against the refreshed journal"
                 );
@@ -2139,6 +2139,27 @@ impl RetainedCodeGraphRuntimeV1 {
         // as that predecessor's own typed error.
         let mut completed_predecessors = 0usize;
         loop {
+            // Every durable journal mutation owns one isolated commit permit.
+            // A pending-conflict append rolls back, so its permit may authorize
+            // the exact discard; the next append iteration must receive a new
+            // permit after that discard commits.
+            let journal_probe = GraphPublicationProbeV1 {
+                request_cancellation: Arc::clone(&probe.request_cancellation),
+                lifecycle_cancellation: Arc::clone(&probe.lifecycle_cancellation),
+                deadline_at: probe.deadline_at,
+                cancellation: probe.cancellation.clone(),
+                deadline: probe.deadline.clone(),
+                commit_started: AtomicBool::new(false),
+                deadline_warned: AtomicBool::new(false),
+            };
+            let journal_control = RuntimeRequestControlV1 {
+                requested_at: tracedecay_contracts::clock::now_micros(),
+                deadline: journal_probe.deadline.clone(),
+                cancellation: journal_probe.cancellation.clone(),
+            };
+            let journal_context =
+                GraphPublicationOperationContextV1::new(&journal_control, &journal_probe)
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
             // Append slice: one journal write per gate hold, with the typed
             // interruption observed after the wait so a request cancelled
             // while blocked never touches the journal.
@@ -2152,7 +2173,7 @@ impl RetainedCodeGraphRuntimeV1 {
                             Err(GraphDbError::DeadlineExceeded)
                         }
                         None => storage
-                            .append_replay(&replay, context)
+                            .append_replay(&replay, &journal_context)
                             .map_err(GraphDbError::from),
                     }
                 )
@@ -2177,18 +2198,24 @@ impl RetainedCodeGraphRuntimeV1 {
                     ) {
                         Ok(_) => {}
                         // The orphan predecessor refused deterministically:
-                        // its interrupted publisher left journal or store
-                        // state that completion can never satisfy (issue
-                        // #765). Discarding it reopens the journal position
-                        // this append is blocked on; answering Conflict here
-                        // wedged the projection forever.
-                        Err(conflict @ GraphDbError::Conflict { .. }) => {
+                        // its interrupted publisher left conflicting store
+                        // state (issue #765), its historical seal predates
+                        // authenticated source commitments, or its rows are
+                        // refused by the current reader's contract. None can
+                        // ever complete. The compare-and-swap discard reopens
+                        // only that pending journal position for this fresh
+                        // append.
+                        Err(
+                            cause @ (GraphDbError::Conflict { .. }
+                            | GraphDbError::SourceCommitmentsUnavailable { .. }
+                            | GraphDbError::SealedRevisionIncompatible { .. }),
+                        ) => {
                             self.discard_interrupted_publication_row(
                                 &mut storage,
-                                context,
+                                &journal_context,
                                 registration(),
                                 &pending,
-                                &conflict,
+                                &cause,
                             )?;
                         }
                         Err(error) => return Err(error),

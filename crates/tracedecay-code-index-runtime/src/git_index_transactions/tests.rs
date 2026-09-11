@@ -1,8 +1,116 @@
 use std::fs;
+use std::io::{Read, Write};
 use std::process::Command;
 
+use super::process::run_command_with_stdin;
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 use tempfile::tempdir;
+
+const PIPE_ECHO_HELPER_ENV: &str = "TRACEDECAY_GIT_INDEX_PIPE_ECHO_HELPER";
+const PIPE_EARLY_EXIT_HELPER_ENV: &str = "TRACEDECAY_GIT_INDEX_PIPE_EARLY_EXIT_HELPER";
+const PIPE_FAIL_HELPER_ENV: &str = "TRACEDECAY_GIT_INDEX_PIPE_FAIL_HELPER";
+
+#[test]
+fn pipe_echo_helper() {
+    if std::env::var_os(PIPE_EARLY_EXIT_HELPER_ENV).is_some() {
+        return;
+    }
+    if std::env::var_os(PIPE_ECHO_HELPER_ENV).is_none() {
+        return;
+    }
+    let mut input = std::io::stdin().lock();
+    let mut output = std::io::stdout().lock();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer).expect("read helper stdin");
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .expect("write helper stdout");
+        output.flush().expect("flush helper stdout");
+    }
+    assert!(
+        std::env::var_os(PIPE_FAIL_HELPER_ENV).is_none(),
+        "requested child failure"
+    );
+}
+
+#[test]
+fn command_with_large_bidirectional_pipes_drains_output_while_writing_input() {
+    let input = vec![0xa5; 4 * 1024 * 1024];
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args([
+            "--exact",
+            "git_index_transactions::tests::pipe_echo_helper",
+            "--nocapture",
+        ])
+        .env(PIPE_ECHO_HELPER_ENV, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+
+    let output = run_command_with_stdin(command, "pipe-echo", &input)
+        .expect("large bidirectional subprocess completes");
+    assert_eq!(
+        output
+            .stdout
+            .iter()
+            .copied()
+            .filter(|byte| *byte == 0xa5)
+            .count(),
+        input.len(),
+        "the concurrent drain must retain every emitted byte"
+    );
+}
+
+#[test]
+fn command_child_failure_remains_typed_after_pipe_drain() {
+    let input = vec![0xa5; 4 * 1024 * 1024];
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args([
+            "--exact",
+            "git_index_transactions::tests::pipe_echo_helper",
+            "--nocapture",
+        ])
+        .env(PIPE_ECHO_HELPER_ENV, "1")
+        .env(PIPE_FAIL_HELPER_ENV, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    assert!(matches!(
+        run_command_with_stdin(command, "pipe-child-failure", &input),
+        Err(NativeGitIndexError::GitFailed {
+            operation: "pipe-child-failure",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn command_that_closes_stdin_early_returns_a_typed_io_failure() {
+    let input = vec![0xa5; 4 * 1024 * 1024];
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .args([
+            "--exact",
+            "git_index_transactions::tests::pipe_echo_helper",
+            "--nocapture",
+        ])
+        .env(PIPE_EARLY_EXIT_HELPER_ENV, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    assert!(matches!(
+        run_command_with_stdin(command, "pipe-early-exit", &input),
+        Err(NativeGitIndexError::Io(_))
+    ));
+}
 
 #[test]
 fn existing_native_index_lock_blocks_mutation_before_git_runs() {

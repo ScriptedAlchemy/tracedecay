@@ -1,8 +1,8 @@
 import type Graph from 'graphology';
 
 /** Managed companion prefixes. These are renderer-owned nodes and edges that
- * carry glow, dendrite geometry and travelling light; reducers pass them
- * through untouched and every topology query filters them out. */
+ * carry glow, dendrite geometry and travelling light; topology queries filter
+ * them out, while glow companions inherit their owner's focus treatment. */
 export const HALO = '__halo__';
 export const BLOOM = '__bloom__';
 export const RING = '__ring__';
@@ -34,6 +34,9 @@ export function upsert(
   id: string,
   attributes: Record<string, unknown>,
 ): void {
-  if (graph.hasNode(id)) graph.mergeNodeAttributes(id, attributes);
-  else graph.addNode(id, attributes);
+  // Empty strings still enter Sigma's label collision grid: a larger halo
+  // would win its body's cell and suppress the actual identity label.
+  const decoration = { ...attributes, label: null };
+  if (graph.hasNode(id)) graph.mergeNodeAttributes(id, decoration);
+  else graph.addNode(id, decoration);
 }

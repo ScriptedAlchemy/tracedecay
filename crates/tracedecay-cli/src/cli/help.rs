@@ -494,6 +494,7 @@ grain=logical_message.";
 pub(crate) const SESSIONS_AFTER_HELP: &str = "\
 Examples:
   tracedecay sessions import                     Schedule native host transcript import
+  tracedecay sessions sync-status --idempotency-key session-sync.abc --project-path /path/to/repo
   tracedecay sessions git-sync --dry-run          Preview session/Git convergence
   tracedecay sessions search \"auth refactor\"     Full-text transcript search
   tracedecay sessions search \"bug\" --limit 5 --provider cursor

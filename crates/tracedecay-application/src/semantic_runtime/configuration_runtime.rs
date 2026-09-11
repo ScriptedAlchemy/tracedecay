@@ -208,7 +208,7 @@ impl ProjectSemanticActivationExt for ProjectConfigurationRuntime {
         let capability = retrieval_profile_mutation_capability(
             self,
             authority,
-            &expected.expected_configuration_revision,
+            &base_configuration.revision_id,
             now,
         )
         .await?;
@@ -245,7 +245,7 @@ impl ProjectSemanticActivationExt for ProjectConfigurationRuntime {
         let capability = retrieval_profile_mutation_capability(
             self,
             authority,
-            &expected.expected_configuration_revision,
+            &base_configuration.revision_id,
             now,
         )
         .await?;

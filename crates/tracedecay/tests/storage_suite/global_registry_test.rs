@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{
     GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
 };
@@ -1026,12 +1026,15 @@ async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authorit
             "registry GC fixture",
         )
         .unwrap();
-        let runtime =
-            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::open(
-                profile.path(),
-            )
+        let identity =
+            tracedecay_daemon_identity::profile_identity::load_existing(profile.path()).unwrap();
+        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
             .await
             .unwrap();
+        let runtime =
+            tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::from_admitted_lease(
+                registry.profile_database().await.unwrap(),
+            );
         let preview = runtime
             .registry_gc(profile.path(), None, false)
             .await

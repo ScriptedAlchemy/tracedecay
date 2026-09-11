@@ -209,6 +209,68 @@ impl ModelArtifactStore {
         Ok(())
     }
 
+    /// Local sources stream through the same bounded buffer without making
+    /// every buffer a durable remote-protocol checkpoint. The recorded offset
+    /// advances only after the complete member is durable; an interrupted
+    /// payload/meta pair is still rejected by resume's length check.
+    #[hotpath::measure(label = "semantic.artifact_store.stage_local_member")]
+    pub(super) fn stage_local_member(
+        &self,
+        session: &mut ImportSession,
+        member: &ArtifactPackageMemberV1,
+        source: &mut impl Read,
+    ) -> Result<(), ArtifactImportErrorV1> {
+        let _lock = self.acquire_lock()?;
+        self.recover_locked()?;
+        self.ensure_session_dir(session)?;
+        self.ensure_session_active_locked(session)?;
+        let member_index = session
+            .meta
+            .members
+            .iter()
+            .position(|staged| staged.member == *member)
+            .ok_or(ArtifactImportErrorV1::MemberMismatch)?;
+        let mut written = session.meta.members[member_index].bytes_written;
+        let mut options = CapOpenOptions::new();
+        options.write(true).append(true).follow(FollowSymlinks::No);
+        let mut destination = session
+            .members_dir
+            .open_with(
+                member_file_name(member.role, Some(&session.meta.manifest.payload.runtime)),
+                &options,
+            )
+            .map_err(|_| ArtifactImportErrorV1::UnsafeStorePath)?
+            .into_std();
+        let metadata = destination.metadata()?;
+        if !metadata.is_file() || metadata_has_multiple_links(&metadata) {
+            return Err(ArtifactImportErrorV1::UnsafeStorePath);
+        }
+        if metadata.len() != written || written > member.byte_length {
+            return Err(ArtifactImportErrorV1::ResumeIdentityMismatch);
+        }
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            let read = source
+                .read(&mut buffer)
+                .map_err(|_| ArtifactImportErrorV1::SourceInterrupted)?;
+            if read == 0 {
+                break;
+            }
+            written = written.saturating_add(read as u64);
+            if written > member.byte_length {
+                return Err(ArtifactImportErrorV1::SizeExpansionBeyondDeclared);
+            }
+            destination.write_all(&buffer[..read])?;
+            hotpath::gauge!("semantic_artifact_staged_bytes").inc(read as u64);
+        }
+        if written != member.byte_length {
+            return Err(ArtifactImportErrorV1::LengthMismatch);
+        }
+        destination.sync_all()?;
+        session.meta.members[member_index].bytes_written = written;
+        write_staging_meta(&session.staging_dir, &session.staging_path, &session.meta)
+    }
+
     /// Import one explicit local directory. The directory must contain exactly
     /// the manifest members and only regular, single-link files. Paths are
     /// validated before any package bytes become runtime-discoverable.
@@ -269,7 +331,7 @@ impl ModelArtifactStore {
             let path = files
                 .get(&member.path)
                 .ok_or(ArtifactImportErrorV1::MemberMismatch)?;
-            let result = stream_local_member(self, &mut session, member, path, now_unix);
+            let result = stream_local_member(self, &mut session, member, path);
             if let Err(error) = result {
                 self.quarantine_and_discard(
                     session,

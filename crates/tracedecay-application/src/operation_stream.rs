@@ -464,6 +464,27 @@ impl CanonicalManagedTestRunReader {
         Some(current_managed_test_run(snapshot, current))
     }
 
+    pub(crate) async fn latest_page(
+        &self,
+        root_uri: &str,
+        page: &PageRequest,
+    ) -> Result<ManagedTestRunSnapshot, ManagedTestRunUnavailableReason> {
+        let snapshot = self
+            .events
+            .latest_managed_test_run(root_uri)
+            .await
+            .map_err(|error| match error {
+                OperationEventError::FrontierExpired => {
+                    ManagedTestRunUnavailableReason::FrontierExpired
+                }
+                _ => ManagedTestRunUnavailableReason::AuthorityFailure,
+            })?;
+        self.events
+            .page_managed_test_run(snapshot, page)
+            .await
+            .map_err(|_| ManagedTestRunUnavailableReason::AuthorityFailure)
+    }
+
     #[hotpath::measure(label = "usecases.operation.page_test_run", future = true)]
     pub(crate) async fn latest_current_page(
         &self,
@@ -483,7 +504,7 @@ impl CanonicalManagedTestRunReader {
     }
 }
 
-fn current_managed_test_run(
+pub(crate) fn current_managed_test_run(
     snapshot: ManagedTestRunSnapshot,
     current: &ManagedTestRunCurrentScope,
 ) -> ManagedTestRunReadOutcome {
@@ -1935,6 +1956,18 @@ mod tests {
         assert_eq!(
             reader.latest_current(&current).await,
             ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::DocumentContent)
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_managed_test_run_pages_without_source_identity() {
+        let reader = CanonicalManagedTestRunReader::new(OperationEventAuthority::default());
+
+        assert_eq!(
+            reader
+                .latest_page("file:///workspace", &PageRequest::first(1).expect("page"),)
+                .await,
+            Err(ManagedTestRunUnavailableReason::FrontierExpired)
         );
     }
 

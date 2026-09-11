@@ -565,6 +565,7 @@ impl RetrievalProfileMutationCapabilityV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalProfileCasV1 {
+    /// Last semantic commit in this scope, independent of the current project revision.
     pub expected_configuration_revision: ConfigurationRevisionId,
     pub expected_active_digest: ManifestDigest,
     pub expected_rollback_digest: Option<ManifestDigest>,
@@ -597,6 +598,7 @@ pub struct RetrievalProfileAuditEventV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetrievalProfileCommitMetadataV1 {
     freshness_vector_digest: ManifestDigest,
+    base_configuration_revision: ConfigurationRevisionId,
     result_revision: ConfigurationRevisionId,
     now: UtcMicros,
 }
@@ -605,11 +607,13 @@ impl RetrievalProfileCommitMetadataV1 {
     #[must_use]
     pub fn new(
         freshness_vector_digest: ManifestDigest,
+        base_configuration_revision: ConfigurationRevisionId,
         result_revision: ConfigurationRevisionId,
         now: UtcMicros,
     ) -> Self {
         Self {
             freshness_vector_digest,
+            base_configuration_revision,
             result_revision,
             now,
         }
@@ -729,7 +733,7 @@ impl RetrievalProfileStateV1 {
     ) -> Result<&RetrievalProfileAuditEventV1, RetrievalProfileActivationErrorV1> {
         self.validate_cas(expected)?;
         let actor = capability
-            .validate(&expected.expected_configuration_revision, commit.now)?
+            .validate(&commit.base_configuration_revision, commit.now)?
             .clone();
         self.active.executable_under(current_runtime)?;
         candidate.executable_under(candidate_runtime)?;
@@ -766,7 +770,7 @@ impl RetrievalProfileStateV1 {
             return Err(RetrievalProfileActivationErrorV1::InvalidRollbackTrigger);
         }
         let actor = capability
-            .validate(&expected.expected_configuration_revision, commit.now)?
+            .validate(&commit.base_configuration_revision, commit.now)?
             .clone();
         let restored = self
             .rollback
@@ -918,7 +922,9 @@ fn audit_event(
     base_revision: ConfigurationRevisionId,
     commit: RetrievalProfileCommitMetadataV1,
 ) -> Result<RetrievalProfileAuditEventV1, RetrievalProfileActivationErrorV1> {
-    if commit.result_revision == base_revision {
+    if commit.result_revision == base_revision
+        || commit.result_revision == commit.base_configuration_revision
+    {
         return Err(RetrievalProfileActivationErrorV1::StaleRevision);
     }
     commit

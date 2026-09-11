@@ -6,6 +6,7 @@
 //! spelling so call sites share one import path.
 
 pub mod analyzer;
+pub mod model;
 pub mod scope_control;
 pub mod topology;
 pub mod work_executable_binding;

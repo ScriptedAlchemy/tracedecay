@@ -7,8 +7,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::McpServer;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
@@ -264,7 +264,7 @@ pub(crate) async fn mcp_runtime_events(
     global_db_path: &std::path::Path,
     session_id: &str,
 ) -> Vec<tracedecay_global_db::AnalyticsEventRecord> {
-    let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(
+    let runtime = tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
         global_db_path
             .parent()
             .expect("global db has a profile root"),

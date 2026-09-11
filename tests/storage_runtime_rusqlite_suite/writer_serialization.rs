@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracedecay_rusqlite_runtime::read_consistency::{CommitWatermarkSource, WatermarkSourceState};
 use tracedecay_store::{CommitSequenceV1, RuntimeSubmitOutcomeV1};
 
-use crate::runtime_test_support::{
+use super::runtime_test_support::{
     Probe, TestDatabase, outbox_request, run, writer, writer_runtime_fixture,
 };
 

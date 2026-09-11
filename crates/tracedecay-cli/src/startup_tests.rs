@@ -7,8 +7,8 @@ use super::{
     hotpath_focus_is_valid, hotpath_output_format_is_none, hotpath_output_format_is_valid,
     hotpath_output_path_is_valid, hotpath_requires_protocol_safe_output, is_daemon_run,
     is_full_component_set_adoption, is_local_install_command, normalize_tool_reserved_global_flags,
-    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
-    validate_host_bundle_options,
+    runs_worldwide_counter_flush, should_skip_agent_install_check, should_skip_startup_maintenance,
+    stderr_tracing_default, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -965,6 +965,14 @@ fn serve_skips_startup_maintenance() {
         path: None,
         timings: false,
     }));
+}
+
+#[test]
+fn init_defers_worldwide_counter_flush_but_retains_other_startup_maintenance() {
+    let command = parse_command(&["init", "/tmp/project"]);
+    assert!(!runs_worldwide_counter_flush(&command));
+    assert!(!should_skip_startup_maintenance(&command));
+    assert!(runs_worldwide_counter_flush(&parse_command(&["sync"])));
 }
 
 #[test]

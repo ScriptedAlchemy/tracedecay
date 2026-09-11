@@ -31,6 +31,10 @@ const MAX_ACTIVITY_PULSES = 64;
  * already knows the daemon's event shape.
  */
 export interface LiveActivityPulse {
+  /** Exact admitted envelope identity; distinct from a transcript/message id. */
+  eventId: string;
+  /** Server observation time in microseconds, preserved from the envelope. */
+  observationTime: string;
   /** Registered project id from the event's exact scope, when profile-backed. */
   projectId: string | null;
   /** Event family (`heartbeat`, `project_registry_changed`, …). */
@@ -82,6 +86,8 @@ export function connectEvents(url = '/api/events'): SseConnection {
   const recordActivity = (event: DecodedSseEvent) => {
     const payload = event.payload;
     activity.push({
+      eventId: event.event_id,
+      observationTime: event.observation_time,
       projectId: event.projectId,
       family:
         isRecord(payload) && typeof payload.family === 'string' ? payload.family : event.stream.stream_id,

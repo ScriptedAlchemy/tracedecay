@@ -1,8 +1,8 @@
 //! MCP tool definitions (JSON Schema descriptors).
 //!
-//! Each `def_*` function returns a `ToolDefinition` with the tool name,
-//! description, JSON Schema for its input parameters, MCP annotations
-//! (readOnlyHint, title), and optional `_meta` (anthropic/alwaysLoad).
+//! Compatibility-owned `def_*` functions return their transport definitions.
+//! Canonical application definitions project their names, schemas, effects,
+//! and descriptions from the handler/catalog/executable authorities.
 //!
 //! The `def_*` functions live in domain submodules (graph, analysis, git,
 //! testing, edit, lcm, memory, skills, admin); this root keeps the shared
@@ -12,7 +12,7 @@
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
-use tracedecay_tool_catalog::ScopeDimension;
+use tracedecay_tool_catalog::{ApplicationSurfaceOperation, ScopeDimension};
 
 use crate::McpCatalogError;
 use crate::ToolDefinition;
@@ -26,14 +26,10 @@ pub mod ast_grep;
 mod edit;
 mod git;
 mod git_scope;
-mod github_stack;
 mod graph;
 mod lcm;
 mod memory;
 mod multi_root;
-mod native_integration;
-mod native_worktree;
-mod observatory;
 mod session;
 mod skills;
 mod testing;
@@ -43,19 +39,17 @@ mod workflow;
 use admin::*;
 use analysis::*;
 use application::*;
-use application_schema::canonical_application_request_schema;
+pub use application_schema::mcp_input_schema;
+use application_schema::{canonical_application_request_schema, project_input_schema};
 use ast_grep::ast_grep_available;
 pub use ast_grep::ast_grep_diagnostics;
 use edit::*;
 use git::*;
-use github_stack::*;
 use graph::*;
 pub use graph::{SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS};
 use lcm::*;
 use memory::*;
 use multi_root::*;
-use native_integration::*;
-use observatory::*;
 use skills::*;
 use testing::*;
 
@@ -392,11 +386,8 @@ pub fn get_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogE
 fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     #[cfg(test)]
     MAXIMAL_DEFINITION_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    // The dynamic registries have no shared mutable authority and dominate
-    // cold catalog construction. Build the application-backed definitions on
-    // this thread while the three independent extension registries assemble.
-    let observatory_worker =
-        spawn_definition_worker("tracedecay-catalog-observatory", observatory_definitions)?;
+    // Work and Workflow own independent executable registries; assemble them
+    // concurrently while the application descriptor projection runs here.
     let work_worker = spawn_definition_worker("tracedecay-catalog-work", work::work_definitions)?;
     let workflow_worker = spawn_definition_worker(
         "tracedecay-catalog-workflow",
@@ -405,7 +396,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     let application_registry = tracedecay_contracts::mcp_executable_binding_registry()
         .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
     let request_schema = |operation: &'static str| {
-        canonical_application_request_schema(&application_registry, operation)
+        canonical_application_request_schema(application_registry, operation)
     };
     let mut definitions = vec![
         def_search(),
@@ -423,64 +414,10 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_project_search(),
         def_project_context(),
         def_files(),
-        def_git_status(),
-        def_git_diff(),
-        def_git_history(),
-        def_git_blame(),
-        def_git_hunks(),
-        def_git_preview(),
-        def_git_apply(),
-        def_github_stack_signal_expand(),
-        def_stack_snapshot(),
-        def_preflight_native_integration(),
-        def_approve_native_integration(),
-        def_apply_native_integration(),
-        def_native_integration_status(),
-        def_cancel_native_integration(),
         def_multi_root_scope_set_read(),
         def_multi_root_scope_set_compare_and_swap(),
         def_multi_root_execute(),
-        def_context_scout_status(),
-        def_context_scout_recent(),
-        def_context_scout_explain(),
-        def_context_scout_capability(),
-        def_context_scout_budget(),
-        def_feedback_diagnostics(),
-        def_feedback_get(),
-        def_feedback_expand(),
-        def_feedback_list(),
-        def_feedback_advisory_cycle(),
-        def_feedback_impact(),
-        def_affected_tests(),
-        def_test_results(),
-        def_code_exact_occurrence(),
-        def_code_phrase_search(),
-        def_code_symbol_search(),
-        def_code_signature_search(),
-        def_code_implementations(),
-        def_code_type_hierarchy(),
-        def_code_callers(),
-        def_code_callees(),
-        def_code_facets(),
-        def_code_timeline(),
-        def_code_declaration(),
-        def_code_definition(),
-        def_code_type_definition(),
-        def_code_references(),
-        def_session_lookup(),
-        def_qualified_name_read(),
-        def_call_chain_read(),
-        def_file_dependents_read(),
-        def_source_lines_read(),
-        def_source_body_read(),
-        def_source_outline_read(),
-        def_module_api_read(),
-        def_file_metadata_read(),
-        def_health_read(),
-        def_health_delta(),
-        def_storage_status_read(),
         def_remote_status_read(),
-        def_diagnostics_read(),
         def_affected(),
         def_dead_code(),
         def_diff_context(),
@@ -488,7 +425,6 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_hotspots(),
         def_similar(request_schema("similar")?),
         def_rename_preview(request_schema("rename_preview")?),
-        def_unused_imports(),
         def_unmounted_files(),
         def_rank(),
         def_largest(),
@@ -504,7 +440,6 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_port_order(request_schema("port_order")?),
         def_commit_context(),
         def_pr_context(),
-        def_simplify_scan(),
         def_test_map(),
         def_type_hierarchy(),
         def_branch_search(),
@@ -569,7 +504,6 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_outline(),
         def_implementations(),
         def_unsafe_patterns(),
-        def_diagnostics(),
         def_config(),
         def_signature_search(),
         def_constructors(),
@@ -582,13 +516,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_source_edit_rollback(),
         def_find_exact_symbol(),
     ];
-    definitions.extend(configuration_definitions());
-    definitions.extend(context_scout_control_definitions());
-    let observatory = observatory_worker.join().map_err(|_| {
-        McpCatalogError::Initialization(
-            "observatory tool catalog worker terminated unexpectedly".to_owned(),
-        )
-    })??;
+    definitions.extend(application_definitions()?);
     let work = work_worker.join().map_err(|_| {
         McpCatalogError::Initialization(
             "work tool catalog worker terminated unexpectedly".to_owned(),
@@ -599,10 +527,11 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
             "workflow tool catalog worker terminated unexpectedly".to_owned(),
         )
     })??;
-    definitions.extend(observatory);
     definitions.extend(work);
     definitions.extend(workflow);
-    definitions.extend(native_worktree::native_worktree_definitions());
+    for definition in &mut definitions {
+        project_input_schema(&mut definition.input_schema);
+    }
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions)?;
@@ -698,7 +627,7 @@ fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]
     }
 }
 
-const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
+const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
     // graph
     "tracedecay_search",
     "tracedecay_grep",
@@ -731,7 +660,6 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_signature_search",
     "tracedecay_port_status",
     "tracedecay_port_order",
-    "tracedecay_simplify_scan",
     // git
     "tracedecay_git_status",
     "tracedecay_git_diff",
@@ -745,87 +673,11 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_pr_context",
     "tracedecay_branch_search",
     "tracedecay_branch_diff",
-    // application surfaces
-    "tracedecay_git_preview",
-    "tracedecay_git_apply",
-    "tracedecay_github_stack_signal_expand",
-    "tracedecay_stack_snapshot",
-    "tracedecay_worktree_inventory",
-    "tracedecay_worktree_cleanup_inspect",
-    "tracedecay_worktree_cleanup_confirm",
-    "tracedecay_worktree_cleanup_remove",
-    "tracedecay_worktree_cleanup_reconcile",
-    "tracedecay_observatory_read",
-    "tracedecay_preflight_native_integration",
-    "tracedecay_approve_native_integration",
-    "tracedecay_apply_native_integration",
-    "tracedecay_native_integration_status",
-    "tracedecay_cancel_native_integration",
-    "tracedecay_feedback_diagnostics",
-    "tracedecay_feedback_get",
-    "tracedecay_feedback_expand",
-    "tracedecay_feedback_list",
-    "tracedecay_feedback_impact",
-    "tracedecay_affected_tests",
-    "tracedecay_feedback_advisory_cycle",
-    "tracedecay_test_results",
-    "tracedecay_code_exact_occurrence",
-    "tracedecay_code_phrase_search",
-    "tracedecay_code_symbol_search",
-    "tracedecay_code_signature_search",
-    "tracedecay_code_implementations",
-    "tracedecay_code_type_hierarchy",
-    "tracedecay_code_callers",
-    "tracedecay_code_callees",
-    "tracedecay_code_facets",
-    "tracedecay_code_timeline",
-    "tracedecay_code_declaration",
-    "tracedecay_code_definition",
-    "tracedecay_code_type_definition",
-    "tracedecay_code_references",
-    "tracedecay_session_lookup",
-    "tracedecay_qualified_name",
-    "tracedecay_call_chain",
-    "tracedecay_file_dependents",
-    "tracedecay_source_lines",
-    "tracedecay_source_body",
-    "tracedecay_source_outline",
-    "tracedecay_module_api",
-    "tracedecay_file_metadata",
-    "tracedecay_health_read",
-    "tracedecay_health_delta",
-    "tracedecay_storage_status",
     "tracedecay_remote_status",
-    "tracedecay_diagnostics_read",
-    "tracedecay_configuration_list",
-    "tracedecay_configuration_explain",
-    "tracedecay_configuration_get",
-    "tracedecay_configuration_set",
-    "tracedecay_configuration_unset",
-    "tracedecay_configuration_batch",
-    "tracedecay_configuration_write_credential",
-    "tracedecay_configuration_observed_state",
-    "tracedecay_configuration_protected_preview",
-    "tracedecay_configuration_protected_apply",
-    "tracedecay_configuration_rollback_preview",
-    "tracedecay_configuration_rollback_apply",
-    "tracedecay_configuration_audit",
-    "tracedecay_context_scout_status",
-    "tracedecay_context_scout_recent",
-    "tracedecay_context_scout_explain",
-    "tracedecay_context_scout_capability",
-    "tracedecay_context_scout_budget",
-    "tracedecay_context_scout_pause",
-    "tracedecay_context_scout_resume",
-    "tracedecay_context_scout_cancel",
-    "tracedecay_context_scout_claim",
-    "tracedecay_context_scout_delivery",
-    "tracedecay_context_scout_feedback",
     // analysis
     "tracedecay_dead_code",
     "tracedecay_circular",
     "tracedecay_hotspots",
-    "tracedecay_unused_imports",
     "tracedecay_unmounted_files",
     "tracedecay_rank",
     "tracedecay_largest",
@@ -837,7 +689,6 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_doc_coverage",
     "tracedecay_god_class",
     "tracedecay_unsafe_patterns",
-    "tracedecay_diagnostics",
     "tracedecay_constructors",
     "tracedecay_field_sites",
     // health
@@ -908,8 +759,16 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_type_hierarchy",
 ];
 
+static FORMAT_CAPABLE_TOOL_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES
+        .iter()
+        .copied()
+        .chain(ApplicationSurfaceOperation::MCP_TOOL_NAMES)
+        .collect()
+});
+
 pub fn format_capable_tool_names() -> &'static [&'static str] {
-    FORMAT_CAPABLE_TOOL_NAMES
+    &FORMAT_CAPABLE_TOOL_NAMES
 }
 
 pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
@@ -942,26 +801,34 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
 }
 
 fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCatalogError> {
-    for definition in matching_tool_definitions_mut(definitions, FORMAT_CAPABLE_TOOL_NAMES) {
-        let Some(properties) = definition
-            .input_schema
-            .get_mut("properties")
-            .and_then(Value::as_object_mut)
-        else {
+    for definition in matching_tool_definitions_mut(definitions, format_capable_tool_names()) {
+        let Some(schema) = definition.input_schema.as_object_mut() else {
             // Reachable on every tools/list and dispatch admission check, so a
             // malformed definition must surface as the builders' typed error
             // rather than a production panic.
             return Err(McpCatalogError::Initialization(format!(
-                "{} must define object properties",
+                "{} must define an object schema",
                 definition.name
             )));
         };
+        let properties = schema
+            .entry("properties")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                McpCatalogError::Initialization(format!(
+                    "{} must define object properties",
+                    definition.name
+                ))
+            })?;
+        // Repeated once per format-capable tool in every `tools/list`, so the
+        // wording stays short.
         properties.insert(
             "format".to_string(),
             json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
-                "description": "Output format. Default 'markdown' (compact, LLM-optimized sections and bullets; no tables). Pass 'json' for compact machine-readable JSON when a program will parse the result."
+                "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
             }),
         );
     }

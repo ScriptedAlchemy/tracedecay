@@ -40,6 +40,14 @@ pub const OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION: &str =
 /// crate's `ui_messages_source_key`).
 const CLINE_LIKE_UI_MESSAGES_SOURCE_SUFFIX: &str = ":ui_messages";
 
+/// Rows examined by one native-source census query. The schema transaction's
+/// long lease renews after each bounded query completes, so the census must
+/// expose progress between pages instead of running one full-table JSON scan.
+/// Observation payloads may approach the 1 MiB authority limit; keep their
+/// page smaller than the cursor-only page.
+pub(super) const OBSERVATION_SOURCE_CENSUS_PAGE_ROWS: i64 = 48;
+pub(super) const SOURCE_CURSOR_CENSUS_PAGE_ROWS: i64 = 128;
+
 /// Canonical `observations` column set. Shared by the admission refusal below
 /// and the scoped operator reset in [`super::reset`] so the two can never
 /// disagree about what counts as a refused shape.
@@ -109,6 +117,7 @@ async fn observation_authority_populated(
 /// without such rows was written by a scheme that never applied to it, so
 /// enrolling it is exact rather than a migration of ambiguous data; one with
 /// such rows carries no record of which scheme wrote them and must reset.
+#[hotpath::measure(future = true, label = "global_db.observation.native_source_census")]
 async fn cline_like_sources_present(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
@@ -118,30 +127,102 @@ async fn cline_like_sources_present(
         NativeHostIdentityV1::Kilo.hook_key(),
     ];
     let ui_messages_pattern = format!("%{CLINE_LIKE_UI_MESSAGES_SOURCE_SUFFIX}");
-    let mut rows = conn
-        .query(
-            "SELECT 1 WHERE EXISTS(
-                 SELECT 1 FROM observations
-                 WHERE json_extract(observation_json, '$.identity.source.provider') IN (?1, ?2, ?3)
-                    OR json_extract(observation_json, '$.identity.source.source_key') LIKE ?4
-             ) OR EXISTS(
-                 SELECT 1 FROM source_cursors
-                 WHERE json_extract(source_json, '$.provider') IN (?1, ?2, ?3)
-                    OR json_extract(source_json, '$.source_key') LIKE ?4
-             )",
-            params![
-                providers[0],
-                providers[1],
-                providers[2],
-                ui_messages_pattern
-            ],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    rows.next()
-        .await
-        .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+
+    let mut cursor_rowid = i64::MIN;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT rowid,
+                        COALESCE(
+                            json_extract(source_json, '$.provider') IN (?1, ?2, ?3)
+                            OR json_extract(source_json, '$.source_key') LIKE ?4,
+                            0
+                        )
+                 FROM source_cursors
+                 WHERE rowid > ?5 ORDER BY rowid LIMIT ?6",
+                params![
+                    providers[0],
+                    providers[1],
+                    providers[2],
+                    &ui_messages_pattern,
+                    cursor_rowid,
+                    SOURCE_CURSOR_CENSUS_PAGE_ROWS
+                ],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+        {
+            page_rows += 1;
+            cursor_rowid = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+            if row
+                .get::<i64>(1)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+                != 0
+            {
+                return Ok(true);
+            }
+        }
+        drop(rows);
+        if page_rows < SOURCE_CURSOR_CENSUS_PAGE_ROWS {
+            break;
+        }
+    }
+
+    let mut observation_sequence = 0_i64;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT sequence,
+                        COALESCE(
+                            json_extract(observation_json, '$.identity.source.provider')
+                                IN (?1, ?2, ?3)
+                            OR json_extract(observation_json, '$.identity.source.source_key')
+                                LIKE ?4,
+                            0
+                        )
+                 FROM observations
+                 WHERE sequence > ?5 ORDER BY sequence LIMIT ?6",
+                params![
+                    providers[0],
+                    providers[1],
+                    providers[2],
+                    &ui_messages_pattern,
+                    observation_sequence,
+                    OBSERVATION_SOURCE_CENSUS_PAGE_ROWS
+                ],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+        {
+            page_rows += 1;
+            observation_sequence = row
+                .get::<i64>(0)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+            if row
+                .get::<i64>(1)
+                .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
+                != 0
+            {
+                return Ok(true);
+            }
+        }
+        drop(rows);
+        if page_rows < OBSERVATION_SOURCE_CENSUS_PAGE_ROWS {
+            return Ok(false);
+        }
+    }
 }
 
 pub(super) async fn migration_recorded(
@@ -380,11 +461,17 @@ pub async fn ensure_observation_schema(
         .await
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
     }
+    // The retained marker already certifies the native-source scheme. Reopening
+    // an enrolled authority must not scan historical JSON again while holding
+    // schema admission's writer transaction.
     // Enroll the native-source scheme wherever it cannot double-count: an
     // authority with no rows, or one whose rows and cursors never came from a
     // Cline-like host. Only a populated authority that does carry such rows is
     // left unmarked, and `require_admitted_observation_shape` refuses it.
-    if !observation_authority_populated(conn).await? || !cline_like_sources_present(conn).await? {
+    if !migration_recorded(conn, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION).await?
+        && (!observation_authority_populated(conn).await?
+            || !cline_like_sources_present(conn).await?)
+    {
         conn.execute(
             "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
             params![OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
@@ -394,4 +481,130 @@ pub async fn ensure_observation_schema(
     }
     require_admitted_observation_shape(conn).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_runtime_core::db::engine::{IntoParams, Rows};
+
+    use super::*;
+
+    struct CountQueries<'a, T> {
+        inner: &'a T,
+        count: AtomicUsize,
+    }
+
+    impl<T: QueryExecutor> QueryExecutor for CountQueries<'_, T> {
+        async fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<Rows>
+        where
+            P: IntoParams,
+        {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            self.inner.query(sql, params).await
+        }
+    }
+
+    impl<T: Executor> Executor for CountQueries<'_, T> {
+        async fn execute<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<u64>
+        where
+            P: IntoParams,
+        {
+            self.inner.execute(sql, params).await
+        }
+
+        async fn execute_batch(
+            &self,
+            sql: &str,
+        ) -> tracedecay_runtime_core::db::engine::Result<()> {
+            self.inner.execute_batch(sql).await
+        }
+    }
+
+    #[tokio::test]
+    async fn enrolled_schema_admission_cost_does_not_grow_with_retained_observations() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let fixture = crate::tests::harness::open_registered_test_fixture(
+            &directory.path().join("sessions.db"),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .unwrap();
+        let transaction = fixture.database().begin_write_transaction().await.unwrap();
+        let measured = CountQueries {
+            inner: &transaction,
+            count: AtomicUsize::new(0),
+        };
+        ensure_observation_schema(&measured).await.unwrap();
+        let empty_queries = measured.count.swap(0, Ordering::Relaxed);
+
+        for index in 0..=OBSERVATION_SOURCE_CENSUS_PAGE_ROWS * 2 {
+            let (observation, cursor) =
+                crate::schema_contract::invariants::test_fixture::authority_fixture(
+                    index as u64,
+                    &format!("enrolled-{index}"),
+                );
+            let receipt = observation.receipt();
+            transaction
+                .execute(
+                    "INSERT INTO sanitization_receipts
+                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        receipt.receipt().receipt_id().as_str(),
+                        receipt.receipt().sanitizer_version().as_str(),
+                        observation.payload_reference().digest().as_str(),
+                        serde_json::to_string(receipt).unwrap()
+                    ],
+                )
+                .await
+                .unwrap();
+            transaction.execute(
+                "INSERT INTO observations
+                 (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![observation.observation_id().as_str(), observation.payload_reference().digest().as_str(),
+                    receipt.receipt().receipt_id().as_str(), serde_json::to_string(&observation).unwrap(),
+                    serde_json::to_string(&cursor).unwrap()],
+            ).await.unwrap();
+        }
+        ensure_observation_schema(&measured).await.unwrap();
+        let populated_queries = measured.count.swap(0, Ordering::Relaxed);
+
+        transaction
+            .execute(
+                "DELETE FROM global_schema_migrations WHERE migration = ?1",
+                params![OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+            )
+            .await
+            .unwrap();
+        ensure_observation_schema(&measured).await.unwrap();
+        let unenrolled_queries = measured.count.swap(0, Ordering::Relaxed);
+        println!(
+            "schema queries: empty={empty_queries}, populated enrolled={populated_queries}, unenrolled={unenrolled_queries}"
+        );
+        assert!(
+            unenrolled_queries > populated_queries,
+            "unmarked content must still be inspected"
+        );
+        assert!(
+            populated_queries <= empty_queries + 1,
+            "enrolled admission must not page through historical content: empty={empty_queries}, populated={populated_queries}"
+        );
+        assert!(
+            migration_recorded(&transaction, OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION)
+                .await
+                .unwrap()
+        );
+        transaction.rollback().await.unwrap();
+    }
 }

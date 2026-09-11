@@ -106,11 +106,9 @@ pub trait WorkflowRunStoragePort: Send + Sync {
         let mut binding = None;
         for projection in self.projections()? {
             for plan in projection.fan_out_plans().values() {
-                if plan
-                    .children
-                    .iter()
-                    .any(|child| &child.attempt_identity == identity)
-                {
+                if plan.children.iter().any(|child| {
+                    projection.planned_fan_out_attempt(identity) == Some(&child.attempt_identity)
+                }) {
                     let candidate = WorkflowFanOutAttemptBindingV1 {
                         run_id: projection.run_id().clone(),
                         step_id: plan.step_id.clone(),

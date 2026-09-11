@@ -73,7 +73,7 @@ pub(crate) async fn resolve_registered_project_route(
         context.clone(),
         requested_path.clone(),
     );
-    let server = resolver.resolve(request).await?.ok_or_else(|| {
+    let server = resolver(request).await?.ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::project_route(
             "project_route_unavailable",
             true,

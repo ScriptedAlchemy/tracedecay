@@ -208,18 +208,6 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
             }),
         ),
         (
-            "tracedecay_configuration_write_credential",
-            ApplicationSurfaceOperation::ConfigurationWriteCredential,
-            "configuration.idempotency.mcp-credential",
-            json!({
-                "expected_reference_id": null,
-                "kind": "api_token",
-                "write_handle": "credential-write-handle.mcp",
-                "expected_revision": revision,
-                "idempotency_key": "configuration.idempotency.mcp-credential"
-            }),
-        ),
-        (
             "tracedecay_configuration_protected_apply",
             ApplicationSurfaceOperation::ConfigurationProtectedApply,
             "configuration.idempotency.mcp-protected-apply",
@@ -324,11 +312,6 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
             "tracedecay_configuration_list",
             ApplicationSurfaceOperation::ConfigurationList,
             json!({}),
-        ),
-        (
-            "tracedecay_configuration_explain",
-            ApplicationSurfaceOperation::ConfigurationExplain,
-            json!({"key": "mcp.tool_timings"}),
         ),
         (
             "tracedecay_configuration_get",

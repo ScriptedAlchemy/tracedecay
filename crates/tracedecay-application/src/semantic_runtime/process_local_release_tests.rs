@@ -19,7 +19,7 @@ fn project_unregistration_drops_the_process_local_activation_gate() {
     );
     drop(gate);
 
-    unregister_project_semantic_runtime(project_root);
+    drop(unregister_project_semantic_runtime(project_root));
 
     assert!(
         probe.upgrade().is_none(),

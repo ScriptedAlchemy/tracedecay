@@ -108,13 +108,17 @@ export function prepareField({
     const [kr, kg, kb] = kindRgb(node.kind);
     const degreeFraction =
       node.degree == null ? 0 : Math.max(0, node.degree) / maxDegree;
+    // A repository is a categorical junction, not a larger holding. Its
+    // checkout count still determines edges and labels, but never body mass.
+    const baseSize =
+      node.kind === 'repository' ? 6 : 5 + 9 * Math.sqrt(degreeFraction);
     graph.addNode(node.id, {
       label: node.label,
       kind: node.kind,
       degree: node.degree,
       x: placed ? node.x! : Math.cos(angle),
       y: placed ? node.y! : Math.sin(angle),
-      size: Math.min((5 + 9 * Math.sqrt(degreeFraction)) * bodyScale, bodyCeiling),
+      size: Math.min(baseSize * bodyScale, bodyCeiling),
       isHub: node.degree != null && node.degree >= maxDegree * 0.75,
       // A graph with no vitality measurement rests mid-scale, so an absent
       // signal never masquerades as a dead network.
@@ -214,7 +218,7 @@ export function buildDendrites(graph: Graph, edgeCount: number): Strand[] {
           // Geometry only: a waypoint is a joint, never a visible body.
           size: 0.01,
           color: 'rgba(0, 0, 0, 0)',
-          label: '',
+          label: null,
           zIndex: 0,
         });
       }

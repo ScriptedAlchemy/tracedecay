@@ -427,27 +427,6 @@ const ROW_DICTIONARY_PAGES_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] 
         "DELETE",
     ),
 ];
-/// The running field-length totals are the one base-phase table a batch
-/// updates in place, so they carry the private-builder gate on every
-/// operation and no immutability trigger; finalization seals them into
-/// `field_stats` and drops the staging table.
-const FIELD_LENGTH_TOTALS_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
-    (
-        "builder_gate_field_length_totals_insert",
-        "field_length_totals",
-        "INSERT",
-    ),
-    (
-        "builder_gate_field_length_totals_update",
-        "field_length_totals",
-        "UPDATE",
-    ),
-    (
-        "builder_gate_field_length_totals_delete",
-        "field_length_totals",
-        "DELETE",
-    ),
-];
 const ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 2] = [
     (
         "immutable_row_dictionary_pages_update",
@@ -460,6 +439,25 @@ const ROW_DICTIONARY_PAGES_IMMUTABLE_TRIGGER_LAYOUT: [(&str, &str, &str, &str); 
         "row_dictionary_pages",
         "DELETE",
         "immutable lexical row dictionary pages",
+    ),
+];
+/// Per-field posting-length totals folded in by every committed batch and
+/// sealed into `field_stats` (which drops this table) at finalization.
+const FIELD_STATS_STAGING_BUILDER_GATE_TRIGGER_LAYOUT: [(&str, &str, &str); 3] = [
+    (
+        "builder_gate_field_stats_staging_insert",
+        "field_stats_staging",
+        "INSERT",
+    ),
+    (
+        "builder_gate_field_stats_staging_update",
+        "field_stats_staging",
+        "UPDATE",
+    ),
+    (
+        "builder_gate_field_stats_staging_delete",
+        "field_stats_staging",
+        "DELETE",
     ),
 ];
 
@@ -1161,7 +1159,6 @@ impl CodeLexicalArtifactBuilderV1 {
         hotpath::measure_block!("query.artifact.open.schema_verify", {
             require_integrity(&connection, control)?;
             verify_artifact_table_layout(&connection, layout)?;
-            verify_field_length_totals_staging(&connection)?;
             verify_builder_mutation_gate_schema(&connection)
         })?;
         let expected_digest = hotpath::measure_block!("query.artifact.open.metadata_restore", {
@@ -1188,6 +1185,17 @@ impl CodeLexicalArtifactBuilderV1 {
                 .is_some_and(|state| state.phase == PersistedFinalizationPhaseV1::Digest)
         {
             verify_required_artifact_indexes(&connection, layout)?;
+        }
+        // A staging file still accepting pages must carry the per-batch field
+        // totals; one staged without them (an older builder) cannot seal
+        // correct statistics and is not resumed.
+        if receipt.is_none()
+            && finalization.is_none()
+            && !table_exists(&connection, "field_stats_staging")?
+        {
+            return Err(CodeLexicalArtifactErrorV1::Incompatible(
+                "lexical artifact was staged without incremental field statistics".to_owned(),
+            ));
         }
         validate_contiguous_pages(&connection, control)?;
         checkpoint(control)?;
@@ -3354,7 +3362,7 @@ fn append_prepared_postings(
     )?;
     let expected_term_rows = term_insert_plan.entries.len();
     let mut inserted_term_rows = 0usize;
-    let mut field_length_totals = BTreeMap::<i64, i64>::new();
+    let mut field_totals = BTreeMap::new();
     hotpath::measure_block!("query.artifact.batch.postings.term_rows", {
         while let Some(entry) = next_term_insert(term_insert_plan)? {
             if inserted_term_rows.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
@@ -3372,10 +3380,12 @@ fn append_prepared_postings(
                 sql_integer(document_id),
                 sql_integer(entry.posting.frequency),
             ])?;
-            let total = field_length_totals.entry(field).or_insert(0);
-            *total = total
-                .checked_add(entry.posting.frequency)
-                .ok_or_else(field_length_overflow)?;
+            let total: &mut i64 = field_totals.entry(field).or_default();
+            *total = total.checked_add(entry.posting.frequency).ok_or_else(|| {
+                CodeLexicalArtifactErrorV1::Contract(
+                    "lexical artifact field total overflowed".to_owned(),
+                )
+            })?;
             inserted_term_rows = inserted_term_rows
                 .checked_add(1)
                 .ok_or_else(batch_ledger_overflow)?;
@@ -3388,8 +3398,8 @@ fn append_prepared_postings(
         ));
     }
     hotpath::measure_block!(
-        "query.artifact.batch.postings.field_length_totals",
-        advance_field_length_totals(transaction, &field_length_totals)
+        "query.artifact.batch.postings.field_totals",
+        stage_field_totals(transaction, &field_totals)
     )?;
     let expected_exact_rows = exact_insert_plan.entries.len();
     let mut inserted_exact_rows = 0usize;
@@ -3443,41 +3453,6 @@ fn append_prepared_postings(
         }
         ngram_insert.finish()
     })
-}
-
-fn field_length_overflow() -> CodeLexicalArtifactErrorV1 {
-    CodeLexicalArtifactErrorV1::Contract(
-        "lexical artifact field length total overflowed".to_owned(),
-    )
-}
-
-/// Add one batch's per-field posting lengths to the running totals. The sum
-/// is carried in Rust so an overflow is a typed refusal rather than SQLite's
-/// silent promotion of `+` to a real.
-fn advance_field_length_totals(
-    transaction: &Transaction<'_>,
-    batch_totals: &BTreeMap<i64, i64>,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let mut read = transaction
-        .prepare_cached("SELECT total_length FROM field_length_totals WHERE field = ?1")
-        .map_err(sqlite_error)?;
-    let mut write = transaction
-        .prepare_cached(
-            "INSERT INTO field_length_totals(field, total_length) VALUES (?1, ?2) ON CONFLICT(field) DO UPDATE SET total_length = excluded.total_length",
-        )
-        .map_err(sqlite_error)?;
-    for (&field, &added) in batch_totals {
-        let current: Option<i64> = read
-            .query_row([field], |row| row.get(0))
-            .optional()
-            .map_err(sqlite_error)?;
-        let total = current
-            .unwrap_or(0)
-            .checked_add(added)
-            .ok_or_else(field_length_overflow)?;
-        write.execute(params![field, total]).map_err(sqlite_error)?;
-    }
-    Ok(())
 }
 
 fn append_prepared_rows(
@@ -3659,11 +3634,7 @@ fn create_schema(
                 field INTEGER PRIMARY KEY,
                 total_length INTEGER NOT NULL
             ) WITHOUT ROWID;
-            -- Running per-field posting lengths, advanced in the same private
-            -- append transaction as the term postings they sum. Finalization
-            -- seals them as `field_stats` and drops the staging table instead
-            -- of re-scanning every posting for six sums.
-            CREATE TABLE field_length_totals (
+            CREATE TABLE field_stats_staging (
                 field INTEGER PRIMARY KEY,
                 total_length INTEGER NOT NULL
             ) WITHOUT ROWID;
@@ -3720,9 +3691,9 @@ fn create_schema(
             CREATE TRIGGER builder_gate_exact_postings_update BEFORE UPDATE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             CREATE TRIGGER builder_gate_exact_postings_delete BEFORE DELETE ON exact_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             CREATE TRIGGER builder_gate_ngram_postings_insert BEFORE INSERT ON ngram_postings WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_field_length_totals_insert BEFORE INSERT ON field_length_totals WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_field_length_totals_update BEFORE UPDATE ON field_length_totals WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
-            CREATE TRIGGER builder_gate_field_length_totals_delete BEFORE DELETE ON field_length_totals WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_field_stats_staging_insert BEFORE INSERT ON field_stats_staging WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_field_stats_staging_update BEFORE UPDATE ON field_stats_staging WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
+            CREATE TRIGGER builder_gate_field_stats_staging_delete BEFORE DELETE ON field_stats_staging WHEN tracedecay_lexical_builder_append_authorized() != 1 BEGIN SELECT RAISE(ABORT, 'private lexical builder mutation required'); END;
             "
         ))
         .map_err(sqlite_error)?;
@@ -3817,38 +3788,6 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool, CodeLexica
         .map_err(sqlite_error)
 }
 
-fn trigger_exists(
-    connection: &Connection,
-    trigger: &str,
-) -> Result<bool, CodeLexicalArtifactErrorV1> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = ?1)",
-            [trigger],
-            |row| row.get(0),
-        )
-        .map_err(sqlite_error)
-}
-
-/// A resumable staging artifact carries its running field-length totals until
-/// finalization seals them as `field_stats` (the freeze trigger is created in
-/// that same statement batch). A staging file with neither was written before
-/// the totals existed; its postings can no longer produce `field_stats`, so it
-/// is refused as incompatible and the scheduler rebuilds it from the sealed
-/// source instead of failing at finalization.
-fn verify_field_length_totals_staging(
-    connection: &Connection,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    if table_exists(connection, "field_length_totals")?
-        || trigger_exists(connection, "frozen_field_stats_insert")?
-    {
-        return Ok(());
-    }
-    Err(CodeLexicalArtifactErrorV1::Incompatible(
-        "staging artifact predates running field-length totals".to_owned(),
-    ))
-}
-
 fn verify_builder_mutation_gate_schema(
     connection: &Connection,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
@@ -3859,12 +3798,11 @@ fn verify_builder_mutation_gate_schema(
         verify_trigger_schema(connection, name, table, &expected)?;
     }
     // Layout-dependent tables are verified only when present: `exact_vocabulary`
-    // from revision 12, and the staging tables finalization drops once their
-    // sealed derivations exist (the revision-14 dictionary pages and the
-    // running field-length totals).
+    // from revision 12, and the staging tables (revision-14 dictionary, field
+    // statistics) that finalization drops once their sealed table is derived.
     let has_exact_vocabulary = table_exists(connection, "exact_vocabulary")?;
     let has_row_dictionary_pages = table_exists(connection, "row_dictionary_pages")?;
-    let has_field_length_totals = table_exists(connection, "field_length_totals")?;
+    let has_field_stats_staging = table_exists(connection, "field_stats_staging")?;
     let gated_layouts: [(bool, &[GateTriggerLayoutV1]); 3] = [
         (
             has_exact_vocabulary,
@@ -3875,8 +3813,8 @@ fn verify_builder_mutation_gate_schema(
             &ROW_DICTIONARY_PAGES_BUILDER_GATE_TRIGGER_LAYOUT,
         ),
         (
-            has_field_length_totals,
-            &FIELD_LENGTH_TOTALS_BUILDER_GATE_TRIGGER_LAYOUT,
+            has_field_stats_staging,
+            &FIELD_STATS_STAGING_BUILDER_GATE_TRIGGER_LAYOUT,
         ),
     ];
     for (name, table, operation) in gated_layouts
@@ -3968,9 +3906,6 @@ fn install_base_freeze(
             CREATE TRIGGER frozen_ngram_postings_insert BEFORE INSERT ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;
             CREATE TRIGGER frozen_ngram_postings_update BEFORE UPDATE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;
             CREATE TRIGGER frozen_ngram_postings_delete BEFORE DELETE ON ngram_postings BEGIN SELECT RAISE(ABORT, 'frozen lexical ngram postings'); END;
-            CREATE TRIGGER frozen_field_length_totals_insert BEFORE INSERT ON field_length_totals BEGIN SELECT RAISE(ABORT, 'frozen lexical field length totals'); END;
-            CREATE TRIGGER frozen_field_length_totals_update BEFORE UPDATE ON field_length_totals BEGIN SELECT RAISE(ABORT, 'frozen lexical field length totals'); END;
-            CREATE TRIGGER frozen_field_length_totals_delete BEFORE DELETE ON field_length_totals BEGIN SELECT RAISE(ABORT, 'frozen lexical field length totals'); END;
             ",
         )
         .map_err(sqlite_error)?;
@@ -4220,18 +4155,37 @@ where
         .spawn_scoped(scope, monitor)
 }
 
+/// Fold one committed batch's per-field posting lengths into
+/// `field_stats_staging`, inside that batch's transaction, so sealing
+/// `field_stats` never rescans `term_postings`.
+fn stage_field_totals(
+    transaction: &Transaction<'_>,
+    totals: &BTreeMap<i64, i64>,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let mut upsert = transaction
+        .prepare_cached(
+            "INSERT INTO field_stats_staging(field, total_length) VALUES (?1, ?2)
+             ON CONFLICT(field) DO UPDATE SET total_length = total_length + excluded.total_length",
+        )
+        .map_err(sqlite_error)?;
+    for (field, total) in totals {
+        upsert.execute([*field, *total]).map_err(sqlite_error)?;
+    }
+    Ok(())
+}
+
 fn derive_statistics_step(
     transaction: &Transaction<'_>,
     ordinal: u64,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     match ordinal {
-        // The totals were advanced by every append transaction, so sealing
-        // them is a six-row copy; the staging table is dropped in the same
-        // statement batch that freezes `field_stats`.
         0 => hotpath::measure_block!("query.artifact.finalization.derive_field_stats", {
+            // Every committed batch already folded its posting lengths into
+            // the staging totals (`stage_field_totals`): sealing copies at
+            // most seven rows and drops the staging table with its gates.
             transaction.execute_batch(
-                "INSERT INTO field_stats(field, total_length) SELECT field, total_length FROM field_length_totals ORDER BY field;
-                 DROP TABLE field_length_totals;
+                "INSERT INTO field_stats(field, total_length) SELECT field, total_length FROM field_stats_staging ORDER BY field;
+                 DROP TABLE field_stats_staging;
                  CREATE TRIGGER frozen_field_stats_insert BEFORE INSERT ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;
                  CREATE TRIGGER frozen_field_stats_update BEFORE UPDATE ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;
                  CREATE TRIGGER frozen_field_stats_delete BEFORE DELETE ON field_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical field statistics'); END;",
@@ -4245,10 +4199,10 @@ fn derive_statistics_step(
                  CREATE TRIGGER frozen_term_stats_delete BEFORE DELETE ON term_stats BEGIN SELECT RAISE(ABORT, 'frozen lexical term statistics'); END;",
             )
         }),
-        // `term_stats` (sealed in the previous step) holds exactly the
-        // distinct `(term_id, field)` pairs of `term_postings`, so the fuzzy
-        // flag reads it instead of re-scanning every posting.
         2 => hotpath::measure_block!("query.artifact.finalization.derive_vocabulary", {
+            // The preceding statistics step already grouped every posting
+            // by (term_id, field). Reuse that frozen membership instead of
+            // scanning the larger posting table again.
             let subtoken = field_code(LexicalFieldV1::Subtoken);
             transaction
                 .execute(
@@ -5730,6 +5684,129 @@ mod tests {
     }
 
     #[test]
+    fn field_statistics_preserve_posting_sums_and_omit_absent_fields() {
+        for empty in [false, true] {
+            let mut connection = Connection::open_in_memory().expect("statistics database");
+            let _authority = create_mutable_test_schema(&connection);
+            if !empty {
+                // Two committed batches: the staged totals must accumulate
+                // across them exactly as a scan over every posting would.
+                let batches: [&[(i64, i64, i64, i64)]; 2] = [
+                    &[(1, 1, 1, 2), (2, 1, 1, 3), (1, 3, 1, 7)],
+                    &[(1, 1, 2, 4), (2, 7, 2, 11)],
+                ];
+                for batch in batches {
+                    let transaction = connection.transaction().expect("batch transaction");
+                    let mut totals = BTreeMap::new();
+                    for (term_id, field, document_id, frequency) in batch {
+                        transaction
+                            .execute(
+                                "INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES (?1, ?2, ?3, ?4)",
+                                [term_id, field, document_id, frequency],
+                            )
+                            .expect("posting fixture");
+                        *totals.entry(*field).or_insert(0) += frequency;
+                    }
+                    stage_field_totals(&transaction, &totals).expect("stage field totals");
+                    transaction.commit().expect("commit batch");
+                }
+            }
+            let expected = connection
+                .prepare(
+                    "SELECT field, SUM(frequency) FROM term_postings GROUP BY field ORDER BY field",
+                )
+                .expect("reference sums")
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .expect("reference rows")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("reference totals");
+            let transaction = connection.transaction().expect("statistics transaction");
+            derive_statistics_step(&transaction, 0).expect("derive statistics");
+            let actual = transaction
+                .prepare("SELECT field, total_length FROM field_stats ORDER BY field")
+                .expect("derived sums")
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .expect("derived rows")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("derived totals");
+            assert_eq!(actual, expected);
+            assert!(
+                transaction
+                    .execute("INSERT INTO field_stats VALUES (2, 5)", [])
+                    .is_err()
+            );
+            assert!(
+                !table_exists(&transaction, "field_stats_staging").expect("staging lookup"),
+                "sealing the statistics must drop the staging totals"
+            );
+        }
+    }
+
+    #[test]
+    fn resume_refuses_staging_without_incremental_field_statistics() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let path = directory.path().join("no-field-stats-staging.sqlite");
+        let metadata = test_metadata();
+        drop(
+            CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
+                .expect("create current staging artifact"),
+        );
+        let connection = Connection::open(&path).expect("open staging artifact for fixture setup");
+        connection
+            .execute_batch("DROP TABLE field_stats_staging;")
+            .expect("install pre-incremental staging layout");
+        drop(connection);
+
+        let error =
+            match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &path,
+                metadata,
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &ActiveControl,
+            ) {
+                Ok(_) => panic!("resume must not seal statistics without staged totals"),
+                Err(error) => error,
+            };
+        assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
+    }
+
+    #[test]
+    fn fuzzy_vocabulary_requires_a_non_subtoken_posting() {
+        let mut connection = Connection::open_in_memory().expect("vocabulary database");
+        let _authority = create_mutable_test_schema(&connection);
+        connection
+            .execute_batch(
+                "INSERT INTO vocabulary(term_id, term, in_fuzzy) VALUES
+                 (1, 'subtoken_only', 0), (2, 'body_only', 0),
+                 (3, 'both_fields', 0), (4, 'unreferenced', 0);
+                 INSERT INTO term_postings(term_id, field, document_id, frequency) VALUES
+                 (1, 7, 1, 3), (1, 7, 2, 5),
+                 (2, 4, 1, 2), (2, 4, 2, 7),
+                 (3, 7, 1, 1), (3, 4, 2, 1);",
+            )
+            .expect("vocabulary fixture");
+        let transaction = connection.transaction().expect("statistics transaction");
+        derive_statistics_step(&transaction, 1).expect("derive term statistics");
+        derive_statistics_step(&transaction, 2).expect("derive fuzzy vocabulary");
+        let actual = transaction
+            .prepare("SELECT term_id, in_fuzzy FROM vocabulary ORDER BY term_id")
+            .expect("fuzzy membership")
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+            })
+            .expect("vocabulary rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("vocabulary membership");
+        assert_eq!(actual, [(1, false), (2, true), (3, true), (4, false)]);
+        assert!(
+            transaction
+                .execute("UPDATE vocabulary SET in_fuzzy = 0 WHERE term_id = 2", [])
+                .is_err(),
+            "derived membership must remain frozen"
+        );
+    }
+
+    #[test]
     fn canonical_batch_limits_select_a_multi_page_prefix_without_stalling() {
         let page_bounds = [
             (700_000usize, 80 * 1024 * 1024usize),
@@ -6034,44 +6111,6 @@ mod tests {
                 Err(error) => error,
             };
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Incompatible(_)));
-    }
-
-    /// A staging artifact written before the append phase carried running
-    /// field-length totals cannot seal `field_stats` any more; resume refuses
-    /// it as incompatible so the scheduler rebuilds from the sealed source.
-    #[test]
-    fn resume_refuses_a_staging_artifact_without_field_length_totals() {
-        let directory = tempfile::tempdir().expect("private staging directory");
-        let path = directory.path().join("pre-running-totals.sqlite");
-        let metadata = test_metadata();
-        drop(
-            CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
-                .expect("create current staging artifact"),
-        );
-        let connection = Connection::open(&path).expect("open staging artifact for fixture setup");
-        connection
-            .execute_batch("DROP TABLE field_length_totals;")
-            .expect("remove the running totals as an older writer would have");
-        drop(connection);
-
-        let error =
-            match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
-                &path,
-                metadata,
-                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-                &ActiveControl,
-            ) {
-                Ok(_) => panic!("resume must not accept a staging artifact without field totals"),
-                Err(error) => error,
-            };
-        assert!(
-            matches!(
-                &error,
-                CodeLexicalArtifactErrorV1::Incompatible(message)
-                    if message.contains("field-length totals")
-            ),
-            "unexpected refusal: {error}"
-        );
     }
 
     #[test]

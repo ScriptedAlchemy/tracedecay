@@ -387,13 +387,19 @@ pub struct ProjectionRequestBatchV1 {
     pub canonical_chunks: Vec<Arc<CodeSearchChunkV1>>,
 }
 
-/// One native encoder invocation derived from a file-local canonical order.
+/// One native encoder invocation derived from canonical token-length order.
 ///
 /// The request's change partitions remain chunk-ID sorted for their durable
 /// digest contract; this grouping records the independent native-input order.
 struct CanonicalEncoderGroupV1<'a> {
     changes: Vec<&'a ChangedCodeChunkV1>,
 }
+
+/// Quadratic attention-score budget equal to the previous worst-case batch:
+/// 32 rows padded to 512 tokens. A single longer row is always admitted so
+/// the configured sequence ceiling remains reachable.
+const ATTENTION_BUDGET_BASELINE_SEQUENCE: usize = 512;
+const ESTIMATED_BYTES_PER_TOKEN: usize = 4;
 
 /// Split one whole-corpus projection request into batches that commit
 /// independently.
@@ -404,11 +410,9 @@ struct CanonicalEncoderGroupV1<'a> {
 ///
 /// Splitting is identity-preserving, which is the load-bearing property:
 ///
-/// - Boundaries preserve complete canonical encoder groups, greedily bounded
-///   by both the admitted `inference_batch_size` and
-///   `inference_batch_bytes`. The tensor shape the model sees never changes,
-///   so vector bytes — and therefore every `output_digest`, and the generation
-///   manifest digest built from those digests — are byte-identical.
+/// - Boundaries preserve complete canonical encoder groups, bounded by count,
+///   input bytes, and the quadratic attention budget. The tensor shape the
+///   model sees therefore does not change when a whole request is paged.
 /// - `added_or_changed` is split only between complete groups from its
 ///   already-canonical list, so each batch's partition is canonical too.
 /// - Deletions and ordinary reuse are receipt-only decisions with no encoder
@@ -456,6 +460,20 @@ pub fn split_projection_request(
             "semantic projection inference batch byte ceiling is zero".to_owned(),
         ));
     }
+    let inference_sequence_length = inference_batch_bytes
+        .checked_div(inference_batch_size.saturating_mul(ESTIMATED_BYTES_PER_TOKEN))
+        .unwrap_or(0)
+        .max(1);
+    for chunk in canonical_chunks {
+        record_token_length_histogram(
+            chunk
+                .sanitized_text
+                .as_str()
+                .len()
+                .div_ceil(ESTIMATED_BYTES_PER_TOKEN)
+                .max(1),
+        );
+    }
     // Round down to whole encoder groups; never below one group.
     let window = max_embeds_per_batch
         .saturating_sub(max_embeds_per_batch % inference_batch_size)
@@ -479,6 +497,7 @@ pub fn split_projection_request(
         &chunks_by_id,
         inference_batch_size,
         inference_batch_bytes,
+        inference_sequence_length,
         |chunk_id| SemanticProjectionErrorV1::CanonicalChunkSetMismatch(chunk_id.clone()),
     ) {
         Ok(group_lengths) => group_lengths,
@@ -490,6 +509,7 @@ pub fn split_projection_request(
             &chunks_by_id,
             inference_batch_size,
             inference_batch_bytes,
+            inference_sequence_length,
             |_chunk_id| SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds,
         ) {
             Ok(group_lengths) => group_lengths,
@@ -598,52 +618,19 @@ fn take_full_encoder_groups<'a>(
 
 /// Derive the canonical native encoder groups for one ordered projection lane.
 ///
-/// Group membership is projection identity. Multi-chunk file buckets are
-/// traversed in deterministic file-occurrence order; chunks inside a file are
-/// ordered by source span, grain, and identity before greedy count/byte
-/// grouping. Runs of one-chunk files are coalesced under the same limits so a
-/// corpus of small files does not degenerate into one model call per chunk.
-/// This keeps copied multi-chunk file tensors invariant when unrelated chunk
-/// IDs interleave in the changed-set's durable chunk-ID order without
-/// sacrificing the admitted production batch shape for singleton files.
-///
-/// # Why the resulting under-fill is not recovered by batching at the model
-///
-/// Flushing per file makes real corpora under-fill: every multi-chunk file
-/// contributes one partial group, so the achieved mean fill sits far below the
-/// admitted batch width and the forward-pass count tracks the multi-chunk file
-/// count rather than the corpus size.
-///
-/// The obvious recovery — keep membership, but hand several groups to the
-/// model in one call — is unavailable, and not because of this function.
-/// `TextEmbedding::transform` splits its input with `texts.chunks(batch_size)`
-/// and runs one `ort::Session::run` per chunk, while the tokenizer pads with
-/// `PaddingStrategy::BatchLongest`. So a chunk's ONNX input shape is
-/// `[chunk_len, longest_encoding_in_that_chunk]`, and the two reachable
-/// merges are both dead ends:
-///
-/// - Equal-sized groups concatenated under `Some(k)` are split straight back
-///   apart by `chunks(k)`. Byte-identical, and exactly as many forward passes
-///   as before — the win is zero.
-/// - Differently-sized groups can only merge under `Some(total)`, which
-///   re-pads the shorter group's rows to the longer group's length. Whether
-///   that perturbs the emitted floats is a property of the specific ONNX
-///   graph: measured byte-identical on the cataloged
-///   `jinaai/jina-embeddings-v2-base-code`, but every lane of every row moves
-///   by up to 2.4e-2 on `Xenova/all-MiniLM-L6-v2`. Since vector bytes feed
-///   `vector_output_digest` and thence the generation manifest digest, a
-///   merge that is safe only for today's single catalog entry would turn any
-///   future catalog addition into an unannounced full re-embed.
-///
-/// `tests/inference_batch_identity.rs` is the executable form of both
-/// findings. Recovering this under-fill needs a batching seam below FastEmbed
-/// (pre-tokenized inputs with an explicit padded length), not a regrouping
-/// here.
+/// FastEmbed tokenizes only inside `embed`, so this seam uses the documented
+/// bytes/4 estimate. Chunks sort by estimated token length, then deterministic
+/// source identity, before greedy packing. Count and input-byte ceilings still
+/// apply. The additional `batch_len * padded_len²` bound models BERT attention
+/// score storage and preserves the previous 32-by-512 worst-case budget.
+/// Longer configured sequences run alone when even one row exceeds that
+/// historical budget.
 fn canonical_encoder_groups<'a, Missing>(
     changes: &'a [ChangedCodeChunkV1],
     chunks: &BTreeMap<CodeSearchChunkId, &'a Arc<CodeSearchChunkV1>>,
     inference_batch_size: usize,
     inference_batch_bytes: usize,
+    inference_sequence_length: usize,
     missing: Missing,
 ) -> Result<Vec<CanonicalEncoderGroupV1<'a>>, SemanticProjectionErrorV1>
 where
@@ -657,6 +644,11 @@ where
     if inference_batch_bytes == 0 {
         return Err(SemanticProjectionErrorV1::Contract(
             "semantic projection inference batch byte ceiling is zero".to_owned(),
+        ));
+    }
+    if inference_sequence_length == 0 {
+        return Err(SemanticProjectionErrorV1::Contract(
+            "semantic projection sequence length is zero".to_owned(),
         ));
     }
 
@@ -677,13 +669,22 @@ where
                     },
                 );
             }
-            Ok((change, chunk))
+            let estimated_tokens = chunk_bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN).max(1);
+            Ok((
+                change,
+                chunk,
+                estimated_tokens.min(inference_sequence_length),
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    ordered_changes.sort_unstable_by(|(_, left), (_, right)| {
-        left.anchor
-            .file_occurrence_id
-            .cmp(&right.anchor.file_occurrence_id)
+    ordered_changes.sort_unstable_by(|(_, left, left_tokens), (_, right, right_tokens)| {
+        left_tokens
+            .cmp(right_tokens)
+            .then_with(|| {
+                left.anchor
+                    .file_occurrence_id
+                    .cmp(&right.anchor.file_occurrence_id)
+            })
             .then_with(|| {
                 left.anchor
                     .source_span
@@ -701,70 +702,49 @@ where
     });
 
     let mut groups = Vec::new();
-    let mut singleton_run = Vec::new();
-    let mut next_file = 0;
-    while next_file < ordered_changes.len() {
-        let file = &ordered_changes[next_file].1.anchor.file_occurrence_id;
-        let mut file_end = next_file.saturating_add(1);
-        while ordered_changes
-            .get(file_end)
-            .is_some_and(|(_, chunk)| &chunk.anchor.file_occurrence_id == file)
-        {
-            file_end = file_end.saturating_add(1);
-        }
-        let file_changes = &ordered_changes[next_file..file_end];
-        if file_changes.len() == 1 {
-            singleton_run.push(file_changes[0]);
-        } else {
-            append_canonical_encoder_groups(
-                &mut groups,
-                &singleton_run,
-                inference_batch_size,
-                inference_batch_bytes,
-            );
-            singleton_run.clear();
-            append_canonical_encoder_groups(
-                &mut groups,
-                file_changes,
-                inference_batch_size,
-                inference_batch_bytes,
-            );
-        }
-        next_file = file_end;
-    }
-    append_canonical_encoder_groups(
-        &mut groups,
-        &singleton_run,
-        inference_batch_size,
-        inference_batch_bytes,
-    );
-    Ok(groups)
-}
-
-fn append_canonical_encoder_groups<'a>(
-    groups: &mut Vec<CanonicalEncoderGroupV1<'a>>,
-    ordered_changes: &[(&'a ChangedCodeChunkV1, &'a Arc<CodeSearchChunkV1>)],
-    inference_batch_size: usize,
-    inference_batch_bytes: usize,
-) {
+    let attention_token_square_budget = inference_batch_size
+        .saturating_mul(ATTENTION_BUDGET_BASELINE_SEQUENCE)
+        .saturating_mul(ATTENTION_BUDGET_BASELINE_SEQUENCE);
     let mut group = Vec::new();
     let mut group_bytes = 0;
-    for (change, chunk) in ordered_changes.iter().copied() {
+    let mut padded_tokens = 0usize;
+    for (change, chunk, estimated_tokens) in ordered_changes {
         let chunk_bytes = chunk.sanitized_text.as_str().len();
+        let next_padded_tokens = padded_tokens.max(estimated_tokens);
+        let next_len = group.len().saturating_add(1);
+        let attention_cost = next_len
+            .saturating_mul(next_padded_tokens)
+            .saturating_mul(next_padded_tokens);
         if !group.is_empty()
-            && (group.len() == inference_batch_size
-                || chunk_bytes > inference_batch_bytes.saturating_sub(group_bytes))
+            && (next_len > inference_batch_size
+                || chunk_bytes > inference_batch_bytes.saturating_sub(group_bytes)
+                || attention_cost > attention_token_square_budget)
         {
             groups.push(CanonicalEncoderGroupV1 { changes: group });
             group = Vec::new();
             group_bytes = 0;
+            padded_tokens = 0;
         }
         group.push(change);
         group_bytes = group_bytes.saturating_add(chunk_bytes);
+        padded_tokens = padded_tokens.max(estimated_tokens);
     }
     if !group.is_empty() {
         groups.push(CanonicalEncoderGroupV1 { changes: group });
     }
+    Ok(groups)
+}
+
+fn record_token_length_histogram(estimated_tokens: usize) {
+    match estimated_tokens {
+        0..=128 => hotpath::gauge!("semantic_embedding_tokens_le_128").inc(1_u64),
+        129..=256 => hotpath::gauge!("semantic_embedding_tokens_le_256").inc(1_u64),
+        257..=512 => hotpath::gauge!("semantic_embedding_tokens_le_512").inc(1_u64),
+        513..=1024 => hotpath::gauge!("semantic_embedding_tokens_le_1024").inc(1_u64),
+        1025..=2048 => hotpath::gauge!("semantic_embedding_tokens_le_2048").inc(1_u64),
+        2049..=4096 => hotpath::gauge!("semantic_embedding_tokens_le_4096").inc(1_u64),
+        _ => hotpath::gauge!("semantic_embedding_tokens_gt_4096").inc(1_u64),
+    };
 }
 
 /// Encode `changes` group by group, dispatching a bounded window of groups to
@@ -776,8 +756,8 @@ fn append_canonical_encoder_groups<'a>(
 ///   `inference_batch_bytes` pinned by the admitted embedding projection. The
 ///   tensor shape therefore never depends on the dispatch window or the
 ///   encoder's concurrency.
-/// - Results are drained in input order, so vectors, decisions, and the
-///   lowest-index failure are identical at any width.
+/// - Results are restored to request order after length-aware batching, so
+///   vectors and decisions retain their durable caller-visible order.
 #[hotpath::measure(label = "semantic.projector.encode")]
 fn encode_changes_windowed<E, Missing, Sink>(
     encoder: &mut E,
@@ -816,11 +796,13 @@ where
         chunks,
         inference_batch_size,
         inference_batch_bytes,
+        embedding_key.truncation_length as usize,
         missing,
     )?;
     let window_groups = ENCODING_WINDOW_GROUPS_PER_WORKER
         .saturating_mul(encoder.encode_concurrency().max(1))
         .max(1);
+    let mut encoded_by_id = BTreeMap::new();
 
     for group_window in canonical_groups.chunks(window_groups) {
         let groups = group_window
@@ -869,7 +851,7 @@ where
                 reason: "semantic projector returned an unexpected vector group count".to_owned(),
             });
         }
-        for ((group, group_chunks), values) in groups.into_iter().zip(encoded) {
+        for ((group, _group_chunks), values) in groups.into_iter().zip(encoded) {
             if values.len() != group.changes.len() {
                 return Err(SemanticProjectionErrorV1::Encoder {
                     chunk_id: group
@@ -885,10 +867,24 @@ where
                         .to_owned(),
                 });
             }
-            for ((change, chunk), vector) in group.changes.iter().zip(group_chunks).zip(values) {
-                sink(change, chunk, vector)?;
+            for (change, vector) in group.changes.iter().zip(values) {
+                encoded_by_id.insert(change.chunk_id.clone(), vector);
             }
         }
+    }
+    for change in changes {
+        let chunk = chunks.get(&change.chunk_id).ok_or_else(|| {
+            SemanticProjectionErrorV1::Contract(
+                "canonical encoder output lost a previously validated chunk".to_owned(),
+            )
+        })?;
+        let vector = encoded_by_id.remove(&change.chunk_id).ok_or_else(|| {
+            SemanticProjectionErrorV1::Encoder {
+                chunk_id: change.chunk_id.clone(),
+                reason: "semantic projector returned no vector for a canonical chunk".to_owned(),
+            }
+        })?;
+        sink(change, chunk, vector)?;
     }
     Ok(())
 }
@@ -963,10 +959,9 @@ mod encoder_group_tests {
     };
 
     const BATCH_SIZE: usize = 32;
-    const BATCH_BYTES: usize = 32 * 512 * 4;
+    const BATCH_BYTES: usize = 32 * 4096 * 4;
 
-    fn chunk(file: &str, ordinal: u32) -> Arc<CodeSearchChunkV1> {
-        let text = "fn fixture() {}";
+    fn chunk_with_text(file: &str, ordinal: u32, text: &str) -> Arc<CodeSearchChunkV1> {
         let start_byte = u64::from(ordinal).saturating_mul(1024);
         Arc::new(CodeSearchChunkV1 {
             id: CodeSearchChunkId::new(format!("grouping.chunk.{file}.{ordinal}"))
@@ -1001,6 +996,10 @@ mod encoder_group_tests {
         })
     }
 
+    fn chunk(file: &str, ordinal: u32) -> Arc<CodeSearchChunkV1> {
+        chunk_with_text(file, ordinal, "fn fixture() {}")
+    }
+
     /// Exact group membership, as chunk IDs, for one in-memory changed set.
     ///
     /// Membership — not just the shape — is projection identity, so the tests
@@ -1019,9 +1018,14 @@ mod encoder_group_tests {
             .map(|chunk| (chunk.id.clone(), chunk))
             .collect::<BTreeMap<_, _>>();
 
-        canonical_encoder_groups(&changes, &by_id, BATCH_SIZE, BATCH_BYTES, |chunk_id| {
-            SemanticProjectionErrorV1::CanonicalChunkSetMismatch(chunk_id.clone())
-        })
+        canonical_encoder_groups(
+            &changes,
+            &by_id,
+            BATCH_SIZE,
+            BATCH_BYTES,
+            4096,
+            |chunk_id| SemanticProjectionErrorV1::CanonicalChunkSetMismatch(chunk_id.clone()),
+        )
         .expect("fixture groups")
         .iter()
         .map(|group| {
@@ -1038,18 +1042,31 @@ mod encoder_group_tests {
         encoder_groups(chunks).iter().map(Vec::len).collect()
     }
 
-    /// Every multi-chunk file flushes the pending singleton run and then emits
-    /// its own group, so no two files ever share one.
-    ///
-    /// The fixture corpus is deliberately smaller than one admitted batch: a
-    /// grouping that packed greedily across file boundaries would emit a
-    /// single full group of 30. The per-file flush instead yields one partial
-    /// group per multi-chunk file — the achieved fill sits below the admitted
-    /// batch width, and the forward-pass count tracks the multi-chunk file
-    /// count rather than the corpus size. That under-fill is the documented,
-    /// deliberate cost of keeping copied file tensors invariant.
     #[test]
-    fn multi_chunk_files_each_contribute_one_partial_group() {
+    fn quadratic_token_budget_buckets_long_chunks_into_smaller_batches() {
+        let chunks = [
+            (0..32)
+                .map(|ordinal| chunk_with_text(&format!("short{ordinal}"), 0, &"x".repeat(128 * 4)))
+                .collect::<Vec<_>>(),
+            (0..8)
+                .map(|ordinal| {
+                    chunk_with_text(&format!("medium{ordinal}"), 0, &"x".repeat(1024 * 4))
+                })
+                .collect::<Vec<_>>(),
+            (0..2)
+                .map(|ordinal| chunk_with_text(&format!("long{ordinal}"), 0, &"x".repeat(2048 * 4)))
+                .collect::<Vec<_>>(),
+            vec![chunk_with_text("maximum", 0, &"x".repeat(4096 * 4))],
+        ]
+        .concat();
+
+        assert_eq!(group_sizes(&chunks), vec![32, 8, 2, 1]);
+    }
+
+    /// Short chunks fill the admitted count width regardless of file
+    /// boundaries; token length, not source layout, controls padding cost.
+    #[test]
+    fn short_chunks_pack_across_file_boundaries() {
         const FILES: usize = 6;
         const CHUNKS_PER_FILE: usize = 5;
 
@@ -1064,84 +1081,25 @@ mod encoder_group_tests {
             "the whole corpus must fit one admitted batch for this test to bite"
         );
 
-        let groups = encoder_groups(&chunks);
-        let expected = (0..FILES)
-            .map(|file| {
-                (0..CHUNKS_PER_FILE)
-                    .map(|ordinal| format!("grouping.chunk.multi{file}.{ordinal}"))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(groups, expected);
-
-        // The group count tracks the multi-chunk file count, and every group
-        // is under-filled relative to the admitted batch width.
-        assert_eq!(groups.len(), FILES);
-        for group in &groups {
-            assert_eq!(group.len(), CHUNKS_PER_FILE);
-            assert!(group.len() < BATCH_SIZE);
-        }
+        let expected = vec![
+            (0..FILES)
+                .flat_map(|file| {
+                    (0..CHUNKS_PER_FILE)
+                        .map(move |ordinal| format!("grouping.chunk.multi{file}.{ordinal}"))
+                })
+                .collect::<Vec<_>>(),
+        ];
+        assert_eq!(encoder_groups(&chunks), expected);
     }
 
-    /// Consecutive one-chunk files coalesce into shared groups bounded by the
-    /// admitted batch width, but an interleaved multi-chunk file breaks the
-    /// run into a before-group, its own group, and an after-group.
+    /// Arrival order never affects the canonical length-bucket membership.
     #[test]
-    fn singleton_runs_coalesce_but_multi_chunk_files_break_the_run() {
-        // A pure run of one-chunk files packs up to the admitted count bound
-        // (the byte ceiling is far out of reach for these fixtures), then
-        // flushes the trailing remainder.
-        let run = (0..40u32)
+    fn input_arrival_order_does_not_change_groups() {
+        let mut run = (0..40u32)
             .map(|file| chunk(&format!("s{file:03}"), 0))
             .collect::<Vec<_>>();
-        assert_eq!(group_sizes(&run), vec![BATCH_SIZE, 8]);
-        assert_eq!(
-            encoder_groups(&run),
-            vec![
-                (0..32u32)
-                    .map(|file| format!("grouping.chunk.s{file:03}.0"))
-                    .collect::<Vec<_>>(),
-                (32..40u32)
-                    .map(|file| format!("grouping.chunk.s{file:03}.0"))
-                    .collect::<Vec<_>>(),
-            ]
-        );
-
-        // Now interleave one three-chunk file `b` between two singleton runs
-        // `a*` and `c*`. Input order is scrambled on purpose: grouping is a
-        // function of the canonical file/span order, not of the changed set's
-        // arrival order.
-        let mut interleaved = Vec::new();
-        for file in 0..4u32 {
-            interleaved.push(chunk(&format!("c{file:02}"), 0));
-        }
-        interleaved.push(chunk("b", 2));
-        for file in 0..5u32 {
-            interleaved.push(chunk(&format!("a{file:02}"), 0));
-        }
-        interleaved.push(chunk("b", 0));
-        interleaved.push(chunk("b", 1));
-
-        assert!(
-            interleaved.len() < BATCH_SIZE,
-            "all twelve chunks would fit one batch if the run were never broken"
-        );
-        assert_eq!(
-            encoder_groups(&interleaved),
-            vec![
-                // The `a*` run, flushed by the arrival of multi-chunk `b`.
-                (0..5u32)
-                    .map(|file| format!("grouping.chunk.a{file:02}.0"))
-                    .collect::<Vec<_>>(),
-                // `b`'s own partial group, in source-span order.
-                (0..3u32)
-                    .map(|ordinal| format!("grouping.chunk.b.{ordinal}"))
-                    .collect::<Vec<_>>(),
-                // The trailing `c*` run, flushed at the end.
-                (0..4u32)
-                    .map(|file| format!("grouping.chunk.c{file:02}.0"))
-                    .collect::<Vec<_>>(),
-            ]
-        );
+        let expected = encoder_groups(&run);
+        run.reverse();
+        assert_eq!(encoder_groups(&run), expected);
     }
 }

@@ -172,6 +172,12 @@ fn clone_production_error(error: &CodeIndexProductionErrorV1) -> CodeIndexProduc
         CodeIndexProductionErrorV1::SourceCommitmentsUnavailable => {
             CodeIndexProductionErrorV1::SourceCommitmentsUnavailable
         }
+        CodeIndexProductionErrorV1::SealedRowContractRefused { revision, message } => {
+            CodeIndexProductionErrorV1::SealedRowContractRefused {
+                revision: *revision,
+                message: message.clone(),
+            }
+        }
         CodeIndexProductionErrorV1::Contract(error) => {
             CodeIndexProductionErrorV1::Contract(error.clone())
         }

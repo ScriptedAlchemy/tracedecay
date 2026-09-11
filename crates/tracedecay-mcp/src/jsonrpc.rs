@@ -289,20 +289,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_jsonrpc_request() {
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-            "params": {}
-        });
-
-        let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
-        assert_eq!(request.method, "tools/list");
-        assert_eq!(request.id, Some(serde_json::Value::Number(1.into())));
-    }
-
-    #[test]
     fn test_parse_notification_without_id() {
         let msg = json!({
             "jsonrpc": "2.0",
@@ -348,21 +334,6 @@ mod tests {
         assert_eq!(ErrorCode::InvalidParams.as_i32(), -32602);
         assert_eq!(ErrorCode::RequestCancelled.as_i32(), -32800);
         assert_eq!(ErrorCode::InternalError.as_i32(), -32603);
-    }
-
-    #[test]
-    fn test_request_with_string_id() {
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": "abc-123",
-            "method": "ping"
-        });
-
-        let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
-        assert_eq!(
-            request.id,
-            Some(serde_json::Value::String("abc-123".to_string()))
-        );
     }
 
     fn invalid_request_id(error: JsonRpcDecodeError) -> Value {

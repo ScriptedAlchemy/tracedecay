@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+#[cfg(test)]
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -13,29 +14,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::tools::render;
-
-/// Builds a `Config` error from a message, for argument-validation failures.
-pub(super) fn argument_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
-}
-
-pub(super) fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
-    let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    if encoded.len() > 4_096 {
-        return Err(argument_error(
-            "cursor exceeds its bounded authenticated envelope",
-        ));
-    }
-    let cursor: tracedecay_domain::RetrievalCursor = serde_json::from_str(encoded)?;
-    cursor.validate().map_err(|_| {
-        argument_error("cursor is not a valid authenticated retrieval continuation")
-    })?;
-    Ok(Some(cursor))
-}
 
 /// Key under which context handlers stash analytics that must reach the server
 /// but never the client. [`rendered_tool_result`] is the one place it is lifted
@@ -120,6 +98,7 @@ pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value
 /// or array is caller error, not a broken invariant — asserting it would
 /// panic the daemon's client task and the caller would see only a dropped
 /// connection.
+#[cfg(test)]
 pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
     if args.is_object() {
         return Ok(());
@@ -131,6 +110,7 @@ pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
 
 /// Decode one catalog-owned primitive request after removing keys owned by
 /// the MCP transport rather than the application operation.
+#[cfg(test)]
 pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
     args: &Value,
     tool_name: &str,

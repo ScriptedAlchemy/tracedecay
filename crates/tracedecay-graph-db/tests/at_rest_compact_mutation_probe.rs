@@ -1,3 +1,5 @@
+// Its own test binary, not a graph_db_suite module: a `graph-disk-tier` probe
+// that is run explicitly by name and needs no `test-helpers` fixture.
 //! Whether a compacted store survives being written to afterwards.
 //!
 //! Ignored by default, and pure grafeo: no TraceDecay schema, no registry, no

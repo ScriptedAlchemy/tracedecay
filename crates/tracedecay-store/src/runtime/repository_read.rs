@@ -501,6 +501,10 @@ pub enum ObservationReadResultV1 {
 pub enum DiagnosticReadOperationV1 {
     CurrentGeneration,
     Generation(CodeGenerationId),
+    Publication {
+        generation_id: CodeGenerationId,
+        publication_revision: u64,
+    },
     CurrentForFile {
         generation_id: CodeGenerationId,
         file_occurrence_id: FileOccurrenceId,

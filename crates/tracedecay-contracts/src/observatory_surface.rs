@@ -4,25 +4,22 @@
 //! Analytics retains its distinct facts and automation rollups; those private
 //! counters, sections, and Markdown rendering are not Observatory DTOs.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
-    IdempotencyContract, LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract,
-    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, TerminalState,
-    TerminalStateContract, UseCaseId,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
+    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, PaginationContract,
+    PrivacyClass, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
+    TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation, CostsReadModelV1,
-    ObservatoryReadModelV1, ResultContractRef, current_bindings,
+    ObservatoryReadModelV1, ResultContractRef, current_application_bindings,
 };
 
 pub const OBSERVATORY_READ_OPERATION: &str = "observatory_read";
@@ -67,42 +64,12 @@ pub struct ObservatoryReadResultV1 {
     pub costs: CostsReadModelV1,
 }
 
-pub type ObservatoryReadFuture<'a> = Pin<
-    Box<dyn Future<Output = Result<ObservatoryReadResultV1, ApplicationContractError>> + Send + 'a>,
->;
-
-/// Daemon-owned access to the registered project observation authorities.
-pub trait ObservatoryReadPortV1: Send + Sync {
-    fn read<'a>(&'a self, request: ObservatoryReadRequestV1) -> ObservatoryReadFuture<'a>;
-}
-
-pub struct ObservatoryReadServiceV1<P> {
-    port: P,
-}
-
-impl<P> ObservatoryReadServiceV1<P>
-where
-    P: ObservatoryReadPortV1,
-{
-    #[hotpath::skip]
-    pub const fn new(port: P) -> Self {
-        Self { port }
-    }
-
-    pub async fn read(
-        &self,
-        request: ObservatoryReadRequestV1,
-    ) -> Result<ObservatoryReadResultV1, ApplicationContractError> {
-        self.port.read(request).await
-    }
-}
-
 pub fn observatory_read_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let capability_id = CapabilityId::new(CAPABILITY_ID)?;
-    let (bindings, binding_ids) = current_bindings(
+    let (bindings, binding_ids) = current_application_bindings(
         &capability_id,
-        OBSERVATORY_READ_OPERATION,
+        ApplicationSurfaceOperation::ObservatoryRead,
         [BindingSurface::Cli, BindingSurface::Mcp],
     )?;
     let manifest = CapabilityManifestV1::new(CapabilityManifestInputV1 {
@@ -169,7 +136,9 @@ pub fn observatory_read_catalog_contribution()
 
 pub fn observatory_read_handler_descriptor()
 -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
-    ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        OBSERVATORY_READ_OPERATION,
+        "service.application.observatory",
         observatory_read_operation()?,
         observatory_read_request_schema()?,
         observatory_read_result_schema()?,

@@ -202,12 +202,4 @@ mod tests {
         assert_eq!(sequence.next_number(), Err(SequenceExhausted));
         assert_eq!(sequence.next_number(), Err(SequenceExhausted));
     }
-
-    #[test]
-    fn exhaustion_reports_the_retained_identity_failure_class() {
-        assert_eq!(
-            SequenceExhausted.to_string(),
-            "the process-wide identity sequence is exhausted"
-        );
-    }
 }

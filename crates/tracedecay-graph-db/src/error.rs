@@ -117,6 +117,20 @@ pub enum GraphDbError {
     ResetRequired { message: String },
     #[error("graph database is corrupt: {message}")]
     Corrupt { message: String },
+    #[error(
+        "sealed code generation `{sealed_state_digest}` predates authenticated source commitments"
+    )]
+    SourceCommitmentsUnavailable { sealed_state_digest: String },
+    /// The sealed generation's rows are refused by the current reader's
+    /// contract (a historical writer revision). No retry or rebuild of the
+    /// graph can ever complete it; only a fresh code-index seal can.
+    #[error(
+        "sealed code generation `{sealed_state_digest}` is refused by the current reader: {message}"
+    )]
+    SealedRevisionIncompatible {
+        sealed_state_digest: String,
+        message: String,
+    },
     /// A write reached a generation that is sealed into an immutable
     /// compacted store. Sealed rows accept exact idempotent replays only;
     /// anything else is refused with this typed error rather than a generic

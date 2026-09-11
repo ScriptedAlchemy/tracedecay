@@ -114,9 +114,13 @@ pub async fn retire_one_project_vector_generation(
     configuration: &tracedecay_application::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1,
     after: Option<tracedecay_store::SemanticVectorStageCensusCursor>,
 ) -> ProjectSemanticVectorRetentionStep {
-    let step =
-        converge_one_project_vector_generation(schedulers, project_root, configuration, after)
-            .await;
+    let step = Box::pin(converge_one_project_vector_generation(
+        schedulers,
+        project_root,
+        configuration,
+        after,
+    ))
+    .await;
     #[cfg(feature = "hotpath")]
     observe_retention_step(&step);
     step

@@ -3,12 +3,68 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::config;
+use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     EnrollmentMarker, ProjectIdentity, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
     StoreLayout, read_repository_identity_marker, validate_project_id,
 };
+
+/// Typed project identity recorded on a registered store layout.
+///
+/// Absence or an invalid id is a configuration fault — registered code
+/// runtimes never invent a project id from the filesystem path.
+pub fn registered_project_id(store_layout: &StoreLayout) -> Result<ProjectId> {
+    let project_id =
+        store_layout
+            .identity
+            .project_id
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "registered code runtime requires an authoritative project identity"
+                    .to_owned(),
+            })?;
+    ProjectId::new(project_id.clone()).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid registered project identity: {error}"),
+    })
+}
+
+/// Filters candidate roots down to the ones whose root-side evidence
+/// names exactly `project_id`: a `.git/` repository identity marker with
+/// that id, or (for roots without one) a deterministic path-derived
+/// identity equal to it.
+///
+/// This never creates or repairs a marker, so a caller that must not mount
+/// a store the profile has not enrolled — a cross-project memory reader,
+/// for one — can tell "not enrolled here" apart from "enrolled".
+pub fn enrolled_project_roots(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    project_id: &ProjectId,
+) -> Result<Vec<PathBuf>> {
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+
+    let mut roots = Vec::new();
+    for candidate in candidates {
+        let candidate = crate::worktree::repository_identity_root(&candidate).unwrap_or(candidate);
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if roots.contains(&canonical) {
+            continue;
+        }
+        let named_id = match read_repository_identity_marker(&canonical)? {
+            Some(marker) => marker.project_id,
+            None => default_profile_project_id(&canonical),
+        };
+        if named_id == project_id.as_str() {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
+}
 
 pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathBuf {
     profile_root.join("projects").join(project_id)

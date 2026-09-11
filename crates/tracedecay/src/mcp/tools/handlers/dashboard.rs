@@ -220,23 +220,24 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         &self,
         active_project_id: ProjectId,
     ) -> std::result::Result<DashboardApplicationRouters, String> {
-        let http = crate::application_surface::assemble_http_application_router(
-            Arc::clone(&self.executor),
-            tracedecay_application::operation_stream::OperationEventAuthority::default(),
-            active_project_id,
-        )
-        .map_err(|error| error.to_string())?;
+        let http =
+            tracedecay_daemon_service::application_surface::assemble_http_application_router(
+                Arc::clone(&self.executor),
+                tracedecay_application::operation_stream::OperationEventAuthority::default(),
+                active_project_id,
+            )
+            .map_err(|error| error.to_string())?;
         let configuration =
-            crate::application_surface::dashboard_configuration_application_router_with_executor(
+            tracedecay_daemon_service::application_surface::dashboard_configuration_application_router_with_executor(
                 Arc::clone(&self.executor),
             )
             .map_err(|error| error.to_string())?;
         let feedback =
-            crate::application_surface::dashboard_feedback_application_router_with_executor(
+            tracedecay_daemon_service::application_surface::dashboard_feedback_application_router_with_executor(
                 Arc::clone(&self.executor),
             )
             .map_err(|error| error.to_string())?;
-        let work = crate::application_surface::dashboard_work_application_router_with_executor(
+        let work = tracedecay_daemon_service::application_surface::dashboard_work_application_router_with_executor(
             Arc::clone(&self.executor),
         )
         .map_err(|error| error.to_string())?;
@@ -263,10 +264,10 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         }
         Box::pin(async move {
             let error_request_id = request_id.clone();
-            match crate::application_surface::resolve_dashboard_application_surface(
+            match tracedecay_daemon_service::application_surface::resolve_dashboard_application_surface(
                 ApplicationSurfaceOperation::ConfigurationBatch,
                 request_id,
-                crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
                     tracedecay_contracts::ConfigurationWireRequestV1::Batch(
                         tracedecay_contracts::ConfigurationBatchRequestV1 {
                             mutations: direct_mutations,
@@ -388,7 +389,7 @@ pub(crate) async fn dashboard_native_integration_status(
     let request = tracedecay_daemon_protocol::DaemonInvocationRequest::native_integration(
         control.request_id().as_str(),
         ApplicationSurfaceOperation::NativeIntegrationStatus,
-        crate::application_surface::NativeIntegrationSurfaceRequest::Status(
+        tracedecay_daemon_service::application_surface::NativeIntegrationSurfaceRequest::Status(
             tracedecay_contracts::NativeIntegrationStatusSurfaceRequest { transaction_id },
         ),
         control.observed_at(),
@@ -648,6 +649,14 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
 }
 
 #[hotpath::measure(label = "mcp.dashboard.open.total")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Dashboard mounting composes independently optional provider authorities; their absence must remain explicit"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Dashboard handling is one action match onto the composed dashboard readers."
+)]
 pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,
@@ -666,14 +675,13 @@ pub(super) async fn handle_dashboard(
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
-    remote_operational_status: Option<
-        std::sync::Arc<dyn tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort>,
-    >,
+    remote_operational_status: Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     code_index_freshness_reader: Option<
         tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     >,
     explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     feedback_status_reader: Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
+    pr_autotrack_reader: Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
@@ -781,21 +789,22 @@ pub(super) async fn handle_dashboard(
             // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
-            let retained_server = retained_project_server_resolver
-                .as_ref()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "retained dashboard project server resolver is unavailable"
-                        .to_string(),
-                })?
-                .resolve(
-                    crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
-                        cg.project_root().to_path_buf(),
-                    ),
-                )
-                .await?
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "retained dashboard project server is unavailable".to_string(),
+            let retained_server_resolver =
+                retained_project_server_resolver.as_ref().ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "retained dashboard project server resolver is unavailable"
+                            .to_string(),
+                    }
                 })?;
+            let retained_server = retained_server_resolver(
+                crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
+                    cg.project_root().to_path_buf(),
+                ),
+            )
+            .await?
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "retained dashboard project server is unavailable".to_string(),
+            })?;
             if let Some(expected_profile_id) = daemon_user_profile_id.as_ref()
                 && retained_server
                     .profile_identity()
@@ -824,8 +833,8 @@ pub(super) async fn handle_dashboard(
                     "retained dashboard project server resolved a different root",
                 ));
             }
-            let retained_cg: Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime> =
-                retained_graph;
+            let retained_cg =
+                Arc::new(crate::dashboard::dashboard_project_context(&retained_graph));
             let dashboard_project_graph_resolver = retained_project_server_resolver
                 .clone()
                 .zip(daemon_user_profile_id.clone())
@@ -872,7 +881,7 @@ pub(super) async fn handle_dashboard(
                     compose_dashboard_profile_code_index_worker_settings(
                         database,
                         profile_id,
-                        retained_cg.project_root().to_path_buf(),
+                        retained_cg.store_layout.project_root.clone(),
                         &service,
                     )
                 });
@@ -908,7 +917,7 @@ pub(super) async fn handle_dashboard(
             let delivery_read_authority = daemon_invocation_service.map(|service| {
                 let adapter = super::dashboard_delivery::DashboardDeliveryReadAdapter::new(
                     service,
-                    retained_cg.project_root().to_path_buf(),
+                    retained_cg.store_layout.project_root.clone(),
                 );
                 Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>
             });
@@ -934,13 +943,11 @@ pub(super) async fn handle_dashboard(
                     automation_observation,
                     automation_writer,
                     doctor_report_reader,
-                    remote_operational_status_reader: remote_operational_status.map(|provider| {
-                        Arc::new(move || provider.read())
-                            as tracedecay_dashboard_api::RemoteOperationalStatusReader
-                    }),
+                    remote_operational_status_reader: remote_operational_status,
                     code_index_freshness_reader,
                     explorer_semantic_reader,
                     feedback_status_reader,
+                    pr_autotrack_reader,
                     code_diagnostics_broker,
                     application_invocation_executor,
                     delivery_settlement_authority,

@@ -55,9 +55,11 @@ pub(super) async fn cleanup_connection_lsp_sessions(
 }
 
 pub(super) fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<AdmittedRoot> {
-    url::Url::from_file_path(project_path)
+    // The root published to clients and the root document containment strips
+    // against have to be the same string, so both come from one authority.
+    tracedecay_application::primitives::admitted_root_uri_for_project(project_path)
         .ok()
-        .map(|uri| AdmittedRoot::new(uri.to_string()))
+        .map(AdmittedRoot::new)
 }
 
 pub(super) async fn admitted_lsp_workspace_for_request(

@@ -21,7 +21,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
-use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_contracts::remote::credential_admission::{
     RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionPortV1, RemoteSessionBoundProtocolBodyV1,
@@ -31,15 +30,13 @@ use tracedecay_contracts::remote::protocol::{
     RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
     RemoteProtocolResponseV1, RemoteProtocolServiceV1, remote_protocol_problem,
 };
-use tracedecay_contracts::remote::query::{RemoteQueryRequestV1, RemoteQueryResultV1};
+use tracedecay_contracts::remote::protocol_owner::RemoteOperationProtocolPortsV1;
+use tracedecay_contracts::remote::query::RemoteQueryRequestV1;
 use tracedecay_contracts::remote::recovery::{
-    BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
-    StagedRestoreConfirmationV1, StagedRestoreProgressV1,
+    BackupRequestV1, PromotionConfirmationV1, StagedRestoreConfirmationV1,
 };
-use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
-use tracedecay_contracts::remote::transfer::{
-    RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
-};
+use tracedecay_contracts::remote::replay::RemoteReplayRequestV1;
+use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblemKind, CancellationSignal, RequestId,
     ResultContractRef,
@@ -136,13 +133,13 @@ impl<T> From<RemoteProtocolResponseV1<T>> for RemoteHttpResponseV1<T> {
     }
 }
 
-struct RemoteProtocolRouterStateV1<Port> {
+struct RemoteProtocolRouterStateV1<Port: ?Sized> {
     service: Arc<RemoteProtocolServiceV1<Port>>,
     credential_admission: Arc<dyn RemoteCredentialAdmissionPortV1>,
     clock: fn() -> UtcMicros,
 }
 
-impl<Port> Clone for RemoteProtocolRouterStateV1<Port> {
+impl<Port: ?Sized> Clone for RemoteProtocolRouterStateV1<Port> {
     fn clone(&self) -> Self {
         Self {
             service: Arc::clone(&self.service),
@@ -161,7 +158,7 @@ struct RemotePreBodyAdmissionV1<Request> {
     request: PhantomData<fn() -> Request>,
 }
 
-impl<Port, Request> FromRequestParts<RemoteProtocolRouterStateV1<Port>>
+impl<Port: ?Sized, Request> FromRequestParts<RemoteProtocolRouterStateV1<Port>>
     for RemotePreBodyAdmissionV1<Request>
 where
     Port: Send + Sync,
@@ -216,7 +213,7 @@ impl Drop for CancelRemoteRequestOnDropV1 {
     }
 }
 
-impl<Port> FromRequestParts<RemoteProtocolRouterStateV1<Port>>
+impl<Port: ?Sized> FromRequestParts<RemoteProtocolRouterStateV1<Port>>
     for RemoteEnrollmentPreBodyAdmissionV1
 where
     Port: Send + Sync,
@@ -252,60 +249,51 @@ where
 
 /// Build the sole Remote Brain HTTP router.
 ///
-/// The central composition root supplies the production protocol port, the
+/// The central composition root supplies the typed production operation ports, the
 /// fingerprint-indexed final credential authority, and the canonical runtime
 /// clock. Authentication occurs in a parts-only extractor before Axum polls or
 /// deserializes the JSON body. The typed body is then bound to that exact
 /// request-scoped session before delegation.
-pub fn remote_protocol_router<Port>(
-    port: Port,
+pub fn remote_protocol_router(
+    enrollment: Arc<dyn RemoteEnrollmentProtocolPortV1>,
+    operations: RemoteOperationProtocolPortsV1,
     credential_admission: Arc<dyn RemoteCredentialAdmissionPortV1>,
     clock: fn() -> UtcMicros,
-) -> Router
-where
-    Port: RemoteEnrollmentProtocolPortV1
-        + RemoteProtocolPortV1<RemoteCaptureRequestV1, Output = RemoteCaptureReceiptV1>
-        + RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1>
-        + RemoteProtocolPortV1<RemoteFrameTransferRequestV1, Output = RemoteFrameTransferReceiptV1>
-        + RemoteProtocolPortV1<RemoteQueryRequestV1, Output = RemoteQueryResultV1>
-        + RemoteProtocolPortV1<BackupRequestV1, Output = BackupOperationStateV1>
-        + RemoteProtocolPortV1<StagedRestoreConfirmationV1, Output = StagedRestoreProgressV1>
-        + RemoteProtocolPortV1<PromotionConfirmationV1, Output = PromotionCasReceiptV1>
-        + Send
-        + Sync
-        + 'static,
-{
-    let state = RemoteProtocolRouterStateV1 {
-        service: Arc::new(RemoteProtocolServiceV1::new(port)),
-        credential_admission,
-        clock,
-    };
-    Router::new()
-        .route("/enrollment", post(enrollment_route::<Port>))
-        .route(
-            "/capture",
-            post(protocol_route::<Port, RemoteCaptureRequestV1>),
-        )
-        .route(
-            "/replay",
-            post(protocol_route::<Port, RemoteReplayRequestV1>),
-        )
-        .route(
-            "/frames/transfer",
-            post(protocol_route::<Port, RemoteFrameTransferRequestV1>),
-        )
-        .route("/query", post(protocol_route::<Port, RemoteQueryRequestV1>))
-        .route("/backup", post(protocol_route::<Port, BackupRequestV1>))
-        .route(
-            "/restore",
-            post(protocol_route::<Port, StagedRestoreConfirmationV1>),
-        )
-        .route(
-            "/failover",
-            post(protocol_route::<Port, PromotionConfirmationV1>),
-        )
-        .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))
-        .with_state(state)
+) -> Router {
+    let router = Router::new().route(
+        "/enrollment",
+        post(enrollment_route::<dyn RemoteEnrollmentProtocolPortV1>).with_state(
+            RemoteProtocolRouterStateV1 {
+                service: Arc::new(RemoteProtocolServiceV1::new(enrollment)),
+                credential_admission: Arc::clone(&credential_admission),
+                clock,
+            },
+        ),
+    );
+    // Each route retains its own typed operation authority; no dispatcher sits
+    // between the validated request and the selected operation.
+    macro_rules! mount_operations {
+        ($($path:literal => $request:ty, $port:expr);+ $(;)?) => {
+            router$(.route(
+                $path,
+                post(protocol_route::<_, $request>).with_state(RemoteProtocolRouterStateV1 {
+                    service: Arc::new(RemoteProtocolServiceV1::new($port)),
+                    credential_admission: Arc::clone(&credential_admission),
+                    clock,
+                }),
+            ))+
+        };
+    }
+    mount_operations! {
+        "/capture" => RemoteCaptureRequestV1, operations.capture;
+        "/replay" => RemoteReplayRequestV1, operations.replay;
+        "/frames/transfer" => RemoteFrameTransferRequestV1, operations.frame_transfer;
+        "/query" => RemoteQueryRequestV1, operations.query;
+        "/backup" => BackupRequestV1, operations.backup;
+        "/restore" => StagedRestoreConfirmationV1, operations.restore;
+        "/failover" => PromotionConfirmationV1, operations.promotion;
+    }
+    .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))
 }
 
 async fn protocol_route<Port, Request>(
@@ -314,7 +302,7 @@ async fn protocol_route<Port, Request>(
     payload: Result<Json<RemoteHttpRequestV1<Request>>, JsonRejection>,
 ) -> Result<Response, RemoteHttpRejection>
 where
-    Port: RemoteProtocolPortV1<Request> + Send + Sync + 'static,
+    Port: RemoteProtocolPortV1<Request> + Send + Sync + 'static + ?Sized,
     Request: DeserializeOwned + RemoteSessionBoundProtocolBodyV1 + Send + 'static,
     Port::Output: Serialize + Send + 'static,
 {
@@ -408,7 +396,7 @@ async fn enrollment_route<Port>(
     payload: Result<Json<RemoteHttpRequestV1<EnrollmentRequestV1>>, JsonRejection>,
 ) -> Result<Response, RemoteHttpRejection>
 where
-    Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static,
+    Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static + ?Sized,
 {
     let request = hotpath::measure_block!("api.http.admission", {
         let Json(request) = match payload {

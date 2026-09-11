@@ -15,7 +15,7 @@ async fn retained_skill_writer_preserves_retrieval_and_defers_ledger_publication
         "insufficient_repeated_evidence",
     ));
     let retained = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &enabled_skill_writer_config(),
         &test_configuration_revision(),
         &backend,
@@ -112,7 +112,7 @@ async fn skill_writer_fails_closed_on_denied_temporal_evidence() {
 
     let run =
         tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &enabled_skill_writer_config(),
             &test_configuration_revision(),
             &backend,
@@ -233,7 +233,7 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
 
     let run =
         tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -264,7 +264,7 @@ async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -706,7 +706,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -742,7 +742,7 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,

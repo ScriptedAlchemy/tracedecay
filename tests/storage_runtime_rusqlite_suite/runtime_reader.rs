@@ -12,7 +12,7 @@ use tracedecay_store::{
     StoreCommitReceiptV1, UnavailableReasonV1,
 };
 
-use crate::runtime_test_support::{
+use super::runtime_test_support::{
     CountExecutor, Probe, TestDatabase, read_request, reader_locator, reader_runtime_fixture,
 };
 

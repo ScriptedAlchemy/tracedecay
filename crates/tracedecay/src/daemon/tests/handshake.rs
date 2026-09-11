@@ -1012,3 +1012,87 @@ fn proxy_records_negotiated_catalog_capability_and_version() {
     assert!(!legacy.tool_list_changed_capable);
     assert!(legacy.catalog_version.is_empty());
 }
+
+/// A saturated daemon must still name wire skew.
+///
+/// The saturation rejection path parsed the client handshake with `?` and
+/// dropped the socket when it failed, leaving the client's pipelined request
+/// unread — the kernel answers that with `Connection reset by peer`, the exact
+/// signature reported in #753 for a day-old eval client. Saturation is not a
+/// reason to hide a protocol refusal behind a transport error.
+#[cfg(unix)]
+#[tokio::test]
+async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() {
+    // The refusal advertises the daemon's build version, which is read from
+    // the registered product runtime and is deliberately fallible: a process
+    // that never registered one has no truthful version to advertise, and the
+    // refusal is abandoned rather than sent. Under `cargo test` a sibling test
+    // in the same process had already registered it, so this passed locally
+    // and failed under nextest, which runs every test in its own process.
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let _engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "saturated-handshake-refusal-test",
+    );
+
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(async move {
+        super::super::reject_saturated_daemon_client(
+            tracedecay_daemon_protocol::BrokerStream::Unix(server),
+            super::super::DaemonClientSaturationResponse {
+                kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
+                retryable: true,
+                capacity: 1,
+            },
+        )
+        .await;
+    });
+
+    let (reader, mut writer) = client.into_split();
+    // Valid JSON that is not this daemon's handshake shape, then the request a
+    // real client pipelines behind it before it starts reading.
+    writer
+        .write_all(b"{\"handshake_revision\":99,\"client\":\"future-build\"}\n")
+        .await
+        .expect("write drifted handshake");
+    writer
+        .write_all(
+            b"{\"protocol\":\"tracedecay.daemon.invocation\",\"revision\":1,\
+              \"request_id\":\"request.saturated-drifted-handshake\",\
+              \"operation\":\"semantic_evaluate_and_publish\"}\n",
+        )
+        .await
+        .expect("write pipelined request");
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let refusal_line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("refusal must arrive before the read deadline")
+        .expect("the refusal read must not fail with a transport reset")
+        .expect("a saturated daemon must answer a drifted handshake with a refusal line");
+    let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
+        .expect("the refusal line must parse as the typed refusal frame");
+    assert_eq!(
+        refusal.refusal,
+        tracedecay_daemon_protocol::DaemonHandshakeRefusalReason::UnsupportedRevision,
+        "wire drift under saturation is still a revision refusal"
+    );
+    assert!(
+        !refusal.daemon_version.is_empty(),
+        "the refusal must advertise the daemon version so the client can name the skew"
+    );
+
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("connection close must arrive before the read deadline")
+        .expect("the close must be a clean EOF, not a connection reset");
+    assert_eq!(
+        eof, None,
+        "the refusal replaces the saturation frame; no frames follow it"
+    );
+
+    server_task.await.expect("saturation server task");
+}

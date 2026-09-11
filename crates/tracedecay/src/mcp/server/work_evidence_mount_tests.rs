@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use tracedecay_application::work::{
+    WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
+};
 use tracedecay_contracts::{RequestContext, ResolvedScope};
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 use tracedecay_session_memory::context::{
@@ -28,13 +31,11 @@ impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalP
 
 struct MissingFederatedAuthority;
 
-impl crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1
-    for MissingFederatedAuthority
-{
+impl WorkFederatedQueryAuthorityPortV1 for MissingFederatedAuthority {
     fn authority_for<'a>(
         &'a self,
         _scope: &'a ResolvedScope,
-    ) -> crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityFutureV1<'a> {
+    ) -> WorkFederatedQueryAuthorityFutureV1<'a> {
         Box::pin(async { None })
     }
 }

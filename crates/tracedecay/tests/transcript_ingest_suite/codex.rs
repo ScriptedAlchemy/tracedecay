@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::codex::CodexSource;
 

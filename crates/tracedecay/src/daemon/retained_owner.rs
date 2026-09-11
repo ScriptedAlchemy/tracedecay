@@ -1,42 +1,34 @@
-//! Direct retained application authorities owned by the daemon.
+//! Composition-root assembly of retained session, memory, LCM, and automation
+//! owners. Implementations live in the owner crates; this module only selects
+//! their native inputs and mounts the retained surface.
 
-use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
+use tracedecay_contracts::retained_surfaces::{
+    FactStoreCurateRequestV1, MemoryScopeV1, RetainedAutomationExecutionPortV1,
+    RetainedProjectSelectorV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionFutureV1,
+};
 use tracedecay_contracts::{
-    RequestAdmission, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
-    RetainedSurfacePortsV1, now_micros,
+    RetainedMemoryExecutionPortV1, RetainedSurfaceExecutionErrorV1, RetainedSurfacePortsV1,
 };
 use tracedecay_daemon_service::DaemonInvocationService;
-use tracedecay_domain::ManifestDigest;
+use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProjectId};
+use tracedecay_session_runtime::retained::{
+    ProjectRetainedSessionAuthoritiesV1, RetainedSessionRefreshPortV1, map_execution_error,
+};
+use tracedecay_store_runtime::retained_memory::{
+    MemoryTargetAccessV1, RetainedMemoryTargetAuthorityV1, RetainedMemoryTargetV1,
+};
 
 use crate::tracedecay::TraceDecay;
-use tracedecay_domain::errors::TraceDecayError;
 
-mod automation;
-mod lcm;
-mod memory;
-mod memory_target;
-mod profile;
-mod session;
-pub(crate) mod session_refresh;
-
-pub(crate) use memory_target::{MemoryTargetAccessV1, open_project_retained_memory_target};
-pub(crate) use tracedecay_contracts::retained_receipts as receipts;
-pub(crate) use tracedecay_session_memory::memory_mapping;
-pub(crate) use tracedecay_session_memory::memory_mapping::search_page;
-pub(crate) use tracedecay_session_memory::memory_mutation;
-pub(crate) use tracedecay_session_memory::memory_tracking;
-pub(crate) use tracedecay_session_runtime::session_queries;
-
-pub(crate) use profile::{
-    ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1,
-    execute_profile_retained_application, profile_retained_connection_authority,
-    profile_session_retrieval_serving_identity,
-};
-pub(crate) use session_refresh::RetainedSessionRefreshPortV1;
+#[cfg(test)]
+mod memory_target_journeys;
+#[cfg(test)]
+mod profile_refresh_journeys;
+#[cfg(test)]
+mod session_retained_effect_tests;
 
 /// Exact authorities used by independently mounted project retained families.
 /// A missing session or LCM authority cannot prevent memory from registering.
@@ -49,7 +41,7 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) mounted_session_store_id: Option<tracedecay_session_memory::context::SessionStoreId>,
     pub(crate) mounted_session_root_id: Option<tracedecay_session_memory::context::SessionRootId>,
     pub(crate) registered_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
-    pub(crate) project_refresh: Option<Arc<dyn session_refresh::RetainedSessionRefreshPortV1>>,
+    pub(crate) project_refresh: Option<Arc<dyn RetainedSessionRefreshPortV1>>,
     pub(crate) project_retrieval: Option<
         Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>,
     >,
@@ -60,21 +52,84 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) invocation_service: Option<DaemonInvocationService>,
 }
 
+fn served_store_identity(
+    cg: &TraceDecay,
+) -> Result<(PathBuf, ProjectId, bool), RetainedSurfaceExecutionErrorV1> {
+    match cg.project_memory_owner() {
+        Ok(FactOwnerV1::Project { project_id }) => Ok((
+            cg.project_root().to_path_buf(),
+            project_id,
+            cg.is_read_only(),
+        )),
+        Ok(FactOwnerV1::Profile) => Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized),
+        Err(error) => Err(map_execution_error(error)),
+    }
+}
+
+pub(crate) async fn live_retained_memory_authority(
+    cg: &tokio::sync::RwLock<Arc<TraceDecay>>,
+    mounted_project_id: &ProjectId,
+    mounted_project_root: &Path,
+) -> Result<RetainedMemoryTargetAuthorityV1, RetainedSurfaceExecutionErrorV1> {
+    let graph = cg.read().await;
+    let (served_project_root, store_layout_project_id, graph_read_only) =
+        served_store_identity(graph.as_ref())?;
+    Ok(RetainedMemoryTargetAuthorityV1 {
+        registry: graph.retained_store_runtime_registry(),
+        profile_database: graph.profile_database().clone(),
+        project_root: mounted_project_root.to_path_buf(),
+        project_id: mounted_project_id.clone(),
+        store_layout_project_id,
+        served_project_root,
+        graph_read_only,
+    })
+}
+
+struct AssembledRetainedMemory {
+    cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
+    mounted_project_id: ProjectId,
+    mounted_project_root: PathBuf,
+    configuration_digest: ManifestDigest,
+}
+
+impl RetainedMemoryExecutionPortV1 for AssembledRetainedMemory {
+    fn execute_memory<'a>(
+        &'a self,
+        context: RetainedSurfaceExecutionContextV1<'a>,
+        request: tracedecay_contracts::RetainedMemoryRequestV1<'a>,
+    ) -> RetainedSurfaceExecutionFutureV1<'a> {
+        Box::pin(async move {
+            let authority = live_retained_memory_authority(
+                self.cg.as_ref(),
+                &self.mounted_project_id,
+                &self.mounted_project_root,
+            )
+            .await?;
+            tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::project(
+                authority,
+                self.configuration_digest.clone(),
+            )
+            .execute_request(context, request)
+            .await
+        })
+    }
+}
+
 pub(crate) fn retained_surface_ports(
     authorities: ProductionRetainedAuthoritiesV1,
 ) -> Arc<RetainedSurfacePortsV1<'static>> {
-    let mut ports = RetainedSurfacePortsV1::default().with_memory(Arc::new(
-        memory::DirectRetainedMemoryPortV1::project(
-            Arc::clone(&authorities.cg),
-            authorities.project_root.clone(),
-            authorities.configuration_digest.clone(),
-        ),
-    ));
+    let mut ports = RetainedSurfacePortsV1::default();
+    ports = ports.with_memory(Arc::new(AssembledRetainedMemory {
+        cg: Arc::clone(&authorities.cg),
+        mounted_project_id: authorities.project_id.clone(),
+        mounted_project_root: authorities.project_root.clone(),
+        configuration_digest: authorities.configuration_digest.clone(),
+    }));
     if let Some(invocation_service) = authorities.invocation_service.clone() {
-        ports = ports.with_automation(Arc::new(automation::DirectRetainedAutomationPortV1::new(
-            Arc::clone(&authorities.cg),
+        ports = ports.with_automation(Arc::new(AssembledRetainedAutomation {
+            cg: Arc::clone(&authorities.cg),
             invocation_service,
-        )));
+        }));
     }
     if let (
         Some(profile_id),
@@ -93,168 +148,93 @@ pub(crate) fn retained_surface_ports(
         authorities.registered_session_db,
         authorities.project_workflow_index,
     ) {
-        ports = ports.with_session(Arc::new(session::DirectRetainedSessionPortV1::project(
-            session::ProjectRetainedSessionAuthoritiesV1 {
-                project_root: authorities.project_root,
-                project_id: authorities.project_id,
-                profile_id,
-                session_store_id,
-                session_root_id,
-                configuration_digest: authorities.configuration_digest,
-                refresh,
-                retrieval,
-                session_database,
-                workflow_index,
-            },
-        )));
+        ports = ports.with_session(Arc::new(
+            tracedecay_session_runtime::retained::DirectRetainedSessionPortV1::project(
+                ProjectRetainedSessionAuthoritiesV1 {
+                    project_root: authorities.project_root,
+                    project_id: authorities.project_id,
+                    profile_id,
+                    session_store_id,
+                    session_root_id,
+                    configuration_digest: authorities.configuration_digest,
+                    refresh,
+                    retrieval,
+                    session_database,
+                    workflow_index,
+                },
+            ),
+        ));
     }
     if let (Some(authority), Some(retrieval)) =
         (authorities.project_lcm, authorities.project_retrieval)
     {
-        ports = ports.with_lcm(Arc::new(lcm::DirectRetainedLcmPortV1::project(
-            authority, retrieval,
-        )));
+        ports = ports.with_lcm(Arc::new(
+            tracedecay_session_runtime::retained::DirectRetainedLcmPortV1::project(
+                authority, retrieval,
+            ),
+        ));
     }
     Arc::new(ports)
 }
 
-pub(super) async fn bounded_execution<T, F>(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    future: F,
-) -> Result<T, RetainedSurfaceExecutionErrorV1>
-where
-    F: Future<Output = Result<T, TraceDecayError>>,
-{
-    let now = now_micros();
-    match context.request_context.admission_at(now) {
-        RequestAdmission::Admitted => {}
-        RequestAdmission::Cancelled => {
-            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                tracedecay_contracts::CancellationStage::BeforeRead,
-            ));
-        }
-        RequestAdmission::TimedOut => {
-            return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                tracedecay_contracts::CancellationStage::BeforeRead,
-            ));
-        }
-    }
-    let remaining = context
-        .request_context
-        .deadline()
-        .expires_at
-        .0
-        .saturating_sub(now.0);
-    let remaining = u64::try_from(remaining)
-        .ok()
-        .map(Duration::from_micros)
-        .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_contracts::CancellationStage::BeforeRead,
-        ))?;
-    match tokio::time::timeout(remaining, future).await {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(map_execution_error(error)),
-        Err(_) => Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-            tracedecay_contracts::CancellationStage::DuringRead,
-        )),
+/// Single `RetainedAutomationExecutionPortV1` impl at the composition root.
+/// The curator still requires the selected `TraceDecay` lock inside
+/// `dashboard_automation`; this type forwards that already-selected runtime
+/// and the invocation service. It is not a compatibility rename of
+/// `DirectRetainedAutomationPortV1`.
+struct AssembledRetainedAutomation {
+    cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
+    invocation_service: DaemonInvocationService,
+}
+
+impl RetainedAutomationExecutionPortV1 for AssembledRetainedAutomation {
+    fn execute_fact_store_curate<'a>(
+        &'a self,
+        context: RetainedSurfaceExecutionContextV1<'a>,
+        request: &'a FactStoreCurateRequestV1,
+    ) -> RetainedSurfaceExecutionFutureV1<'a> {
+        Box::pin(async move {
+            let cg = self.cg.read().await.clone();
+            hotpath::future!(
+                crate::daemon::dashboard_automation::execute_retained_memory_curator(
+                    cg.as_ref(),
+                    &self.invocation_service,
+                    &context,
+                    request
+                ),
+                label = "daemon.retained.automation.curate"
+            )
+            .await
+        })
     }
 }
 
-/// One rendering of the typed session-retrieval unavailability reason shared
-/// by every retained family that consumes the retrieval service.
-pub(in crate::daemon) fn session_retrieval_unavailable_detail(
-    unavailable: &tracedecay_session_runtime::session_retrieval::SessionRetrievalUnavailable,
-) -> String {
-    // A refusal that names the refresh worker also names where the worker
-    // stands, so a converging store reads as converging, not as missing data.
-    match &unavailable.worker {
-        Some(worker) => format!(
-            "the session retrieval service is unavailable: {:?} (refresh worker backlog={}, \
-             blocker={:?}, retry_class={:?}, last_progress_at_unix_micros={:?})",
-            unavailable.reason,
-            worker.backlog,
-            worker.blocker,
-            worker.retry_class,
-            worker.last_progress_at_unix_micros
-        ),
-        None => format!(
-            "the session retrieval service is unavailable: {:?}",
-            unavailable.reason
-        ),
-    }
-}
-
-pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExecutionErrorV1 {
-    match error {
-        TraceDecayError::Config { .. } => RetainedSurfaceExecutionErrorV1::InvalidRequest,
-        TraceDecayError::ProjectRoute {
-            retryable: false, ..
-        } => RetainedSurfaceExecutionErrorV1::Conflict,
-        TraceDecayError::ProfileResetRequired { .. } => {
-            RetainedSurfaceExecutionErrorV1::ProfileResetRequired
-        }
-        TraceDecayError::ResetRequired { .. } => {
-            RetainedSurfaceExecutionErrorV1::ProjectResetRequired
-        }
-        // The Display text already reaches operators on other surfaces (CLI
-        // config errors print it), so threading it here keeps the retained
-        // problem diagnostic equally honest about what actually failed.
-        error @ (TraceDecayError::SyncLock { .. }
-        | TraceDecayError::ProjectRoute { .. }
-        | TraceDecayError::Database { .. }
-        | TraceDecayError::Search { .. }
-        | TraceDecayError::File { .. }
-        | TraceDecayError::HostCliUnavailable { .. }
-        | TraceDecayError::Io(_)
-        | TraceDecayError::Sqlite(_)
-        | TraceDecayError::Json(_)
-        | TraceDecayError::Automation(_)) => {
-            RetainedSurfaceExecutionErrorV1::unavailable(error.to_string())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn host_cli_requirement_maps_to_unavailable() {
-        let error = TraceDecayError::HostCliUnavailable {
-            program: "kiro-cli".to_string(),
-            lifecycle: "kiro MCP registry lifecycle".to_string(),
-        };
-
-        let RetainedSurfaceExecutionErrorV1::Unavailable { detail } = map_execution_error(error)
-        else {
-            panic!("host CLI unavailability must map to the unavailable terminal");
-        };
-        assert!(
-            detail.contains("kiro-cli"),
-            "the detail must name the missing host CLI, got: {detail}"
-        );
-    }
-
-    #[test]
-    fn unavailable_execution_problem_names_the_underlying_cause() {
-        let error = map_execution_error(TraceDecayError::Database {
-            message: "lcm store open failed: profile shard missing".to_owned(),
-            operation: "lcm_store_open".to_owned(),
-        });
-
-        let problem = tracedecay_contracts::retained_surface_execution_problem(error);
-        let diagnostic = problem
-            .diagnostic()
-            .expect("an unavailable problem carries a diagnostic")
-            .clone();
-        assert_eq!(
-            diagnostic.code,
-            "application.retained.authority-unavailable"
-        );
-        assert!(
-            diagnostic.message.contains("lcm store open failed"),
-            "the problem must name the underlying cause, got: {}",
-            diagnostic.message
-        );
-    }
+pub(crate) async fn open_project_retained_memory_target(
+    cg: &TraceDecay,
+    registered_root: &Path,
+    admitted_project_id: &ProjectId,
+    memory_scope: Option<MemoryScopeV1>,
+    selector: Option<&RetainedProjectSelectorV1>,
+    access: MemoryTargetAccessV1,
+) -> Result<RetainedMemoryTargetV1<'static>, RetainedSurfaceExecutionErrorV1> {
+    let (served_project_root, store_layout_project_id, graph_read_only) =
+        served_store_identity(cg)?;
+    let authority = RetainedMemoryTargetAuthorityV1 {
+        registry: cg.retained_store_runtime_registry(),
+        profile_database: cg.profile_database().clone(),
+        project_root: cg.project_root().to_path_buf(),
+        project_id: admitted_project_id.clone(),
+        store_layout_project_id,
+        served_project_root,
+        graph_read_only,
+    };
+    tracedecay_store_runtime::retained_memory::open_project_retained_memory_target(
+        &authority,
+        registered_root,
+        admitted_project_id,
+        memory_scope,
+        selector,
+        access,
+    )
+    .await
 }

@@ -15,7 +15,7 @@ use tracedecay_store::{
 };
 
 use super::*;
-use crate::host_admission::HostAdmissionTestRuntimeV1;
+use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 fn id<T: TryFrom<String>>(value: &str) -> T

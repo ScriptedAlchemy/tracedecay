@@ -7,6 +7,10 @@
 use super::*;
 
 #[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Handshake open is one identity-bind and route-publish sequence."
+)]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
@@ -204,7 +208,7 @@ fn tool_call_open_refusal_response(
     let tool_name = request.params.as_ref()?.get("name")?.as_str()?;
     let request_id =
         tracedecay_contracts::request_identity::mcp_connection_request_id(&id, connection_scope)?;
-    let envelope = crate::application_surface::mcp_project_open_reset_refusal(
+    let envelope = tracedecay_daemon_service::application_surface::mcp_project_open_reset_refusal(
         tool_name, request_id, authority, reason,
     )?;
     let text = serde_json::to_string(&envelope).ok()?;

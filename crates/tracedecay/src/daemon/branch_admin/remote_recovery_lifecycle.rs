@@ -14,11 +14,11 @@ use tracedecay_store_runtime::{
 use super::{
     DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
 };
-use crate::daemon::maintenance::StoreTelemetrySamplingRegistry;
-use crate::daemon::store_writer_gate::WriterAdmissionGuard;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonNativeIntegrationRuntimeRegistrar;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
+use tracedecay_store_runtime::WriterAdmissionGuard;
 
 pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     brain_id: BrainId,
@@ -165,6 +165,10 @@ impl RemoteRecoveryProjectLifecycleV1 {
     }
 
     #[hotpath::measure(label = "daemon.branch_admin.remote_recovery_quiesce", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Recovery quiesce drains one project's live owners before the recovered store is remounted."
+    )]
     pub(in crate::daemon) async fn quiesce(
         &self,
         project_id: &ProjectId,
@@ -255,6 +259,10 @@ impl RemoteRecoveryProjectLifecycleV1 {
             Some(Arc::clone(&fence)),
         )
         .await?;
+        super::retire_registered_context_scout_owner(
+            project_id,
+            &data_root.join(crate::config::db_filename(data_root)),
+        );
         self.git_index_transaction_services
             .retire_project_database(project_id, database.db_path())
             .await
@@ -456,6 +464,14 @@ pub(super) async fn retire_runtime_work(
             })
             .collect::<Vec<_>>()
     };
+    if let Ok(typed_project_id) = tracedecay_domain::ProjectId::new(project_id.to_owned()) {
+        for (owner, _) in &server_retirements {
+            super::project_retirement::retire_registered_context_scout_owner(
+                &typed_project_id,
+                &owner.graph_db_path,
+            );
+        }
+    }
     for server in server_retirements.iter().flat_map(|(_, servers)| servers) {
         server.revoke_project_server_responses();
         server.abort_project_server_requests();

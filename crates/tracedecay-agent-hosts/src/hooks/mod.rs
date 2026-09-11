@@ -250,14 +250,9 @@ pub(crate) async fn write_hook_output(
                 );
                 return false;
             };
-            let Some(deadline) = Instant::now().checked_add(Duration::from_micros(
-                tracedecay_hooks::HookSynchronousDeadlineV1::start().remaining_micros(),
-            )) else {
-                return false;
-            };
-            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_until(
+            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_within(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
-                deadline,
+                tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
             ) {
                 Ok(writer) => Some(writer),
                 Err(error) => {
@@ -447,7 +442,7 @@ async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Opti
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    runtime.resolve_project_root_with_identity(&start).await
+    (runtime.project_root_resolver)(&start).await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.daemon_action")]
@@ -467,14 +462,13 @@ pub(crate) async fn daemon_hook_action(
         return result;
     }
     let started = std::time::Instant::now();
-    let result = runtime
-        .daemon_tool_json(
-            project_root,
-            "tracedecay_hook_runtime",
-            arguments,
-            project_root.is_some(),
-        )
-        .await;
+    let result = (runtime.daemon_tool)(
+        project_root,
+        "tracedecay_hook_runtime",
+        arguments,
+        project_root.is_some(),
+    )
+    .await;
     if let Some(telemetry) = telemetry {
         telemetry.note_completed_daemon_call(
             payload_bytes,
@@ -698,7 +692,7 @@ pub(crate) async fn notify_hook_event_with_telemetry(
     telemetry: &analytics::HookTimingSpan,
 ) {
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
-    runtime.notify_hook_event(project_root, event).await;
+    (runtime.event_notifier)(project_root, event).await;
     telemetry.note_completed_daemon_notification(payload_bytes);
 }
 
@@ -723,11 +717,7 @@ pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
             })
         });
     let project_root = match cwd {
-        Some(cwd) => {
-            runtime
-                .resolve_project_root_with_identity(std::path::Path::new(&cwd))
-                .await
-        }
+        Some(cwd) => (runtime.project_root_resolver)(std::path::Path::new(&cwd)).await,
         None => None,
     };
     let hook_name = parsed
@@ -1159,7 +1149,7 @@ async fn event_project_root_with_identity(
     parsed: &Value,
 ) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    runtime.resolve_project_root_with_identity(&cwd).await
+    (runtime.project_root_resolver)(&cwd).await
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {

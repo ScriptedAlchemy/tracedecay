@@ -1,3 +1,5 @@
+// Its own test binary, not a runtime_core_suite module: it sets the `GIT`
+// environment variable for the whole process.
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;

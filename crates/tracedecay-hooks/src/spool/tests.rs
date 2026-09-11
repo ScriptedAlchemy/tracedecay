@@ -1308,25 +1308,29 @@ fn bounded_writer_admission_preserves_failfast_and_times_out_without_mutation() 
         HookSpoolV1::open(&root.0, config(), UtcMicros(11)).unwrap_err(),
         HookSpoolError::WriterLeaseHeld
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
     assert_eq!(
-        HookSpoolV1::open_until(&root.0, config(), UtcMicros(11), deadline).unwrap_err(),
+        HookSpoolV1::open_within(
+            &root.0,
+            config(),
+            UtcMicros(11),
+            std::time::Duration::from_millis(20),
+        )
+        .unwrap_err(),
         HookSpoolError::AdmissionTimedOut
     );
     assert_eq!(fs::read(meta_path(&root.0)).unwrap(), before);
     drop(owner);
+    // An exhausted budget never admits, even when the lease is free.
     assert_eq!(
-        HookSpoolV1::open_until(&root.0, config(), UtcMicros(11), deadline).unwrap_err(),
+        HookSpoolV1::open_within(&root.0, config(), UtcMicros(11), std::time::Duration::ZERO)
+            .unwrap_err(),
         HookSpoolError::AdmissionTimedOut
     );
-    let (mut admitted, _) = HookSpoolV1::open_until(
+    let (mut admitted, _) = HookSpoolV1::open_within(
         &root.0,
         config(),
         UtcMicros(11),
-        std::time::Instant::now()
-            + std::time::Duration::from_micros(
-                crate::HookSynchronousDeadlineV1::start().remaining_micros(),
-            ),
+        crate::HOOK_SYNCHRONOUS_BUDGET,
     )
     .unwrap();
     admitted

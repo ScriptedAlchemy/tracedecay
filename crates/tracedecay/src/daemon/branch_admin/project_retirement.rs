@@ -1,7 +1,24 @@
 use std::sync::Arc;
 
-use super::super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
 use super::{StoreAdministration, StoreOwnerKey};
+use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
+
+/// Drops the process-global Context Scout owner when this project's other
+/// owners are torn down. A retired or remotely-deleted project must not keep
+/// a strong `Database` handle for the process lifetime. `graph_db_path` is the
+/// database the retiring runtime bound: a late retirement of a runtime whose
+/// owner was already replaced by a newer database identity leaves the live
+/// replacement registered.
+pub(crate) fn retire_registered_context_scout_owner(
+    project_id: &tracedecay_domain::ProjectId,
+    graph_db_path: &std::path::Path,
+) {
+    let hook_id = tracedecay_hooks::envelope_identity_hash16("project", project_id.as_str());
+    let _ = tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
+        hook_id,
+        graph_db_path,
+    );
+}
 
 pub(super) struct ProjectServerRetirement {
     pub(super) owner: StoreOwnerKey,
@@ -126,14 +143,14 @@ pub(in crate::daemon) struct ProjectRetirementFenceV1 {
     // removed by this temporary recovery guard.
     _invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
     _project_open: crate::daemon::project_open_admission::ProjectOpenIdentityQuiescenceV1,
-    _writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
+    _writer: tracedecay_store_runtime::WriterAdmissionGuard,
 }
 
 impl ProjectRetirementFenceV1 {
     pub(super) fn new(
         invocation: tracedecay_daemon_service::ProjectRuntimeRootQuiescenceV1,
         project_open: crate::daemon::project_open_admission::ProjectOpenIdentityQuiescenceV1,
-        writer: crate::daemon::store_writer_gate::WriterAdmissionGuard,
+        writer: tracedecay_store_runtime::WriterAdmissionGuard,
     ) -> Self {
         Self {
             _invocation: invocation,
@@ -470,7 +487,7 @@ mod tests {
 
     use super::*;
     use crate::daemon::project_server_lifecycle;
-    use crate::daemon::store_writer_gate::{StoreWriterClass, WriterScope};
+    use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
 
     fn owner(project_id: &str) -> StoreOwnerKey {
         isolated_owner(std::path::Path::new("/profile"), project_id)
@@ -495,13 +512,13 @@ mod tests {
         project_id: &str,
     ) -> (
         crate::tracedecay::TraceDecay,
-        crate::host_admission::HostAdmissionTestRuntimeV1,
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(profile_root).expect("isolated profile root");
         std::fs::create_dir_all(project_root).expect("isolated project root");
         let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
             .expect("typed project identity");
-        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
             profile_root,
             project_root,
             project_id,
@@ -522,13 +539,13 @@ mod tests {
     }
 
     async fn isolated_sibling_graph(
-        runtime: &crate::host_admission::HostAdmissionTestRuntimeV1,
+        runtime: &crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
         profile_root: &std::path::Path,
         project_root: &std::path::Path,
         project_id: &str,
     ) -> (
         crate::tracedecay::TraceDecay,
-        crate::host_admission::HostAdmissionTestRuntimeV1,
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(project_root).expect("isolated sibling project root");
         let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
@@ -548,6 +565,75 @@ mod tests {
             .await
             .expect("isolated sibling registered graph");
         (graph, sibling)
+    }
+
+    #[tokio::test]
+    async fn project_retirement_unregisters_context_scout_owner_and_rebind_is_fresh() {
+        let root = tempfile::TempDir::new().expect("retirement fixture");
+        let profile = root.path().join("profile");
+        let project = root.path().join("project");
+        let (graph, _runtime) =
+            isolated_registered_graph(&profile, &project, "proj_retire_scout").await;
+        let project_id =
+            tracedecay_domain::ProjectId::new("proj_retire_scout".to_owned()).expect("project id");
+        let hook_id = tracedecay_hooks::envelope_identity_hash16("project", project_id.as_str());
+        let retired = graph
+            .context_scout_owner()
+            .expect("writable open registers a Context Scout owner");
+        assert_eq!(
+            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+                hook_id
+            )
+            .len(),
+            1
+        );
+
+        retire_registered_context_scout_owner(&project_id, &graph.db_path());
+        assert!(
+            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+                hook_id
+            )
+            .is_empty(),
+            "retirement must remove the process-global Context Scout owner"
+        );
+
+        tracedecay_store_runtime::register_registered_schema_installer();
+        let replacement_root = tempfile::TempDir::new().expect("replacement database");
+        let replacement_path = replacement_root.path().join("graph.db");
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &replacement_path,
+            "re-registered Context Scout owner",
+        )
+        .expect("replacement authority");
+        let replacement = tracedecay_runtime_core::db::Database::publish_test_runtime(
+            &replacement_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("replacement database")
+        .0;
+        let fresh =
+            tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                replacement.clone(),
+                hook_id,
+                tracedecay_domain::UtcMicros(2),
+                None,
+            )
+            .await
+            .expect("fresh owner after retirement");
+        assert!(
+            !std::sync::Arc::ptr_eq(&retired, &fresh),
+            "re-registering after retirement must bind a new owner"
+        );
+        assert_eq!(
+            fresh.store().database().canonical_database_path(),
+            replacement.canonical_database_path()
+        );
+        tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
+            hook_id,
+            replacement.canonical_database_path(),
+        );
     }
 
     #[tokio::test]

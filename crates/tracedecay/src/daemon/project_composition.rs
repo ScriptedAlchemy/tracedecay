@@ -7,7 +7,10 @@
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_daemon_service::DaemonSemanticRuntimeRegistrationError;
+use tracedecay_daemon_service::{
+    DaemonSemanticRuntimeRegistrationError, daemon_owned_project_source_access_at,
+};
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
@@ -22,7 +25,6 @@ mod session_database_admission;
 use code_index_activation::{
     CodeIndexActivationMountInputs, code_index_activation_hint_sink, code_index_activation_mount,
     code_index_freshness_probe_sink, code_index_hook_sink, code_index_reconcile_sink,
-    diagnostics_change_generation_resolver,
 };
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
 use runtime::bind_verified_project_graph_runtime;
@@ -53,6 +55,10 @@ fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) ->
 }
 
 #[hotpath::measure(label = "daemon.project.compose.release_idle", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Idle-server release is one cache-evict-and-shutdown before the next project open."
+)]
 async fn release_one_idle_project_server_before_open(
     store_administration: &StoreAdministration,
     invocation: &DaemonInvocationState,
@@ -135,7 +141,7 @@ async fn release_one_idle_project_server_before_open(
                 .await;
             super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
             for data_root in hook_data_roots {
-                super::hook_v2_replay::shutdown_hook_v2_replay_consumer(&data_root).await;
+                super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
             }
             for prior in prior_owner_retirements {
                 prior.wait().await?;
@@ -154,6 +160,10 @@ async fn release_one_idle_project_server_before_open(
                     message: format!("retired project server identity is invalid: {error}"),
                 }
             })?;
+            super::branch_admin::retire_registered_context_scout_owner(
+                &project_id,
+                &retired_owner.graph_db_path,
+            );
             let runtime_quiescence = retirement_invocation
                 .quiesce_project_runtime_owners(
                     profile_identity.profile_id(),
@@ -259,6 +269,10 @@ struct ProjectOpenInputs<'a> {
 /// wrapper (and every instrumented caller) a few words wide instead of
 /// inlining the whole open.
 #[hotpath::measure(label = "daemon.project.compose.server", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "This composition entry binds route admission, store lifetime, invocation and HTTP owners before publishing a server."
+)]
 pub(super) async fn production_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
@@ -441,11 +455,11 @@ struct ProjectRoutePorts {
         tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
     dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader,
     dashboard_feedback_status_reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
+    dashboard_pr_autotrack_reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     code_index_hook_sink: crate::mcp::server::CodeIndexHookSink,
     code_index_reconcile_sink: crate::mcp::server::CodeIndexReconcileSink,
     code_index_freshness_probe_sink: crate::mcp::server::CodeIndexFreshnessProbeSink,
-    diagnostics_change_generation: crate::mcp::server::DiagnosticsChangeGenerationResolver,
     application_invocation_executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     retained_server_resolver: crate::mcp::server::RetainedProjectServerResolver,
     automation_scheduler_reconciler:
@@ -495,13 +509,13 @@ impl ComposedCoreServer {
             .with_dashboard_feedback_status_reader(Arc::clone(
                 &ports.dashboard_feedback_status_reader,
             ))
+            .with_dashboard_pr_autotrack_reader(Arc::clone(&ports.dashboard_pr_autotrack_reader))
             .with_diagnostics_lsp(Arc::clone(&ports.diagnostic_broker))
             .with_code_index_hook_sink(Arc::clone(&ports.code_index_hook_sink))
             .with_code_index_reconcile_sink(Arc::clone(&ports.code_index_reconcile_sink))
             .with_code_index_freshness_probe_sink(Arc::clone(
                 &ports.code_index_freshness_probe_sink,
             ))
-            .with_diagnostics_change_generation(Arc::clone(&ports.diagnostics_change_generation))
             .with_code_index_publication_identity(Arc::clone(&code_index.publication_identity))
             .with_code_index_search_executor(Arc::clone(&code_index.search_executor))
             .with_code_index_branch_diff_executor(Arc::clone(&code_index.branch_diff_executor))
@@ -513,13 +527,14 @@ impl ComposedCoreServer {
             ))
             .with_code_graph_read_admission_port(Arc::clone(&code_index.graph_read_admission_port))
             .with_verified_graph_query_port(
-                crate::tracedecay::queries::graph::admitted_verified_graph_query_port_with_source(
+                tracedecay_graph_query::admitted_verified_graph_query_port_with_source(
                     Arc::clone(&code_index.graph_read_admission_port),
                     Arc::clone(&code_index.graph_projection_read_port),
-                    Some(Arc::clone(cg) as Arc<dyn tracedecay_graph_query::SourceReadRuntimePort>),
+                    cg.source_read_context(),
                 ),
             )
             .with_code_index_search_authority(code_index.search_authority.clone())
+            .with_admitted_project_scope(code_index.scope.clone())
             .with_project_server_live(Arc::clone(&self.route_registered))
             .with_application_invocation_executor(Arc::clone(
                 &ports.application_invocation_executor,
@@ -545,7 +560,8 @@ struct CoreRouteBinding {
 struct CoreRouteActivation {
     publication_attempt: tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1,
     /// The core's preview-only source-edit lane; `None` for a read-only database.
-    core_source_edit_mutation: Option<Arc<project_open_owners::SourceEditMutationGate>>,
+    core_source_edit_mutation:
+        Option<Arc<tracedecay_daemon_service::project_owner_registration::SourceEditMutationGate>>,
 }
 
 /// Both session databases this route serves, admitted together.
@@ -730,6 +746,10 @@ impl ProjectOpenInputs<'_> {
     /// Build every route-owned port and construct the core (graph, search,
     /// diagnostics) server candidate. Nothing is published yet.
     #[hotpath::measure(label = "daemon.project.compose.core", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Core server composition wires one project's ports into a single McpServer."
+    )]
     async fn compose_core_server(
         &self,
         opened: &OpenedProjectGraph,
@@ -840,10 +860,10 @@ impl ProjectOpenInputs<'_> {
             self.invocation.code_index_schedulers.clone(),
             Arc::clone(&code_index_activation),
         );
-        let code_index_freshness_probe_sink =
-            code_index_freshness_probe_sink(self.invocation.code_index_schedulers.clone());
-        let diagnostics_change_generation =
-            diagnostics_change_generation_resolver(self.invocation.code_index_schedulers.clone());
+        let code_index_freshness_probe_sink = code_index_freshness_probe_sink(
+            self.invocation.code_index_schedulers.clone(),
+            Arc::clone(&code_index_activation),
+        );
         // The daemon mounts the same broker the MCP server and the directly
         // served dashboard open: persisted analyzer settings (with a recorded
         // degradation for an unreadable file) plus the home-level OpenCode
@@ -889,11 +909,11 @@ impl ProjectOpenInputs<'_> {
                     tracedecay_dashboard_api::feedback_api::feedback_status_reader(
                         self.invocation.feedback_runtime_registrar(),
                     ),
+                dashboard_pr_autotrack_reader: project_dashboard_pr_autotrack_reader(),
                 diagnostic_broker,
                 code_index_hook_sink,
                 code_index_reconcile_sink,
                 code_index_freshness_probe_sink,
-                diagnostics_change_generation,
                 application_invocation_executor,
                 retained_server_resolver: retained_project_server_resolver(
                     self.store_administration.clone(),
@@ -1147,6 +1167,10 @@ impl ProjectOpenInputs<'_> {
     /// is deliberately absent; the bounded code-index activation owns
     /// background indexing.
     #[hotpath::measure(label = "daemon.project.compose.construct_full", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Full server construction is one owner-and-port assembly for a published project route."
+    )]
     async fn construct_full_server(
         &self,
         opened: &OpenedProjectGraph,
@@ -1184,7 +1208,7 @@ impl ProjectOpenInputs<'_> {
                 user_session_db.clone(),
             ])
             .await;
-        let delivery_access = project_open_owners::daemon_owned_project_source_access_at(
+        let delivery_access = daemon_owned_project_source_access_at(
             &code_index.scope,
             self.canonical_project_path,
             runtime_configuration,
@@ -1288,13 +1312,13 @@ impl ProjectOpenInputs<'_> {
         // spool, replay, backup, and failover state through this one provider;
         // typed `Unavailable` remains only when the remote plane is genuinely
         // unreadable.
-        let remote_operational_status: tracedecay_store_runtime::RemoteOperationalStatusProviderV1 = {
+        let remote_operational_status: tracedecay_contracts::RemoteOperationalStatusReaderV1 = {
             let remote_credentials = core.graph_runtime.remote_credential_authority();
             Arc::new(move || remote_credentials.operational_status())
         };
-        let remote_operational_read: doctor_kernel::RemoteOperationalReadProviderV1 = {
+        let remote_operational_read = {
             let remote_operational_status = Arc::clone(&remote_operational_status);
-            Arc::new(move || remote_operational_status.read().doctor_read())
+            Arc::new(move || remote_operational_status().doctor_read())
         };
         let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
             self.canonical_project_path.to_path_buf(),
@@ -1410,21 +1434,24 @@ impl ProjectOpenInputs<'_> {
         core: &ComposedCoreServer,
         full_server: &crate::mcp::McpServer,
         session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        core_source_edit_mutation: Option<
+            Arc<tracedecay_daemon_service::project_owner_registration::SourceEditMutationGate>,
+        >,
     ) -> Result<()> {
         let full_setup_started = Instant::now();
         project_open_cancellation_checkpoint(self.cancellation)?;
+        // The shared invocation registry admits one source-edit owner per
+        // project root. Core publication already registered it; the full
+        // upgrade reuses that owner and marks its mutation gate ready after
+        // Git transaction authority exists.
         let source_edit_mutation_ready = if opened.project_database_is_read_only {
             None
         } else {
             Some(
-                project_open_owners::install_project_open_source_edit_preview_owner(
-                    full_server,
-                    Arc::clone(&opened.cg),
-                    Arc::clone(&core.ports.code_index.graph_projection_read_port),
-                    self.canonical_project_path,
-                    &core.project_id,
-                )
-                .await?,
+                core_source_edit_mutation.ok_or_else(|| TraceDecayError::Config {
+                    message: "writable project did not install source edit preview authority"
+                        .to_owned(),
+                })?,
             )
         };
         self.log_phase("source_edit_preview_ready", None, full_setup_started);
@@ -1516,8 +1543,14 @@ impl ProjectOpenInputs<'_> {
         session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<()> {
         self.log_phase("session_capabilities_published", None, self.started);
-        Box::pin(self.mount_full_server_owners(opened, core, full_server.as_ref(), session_db))
-            .await?;
+        Box::pin(self.mount_full_server_owners(
+            opened,
+            core,
+            full_server.as_ref(),
+            session_db,
+            activation.core_source_edit_mutation.clone(),
+        ))
+        .await?;
         if *core.current_key.lock().await != opened.key {
             return Err(TraceDecayError::Config {
                 message: "project changed branch during full capability admission".to_owned(),
@@ -1807,7 +1840,27 @@ fn semantic_project_runtime(
     lifecycle: Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>,
 ) -> Result<SemanticProjectRuntime> {
     let semantic_config = &runtime_configuration.config().semantic;
-    let semantic_resources = &semantic_config.resources;
+    let semantic_candidates = runtime_configuration
+        .snapshot()
+        .provenance
+        .iter()
+        .find(|(key, _)| key.as_str() == crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
+        .map(|(_, candidates)| candidates)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "semantic runtime configuration provenance is unavailable".to_owned(),
+        })?;
+    let semantic_defaulted = semantic_candidates.last().is_some_and(|candidate| {
+        matches!(
+            &candidate.layer,
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::Default
+        )
+    });
+    let mut semantic_resources = semantic_config.resources;
+    semantic_resources.max_resident_bytes =
+        tracedecay_semantic::embedding_parallelism::effective_resident_ceiling(
+            runtime.resident_memory_admission_limit_bytes(),
+            (!semantic_defaulted).then_some(semantic_resources.max_resident_bytes),
+        );
     // The configured ceiling still caps concurrency; this only narrows it to
     // what the serving reservation leaves room for and adds one slot so an
     // interactive query keeps a warm session while a rebuild holds the rest.
@@ -1827,7 +1880,7 @@ fn semantic_project_runtime(
     Ok(SemanticProjectRuntime {
         handle,
         lifecycle: Some(lifecycle),
-        resources: *semantic_resources,
+        resources: semantic_resources,
         document_composition: semantic_config.document_composition,
         auto_download_enabled: semantic_config.auto_download && runtime.semantic_auto_download(),
     })
@@ -1871,31 +1924,33 @@ fn project_code_index_authorities(
             .map_err(|error| TraceDecayError::Config {
             message: format!("project search scope is invalid: {error:?}"),
         })?;
-    let graph_projection_read_port = project_open_owners::project_code_graph_projection_read_port(
-        invocation.code_index_schedulers.clone(),
-        canonical_project_path.to_path_buf(),
-        scope.clone(),
-    );
-    let ignored_dependency_admission =
-        project_open_owners::project_code_index_ignored_dependency_admission_port(
+    let graph_projection_read_port =
+        tracedecay_code_index_runtime::project_reads::project_code_graph_projection_read_port(
+            invocation.code_index_schedulers.clone(),
+            canonical_project_path.to_path_buf(),
+            scope.clone(),
+        );
+    let ignored_dependency_admission = tracedecay_code_index_runtime::project_reads::
+        project_code_index_ignored_dependency_admission_port(
             invocation.code_index_schedulers.clone(),
             canonical_project_path.to_path_buf(),
             scope.clone(),
             !project_database_is_read_only,
         );
-    let generation_census_reader = project_open_owners::project_code_index_generation_census_reader(
-        invocation.code_index_schedulers.clone(),
-        canonical_project_path.to_path_buf(),
-        scope.clone(),
-    );
+    let generation_census_reader =
+        tracedecay_code_index_runtime::project_reads::project_code_index_generation_census_reader(
+            invocation.code_index_schedulers.clone(),
+            canonical_project_path.to_path_buf(),
+            scope.clone(),
+        );
     let graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort = Arc::new(
-        crate::daemon::callable_code_authorization::DaemonCodeGraphReadAdmission::production(
+        tracedecay_daemon_service::DaemonCodeGraphReadAdmission::production(
             canonical_project_path.to_path_buf(),
             scope.clone(),
             Arc::clone(cg.configuration_runtime()),
         ),
     );
-    let search_admission = query_mcp_admission::admit_query_mcp_read(
+    let search_admission = tracedecay_daemon_service::admit_query_mcp_read(
         Some(profile_identity),
         &project_id,
         &scope,
@@ -1905,7 +1960,7 @@ fn project_code_index_authorities(
         message: format!("project search admission is unavailable: {error}"),
     })?;
     let search_authority = search_admission.search_authority();
-    let read_admission_provider = query_mcp_admission::QueryMcpReadAdmissionProviderV1::new(
+    let read_admission_provider = tracedecay_daemon_service::QueryMcpReadAdmissionProviderV1::new(
         profile_identity.clone(),
         project_id.clone(),
         Arc::clone(route_registered),
@@ -1914,13 +1969,13 @@ fn project_code_index_authorities(
         invocation.code_index_schedulers.clone(),
         project_id.clone(),
         read_admission_provider.clone(),
-        project_open_owners::DaemonCodeIndexScopeResolverV1,
+        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1,
     );
     let branch_diff_executor = code_index_branch_diff_executor(
         invocation.code_index_schedulers.clone(),
         project_id.clone(),
         read_admission_provider,
-        project_open_owners::DaemonCodeIndexScopeResolverV1,
+        tracedecay_code_index_runtime::mcp_admission::RegisteredProjectScopeResolverV1,
     );
     Ok(ProjectCodeIndexAuthorities {
         publication_identity,
@@ -1948,11 +2003,29 @@ fn project_dashboard_freshness_reader(
     reader
 }
 
+fn project_dashboard_pr_autotrack_reader()
+-> tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader {
+    Arc::new(|store_root| {
+        tracedecay_application::pr_tracking::managed_summary(&store_root).map(|entries| {
+            entries
+                .into_iter()
+                .map(
+                    |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                        branch: entry.branch,
+                        pr: entry.pr,
+                        head_branch: entry.head_branch,
+                    },
+                )
+                .collect()
+        })
+    })
+}
+
 /// Register the project graph and the session databases this route owns with
 /// the sampling authority. An unavailable registration is recorded and skipped,
 /// never fatal: telemetry must not fail an otherwise healthy project open.
 fn register_route_store_telemetry(
-    sampling: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    sampling: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
     cg: &Arc<crate::tracedecay::TraceDecay>,
     scope: &tracedecay_contracts::ResolvedScope,
     session_databases: [&tracedecay_global_db::RegisteredGlobalDb; 3],

@@ -15,7 +15,7 @@ use tracedecay_lcm::retrieval_content::{
 };
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
-use super::super::shared::path_identity_key;
+use super::super::shared::{durable_project_path_key, path_identity_key};
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -43,8 +43,8 @@ pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.messa
 /// Appends the project-scope predicate.
 ///
 /// `project_key` is an opaque authority and stays byte-exact. `project_path`
-/// is written through `path_identity_key`, so the same selector can use its
-/// exact spelling for the key and its canonical path spelling for the path.
+/// may retain its opened spelling in observation projection or its canonical
+/// OS identity in transcript persistence. Scoped reads accept both spellings.
 fn push_project_identity_predicate(
     sql: &mut String,
     query_params: &mut Vec<Value>,
@@ -52,11 +52,13 @@ fn push_project_identity_predicate(
 ) {
     query_params.push(Value::Text(project_selector.to_owned()));
     let key_parameter = query_params.len();
-    query_params.push(Value::Text(path_identity_key(project_selector)));
+    query_params.push(Value::Text(durable_project_path_key(project_selector)));
     let path_parameter = query_params.len();
+    query_params.push(Value::Text(path_identity_key(project_selector)));
+    let opened_parameter = query_params.len();
     let _ = write!(
         sql,
-        " AND (s.project_key = ?{key_parameter} OR s.project_path = ?{path_parameter})"
+        " AND (s.project_key = ?{key_parameter} OR s.project_path IN (?{path_parameter}, ?{opened_parameter}))"
     );
 }
 
@@ -1203,4 +1205,48 @@ fn row_to_workflow_message(
         source_offset: None,
         metadata_json: Some(JsonValue::Object(metadata).to_string()),
     })
+}
+
+#[cfg(all(test, unix))]
+mod identity_tests {
+    use super::{Value, durable_project_path_key, push_project_identity_predicate};
+
+    #[test]
+    fn project_identity_reads_opened_and_canonical_paths_without_aliasing_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let opened = alias.to_str().unwrap();
+        let canonical = durable_project_path_key(opened);
+        assert_ne!(opened, canonical);
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions (project_key TEXT, project_path TEXT);")
+            .unwrap();
+        for (key, path) in [
+            ("typed-project-a", opened),
+            ("typed-project-a", canonical.as_str()),
+            (opened, "user"),
+            (canonical.as_str(), "user"),
+            ("unrelated", "unknown"),
+        ] {
+            db.execute("INSERT INTO sessions VALUES (?1, ?2)", [key, path])
+                .unwrap();
+        }
+        let mut sql = "SELECT count(*) FROM sessions s WHERE 1 = 1".to_owned();
+        let mut params = Vec::new();
+        push_project_identity_predicate(&mut sql, &mut params, opened);
+        let params = params.iter().map(|value| match value {
+            Value::Text(text) => text.as_str(),
+            _ => panic!("project identity parameters must be text"),
+        });
+        let count: i64 = db
+            .query_row(&sql, rusqlite::params_from_iter(params), |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 3,
+            "both path forms and only the byte-exact opaque key match"
+        );
+    }
 }

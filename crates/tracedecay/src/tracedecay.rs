@@ -2,32 +2,39 @@
 //!
 //! This module root holds the [`TraceDecay`] struct and its shared result
 //! types; the behavior is implemented in focused submodules:
-//! [`lifecycle`] (init/open/branch provenance), [`edits`] (anchored source
-//! edits), [`queries`]
+//! [`lifecycle`] (init/open/branch provenance), [`queries`]
 //! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
 //! (session memory), and source-edit orchestration.
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use crate::config::TraceDecayConfig;
+use tracedecay_configuration::TraceDecayConfig;
 use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_domain::errors::Result;
+use tracedecay_graph_query::SourceReadContext;
 use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
+use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
+mod automation_context;
 #[cfg(test)]
 mod concrete_runtime_tests;
 mod diagnostics;
-mod edits;
 pub(crate) mod facts;
 mod lifecycle;
-mod move_symbol;
-mod project_runtime_port;
 pub(crate) mod queries;
+mod source_edit_runtime;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 pub use lifecycle::MovedStoreAdoption;
-pub(crate) use lifecycle::git_remote_url;
+
+/// Why a `TraceDecay` instance has no Context Scout owner.
+#[derive(Clone)]
+pub(crate) enum ContextScoutOwnerLookupV1 {
+    Ready(Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>),
+    ReadOnly,
+    Unregistered,
+}
 
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///
@@ -36,7 +43,7 @@ pub(crate) use lifecycle::git_remote_url;
 pub struct TraceDecay {
     db: Database,
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    pub(crate) store_runtime_registry: crate::project_store_runtime::ProjectStoreRuntimeHandle,
+    pub(crate) store_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: TraceDecayConfig,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
@@ -55,28 +62,11 @@ pub struct TraceDecay {
     /// new `TraceDecay` rather than mutating an existing one, so the resolved
     /// path is safe to cache for the instance's lifetime.
     db_path_cache: OnceLock<PathBuf>,
-    context_scout_owner: Option<
-        Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
-    >,
-    context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
-    test_runtime_guard: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
+    test_runtime_guard:
+        Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
     _standalone_maintenance_scope:
         Option<Arc<tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>>,
-}
-
-const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
-
-#[derive(Clone)]
-struct MountedContextScoutClaimAuthorityV1 {
-    registry: Arc<
-        tracedecay_agent_hosts::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1,
-    >,
-    pin: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-    context: tracedecay_contracts::RequestContext,
-    lifecycle: tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-    address: ContextScoutAddressV1,
-    input_watermark: [u8; 32],
 }
 
 impl TraceDecay {
@@ -95,10 +85,8 @@ impl TraceDecay {
         &self.configuration_runtime
     }
 
-    pub(crate) fn project_store_runtime(
-        &self,
-    ) -> &dyn tracedecay_application::tracedecay::ProjectStoreRuntimeV1 {
-        self.store_runtime_registry.port()
+    pub(crate) fn project_store_runtime(&self) -> &DaemonSessionRuntimeRegistryV1 {
+        self.store_runtime_registry.as_ref()
     }
 
     pub(crate) fn profile_database(&self) -> &tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
@@ -109,7 +97,7 @@ impl TraceDecay {
     #[cfg(any(test, feature = "test-transport"))]
     pub fn test_runtime_for_test(
         &self,
-    ) -> Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>> {
+    ) -> Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>> {
         self.test_runtime_guard.clone()
     }
 
@@ -117,11 +105,42 @@ impl TraceDecay {
         &self.store_layout
     }
 
+    pub(crate) fn source_read_context(&self) -> Option<SourceReadContext> {
+        Some(SourceReadContext::new(
+            self.project_root.clone(),
+            self.db.clone(),
+            self.read_only,
+            self.store_layout.identity.project_id.clone()?,
+        ))
+    }
+
     pub(crate) fn context_scout_owner(
         &self,
-    ) -> Option<&Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>>
+    ) -> Option<Arc<tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1>>
     {
-        self.context_scout_owner.as_ref()
+        match self.context_scout_owner_lookup() {
+            ContextScoutOwnerLookupV1::Ready(owner) => Some(owner),
+            ContextScoutOwnerLookupV1::ReadOnly | ContextScoutOwnerLookupV1::Unregistered => None,
+        }
+    }
+
+    pub(crate) fn context_scout_owner_lookup(&self) -> ContextScoutOwnerLookupV1 {
+        if self.read_only {
+            return ContextScoutOwnerLookupV1::ReadOnly;
+        }
+        let Some(project_id) =
+            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&self.store_layout)
+        else {
+            return ContextScoutOwnerLookupV1::Unregistered;
+        };
+        let mut owners =
+            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+                project_id,
+            );
+        match owners.len() {
+            1 => ContextScoutOwnerLookupV1::Ready(owners.remove(0)),
+            _ => ContextScoutOwnerLookupV1::Unregistered,
+        }
     }
 
     /// Publishes one hook-admissible Context Scout claim authority for an
@@ -142,38 +161,27 @@ impl TraceDecay {
         input_watermark: [u8; 32],
         observed_at: tracedecay_domain::UtcMicros,
     ) -> bool {
-        if input_watermark == [0; 32]
-            || !self.context_scout_configuration_is_current(&pin).await
-            || registry
-                .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
-                .await
-                != tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                    address,
-                )
-        {
+        let Some(owner) = self.context_scout_owner() else {
             return false;
-        }
-        let mounted = MountedContextScoutClaimAuthorityV1 {
-            registry,
-            pin,
-            context,
-            lifecycle,
-            address,
-            input_watermark,
         };
-        let mut authorities = self.context_scout_claim_authorities.write().await;
-        if let Some(existing) = authorities
-            .iter_mut()
-            .find(|existing| existing.lifecycle == mounted.lifecycle)
-        {
-            *existing = mounted;
-            return true;
-        }
-        if authorities.len() == MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES {
-            authorities.remove(0);
-        }
-        authorities.push(mounted);
-        true
+        let configuration_is_current = self.context_scout_configuration_is_current(&pin).await;
+        matches!(
+            owner
+                .mount_current_claim_authority(
+                    registry,
+                    hook,
+                    pin,
+                    context,
+                    lifecycle,
+                    address,
+                    input_watermark,
+                    observed_at,
+                    configuration_is_current,
+                )
+                .await,
+            tracedecay_agent_hosts::agents::context_scout_owner::ContextScoutClaimAdmissionV1::Mounted
+                | tracedecay_agent_hosts::agents::context_scout_owner::ContextScoutClaimAdmissionV1::Replaced
+        )
     }
 
     /// Resolves the claim authority mounted for one exact lifecycle, or
@@ -187,35 +195,15 @@ impl TraceDecay {
         lifecycle: &tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
-        let mounted = self
-            .context_scout_claim_authorities
-            .read()
-            .await
-            .iter()
-            .find(|mounted| mounted.lifecycle == *lifecycle)
-            .cloned()?;
-        if !self
-            .context_scout_configuration_is_current(&mounted.pin)
-            .await
-        {
-            return None;
-        }
-        let resolved = mounted
-            .registry
-            .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
+        let owner = self.context_scout_owner()?;
+        let pin = owner.mounted_claim_pin(lifecycle).await?;
+        let configuration_is_current = self.context_scout_configuration_is_current(&pin).await;
+        let resolved = owner
+            .resolve_current_claim_authority(hook, lifecycle, observed_at, configuration_is_current)
             .await;
-        let resolved = (resolved
-            == tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                mounted.address,
-            ))
-        .then_some((mounted.address, mounted.input_watermark));
         // Re-check currentness after the registry read: a configuration
         // revision that lands mid-resolve must not hand out a stale claim.
-        if resolved.is_some()
-            && self
-                .context_scout_configuration_is_current(&mounted.pin)
-                .await
-        {
+        if resolved.is_some() && self.context_scout_configuration_is_current(&pin).await {
             resolved
         } else {
             None

@@ -1,4 +1,4 @@
-import { render, within } from '@testing-library/react';
+import { fireEvent, render, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SignalPanel } from './SignalPanel.tsx';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
@@ -13,13 +13,17 @@ const NOW = 1_700_000_000_000;
 
 function pulses(): LiveActivityPulse[] {
   return [
-    { projectId: 'p1', family: 'heartbeat', streamId: 'heartbeat', at: NOW - 400_000 },
-    { projectId: 'p1', family: 'heartbeat', streamId: 'heartbeat', at: NOW - 380_000 },
+    { projectId: 'p1', family: 'heartbeat', streamId: 'heartbeat', at: NOW - 400_000,
+      eventId: 'fixture:heartbeat:1', observationTime: String((NOW - 400_000) * 1000) },
+    { projectId: 'p1', family: 'heartbeat', streamId: 'heartbeat', at: NOW - 380_000,
+      eventId: 'fixture:heartbeat:2', observationTime: String((NOW - 380_000) * 1000) },
     {
       projectId: 'p1',
       family: 'code_index_completed',
       streamId: 'code_index',
       at: NOW - 370_000,
+      eventId: 'fixture:code_index:1',
+      observationTime: String((NOW - 370_000) * 1000),
     },
   ];
 }
@@ -36,6 +40,23 @@ afterEach(() => {
 });
 
 describe('SignalPanel connection honesty', () => {
+  it('opens exact admitted identity and reports when that event leaves the retained window', () => {
+    const event = { ...pulses()[0]!, projectId: null, observationTime: '1700000000000001' };
+    const inspect = vi.fn();
+    const view = render(<SignalPanel pulses={[event]} sseState="live" lastEventAt={NOW} onInspectProject={inspect} />);
+    fireEvent.click(view.getByText(/Inspect admitted events/));
+    fireEvent.click(view.getByRole('button', { name: `heartbeat · ${event.eventId}` }));
+    expect(inspect).toHaveBeenCalledWith(null);
+    const evidence = within(view.getByRole('region', { name: 'Admitted event evidence' }));
+    expect(evidence.getByText(event.eventId)).toBeTruthy();
+    expect(evidence.getByText('1700000000000001')).toBeTruthy();
+    expect(evidence.getByText('unavailable: event is unscoped')).toBeTruthy();
+    expect(evidence.getByText(/carries no session\/message identity/)).toBeTruthy();
+    view.rerender(<SignalPanel pulses={[]} sseState="live" lastEventAt={NOW} />);
+    expect(view.queryByRole('region', { name: 'Admitted event evidence' })).toBeNull();
+    expect(view.getByText(/no longer retained/)).toBeTruthy();
+  });
+
   it('says in words that a dead stream is not an idle one', () => {
     const { container, getByText } = renderPanel('offline', NOW - 370_000);
     expect(getByText(/frozen, not idle/i)).toBeTruthy();
@@ -58,7 +79,7 @@ describe('SignalPanel connection honesty', () => {
     expect(queryByText(/frozen, not idle/i)).toBeNull();
     // Six minutes of quiet on an open stream: the rate is a truthful zero and
     // the age says how long the quiet has lasted.
-    expect(getByText(/per min · last 60s/i)).toBeTruthy();
+    expect(getByText(/retained · last 60s/i)).toBeTruthy();
     expect(getByText('6m')).toBeTruthy();
   });
 
@@ -67,7 +88,8 @@ describe('SignalPanel connection honesty', () => {
     vi.restoreAllMocks();
     const dead = renderPanel('offline', NOW - 370_000).container.textContent ?? '';
     expect(idle).not.toEqual(dead);
-    expect(idle).toContain('current');
+    expect(idle).toContain('Connected.');
+    expect(idle).toContain('only the retained pulse window, not the full stream');
     expect(dead).toContain('Disconnected');
   });
 

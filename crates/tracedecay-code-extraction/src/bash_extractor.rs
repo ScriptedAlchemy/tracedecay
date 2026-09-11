@@ -1,6 +1,7 @@
 /// Tree-sitter based Bash source code extractor.
 ///
 /// Parses Bash/shell source files and emits nodes and edges for the code graph.
+use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
@@ -47,20 +48,6 @@ impl<'s> ExtractionState<'s> {
         }
     }
 
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
     /// Returns the current parent node ID, or None if at file root level.
     fn parent_node_id(&self) -> Option<&str> {
         self.node_stack.last().map(|(_, id)| id.as_str())
@@ -99,8 +86,27 @@ impl BashExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
+        if matches!(
+            scope,
+            crate::parsed_extraction::ParsedExtractionScope::ChangedRegions(_)
+        ) {
+            // Bash reextracts the whole file on incremental edits because its script module
+            // spans and parents the whole document.
+            let full = Self::extract_tree(
+                file_path,
+                source,
+                tree,
+                crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+            );
+            return crate::parsed_extraction::ParsedExtraction::reset(
+                full.result,
+                crate::parsed_extraction::ParsedExtractionResetReason::ChangedRootIdentity,
+                source.len(),
+            );
+        }
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
+        let root = tree.root_node();
 
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
@@ -129,11 +135,48 @@ impl BashExtractor {
             parent_id: None,
         };
         let file_node_id = file_node.id.clone();
+        let script_name = Path::new(file_path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or(file_path);
+        let script_node = Node {
+            id: local_node_id(
+                file_path,
+                source.as_bytes(),
+                &NodeKind::Module,
+                script_name,
+                root,
+            ),
+            kind: NodeKind::Module,
+            name: script_name.to_owned(),
+            qualified_name: format!("{file_path}::{script_name}"),
+            start_line: root.start_position().row as u32,
+            attrs_start_line: root.start_position().row as u32,
+            end_line: root.end_position().row as u32,
+            start_column: root.start_position().column as u32,
+            end_column: root.end_position().column as u32,
+            parent_id: Some(file_node_id.clone()),
+            ..file_node.clone()
+        };
+        let script_node_id = script_node.id.clone();
         state.nodes.push(file_node);
-        state.node_stack.push((file_path.to_string(), file_node_id));
+        state.nodes.push(script_node);
+        state.edges.push(Edge {
+            source: file_node_id.clone(),
+            target: script_node_id.clone(),
+            kind: EdgeKind::Contains,
+            line: Some(0),
+        });
+        state
+            .node_stack
+            .push((script_name.to_owned(), script_node_id.clone()));
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
+            if child.kind() != "function_definition" {
+                Self::extract_call_sites(&mut state, child, &script_node_id);
+            }
         });
 
         state.node_stack.pop();
@@ -176,7 +219,7 @@ impl BashExtractor {
         let end_line = node.end_position().row as u32;
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+        let qualified_name = format!("{}::{name}", state.file_path);
         let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &BASH_COMPLEXITY, state.source);
 
@@ -204,7 +247,7 @@ impl BashExtractor {
             assertions: metrics.assertions,
             complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
-            parent_id: None,
+            parent_id: state.parent_node_id().map(str::to_owned),
         };
         state.nodes.push(graph_node);
 
@@ -240,7 +283,7 @@ impl BashExtractor {
             let end_line = node.end_position().row as u32;
             let start_column = node.start_position().column as u32;
             let end_column = node.end_position().column as u32;
-            let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+            let qualified_name = format!("{}::{name}", state.file_path);
             let id = local_node_id(&state.file_path, state.source, &NodeKind::Const, name, node);
 
             let graph_node = Node {
@@ -298,7 +341,7 @@ impl BashExtractor {
                 let end_line = node.end_position().row as u32;
                 let start_column = node.start_position().column as u32;
                 let end_column = node.end_position().column as u32;
-                let qualified_name = format!("{}::{}", state.qualified_prefix(), arg);
+                let qualified_name = format!("{}::{arg}", state.file_path);
                 let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &arg, node);
                 let text = state.node_text(node);
 
@@ -363,30 +406,27 @@ impl BashExtractor {
 
     /// Recursively find command nodes inside a given node and create unresolved Calls references.
     fn extract_call_sites(state: &mut ExtractionState, node: TsNode<'_>, fn_node_id: &str) {
+        if node.kind() == "command"
+            && let Some(name_node) = node.child_by_field_name("name")
+        {
+            let callee_name = state.node_text(name_node);
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: fn_node_id.to_string(),
+                reference_name: callee_name.to_string(),
+                reference_kind: EdgeKind::Calls,
+                line: node.start_position().row as u32,
+                column: node.start_position().column as u32,
+                file_path: state.file_path.clone(),
+            });
+        }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
                 match child.kind() {
-                    "command" => {
-                        if let Some(name_node) = child.child_by_field_name("name") {
-                            let callee_name = state.node_text(name_node);
-                            state.unresolved_refs.push(UnresolvedRef {
-                                from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name.to_string(),
-                                reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
-                                file_path: state.file_path.clone(),
-                            });
-                        }
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
                     // Skip nested function definitions.
                     "function_definition" => {}
-                    _ => {
-                        Self::extract_call_sites(state, child, fn_node_id);
-                    }
+                    _ => Self::extract_call_sites(state, child, fn_node_id),
                 }
                 if !cursor.goto_next_sibling() {
                     break;

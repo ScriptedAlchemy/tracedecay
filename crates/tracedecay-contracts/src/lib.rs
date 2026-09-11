@@ -9,7 +9,10 @@
 //!
 //! Dependencies stay limited to `tracedecay-domain`, `tracedecay-policy`, and
 //! `tracedecay-tool-catalog`. This crate owns no storage, transport, provider
-//! runtime, UI, model runtime, Git mutation, scheduler, or root composition.
+//! runtime, UI, model runtime, Git mutation, scheduler, or process composition.
+//! [`catalog_composition`] assembles the capability catalog from the operation
+//! descriptors declared here, which is metadata assembly rather than
+//! dependency construction.
 
 #![forbid(unsafe_code)]
 
@@ -17,6 +20,7 @@ pub mod advisory;
 pub mod authorization;
 mod bearer_token;
 pub mod branch_snapshots;
+pub mod catalog_composition;
 pub mod clock;
 pub mod configuration;
 mod configuration_wire;
@@ -90,7 +94,9 @@ mod error;
 mod surface_binding;
 pub mod surface_contracts;
 
-pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
+pub(crate) use surface_binding::{
+    current_application_bindings, current_bindings, current_bindings_with_slug, surface_name,
+};
 
 pub use advisory::*;
 pub use authorization::{
@@ -106,8 +112,7 @@ pub use configuration::{
     ConfigurationObservedStateRequestV1, ConfigurationProtectedApplyRequestV1,
     ConfigurationProtectedPreviewRequestV1, ConfigurationRollbackApplyRequestV1,
     ConfigurationRollbackPreviewRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
-    ConfigurationWireRequestV1, ConfigurationWriteCredentialRequestV1, ResolvedSetting,
-    SettingSummary, configuration_executable_binding_registry,
+    ConfigurationWireRequestV1, ResolvedSetting, SettingSummary,
     configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
     configuration_surface_operation, configuration_surface_request_schema,
     configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
@@ -120,8 +125,8 @@ pub use context::{
     RequestId, ResolvedScope,
 };
 pub use context_scout::{
-    context_scout_executable_binding_registry, context_scout_surface_catalog_contribution,
-    context_scout_surface_handler_descriptors, context_scout_surface_operation,
+    context_scout_surface_catalog_contribution, context_scout_surface_handler_descriptors,
+    context_scout_surface_operation,
 };
 pub use diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,
@@ -132,30 +137,26 @@ pub use diagnostics::{
     ProviderSourceIdentity, RevisionDigest,
 };
 pub use doctor::{
-    AdvisoryFeedbackDoctorAdapterV1, AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1,
-    AdvisoryFeedbackReadV1, AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorAdapterV1,
-    CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
-    ConfigurationAuthorityDoctorAdapterV1, ConfigurationAuthorityDoctorPort,
-    ConfigurationAuthorityReadV1, ConfigurationDriftV1, DOCTOR_FINDING_FAMILIES,
-    DaemonRuntimeHealthSignalV1, DoctorCoverageCompletenessV1, DoctorCoverageStatementV1,
-    DoctorEvidenceRefV1, DoctorEvidenceReferenceV1, DoctorEvidenceStateV1,
-    DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
-    DoctorFindingFamilyV1, DoctorFindingV1, DoctorKernelInputsV1, DoctorReportComposerV1,
-    DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture,
-    DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
-    HostConformanceV1, HostIntegrationDoctorAdapterV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, IngestRefusalCensusReadV1, IngestRefusalCountV1,
-    LanguageServerDoctorAdapterV1, LanguageServerDoctorPort, LanguageServerReadV1,
-    LanguageServerStateV1, ObservabilityDoctorAdapterV1, ObservabilityDoctorPort,
-    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorAdapterV1,
-    OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
-    RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
-    RuntimeHealthDoctorAdapterV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
-    StorageDoctorAdapterV1, StorageDoctorPort, advisory_feedback_findings,
-    advisory_feedback_read_from_publication, code_index_finding, compose_doctor_report,
-    configuration_finding, doctor_finding_family_label, host_integration_finding,
-    ingest_refusal_finding, language_server_finding, merge_storage_reads, observability_finding,
-    operational_audit_findings, runtime_health_finding, runtime_health_read, storage_family_read,
+    AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
+    AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
+    CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
+    ConfigurationDriftV1, DOCTOR_FINDING_FAMILIES, DaemonRuntimeHealthSignalV1,
+    DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
+    DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
+    DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1,
+    DoctorFindingV1, DoctorKernelInputsV1, DoctorReportComposerV1, DoctorReportCoverageV1,
+    DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
+    DoctorStorageFindingKindV1, DoctorStorageFindingV1, HostConformanceV1,
+    HostIntegrationDoctorPort, HostIntegrationReadV1, IngestRefusalCensusReadV1,
+    IngestRefusalCountV1, LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1,
+    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort,
+    OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1,
+    RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
+    StorageDoctorPort, advisory_feedback_findings, advisory_feedback_read_from_publication,
+    code_index_finding, configuration_finding, doctor_finding_family_label,
+    host_integration_finding, ingest_refusal_finding, language_server_finding, merge_storage_reads,
+    observability_finding, operational_audit_findings, runtime_health_finding, runtime_health_read,
+    storage_family_read,
 };
 pub use error::ApplicationContractError;
 pub use execution_topology_metrics::*;
@@ -168,40 +169,40 @@ pub use external_source::{
 pub use feedback::{
     FeedbackExpandRequestV1, FeedbackExpandResultV1, FeedbackGetRequestV1, FeedbackGetResultV1,
     FeedbackHandleRequestV1, FeedbackListRequestV1, FeedbackListResultV1, FeedbackObservationPort,
-    FeedbackReadService, feedback_http_executable_binding_registry,
-    feedback_surface_catalog_contribution, feedback_surface_handler_descriptors,
-    feedback_surface_operation,
+    FeedbackReadService, feedback_surface_catalog_contribution,
+    feedback_surface_handler_descriptors, feedback_surface_operation,
 };
 pub use git::{
-    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
-    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
-    GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
-    GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
-    GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
-    GitIndexTransactionPortError, GitIndexTransactionService, GitIntelligenceError, GitReadPort,
+    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GIT_QUERY_DEFAULT_MAX_BYTES,
+    GIT_QUERY_DEFAULT_MAX_ENTRIES, GitBlameRequest, GitHistoricalBlobReadPort,
+    GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest, GitIndexApplyPortResultV1,
+    GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
+    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
+    GitIndexTransactionApplicationError, GitIndexTransactionPort, GitIndexTransactionPortError,
+    GitIndexTransactionService, GitIntelligenceError, GitReadPort,
     NATIVE_INTEGRATION_APPLY_OPERATION, NATIVE_INTEGRATION_CANCEL_OPERATION,
     NATIVE_INTEGRATION_PREFLIGHT_OPERATION, NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION,
     NATIVE_INTEGRATION_STATUS_OPERATION, NativeIntegrationApplyRequestV1,
     NativeIntegrationApplySurfaceRequest, NativeIntegrationCancelDispositionV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationCancelSurfaceRequest,
     NativeIntegrationCancellationProjectionV1, NativeIntegrationContractError,
-    NativeIntegrationEvidenceRevisionsV1, NativeIntegrationEvidenceRevisionsWireV1,
     NativeIntegrationPort, NativeIntegrationPortError, NativeIntegrationPreflightOutcomeV1,
     NativeIntegrationPreflightRequestV1, NativeIntegrationPreflightSurfaceRequest,
     NativeIntegrationPreviewProjectionV1, NativeIntegrationReceiptProjectionV1,
-    NativeIntegrationRecoveryRequestV1, NativeIntegrationSelectionBindingV1,
-    NativeIntegrationService, NativeIntegrationSnapshotProjectionV1,
-    NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
-    NativeIntegrationStackResolutionRequestV1, NativeIntegrationStackSnapshotService,
-    NativeIntegrationStackSnapshotSurfaceRequest, NativeIntegrationStatusProjectionV1,
-    NativeIntegrationStatusRequestV1, NativeIntegrationStatusSurfaceRequest,
-    NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1, NativeWorktreeService,
-    NativeWorktreeSurfaceRequest, NativeWorktreeSurfaceResultV1, WorktreeContractError,
-    git_index_catalog_contribution, git_index_effect_class, git_index_handler_descriptors,
-    git_surface_catalog_contribution, git_surface_handler_descriptors,
-    is_canonical_repository_relative_path, native_integration_surface_catalog_contribution,
+    NativeIntegrationRecoveryRequestV1, NativeIntegrationSealedStackSnapshotProjectionV1,
+    NativeIntegrationSealedStackSnapshotV1, NativeIntegrationSelectionBindingV1,
+    NativeIntegrationSelectionDeclarationV1, NativeIntegrationService,
+    NativeIntegrationSnapshotProjectionV1, NativeIntegrationStackResolutionOutcomeV1,
+    NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
+    NativeIntegrationStackSnapshotService, NativeIntegrationStackSnapshotSurfaceRequest,
+    NativeIntegrationStatusProjectionV1, NativeIntegrationStatusRequestV1,
+    NativeIntegrationStatusSurfaceRequest, NativeIntegrationSurfaceResultV1,
+    NativeIntegrationSurfaceUnavailableV1, NativeWorktreeService, NativeWorktreeSurfaceRequest,
+    NativeWorktreeSurfaceResultV1, WorktreeContractError, git_index_catalog_contribution,
+    git_index_effect_class, git_index_handler_descriptors, git_surface_catalog_contribution,
+    git_surface_handler_descriptors, is_canonical_repository_relative_path,
+    native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
-    native_worktree_executable_binding_registry,
 };
 pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
@@ -233,8 +234,7 @@ pub use multi_root::{
 };
 pub use observability::*;
 pub use observatory_surface::{
-    OBSERVATORY_READ_OPERATION, ObservatoryReadFuture, ObservatoryReadPortV1,
-    ObservatoryReadRequestV1, ObservatoryReadResultV1, ObservatoryReadServiceV1,
+    OBSERVATORY_READ_OPERATION, ObservatoryReadRequestV1, ObservatoryReadResultV1,
     observatory_read_catalog_contribution, observatory_read_handler_descriptor,
     observatory_read_operation, observatory_read_request_schema, observatory_read_result_schema,
 };
@@ -251,7 +251,7 @@ pub use project_registry::{
     ProjectRegistrySummary, ProjectRegistryView, ProjectRepoGroup, PublicCodeProject,
     list_registered_projects, read_registered_project_context, render_project_registry_view,
 };
-pub use remote::status::RemoteOperationalStatusReadPort;
+pub use remote::status::RemoteOperationalStatusReaderV1;
 pub use result::{
     APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationExecutionFailureClassV1,
     ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
@@ -286,8 +286,7 @@ pub use retained_surfaces::{
 pub use retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
     APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID,
-    application_catalog_contributions, code_search_executable_binding_registry,
-    primitive_http_executable_binding_registry,
+    application_catalog_contributions, application_operation_default_page_size,
 };
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AnchorExpandRequest, AnchorExpandResult,
@@ -310,7 +309,10 @@ pub use retrieval::{
     callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
     callable_code_request_schema, callable_code_result_schema,
 };
-pub use sdk_catalog::sdk_executable_binding_registry;
+pub use sdk_catalog::{
+    application_http_executable_binding_registry, application_http_route_path,
+    sdk_executable_binding_registry,
+};
 pub use semantic_activation::{
     SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
 };
@@ -325,8 +327,9 @@ pub use source_edit::{
     RenameResult, RenameSiteDispositionV1, RenameSiteKindV1, RenameSiteV1, RenameSymbolBindingV1,
     RenameSymbolSurfaceRequestV1, SourceEditAuthorizationAdmissionV1,
     SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditDiagnosticV1,
-    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
-    SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
+    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditInvocationV1, SourceEditKind,
+    SourceEditReconciliationDispositionV1, SourceEditReconciliationInvocationV1,
+    SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditRollbackInvocationV1,
     SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };

@@ -1,5 +1,5 @@
 use tempfile::tempdir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationTaskConfig,

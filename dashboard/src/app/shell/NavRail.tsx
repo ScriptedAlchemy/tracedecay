@@ -18,6 +18,11 @@ import {
 import { NavLink } from 'react-router';
 import type { StorageFindingKindStatusV1 } from '../../contracts/generated.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
+import {
+  scopedWorkspacePath,
+  useScope,
+  type DashboardScope,
+} from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
 import { CHANNELS, channelNumber, type ChannelGroup } from '../channels.ts';
 
@@ -115,15 +120,17 @@ function RailLink({
   path,
   label,
   health,
+  scope,
 }: {
   path: string;
   label: string;
   health?: DoctorHealth;
+  scope: DashboardScope;
 }) {
   const Icon = ICONS[path] ?? Boxes;
   return (
     <NavLink
-      to={`/${path}`}
+      to={scopedWorkspacePath(scope, path)}
       aria-label={label}
       className={({ isActive }) =>
         cn(
@@ -219,6 +226,7 @@ function useDoctorHealth(): DoctorHealth {
  * dot. */
 export function NavRail() {
   const health = useDoctorHealth();
+  const scope = useScope((state) => state.scope);
   return (
     <nav
       aria-label="Workspaces"
@@ -254,6 +262,7 @@ export function NavRail() {
                   path={channel.path}
                   label={channel.label}
                   health={channel.path === 'observatory' ? health : undefined}
+                  scope={scope}
                 />
               ),
             )}
@@ -262,7 +271,7 @@ export function NavRail() {
       </div>
       <div className="shrink-0 border-t border-edge-subtle">
         <RailRegisterLabel label="Config" />
-        <RailLink path="settings" label="Settings" />
+        <RailLink path="settings" label="Settings" scope={scope} />
       </div>
     </nav>
   );

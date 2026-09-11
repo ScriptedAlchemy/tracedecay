@@ -476,10 +476,11 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .rollback_profile()
                 .map(|profile| profile.profile_digest().clone()),
         };
+        let base_configuration = current_configuration_state(&self.configuration).await?;
         self.configuration
             .authorize_semantic_configuration_mutation(
                 request.authority.clone(),
-                &expected.expected_configuration_revision,
+                &base_configuration.revision_id,
                 request.now,
             )
             .await
@@ -531,7 +532,7 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .mutate_direct(
                     request.authority,
                     request.central_mutation,
-                    expected.expected_configuration_revision,
+                    base_configuration.revision_id,
                 )
                 .await
                 .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
@@ -545,9 +546,6 @@ impl ProductionSemanticConfigurationOperationV1 {
             .await
             .map_err(map_authority_error)
             .map_err(|error| log_semantic_activation_failure("resolve_current", error))?;
-        let base_configuration = current_configuration_state(&self.configuration)
-            .await
-            .map_err(|error| log_semantic_activation_failure("current_configuration", error))?;
         let base_pin = super::SemanticConfigurationPinV1::from_current(&base_configuration)
             .map_err(|_| {
                 log_semantic_activation_failure(
@@ -559,7 +557,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             .preview_central_mutation(
                 &request.authority,
                 &request.central_mutation,
-                &expected.expected_configuration_revision,
+                &base_configuration.revision_id,
             )
             .await
             .map_err(|error| log_semantic_activation_failure("preview_configuration", error))?;
@@ -608,10 +606,11 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .rollback_profile()
                 .map(|profile| profile.profile_digest().clone()),
         };
+        let base_configuration = current_configuration_state(&self.configuration).await?;
         self.configuration
             .authorize_semantic_configuration_mutation(
                 request.authority.clone(),
-                &expected.expected_configuration_revision,
+                &base_configuration.revision_id,
                 request.now,
             )
             .await?;
@@ -622,7 +621,7 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .mutate_direct(
                     request.authority,
                     request.central_mutation,
-                    expected.expected_configuration_revision,
+                    base_configuration.revision_id,
                 )
                 .await
                 .map_err(|_| {
@@ -646,7 +645,6 @@ impl ProductionSemanticConfigurationOperationV1 {
             .resolve(restored_digest)
             .await
             .map_err(map_authority_error)?;
-        let base_configuration = current_configuration_state(&self.configuration).await?;
         let base_pin = super::SemanticConfigurationPinV1::from_current(&base_configuration)
             .map_err(|_| {
                 SemanticActivationCoordinationErrorV1::RejectedDetail(
@@ -657,7 +655,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             .preview_central_mutation(
                 &request.authority,
                 &request.central_mutation,
-                &expected.expected_configuration_revision,
+                &base_configuration.revision_id,
             )
             .await?;
         self.configuration

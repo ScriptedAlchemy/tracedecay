@@ -2,14 +2,27 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::settle_in_process_invocation;
+use super::{invocation_is_native_integration_operation, settle_in_process_invocation};
 use tracedecay_contracts::{CancellationSignal, clock::now_micros};
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_daemon_protocol::{
     DAEMON_TOOL_RESPONSE_GRACE, DaemonInvocationOutcome, DaemonInvocationProblem,
     DaemonInvocationResponse,
 };
-use tracedecay_daemon_service::RequestCancellationRegistryV1;
+use tracedecay_daemon_service::{DaemonInvocationOperation, RequestCancellationRegistryV1};
+
+#[test]
+fn native_worktree_operations_request_the_native_integration_owner() {
+    for operation in [
+        DaemonInvocationOperation::NativeIntegrationWorktreeInventory,
+        DaemonInvocationOperation::NativeIntegrationWorktreeInspect,
+        DaemonInvocationOperation::NativeIntegrationWorktreeConfirm,
+        DaemonInvocationOperation::NativeIntegrationWorktreeRemove,
+        DaemonInvocationOperation::NativeIntegrationWorktreeReconcile,
+    ] {
+        assert!(invocation_is_native_integration_operation(operation));
+    }
+}
 
 fn authoritative_response(request_id: &str) -> DaemonInvocationResponse {
     DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::ResetRequired)

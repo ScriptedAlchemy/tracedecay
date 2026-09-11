@@ -27,6 +27,12 @@ pub trait DiagnosticStore: Send + Sync {
         generation: &CodeGenerationId,
     ) -> impl Future<Output = DiagnosticStoreResult<Vec<GenerationDiagnosticV1>>> + Send;
 
+    fn diagnostics_for_publication(
+        &self,
+        generation: &CodeGenerationId,
+        publication_revision: u64,
+    ) -> impl Future<Output = DiagnosticStoreResult<Vec<GenerationDiagnosticV1>>> + Send;
+
     fn current_diagnostics(
         &self,
         generation: &CodeGenerationId,

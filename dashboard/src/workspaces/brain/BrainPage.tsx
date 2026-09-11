@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { useActivationField } from '../../viz/graph/useActivationField.ts';
@@ -23,6 +23,7 @@ import {
   type RegistryField,
 } from './field.ts';
 import { ScopedBrain } from './ScopedBrain.tsx';
+import { ProjectInspector } from './ProjectInspector.tsx';
 import {
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
@@ -39,6 +40,9 @@ import {
  * Scoped, the question becomes "what does TraceDecay know about THIS project?",
  * which is a different surface entirely (see `ScopedBrain.tsx`). */
 export function BrainPage() {
+  const [inspectedId, setInspectedId] = useState<string | null>(null);
+  const [registryFilter, setRegistryFilter] = useState('');
+  const [repositoryView, setRepositoryView] = useState<string | null>(null);
   const scope = useScope((s) => s.scope);
   const projects = useProjectRegistry();
   const registryRead = envelopeReadState(projects.isPending, toEnvelopeResult(projects.data), {
@@ -47,7 +51,7 @@ export function BrainPage() {
   });
 
   if (scope.kind === 'project') {
-    return <ScopedBrain projectId={scope.projectId} label={scope.label} />;
+    return <ScopedBrain key={scope.projectId} projectId={scope.projectId} label={scope.label} />;
   }
 
   return (
@@ -115,8 +119,17 @@ export function BrainPage() {
           (a, b) => latestSeen(b) - latestSeen(a),
         );
         const holdings = summarizeHoldings(groups.flatMap((group) => group.projects));
+        const inspectedGroup = groups.find((group) => group.projects.some((project) => project.project_id === inspectedId));
+        const inspectedProject = inspectedGroup?.projects.find((project) => project.project_id === inspectedId);
+        const query = registryFilter.trim().toLowerCase();
+        const viewedRepository = repositoryView == null ? undefined : groups.find((group) => group.git_common_dir === repositoryView);
+        const matchingGroups = groups.map((group) => ({ ...group, projects: group.projects.filter((project) =>
+          [project.label, project.project_id, project.canonical_root].some((value) => value.toLowerCase().includes(query)),
+        ) })).filter((group) => group.projects.length > 0);
         return (
-          <div className="flex h-full min-h-0 flex-col">
+          <div className="flex h-full min-h-0 flex-col" onKeyDown={(event) => {
+            if (event.key === 'Escape') setInspectedId(null);
+          }}>
             <EnvelopeTruth
               envelope={envelope}
               refreshing={projects.isFetching}
@@ -143,9 +156,26 @@ export function BrainPage() {
                 * the two panes split the viewport and each owns its overflow
                 * again. */}
               <div className="relative flex shrink-0 flex-col p-3 lg:min-h-0 lg:flex-1">
-                <RegistryFieldView groups={groups} activeProjectId={data.active_project_id ?? null} />
+                {viewedRepository ? <nav aria-label="Brain camera breadcrumb" className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+                  <button type="button" className="td-hit underline" onClick={() => setRepositoryView(null)}>Registry overview</button>
+                  <span aria-hidden> / </span><span>{viewedRepository.label} repository · {viewedRepository.projects.length} registered {viewedRepository.projects.length === 1 ? 'project' : 'projects'}</span>
+                </nav> : null}
+                <RegistryFieldView groups={groups} repository={viewedRepository} inspectedId={inspectedId} onInspect={setInspectedId} />
               </div>
               <RegistryRail>
+                {/* Keep row coordinates stable between pointer-down and click:
+                  * inspection must not insert content above its own trigger. */}
+                <div className="h-96 shrink-0 overflow-auto">
+                  {inspectedProject && inspectedGroup ? <ProjectInspector project={inspectedProject} group={inspectedGroup} onClose={() => setInspectedId(null)} onRepository={() => setRepositoryView(inspectedGroup.git_common_dir)} /> : <div className="flex h-full flex-col justify-center gap-3 border border-edge-subtle p-4 text-xs text-text-muted">
+                    <h2 className="font-semibold text-text-primary">Project inspection</h2>
+                    <p>Hover or focus a project to inspect its exact registry evidence.</p>
+                    <p>Click or Enter selects project scope. Escape dismisses inspection.</p>
+                  </div>}
+                </div>
+                <label className="text-2xs">Search project registry
+                  <input type="search" value={registryFilter} onChange={(event) => setRegistryFilter(event.target.value)} className="mt-1 w-full border border-edge-subtle bg-surface-0 p-2 text-xs" />
+                </label>
+                {query ? <p className="text-2xs text-text-muted">{matchingGroups.reduce((count, group) => count + group.projects.length, 0)} matching projects · canvas retains the full registry</p> : null}
                 {/* The counts that are the same on every row, said once. Every
                   * project in a real registry holds exactly one store and three
                   * to five artifacts, so "1 ST · 4 ART" printed forty-four times
@@ -155,11 +185,12 @@ export function BrainPage() {
                     {holdings.uniformLine}
                   </p>
                 ) : null}
-                {groups.map((group, index) => (
+                {matchingGroups.map((group, index) => (
                   <RepoGroupCard
                     key={`${group.git_common_dir ?? group.label}#${index}`}
                     group={group}
                     holdings={holdings}
+                    onInspect={setInspectedId}
                   />
                 ))}
               </RegistryRail>
@@ -210,10 +241,14 @@ function toEnvelopeResult(
  * where such a hub exists at all. */
 function RegistryFieldView({
   groups,
-  activeProjectId,
+  repository,
+  inspectedId,
+  onInspect,
 }: {
   groups: ProjectRepoGroup[];
-  activeProjectId: string | null;
+  repository?: ProjectRepoGroup;
+  inspectedId: string | null;
+  onInspect: (id: string | null) => void;
 }) {
   const selectProject = useScope((s) => s.selectProject);
   const activation = useActivationField(4200);
@@ -247,9 +282,21 @@ function RegistryFieldView({
     () => composeRegistryField(groupsRef.current),
     [fieldSignature],
   );
-  const nodes = field.nodes;
-  const edges = field.edges;
-  const extent = field.extent;
+  const repositoryKey = repository?.git_common_dir;
+  const repositoryRef = useRef(repository);
+  repositoryRef.current = repository;
+  const nodes = useMemo(() => {
+    if (!repositoryKey) return field.nodes;
+    const ids = new Set(repositoryRef.current?.projects.map((project) => project.project_id));
+    ids.add(`repo:${repositoryKey}`);
+    return field.nodes.filter((node) => ids.has(node.id));
+  }, [field, repositoryKey]);
+  const edges = useMemo(() => {
+    if (!repositoryKey) return field.edges;
+    const ids = new Set(nodes.map((node) => node.id));
+    return field.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target));
+  }, [field, nodes, repositoryKey]);
+  const extent = repositoryKey ? undefined : field.extent;
 
   // Propagation reads the drawn edge list, so activation can only ever travel
   // where the viewer can see a relation to travel along. On this field most
@@ -260,9 +307,8 @@ function RegistryFieldView({
 
   // The brain fires on real identities: each accepted event lights the neuron
   // named by its own exact scope, at an intensity that reflects what actually
-  // happened. Only unseen pulses fire (the ring is a decay window, not a log),
-  // and a beat carrying no project scope falls back to the daemon's active
-  // project — which is precisely whose state that beat describes.
+  // happened. Only unseen pulses fire (the ring is a decay window, not a log).
+  // An unscoped event does not establish which project was touched.
   useEffect(() => {
     if (sseState !== 'live' || revision === drawnRevision.current) return;
     if (drawnRevision.current === null) {
@@ -272,7 +318,7 @@ function RegistryFieldView({
     const unseen = Math.min(revision - drawnRevision.current, pulses.length);
     drawnRevision.current = revision;
     for (const pulse of pulses.slice(pulses.length - unseen)) {
-      const projectId = pulse.projectId ?? activeProjectId;
+      const projectId = pulse.projectId;
       // A scope naming something this field does not draw fires nothing: heat
       // on an id with no body is heat nobody can see, and it would keep the
       // render loop awake resolving an invisible decay.
@@ -286,7 +332,7 @@ function RegistryFieldView({
       const hop = neighborsOf(adjacency, projectId);
       if (hop.length > 0) activation.strike(hop, energy / 3);
     }
-  }, [pulses, revision, sseState, activeProjectId, adjacency, drawnIds, activation]);
+  }, [pulses, revision, sseState, adjacency, drawnIds, activation]);
 
   // Stable across renders so the canvas effect never re-runs for a new handler
   // identity; the current registry is read through the ref at click time.
@@ -313,36 +359,34 @@ function RegistryFieldView({
 
   return (
     <>
-      {/* One HUD column rather than two free-floating corners. From `md` up it
-        * overlays the field, anchored to the top and grown downward, so both
-        * strips stay ON the lit canvas -- a bottom-anchored panel measured
-        * from this column instead sat over the caption BELOW the field on a
-        * narrow viewport, which read as chrome spilled onto the page. Below
-        * `md` the overlay itself becomes the problem: on a narrow canvas the
-        * HUD's own content is taller than the field it floats on, so an
-        * absolutely-positioned strip covers the whole canvas and the network
-        * underneath is reduced to a blurred glow behind opaque panels. There
-        * the HUD returns to normal document flow, stacked ABOVE the canvas
-        * (hence rendered first here -- position:absolute takes it out of
-        * flow at `md` and up, so the source order only matters below that).
-        * `z-10` is required, not decorative: GraphCanvas's own canvas element
-        * is `position:relative` (so its own children position correctly),
-        * which makes it a positioned, z-index:auto box just like this HUD --
-        * two such boxes stack in DOM order, and with the HUD now rendered
-        * FIRST (for the mobile flow case above) the canvas would otherwise
-        * paint over it at every width. */}
-      <div className="pointer-events-none static z-10 mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
+      {/* Readouts reserve space so no measured body is hidden behind chrome. */}
+      <div className="pointer-events-none mb-2 flex shrink-0 flex-wrap items-start gap-2">
         <InstrumentReadout
           items={[
             { label: 'repos', value: groups.length },
-            { label: 'projects', value: nodes.length - field.sharedRepoCount },
+            { label: 'projects', value: field.nodes.length - field.sharedRepoCount },
             { label: 'stores', value: totals.stores },
             { label: 'artifacts', value: totals.artifacts },
           ]}
         />
-        <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
+        <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} onInspectProject={(id) => onInspect(id !== null && drawnIds.has(id) ? id : null)} />
+        {repository ? <figure className="border border-edge-subtle p-2">
+          <svg width="160" height="90" viewBox="0 0 160 90" role="img" aria-label="Registry minimap: highlighted projects belong to the viewed repository">
+            {field.nodes.map((node) => {
+              const x = 8 + ((node.x ?? 0) - field.extent.x[0]) / (field.extent.x[1] - field.extent.x[0]) * 144;
+              const y = 82 - ((node.y ?? 0) - field.extent.y[0]) / (field.extent.y[1] - field.extent.y[0]) * 74;
+              return <circle key={node.id} cx={x} cy={y} r={nodes.includes(node) ? 3 : 1.5} fill="currentColor" className={nodes.includes(node) ? 'text-accent' : 'text-text-muted'} />;
+            })}
+          </svg>
+          <figcaption className="text-2xs">Registry overview · repository highlighted</figcaption>
+        </figure> : null}
       </div>
       <GraphCanvas
+        cameraControls
+        inspectedId={inspectedId}
+        // Keep the exact target available while the pointer moves into its
+        // interactive DOM inspector. Escape or Dismiss clears it explicitly.
+        onInspect={(id) => { if (id !== null) onInspect(id); }}
         nodes={nodes}
         edges={edges}
         fill
@@ -357,16 +401,16 @@ function RegistryFieldView({
         activation={activation}
         selectedId={null}
         onSelect={handleSelect}
-        ariaLabel={fieldDescription(field)}
+        ariaLabel={repository ? `${repository.label} repository: ${repository.projects.length} registered projects. Exact repository relationships; original measured positions retained. Project registry is the accessible equivalent.` : fieldDescription(field)}
         fallbackDescription="the Project registry beside this field remains available as a text alternative"
         encoding={{
           body: 'project / repo hub',
-          size: 'mass / checkouts',
+          size: 'indexed mass / categorical hub',
           hue: 'project kind',
           signal: 'recency / activation',
           relation: 'shared checkout',
         }}
-        caption={<FieldAxis field={field} />}
+        caption={repository ? <p>{repository.git_common_dir} · exact registry relation · project mass and recency retain the overview measurements</p> : <FieldAxis field={field} />}
       />
     </>
   );
@@ -490,9 +534,11 @@ function strikeIntensity(family: string): number {
 function RepoGroupCard({
   group,
   holdings,
+  onInspect,
 }: {
   group: ProjectRepoGroup;
   holdings: HoldingsSummary | null;
+  onInspect: (id: string | null) => void;
 }) {
   return (
     <section className="rounded-[var(--radius-card)] border border-edge-subtle bg-surface-1">
@@ -515,6 +561,7 @@ function RepoGroupCard({
             key={`${project.project_id}:${project.canonical_root}`}
             project={project}
             holdings={holdings}
+            onInspect={onInspect}
           />
         ))}
       </div>
@@ -525,9 +572,11 @@ function RepoGroupCard({
 function ProjectRow({
   project,
   holdings,
+  onInspect,
 }: {
   project: ProjectRegistryEntry;
   holdings: HoldingsSummary | null;
+  onInspect: (id: string | null) => void;
 }) {
   const scope = useScope((s) => s.scope);
   const selectProject = useScope((s) => s.selectProject);
@@ -538,6 +587,8 @@ function ProjectRow({
     <button
       type="button"
       onClick={() => selectProject(project.project_id, project.label)}
+      onFocus={() => onInspect(project.project_id)}
+      onPointerEnter={() => onInspect(project.project_id)}
       aria-pressed={selected}
       className={cn(
         'flex w-full flex-col gap-1 border-b border-edge-subtle px-3 py-2 text-left last:border-b-0',

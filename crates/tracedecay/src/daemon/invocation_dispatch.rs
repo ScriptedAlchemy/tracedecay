@@ -18,6 +18,7 @@ use tracedecay_daemon_service::{
     DaemonInvocationService, Lease, SemanticInvocationControlV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_store::StoreShardScopeV1;
 
 fn semantic_invocation_interruption_response(
@@ -231,6 +232,10 @@ pub(super) fn invalid_multi_root_invocation_response(
 }
 
 #[cfg(any(not(unix), test))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Portable transport composes separately owned lifecycle, route admission and HTTP owners; the extra argument is a test probe."
+)]
 pub(super) async fn execute_portable_daemon_invocation(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
@@ -584,6 +589,10 @@ pub(super) async fn resolve_multi_root_projects(
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Daemon invocation dispatch is one payload match onto the owning executor."
+)]
 pub(super) async fn execute_daemon_invocation(
     engine: &DaemonEngine,
     handshake: &DaemonHandshake,

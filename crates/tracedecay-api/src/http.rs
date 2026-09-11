@@ -14,11 +14,11 @@ use tracedecay_contracts::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationProblemKind, CancellationSignal, Deadline, OpaqueCursor, PageRequest,
     ProblemOwningLayer, RequestId, ResultContractRef, RetainedSurfaceOperation, RetryDirective,
-    SafeDiagnostic,
+    SafeDiagnostic, application_operation_default_page_size,
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId,
-    ProfileId, SchemaId, ScopeDimension,
+    OperationId, ProfileId, SchemaId, ScopeDimension,
 };
 
 use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
@@ -26,7 +26,6 @@ mod application_operation_owner;
 pub use application_operation_owner::http_application_owner_kind;
 
 pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
-const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
 
 /// Define the handlers that name one fixed operation.
 ///
@@ -84,14 +83,10 @@ pub(crate) use constant_operation_handlers;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpPageQuery {
-    #[serde(default = "default_http_page_size")]
-    page_size: u32,
+    #[serde(default)]
+    page_size: Option<u32>,
     #[serde(default)]
     cursor: Option<OpaqueCursor>,
-}
-
-const fn default_http_page_size() -> u32 {
-    DEFAULT_HTTP_PAGE_SIZE
 }
 
 /// The canonical application owner family responsible for one HTTP binding.
@@ -132,116 +127,21 @@ const fn is_callable_code_route(operation: ApplicationSurfaceOperation) -> bool 
 }
 
 /// Whether this canonical operation has a public HTTP catalog binding.
-pub const fn is_http_application_operation_exposed(operation: ApplicationSurfaceOperation) -> bool {
-    !matches!(
-        operation,
-        ApplicationSurfaceOperation::GitPreview
-            | ApplicationSurfaceOperation::GitApply
-            | ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
-            | ApplicationSurfaceOperation::NativeIntegrationPreflight
-            | ApplicationSurfaceOperation::NativeIntegrationApprove
-            | ApplicationSurfaceOperation::NativeIntegrationApply
-            | ApplicationSurfaceOperation::NativeIntegrationStatus
-            | ApplicationSurfaceOperation::NativeIntegrationCancel
-            | ApplicationSurfaceOperation::ObservatoryRead
+pub fn is_http_application_operation_exposed(
+    operation: ApplicationSurfaceOperation,
+) -> Result<bool, ApplicationContractError> {
+    let operation_id = OperationId::new(format!("operation.application.{}", operation.as_str()))?;
+    Ok(
+        tracedecay_contracts::application_http_executable_binding_registry()?
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .is_some(),
     )
 }
 
 /// Relative Axum route for a canonical application operation.
 pub fn http_application_route_path(operation: ApplicationSurfaceOperation) -> String {
-    match operation {
-        ApplicationSurfaceOperation::GitStatus => "/git/status".to_owned(),
-        ApplicationSurfaceOperation::GitDiff => "/git/diff".to_owned(),
-        ApplicationSurfaceOperation::GitHistory => "/git/history".to_owned(),
-        ApplicationSurfaceOperation::GitBlame => "/git/blame".to_owned(),
-        ApplicationSurfaceOperation::GitHunks => "/git/hunks".to_owned(),
-        ApplicationSurfaceOperation::GitPreview => "/git/preview".to_owned(),
-        ApplicationSurfaceOperation::GitApply => "/git/apply".to_owned(),
-        ApplicationSurfaceOperation::GitHubStackSignalExpand => {
-            "/github-stack/signal-expand".to_owned()
-        }
-        operation @ (ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
-        | ApplicationSurfaceOperation::NativeIntegrationPreflight
-        | ApplicationSurfaceOperation::NativeIntegrationApprove
-        | ApplicationSurfaceOperation::NativeIntegrationApply
-        | ApplicationSurfaceOperation::NativeIntegrationStatus
-        | ApplicationSurfaceOperation::NativeIntegrationCancel
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
-        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile) => {
-            format!("/native-integration/{}", operation.as_str())
-        }
-        ApplicationSurfaceOperation::AffectedTests => "/tests/affected".to_owned(),
-        ApplicationSurfaceOperation::TestResults => "/tests/results".to_owned(),
-        ApplicationSurfaceOperation::FeedbackDiagnostics => "/feedback/diagnostics".to_owned(),
-        ApplicationSurfaceOperation::FeedbackGet => "/feedback/get".to_owned(),
-        ApplicationSurfaceOperation::FeedbackExpand => "/feedback/expand".to_owned(),
-        ApplicationSurfaceOperation::FeedbackList => "/feedback/list".to_owned(),
-        ApplicationSurfaceOperation::FeedbackImpact => "/feedback/impact".to_owned(),
-        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => "/feedback/advisory_cycle".to_owned(),
-        operation @ (ApplicationSurfaceOperation::CodeExactOccurrence
-        | ApplicationSurfaceOperation::CodePhraseSearch
-        | ApplicationSurfaceOperation::CodeSymbolSearch
-        | ApplicationSurfaceOperation::CodeSignatureSearch
-        | ApplicationSurfaceOperation::CodeImplementations
-        | ApplicationSurfaceOperation::CodeTypeHierarchy
-        | ApplicationSurfaceOperation::CodeCallers
-        | ApplicationSurfaceOperation::CodeCallees
-        | ApplicationSurfaceOperation::CodeFacets
-        | ApplicationSurfaceOperation::CodeTimeline
-        | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
-        | ApplicationSurfaceOperation::CodeTypeDefinition
-        | ApplicationSurfaceOperation::CodeReferences) => {
-            format!("/code/{}", operation.as_str())
-        }
-        operation @ (ApplicationSurfaceOperation::SessionLookup
-        | ApplicationSurfaceOperation::QualifiedName
-        | ApplicationSurfaceOperation::CallChain
-        | ApplicationSurfaceOperation::FileDependents
-        | ApplicationSurfaceOperation::SourceLines
-        | ApplicationSurfaceOperation::SourceBody
-        | ApplicationSurfaceOperation::SourceOutline
-        | ApplicationSurfaceOperation::ModuleApi
-        | ApplicationSurfaceOperation::FileMetadata
-        | ApplicationSurfaceOperation::HealthRead
-        | ApplicationSurfaceOperation::HealthDelta
-        | ApplicationSurfaceOperation::StorageStatus
-        | ApplicationSurfaceOperation::DiagnosticsRead) => {
-            format!("/primitives/{}", operation.as_str())
-        }
-        operation @ (ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
-        | ApplicationSurfaceOperation::ConfigurationGet
-        | ApplicationSurfaceOperation::ConfigurationSet
-        | ApplicationSurfaceOperation::ConfigurationUnset
-        | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
-        | ApplicationSurfaceOperation::ConfigurationObservedState
-        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
-        | ApplicationSurfaceOperation::ConfigurationProtectedApply
-        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
-        | ApplicationSurfaceOperation::ConfigurationRollbackApply
-        | ApplicationSurfaceOperation::ConfigurationAudit) => {
-            format!("/configuration/{}", operation.as_str())
-        }
-        ApplicationSurfaceOperation::ObservatoryRead => "/observatory/read".to_owned(),
-        operation @ (ApplicationSurfaceOperation::ContextScoutStatus
-        | ApplicationSurfaceOperation::ContextScoutRecent
-        | ApplicationSurfaceOperation::ContextScoutExplain
-        | ApplicationSurfaceOperation::ContextScoutCapability
-        | ApplicationSurfaceOperation::ContextScoutBudget
-        | ApplicationSurfaceOperation::ContextScoutPause
-        | ApplicationSurfaceOperation::ContextScoutResume
-        | ApplicationSurfaceOperation::ContextScoutCancel
-        | ApplicationSurfaceOperation::ContextScoutClaim
-        | ApplicationSurfaceOperation::ContextScoutDelivery
-        | ApplicationSurfaceOperation::ContextScoutFeedback) => {
-            format!("/context-scout/{}", operation.as_str())
-        }
-    }
+    tracedecay_contracts::application_http_route_path(operation)
 }
 
 /// Public route mounted beneath the per-project application prefix.
@@ -286,10 +186,7 @@ pub fn http_route_documents(
     ) {
         let path =
             match ApplicationSurfaceOperation::from_catalog_name(binding.operation().as_str()) {
-                Some(operation) if is_http_application_operation_exposed(operation) => {
-                    http_application_full_route_path(operation)
-                }
-                Some(_) => continue,
+                Some(operation) => http_application_full_route_path(operation),
                 None => {
                     let Some(operation) =
                         RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
@@ -344,6 +241,13 @@ pub type HttpApplicationInvocationFuture = Pin<
 /// Each method delegates to the corresponding application owner family. The
 /// adapter performs only extraction, owner selection, and canonical encoding.
 pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
+    fn exposes_operation(
+        &self,
+        operation: ApplicationSurfaceOperation,
+    ) -> Result<bool, ApplicationContractError> {
+        is_http_application_operation_exposed(operation)
+    }
+
     fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 
     fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
@@ -618,14 +522,9 @@ where
 }
 
 fn parse_git_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
-    match operation {
-        "status" => Some(ApplicationSurfaceOperation::GitStatus),
-        "diff" => Some(ApplicationSurfaceOperation::GitDiff),
-        "history" => Some(ApplicationSurfaceOperation::GitHistory),
-        "blame" => Some(ApplicationSurfaceOperation::GitBlame),
-        "hunks" => Some(ApplicationSurfaceOperation::GitHunks),
-        _ => None,
-    }
+    ApplicationSurfaceOperation::from_catalog_name(&format!("git_{operation}")).filter(
+        |operation| http_application_owner_kind(*operation) == HttpApplicationOwnerKind::Git,
+    )
 }
 
 fn parse_feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
@@ -722,11 +621,9 @@ parsed_operation_handlers! {
 }
 
 fn parse_native_integration_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
-    ApplicationSurfaceOperation::from_catalog_name(operation)
-        .filter(|operation| {
-            http_application_owner_kind(*operation) == HttpApplicationOwnerKind::NativeIntegration
-        })
-        .filter(|operation| is_http_application_operation_exposed(*operation))
+    ApplicationSurfaceOperation::from_catalog_name(operation).filter(|operation| {
+        http_application_owner_kind(*operation) == HttpApplicationOwnerKind::NativeIntegration
+    })
 }
 
 async fn invoke_route<O>(
@@ -740,6 +637,16 @@ async fn invoke_route<O>(
 where
     O: HttpApplicationOwners,
 {
+    match owners.exposes_operation(operation) {
+        Ok(true) => {}
+        Ok(false) => {
+            return adapter_problem_response(
+                request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            );
+        }
+        Err(error) => return application_contract_error_response(error),
+    }
     let request = match hotpath::measure_block!("api.http.admission", {
         admit_http_application_request(operation, request_id, controls, page, body)
     }) {
@@ -782,7 +689,11 @@ fn admit_http_application_request(
             )));
         }
     };
-    let page = match PageRequest::new(page.page_size, page.cursor) {
+    let page_size = match page.page_size {
+        Some(page_size) => page_size,
+        None => application_operation_default_page_size(operation),
+    };
+    let page = match PageRequest::new(page_size, page.cursor) {
         Ok(page) => page,
         Err(_) => {
             return Err(Box::new(invalid_request_response(

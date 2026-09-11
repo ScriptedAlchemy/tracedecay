@@ -25,6 +25,13 @@ def require_nonnegative_integer(value: dict[str, Any], key: str, label: str) -> 
     return result
 
 
+def require_list(value: dict[str, Any], key: str, label: str) -> list[Any]:
+    result = value.get(key)
+    if not isinstance(result, list):
+        raise ValueError(f"{label} {key} must be a JSON array")
+    return result
+
+
 def validate_status(value: dict[str, Any], *, strict: bool = False) -> None:
     if not value:
         raise ValueError("status output must not be empty")
@@ -98,8 +105,34 @@ def validate_context(value: dict[str, Any], *, strict: bool = False) -> None:
     if not strict:
         return
 
-    if coverage.get("lexical") != "complete":
-        raise ValueError("strict context requires complete lexical coverage")
+    lexical = coverage.get("lexical")
+    if lexical != "complete":
+        # The strict contract is index readiness, not unbounded recall (#917):
+        # a lexical lane bounded by the retriever's document-frequency budget
+        # (`candidate_sources_pruned`, #1161) is acceptable only when served
+        # from the current generation. The lane carries `generation` exactly
+        # when it was served stale, and `freshness.state` is `fresh` only when
+        # the served generation is the one the scheduler reports current.
+        if not isinstance(lexical, dict) or lexical.get("status") != "partial":
+            raise ValueError("strict context requires complete lexical coverage")
+        reason = lexical.get("reason")
+        if reason != "candidate_sources_pruned":
+            raise ValueError(
+                "strict context requires complete lexical coverage; "
+                f"partial reason={reason or 'absent'} is not candidate_sources_pruned"
+            )
+        if lexical.get("generation") is not None:
+            raise ValueError(
+                "strict context rejects pruned lexical coverage served from a stale "
+                f"generation={lexical['generation']}"
+            )
+        freshness = value.get("freshness")
+        if not isinstance(freshness, dict) or freshness.get("state") != "fresh":
+            state = freshness.get("state", "absent") if isinstance(freshness, dict) else "absent"
+            raise ValueError(
+                "strict context requires pruned lexical coverage from a fresh generation; "
+                f"freshness.state={state}"
+            )
     if coverage.get("graph") != "complete":
         raise ValueError("strict context requires complete graph symbol evidence coverage")
     if not isinstance(value.get("search_matches"), list) or not value["search_matches"]:
@@ -187,8 +220,20 @@ def validate_pr_context(
         impact_partial = coverage.get("impact_partial")
         if not isinstance(symbols_complete, bool) or not isinstance(impact_partial, bool):
             raise ValueError("strict pr_context requires typed bounded analysis coverage")
+        # Every returned entry is either an analyzed seed symbol or a per-file
+        # `config_summary` that folds that file's config keys (never seeds).
+        entries = [
+            *require_list(value, "added", "pr_context"),
+            *require_list(value, "modified", "pr_context"),
+        ]
+        config_summaries = sum(
+            1
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("kind") == "config_summary"
+        )
         if (
-            coverage_counts["seed_symbols_analyzed"] != returned
+            len(entries) != returned
+            or coverage_counts["seed_symbols_analyzed"] + config_summaries != returned
             or coverage_counts["symbols_returned"] != returned
             or symbols_complete != page_complete
             or coverage["complete"] != (symbols_complete and not impact_partial)

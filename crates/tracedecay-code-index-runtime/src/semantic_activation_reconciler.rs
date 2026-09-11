@@ -131,7 +131,9 @@ impl DaemonSemanticActivationReconcilerV1 {
                                             // scheduler. Current/Indexing are never reprojected, so
                                             // mark_ready cannot start a projection feedback loop.
                                             projection_reoffered = schedulers
-                                                .reschedule_semantic_generation(&project_root).await;
+                                                .reschedule_semantic_generation(&project_root)
+                                                .await
+                                                .is_scheduled();
                                             projection_pending = !projection_reoffered;
                                         }
                                         let observed = coordinator.reobserve_current_activation().await?;

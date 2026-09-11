@@ -644,6 +644,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("readonly-runtime-client.db");
         let authority = DatabaseAuthority::acquire_test(&path, "readonly runtime client").unwrap();
+        tracedecay_global_db::register_test_schema_installer();
         let fixture = Database::publish_registered_test_runtime_with_retirement_control(
             &path,
             &authority,

@@ -1,46 +1,77 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock};
 use tracedecay_automation_runtime::automation::config::AutomationConfig;
+use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::context_scout::{
-    ContextScoutAddressV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
+    ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimRequestV1,
+    ContextScoutClaimWindowV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1,
     ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
     ContextScoutWorkV1,
 };
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookLifecyclePhaseV1, HookReadyGuidanceV1,
 };
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 use super::context_scout_model::context_scout_model_assistant_from_project_config;
-use super::context_scout_ports::ContextScoutConfigurationPinV1;
+use super::context_scout_ports::{
+    AdmittedContextScoutHookV1, ContextScoutAuthorityPinV1, ContextScoutConfigurationPinV1,
+    ContextScoutLifecycleAddressV1, ProjectContextScoutAddressRegistryV1,
+};
 use super::context_scout_v2::{
     ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1, ContextScoutControlV1,
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableRuntimeV1,
     ContextScoutDurableStartupOutcomeV1, ContextScoutDurableStoreOutcomeV1,
     ContextScoutDurableStoreV1, ContextScoutErrorV1, ContextScoutExplanationV1,
     ContextScoutModelAssistantV1, ContextScoutModelErrorV1, ContextScoutModelExecutionV1,
-    ContextScoutModelFuture, ContextScoutModelRequestV1, ContextScoutRecentReadOutcomeV1,
-    ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1,
-    ContextScoutServiceStateV1, ContextScoutStatusV1, ProjectContextScoutDurableStoreV1,
+    ContextScoutModelFuture, ContextScoutModelRequestV1, ContextScoutMutationBindingV1,
+    ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
+    ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1,
+    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
+    ProjectContextScoutDurableStoreV1,
 };
 use tracedecay_runtime_core::db::Database;
 
 const STARTUP_RECOVERY_LIMIT: usize = 32;
 const DELIVERY_LEASE_MICROS: i64 = 30 * 1_000_000;
+const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
+
+/// Typed admission for one hook-claim authority on a project owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextScoutClaimAdmissionV1 {
+    /// A new lifecycle was stored under the cap.
+    Mounted,
+    /// The same lifecycle replaced its previous mount.
+    Replaced,
+    /// The 256-claim cap is full and this lifecycle is new.
+    DeniedAtCapacity,
+    /// The claim was never admissible (zero watermark).
+    Rejected,
+}
+
+#[derive(Clone)]
+struct MountedContextScoutClaimV1 {
+    registry: Arc<ProjectContextScoutAddressRegistryV1>,
+    pin: ContextScoutAuthorityPinV1,
+    context: RequestContext,
+    lifecycle: ContextScoutLifecycleAddressV1,
+    address: ContextScoutAddressV1,
+    input_watermark: [u8; 32],
+}
 
 pub(crate) type ProjectScoutRuntime = ContextScoutDurableRuntimeV1<
     Arc<ProjectContextScoutDurableStoreV1>,
     Arc<dyn ContextScoutModelAssistantV1>,
 >;
 
-type ProjectContextScoutOwnerRegistry = BTreeMap<[u8; 16], Vec<Weak<ProjectContextScoutOwnerV1>>>;
+type ProjectContextScoutOwnerRegistry = BTreeMap<[u8; 16], Arc<ProjectContextScoutOwnerV1>>;
 
 pub struct ProjectContextScoutOwnerV1 {
     store: Arc<ProjectContextScoutDurableStoreV1>,
@@ -49,6 +80,7 @@ pub struct ProjectContextScoutOwnerV1 {
     inflight: StdMutex<BTreeMap<ContextScoutAddressV1, (u64, CancellationToken)>>,
     next_inflight_id: AtomicU64,
     startup: ContextScoutDurableStartupOutcomeV1,
+    claim_authorities: RwLock<Vec<MountedContextScoutClaimV1>>,
 }
 
 fn registered_context_scout_owners() -> &'static StdMutex<ProjectContextScoutOwnerRegistry> {
@@ -59,14 +91,51 @@ fn registered_context_scout_owners() -> &'static StdMutex<ProjectContextScoutOwn
 pub fn lookup_registered_context_scout_owners(
     project_id: [u8; 16],
 ) -> Vec<Arc<ProjectContextScoutOwnerV1>> {
+    let Ok(owners) = registered_context_scout_owners().lock() else {
+        return Vec::new();
+    };
+    owners
+        .get(&project_id)
+        .cloned()
+        .map(|owner| vec![owner])
+        .unwrap_or_default()
+}
+
+/// What one conditional unregister did to the project's owner slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextScoutOwnerUnregisterOutcomeV1 {
+    /// The slot held the owner bound to `database_path` and it was removed.
+    Removed,
+    /// No owner is registered for the project.
+    Vacant,
+    /// The slot holds an owner bound to a different database identity (a
+    /// replacement that outlived the retiring runtime); it was left in place.
+    StaleIdentity,
+}
+
+/// Drops the process-global owner for one project identity, but only when the
+/// registered owner still binds `database_path`. Retirement of a runtime whose
+/// owner was already replaced by a newer database identity is a typed no-op
+/// rather than a removal of the live replacement. Project close and isolated
+/// tests call this; branch reopen must not.
+pub fn unregister_registered_context_scout_owner(
+    project_id: [u8; 16],
+    database_path: &std::path::Path,
+) -> ContextScoutOwnerUnregisterOutcomeV1 {
     let Ok(mut owners) = registered_context_scout_owners().lock() else {
-        return Vec::new();
+        return ContextScoutOwnerUnregisterOutcomeV1::Vacant;
     };
-    let Some(project_owners) = owners.get_mut(&project_id) else {
-        return Vec::new();
+    let Some(existing) = owners.get(&project_id) else {
+        return ContextScoutOwnerUnregisterOutcomeV1::Vacant;
     };
-    project_owners.retain(|owner| owner.strong_count() > 0);
-    project_owners.iter().filter_map(Weak::upgrade).collect()
+    if !tracedecay_runtime_core::path_safety::same_canonical_path(
+        existing.store.database().canonical_database_path(),
+        database_path,
+    ) {
+        return ContextScoutOwnerUnregisterOutcomeV1::StaleIdentity;
+    }
+    owners.remove(&project_id);
+    ContextScoutOwnerUnregisterOutcomeV1::Removed
 }
 
 impl ProjectContextScoutOwnerV1 {
@@ -93,6 +162,13 @@ impl ProjectContextScoutOwnerV1 {
         now: UtcMicros,
         model_config: Option<&AutomationConfig>,
     ) -> Option<Arc<Self>> {
+        if let Some(existing) = lookup_registered_context_scout_owners(project_id)
+            .into_iter()
+            .next()
+            && existing.binds_database(&database)
+        {
+            return Some(existing);
+        }
         let (store, startup) = ProjectContextScoutDurableStoreV1::startup_from_project_database(
             database,
             project_id,
@@ -111,16 +187,128 @@ impl ProjectContextScoutOwnerV1 {
             inflight: StdMutex::new(BTreeMap::new()),
             next_inflight_id: AtomicU64::new(1),
             startup,
+            claim_authorities: RwLock::new(Vec::new()),
         });
         let mut owners = registered_context_scout_owners().lock().ok()?;
-        let project_owners = owners.entry(project_id).or_default();
-        project_owners.retain(|owner| owner.strong_count() > 0);
-        project_owners.push(Arc::downgrade(&owner));
+        if let Some(existing) = owners.get(&project_id)
+            && existing.binds_database(owner.store.database())
+        {
+            return Some(Arc::clone(existing));
+        }
+        owners.insert(project_id, Arc::clone(&owner));
         Some(owner)
+    }
+
+    fn binds_database(&self, database: &Database) -> bool {
+        self.store.database().canonical_database_path() == database.canonical_database_path()
     }
 
     pub fn store(&self) -> Arc<ProjectContextScoutDurableStoreV1> {
         Arc::clone(&self.store)
+    }
+
+    /// Publishes one hook-admissible claim authority after the durable
+    /// address registry and the current configuration have been checked.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mount_current_claim_authority(
+        &self,
+        registry: Arc<ProjectContextScoutAddressRegistryV1>,
+        hook: &AdmittedContextScoutHookV1,
+        pin: ContextScoutAuthorityPinV1,
+        context: RequestContext,
+        lifecycle: ContextScoutLifecycleAddressV1,
+        address: ContextScoutAddressV1,
+        input_watermark: [u8; 32],
+        observed_at: UtcMicros,
+        configuration_is_current: bool,
+    ) -> ContextScoutClaimAdmissionV1 {
+        if input_watermark == [0; 32]
+            || !configuration_is_current
+            || registry
+                .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
+                .await
+                != super::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+                    address,
+                )
+        {
+            return ContextScoutClaimAdmissionV1::Rejected;
+        }
+        let mut authorities = self.claim_authorities.write().await;
+        if let Some(existing) = authorities
+            .iter_mut()
+            .find(|existing| existing.lifecycle == lifecycle)
+        {
+            existing.registry = registry;
+            existing.pin = pin;
+            existing.context = context;
+            existing.address = address;
+            existing.input_watermark = input_watermark;
+            return ContextScoutClaimAdmissionV1::Replaced;
+        }
+        if authorities.len() >= MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES {
+            return ContextScoutClaimAdmissionV1::DeniedAtCapacity;
+        }
+        authorities.push(MountedContextScoutClaimV1 {
+            registry,
+            pin,
+            context,
+            lifecycle,
+            address,
+            input_watermark,
+        });
+        ContextScoutClaimAdmissionV1::Mounted
+    }
+
+    pub async fn resolve_current_claim_authority(
+        &self,
+        hook: &AdmittedContextScoutHookV1,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+        observed_at: UtcMicros,
+        configuration_is_current: bool,
+    ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
+        let mounted = self
+            .claim_authorities
+            .read()
+            .await
+            .iter()
+            .find(|mounted| mounted.lifecycle == *lifecycle)
+            .cloned()?;
+        if !configuration_is_current {
+            return None;
+        }
+        let resolved = mounted
+            .registry
+            .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
+            .await;
+        (resolved
+            == super::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
+                mounted.address,
+            ))
+        .then_some((mounted.address, mounted.input_watermark))
+    }
+
+    pub async fn mounted_claim_pin(
+        &self,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+    ) -> Option<ContextScoutAuthorityPinV1> {
+        self.claim_authorities
+            .read()
+            .await
+            .iter()
+            .find(|mounted| mounted.lifecycle == *lifecycle)
+            .map(|mounted| mounted.pin.clone())
+    }
+
+    pub async fn resolve_admitted_claim(
+        &self,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+    ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
+        self.claim_authorities
+            .read()
+            .await
+            .iter()
+            .find(|mounted| mounted.lifecycle == *lifecycle)
+            .map(|mounted| (mounted.address, mounted.input_watermark))
     }
 
     pub fn startup_outcome(&self) -> &ContextScoutDurableStartupOutcomeV1 {
@@ -260,6 +448,32 @@ impl ProjectContextScoutOwnerV1 {
             .complete_delivery(claim, receipt)
             .await
             .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
+    }
+
+    pub async fn record_delivery_by_handle(
+        &self,
+        claim: &ContextScoutClaimHandleV1,
+        receipt: &ContextScoutDeliveryReceiptV1,
+    ) -> ContextScoutDurableStoreOutcomeV1 {
+        let configuration = self.configuration.read().await;
+        let Some(control) = configuration
+            .as_ref()
+            .map(ContextScoutConfigurationPinV1::control)
+        else {
+            return ContextScoutDurableStoreOutcomeV1::Unavailable;
+        };
+        self.store
+            .record_delivery_by_lease(
+                claim.work,
+                claim.envelope_id,
+                ContextScoutLeaseV1 {
+                    lease_id: claim.lease_id,
+                    expires_at: claim.lease_expires_at,
+                },
+                control.configuration_revision,
+                receipt,
+            )
+            .await
     }
 
     #[hotpath::measure(
@@ -639,8 +853,101 @@ impl ProjectContextScoutOwnerV1 {
         if claim.entry.work.address == address && claim.entry.envelope.delivery_window == window {
             return ContextScoutDurableClaimOutcomeV1::Claimed(claim);
         }
-        let _ = self.store.requeue(claim).await;
-        ContextScoutDurableClaimOutcomeV1::Empty
+        match self.store.requeue(claim).await {
+            ContextScoutDurableStoreOutcomeV1::Unavailable => {
+                ContextScoutDurableClaimOutcomeV1::Unavailable
+            }
+            ContextScoutDurableStoreOutcomeV1::Stored
+            | ContextScoutDurableStoreOutcomeV1::Duplicate
+            | ContextScoutDurableStoreOutcomeV1::Superseded => {
+                ContextScoutDurableClaimOutcomeV1::Empty
+            }
+        }
+    }
+
+    pub async fn claim_delivery_request(
+        &self,
+        request: &ContextScoutClaimRequestV1,
+        now: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> ContextScoutDurableClaimOutcomeV1 {
+        let Some(ContextScoutPublicMutationV1::Claim {
+            address,
+            window,
+            configuration_revision,
+            lease,
+            ..
+        }) = self.public_claim_mutation(request, now, expires_at).await
+        else {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        };
+        let claimed = self.claim_delivery_exact(address, window, now, lease).await;
+        let ContextScoutDurableClaimOutcomeV1::Claimed(claim) = claimed else {
+            return claimed;
+        };
+        if claim.entry.envelope.configuration_revision == configuration_revision {
+            return ContextScoutDurableClaimOutcomeV1::Claimed(claim);
+        }
+        match self.store.requeue(claim).await {
+            ContextScoutDurableStoreOutcomeV1::Unavailable => {
+                ContextScoutDurableClaimOutcomeV1::Unavailable
+            }
+            ContextScoutDurableStoreOutcomeV1::Stored
+            | ContextScoutDurableStoreOutcomeV1::Duplicate
+            | ContextScoutDurableStoreOutcomeV1::Superseded => {
+                ContextScoutDurableClaimOutcomeV1::Empty
+            }
+        }
+    }
+
+    pub async fn public_claim_mutation(
+        &self,
+        request: &ContextScoutClaimRequestV1,
+        now: UtcMicros,
+        expires_at: UtcMicros,
+    ) -> Option<ContextScoutPublicMutationV1> {
+        let configuration = self.configuration.read().await;
+        let control = configuration
+            .as_ref()
+            .map(ContextScoutConfigurationPinV1::control)?;
+        let window = match request.window {
+            ContextScoutClaimWindowV1::IdleWindow => ContextScoutDeliveryWindowV1::IdleWindow,
+            ContextScoutClaimWindowV1::OnRequest => ContextScoutDeliveryWindowV1::OnRequest,
+        };
+        let digest = canonical_sha256(&(
+            "tracedecay.context-scout.delivery-lease.v1",
+            &request.idempotency_key,
+            request.address,
+            request.window,
+            control.configuration_revision,
+        ))
+        .ok()?;
+        let encoded = digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .and_then(|encoded| encoded.get(..32))?;
+        let mut lease_id = [0; 16];
+        if hex::decode_to_slice(encoded, &mut lease_id).is_err() {
+            return None;
+        }
+        Some(ContextScoutPublicMutationV1::Claim {
+            address: request.address,
+            window,
+            configuration_revision: control.configuration_revision,
+            now,
+            lease: ContextScoutLeaseV1 {
+                lease_id,
+                expires_at,
+            },
+        })
+    }
+
+    pub async fn commit_public_mutation(
+        &self,
+        binding: ContextScoutMutationBindingV1,
+        mutation: ContextScoutPublicMutationV1,
+    ) -> ContextScoutMutationSettlementOutcomeV1 {
+        self.store.commit_public_mutation(binding, mutation).await
     }
 }
 
@@ -790,7 +1097,27 @@ impl ContextScoutModelAssistantV1 for UnavailableConfiguredContextScoutModelV1 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::context_scout_ports::ContextScoutAddressBindOutcomeV1;
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use tracedecay_application::configuration::ConfigurationCurrentStateV1;
+    use tracedecay_contracts::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::canonical_sha256;
+    use tracedecay_domain::configuration::{
+        CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CandidateDispositionV1, ConfigurationCandidateV1,
+        ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
+        ConfigurationValueV1, ContextScoutSettingsV1, SettingKey,
+    };
+    use tracedecay_domain::feedback::FeedbackScopeV1;
+    use tracedecay_domain::{ActorId, RepositoryId, WorktreeId};
+    use tracedecay_hooks::{
+        HookCapabilityV1, HookEventFamily, HookHostV1, HookScopeBindingV1,
+        NativeEnvelopeMaterialV1, decode_bound_native_hook_event, stock_event_support,
+    };
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     #[test]
     fn state_transition_rejects_model_route_or_limit_drift() {
@@ -909,5 +1236,332 @@ mod tests {
             ContextScoutDeliveryWindowV1::OnRequest,
             &HookEventV2::PromptBoundary,
         ));
+    }
+
+    async fn test_database() -> (tempfile::TempDir, Database) {
+        crate::register_test_schema_installer();
+        let temporary = tempfile::tempdir().expect("owner fixture");
+        let path = temporary.path().join("graph.db");
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &path,
+            "Context Scout owner",
+        )
+        .expect("database authority");
+        let database = Database::publish_test_runtime(
+            &path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("project database")
+        .0;
+        (temporary, database)
+    }
+
+    async fn test_owner(project_id: [u8; 16]) -> Arc<ProjectContextScoutOwnerV1> {
+        let (_temporary, database) = test_database().await;
+        ProjectContextScoutOwnerV1::startup(database, project_id, UtcMicros(1), None)
+            .await
+            .expect("owner")
+    }
+
+    fn unregister(
+        project_id: [u8; 16],
+        owner: &ProjectContextScoutOwnerV1,
+    ) -> ContextScoutOwnerUnregisterOutcomeV1 {
+        unregister_registered_context_scout_owner(
+            project_id,
+            owner.store().database().canonical_database_path(),
+        )
+    }
+
+    fn claim_id<T: TryFrom<String>>(value: &str) -> T
+    where
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).unwrap()
+    }
+
+    fn claim_lifecycle(marker: u16) -> ContextScoutLifecycleAddressV1 {
+        ContextScoutLifecycleAddressV1 {
+            profile_id: claim_id("profile.scout.fixture"),
+            provider_id: claim_id("provider.claude"),
+            project_id: claim_id("project.scout.fixture"),
+            worktree_id: claim_id("worktree.scout.fixture"),
+            session_id: claim_id("session.scout.fixture"),
+            thread_id: claim_id("thread.scout.fixture"),
+            turn_id: claim_id("turn.scout.fixture"),
+            agent_id: claim_id("agent.scout.fixture"),
+            logical_message_id: claim_id(&format!("message.scout.cap.{marker:03}")),
+        }
+    }
+
+    fn claim_mount_authority(
+        database: Database,
+    ) -> (
+        Arc<ProjectContextScoutAddressRegistryV1>,
+        AdmittedContextScoutHookV1,
+        ContextScoutAuthorityPinV1,
+        RequestContext,
+        UtcMicros,
+    ) {
+        let observed_at = UtcMicros(10);
+        let project_id = claim_id::<tracedecay_domain::ProjectId>("project.scout.fixture");
+        let repository_id = claim_id::<RepositoryId>("repository.scout.fixture");
+        let worktree_id = claim_id::<WorktreeId>("worktree.scout.fixture");
+        let scope = ResolvedScope::new(
+            project_id.clone(),
+            repository_id.clone(),
+            worktree_id.clone(),
+            Some(claim_id("refs/heads/main")),
+        )
+        .expect("scope");
+        let capability = CapabilityId::new("capability.scout.cap").expect("capability");
+        let use_case = UseCaseId::new("use-case.scout.cap").expect("use case");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.scout.cap").expect("grant"),
+            1,
+            canonical_sha256(&"scout.cap").expect("digest"),
+            ActorId::new("actor.scout.issuer").expect("issuer"),
+            UtcMicros(1),
+            UtcMicros(10_000),
+            scope.clone(),
+            BTreeSet::from([capability]),
+            BTreeSet::from([use_case]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        let context = RequestContext::new(
+            ActorId::new("actor.scout.requester").expect("actor"),
+            scope.clone(),
+            grant,
+            RequestId::new("request.scout.cap").expect("request"),
+            Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            CancellationContext::active("cancel.scout.cap").expect("cancel"),
+        )
+        .expect("request context");
+        let setting_key = SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY).expect("setting");
+        let revision_id = ConfigurationRevisionId::new("revision.scout.cap").expect("revision");
+        let snapshot = ConfigurationSnapshotV1::new(
+            BTreeMap::from([(
+                setting_key.clone(),
+                ConfigurationValueV1::ContextScoutSettings(ContextScoutSettingsV1::disabled()),
+            )]),
+            BTreeMap::from([(
+                setting_key,
+                vec![ConfigurationCandidateV1 {
+                    layer: ConfigurationLayerIdV1::Project {
+                        project_id: project_id.clone(),
+                    },
+                    revision_id: revision_id.clone(),
+                    disposition: CandidateDispositionV1::Winning,
+                    safe_reason: None,
+                }],
+            )]),
+        )
+        .expect("snapshot");
+        let configuration =
+            ContextScoutConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {
+                revision_id,
+                snapshot,
+            })
+            .expect("configuration pin");
+        let feedback_scope = FeedbackScopeV1 {
+            project_id,
+            repository_id,
+            worktree_id,
+            branch_ref: "refs/heads/main".to_owned(),
+            head_commit_id: claim_id("commit.scout.fixture"),
+        };
+        let pin =
+            ContextScoutAuthorityPinV1::new(&context, feedback_scope, configuration, observed_at)
+                .expect("authority pin");
+        let binding = HookScopeBindingV1 {
+            host: HookHostV1::ClaudeCode,
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: 1,
+            binding_token: [4; 32],
+            capabilities: [
+                HookEventFamily::SessionBoundary,
+                HookEventFamily::PromptBoundary,
+                HookEventFamily::ToolLifecycle,
+                HookEventFamily::SavedEdit,
+                HookEventFamily::TestLifecycle,
+            ]
+            .into_iter()
+            .map(|family| HookCapabilityV1 {
+                family,
+                support: stock_event_support(HookHostV1::ClaudeCode, family),
+            })
+            .collect(),
+        };
+        let envelope = decode_bound_native_hook_event(
+            HookHostV1::ClaudeCode,
+            include_bytes!(
+                "../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+            ),
+            &binding,
+            NativeEnvelopeMaterialV1 {
+                event_id: [5; 16],
+                protected_session_id: [6; 32],
+                observed_at,
+                tool_id: Some([7; 16]),
+                effect_receipt_id: Some([8; 16]),
+                file_id: Some([9; 16]),
+                changed_range_count: 1,
+            },
+        )
+        .expect("hook envelope");
+        let hook = AdmittedContextScoutHookV1::new(envelope, &binding).expect("admitted hook");
+        let registry =
+            ProjectContextScoutAddressRegistryV1::new(database, claim_id("project.scout.fixture"))
+                .expect("address registry");
+        (registry, hook, pin, context, observed_at)
+    }
+
+    #[tokio::test]
+    async fn stale_retirement_of_replaced_owner_keeps_the_live_owner() {
+        let project_id = [44; 16];
+        let (_first_temporary, first_database) = test_database().await;
+        let first =
+            ProjectContextScoutOwnerV1::startup(first_database, project_id, UtcMicros(1), None)
+                .await
+                .expect("owner A");
+        let (_second_temporary, second_database) = test_database().await;
+        let second =
+            ProjectContextScoutOwnerV1::startup(second_database, project_id, UtcMicros(2), None)
+                .await
+                .expect("owner B replaces A");
+        assert!(!Arc::ptr_eq(&first, &second));
+
+        // Late retirement of runtime A must not evict B.
+        assert_eq!(
+            unregister(project_id, &first),
+            ContextScoutOwnerUnregisterOutcomeV1::StaleIdentity
+        );
+        let registered = lookup_registered_context_scout_owners(project_id);
+        assert_eq!(registered.len(), 1);
+        assert!(
+            Arc::ptr_eq(&registered[0], &second),
+            "stale retirement must leave the replacement owner registered"
+        );
+
+        assert_eq!(
+            unregister(project_id, &second),
+            ContextScoutOwnerUnregisterOutcomeV1::Removed
+        );
+        assert!(lookup_registered_context_scout_owners(project_id).is_empty());
+        assert_eq!(
+            unregister(project_id, &second),
+            ContextScoutOwnerUnregisterOutcomeV1::Vacant
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_replaces_owner_when_database_identity_differs() {
+        let project_id = [43; 16];
+        let (_first_temporary, first_database) = test_database().await;
+        let first =
+            ProjectContextScoutOwnerV1::startup(first_database, project_id, UtcMicros(1), None)
+                .await
+                .expect("first owner");
+        let (_second_temporary, second_database) = test_database().await;
+        let second = ProjectContextScoutOwnerV1::startup(
+            second_database.clone(),
+            project_id,
+            UtcMicros(2),
+            None,
+        )
+        .await
+        .expect("replaced owner");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "a different database identity must not reuse the stale owner"
+        );
+        assert_eq!(
+            second.store().database().canonical_database_path(),
+            second_database.canonical_database_path()
+        );
+        unregister(project_id, &second);
+    }
+
+    #[tokio::test]
+    async fn startup_reuses_the_live_owner_for_the_same_project() {
+        let project_id = [41; 16];
+        let (_temporary, database) = test_database().await;
+        let first =
+            ProjectContextScoutOwnerV1::startup(database.clone(), project_id, UtcMicros(1), None)
+                .await
+                .expect("owner");
+        let again = ProjectContextScoutOwnerV1::startup(database, project_id, UtcMicros(2), None)
+            .await
+            .expect("reused owner");
+        assert!(Arc::ptr_eq(&first, &again));
+        unregister(project_id, &again);
+    }
+
+    #[tokio::test]
+    async fn two_hundred_fifty_seventh_claim_is_a_typed_denial() {
+        let project_id = [42; 16];
+        let owner = test_owner(project_id).await;
+        let (_temporary, database) = test_database().await;
+        let (registry, hook, pin, context, observed_at) = claim_mount_authority(database);
+        for marker in 0..MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES {
+            let lifecycle = claim_lifecycle(u16::try_from(marker).expect("marker"));
+            let address = match registry.bind(&hook, &pin, lifecycle.clone()).await {
+                ContextScoutAddressBindOutcomeV1::Bound(address)
+                | ContextScoutAddressBindOutcomeV1::Existing(address) => address,
+                other => panic!("expected bound address, got {other:?}"),
+            };
+            assert_eq!(
+                owner
+                    .mount_current_claim_authority(
+                        Arc::clone(&registry),
+                        &hook,
+                        pin.clone(),
+                        context.clone(),
+                        lifecycle,
+                        address,
+                        [1; 32],
+                        observed_at,
+                        true,
+                    )
+                    .await,
+                ContextScoutClaimAdmissionV1::Mounted
+            );
+        }
+        let (_overflow_temporary, overflow_database) = test_database().await;
+        let (overflow_registry, overflow_hook, overflow_pin, overflow_context, overflow_at) =
+            claim_mount_authority(overflow_database);
+        let overflow_lifecycle = claim_lifecycle(
+            u16::try_from(MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES).expect("cap"),
+        );
+        let overflow_address = match overflow_registry
+            .bind(&overflow_hook, &overflow_pin, overflow_lifecycle.clone())
+            .await
+        {
+            ContextScoutAddressBindOutcomeV1::Bound(address)
+            | ContextScoutAddressBindOutcomeV1::Existing(address) => address,
+            other => panic!("expected overflow bound address, got {other:?}"),
+        };
+        assert_eq!(
+            owner
+                .mount_current_claim_authority(
+                    overflow_registry,
+                    &overflow_hook,
+                    overflow_pin,
+                    overflow_context,
+                    overflow_lifecycle,
+                    overflow_address,
+                    [1; 32],
+                    overflow_at,
+                    true,
+                )
+                .await,
+            ContextScoutClaimAdmissionV1::DeniedAtCapacity
+        );
+        unregister(project_id, &owner);
     }
 }

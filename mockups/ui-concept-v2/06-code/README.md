@@ -25,6 +25,7 @@ Route: `/code`.
 | File, source, impact, and tests | [final/01-semantic-cortex.md](final/01-semantic-cortex.md) | Drill from selection into exact evidence modes. |
 | Fresh, stale, warming, partial, unavailable diagnostics | [final/01-semantic-cortex.md](final/01-semantic-cortex.md) | Read each independent authority state. |
 | Loaded Trace or Core lens | No current plate | Required interaction/result is specified but not pictured as a separate still. |
+| Structural comparison | [final/02-structural-comparison.md](final/02-structural-comparison.md) | Retain the measured atlas while comparing named evidence layers and opening related Loom proximity. |
 
 “Depicted” means visible in the plate (including a labelled state legend), not executed by the still. “No current plate” is reserved for required behavior or result that no current plate pictures.
 

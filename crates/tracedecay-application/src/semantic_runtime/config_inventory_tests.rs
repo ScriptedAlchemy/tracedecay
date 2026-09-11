@@ -4,7 +4,7 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
 use tracedecay_domain::{
     CalibrationProfileId, DiversityPolicy, FusionProfile, ManifestDigest, ProjectId, RepositoryId,
-    RetrievalBudget, RetrieverKind, VectorGenerationIdV1, WorktreeId,
+    RetrievalBudget, RetrieverKind, UtcMicros, VectorGenerationIdV1, WorktreeId,
 };
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_query::search_quality::{
@@ -15,6 +15,7 @@ use tracedecay_query::search_quality::{
 
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
+    RetrievalProfileCasV1, RetrievalProfileCommitMetadataV1, RetrievalProfileMutationCapabilityV1,
     RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
 use crate::semantic_runtime::{
@@ -176,6 +177,80 @@ fn initial_state(label: &str) -> (SemanticConfigurationPinV1, RetrievalProfileSt
         },
         state,
     )
+}
+
+/// A grant minted for `revision`, already rechecked against a matching current
+/// authorization. Only the configuration revision varies between callers.
+fn capability(revision: ConfigurationRevisionId) -> RetrievalProfileMutationCapabilityV1 {
+    use tracedecay_configuration::{
+        ConfigurationMutationAuthority, CurrentConfigurationMutationAuthorizationV1,
+    };
+    use tracedecay_domain::configuration::{
+        ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1,
+    };
+
+    let scope_digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+    let policy_digest: tracedecay_domain::AccessPolicyDigest =
+        typed(&format!("sha256:{}", "b".repeat(64)));
+    RetrievalProfileMutationCapabilityV1::from_current_authorization(
+        ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                typed("configuration.grant-receipt.scope"),
+                typed("configuration.grant.scope"),
+                typed("actor.scope"),
+                ConfigurationMutationOperationV1::DirectMutation,
+                scope_digest.clone(),
+                revision,
+                1,
+                policy_digest.clone(),
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                Some(typed("configuration.idempotency.scope")),
+                UtcMicros(1),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        },
+        CurrentConfigurationMutationAuthorizationV1 {
+            grant_revision: 1,
+            grant_digest: scope_digest.clone(),
+            scope_digest,
+            policy_epoch: 1,
+            policy_digest,
+        },
+    )
+    .unwrap()
+}
+
+fn cas(state: &RetrievalProfileStateV1) -> RetrievalProfileCasV1 {
+    RetrievalProfileCasV1 {
+        expected_configuration_revision: state.configuration_revision().clone(),
+        expected_active_digest: state.active().profile_digest().clone(),
+        expected_rollback_digest: state.rollback_profile().map(|p| p.profile_digest().clone()),
+    }
+}
+
+fn commit_metadata(
+    base: ConfigurationRevisionId,
+    result: ConfigurationRevisionId,
+) -> RetrievalProfileCommitMetadataV1 {
+    RetrievalProfileCommitMetadataV1::new(
+        ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+        base,
+        result,
+        UtcMicros(2),
+    )
+}
+
+fn compat(state: &RetrievalProfileStateV1) -> RetrievalRuntimeCompatibilityV1 {
+    RetrievalRuntimeCompatibilityV1 {
+        retrieval_ceiling: state.active().profile().retrieval_budget,
+        semantic: None,
+        semantic_ceiling: None,
+        rerank: None,
+        rerank_ceiling: None,
+    }
 }
 
 fn scope(project: &ProjectId, repository: &str, worktree: &str) -> ResolvedScope {
@@ -392,4 +467,209 @@ async fn absent_project_inventory_is_authoritative_until_profile_bootstrap() {
         .unwrap();
     assert!(published.revision().is_some());
     assert_eq!(published.scope_count(), 1);
+}
+
+#[test]
+fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope() {
+    use crate::config::retrieval::RetrievalProfileActivationErrorV1;
+
+    let (_, mut primary) = initial_state("a");
+    let mut sibling = primary.clone();
+    let (_, candidate) = initial_state("b");
+    let runtime = compat(&primary);
+    let first_revision = primary.configuration_revision().clone();
+    let sibling_revision = typed::<ConfigurationRevisionId>("configuration.sibling");
+    let next_revision = typed::<ConfigurationRevisionId>("configuration.next");
+    let initial = cas(&primary);
+    primary
+        .activate(
+            &capability(first_revision.clone()),
+            &initial,
+            candidate.active().clone(),
+            &runtime,
+            &runtime,
+            commit_metadata(first_revision.clone(), sibling_revision.clone()),
+        )
+        .unwrap();
+    // A project commit must not change the sibling's scope token. Its new grant
+    // authorizes the current project revision, while CAS checks its own state.
+    sibling
+        .activate(
+            &capability(sibling_revision.clone()),
+            &initial,
+            candidate.active().clone(),
+            &runtime,
+            &runtime,
+            commit_metadata(sibling_revision.clone(), next_revision.clone()),
+        )
+        .unwrap();
+    sibling.snapshot().unwrap().into_state().unwrap();
+    let committed = sibling.clone();
+    assert_eq!(
+        sibling.activate(
+            &capability(next_revision.clone()),
+            &initial,
+            candidate.active().clone(),
+            &runtime,
+            &runtime,
+            commit_metadata(next_revision.clone(), typed("configuration.stale")),
+        ),
+        Err(RetrievalProfileActivationErrorV1::CasConflict),
+    );
+    assert_eq!(sibling, committed);
+    let expected = cas(&sibling);
+    assert_eq!(
+        sibling.rollback(
+            &capability(sibling_revision.clone()),
+            &expected,
+            &runtime,
+            "restore".into(),
+            commit_metadata(next_revision.clone(), typed("configuration.denied")),
+        ),
+        Err(RetrievalProfileActivationErrorV1::Unauthorized),
+    );
+    assert_eq!(sibling, committed);
+    // Unrelated project changes also leave rollback available.
+    let settings_revision = typed::<ConfigurationRevisionId>("configuration.settings");
+    sibling
+        .rollback(
+            &capability(settings_revision.clone()),
+            &expected,
+            &runtime,
+            "restore".into(),
+            commit_metadata(settings_revision, typed("configuration.restored")),
+        )
+        .unwrap();
+    assert_eq!(sibling.active(), committed.rollback_profile().unwrap());
+    sibling.snapshot().unwrap().into_state().unwrap();
+    let restored_cas = cas(&sibling);
+    let restored_revision = sibling.configuration_revision().clone();
+    sibling
+        .activate(
+            &capability(restored_revision.clone()),
+            &restored_cas,
+            candidate.active().clone(),
+            &runtime,
+            &runtime,
+            commit_metadata(restored_revision, typed("configuration.reactivated")),
+        )
+        .unwrap();
+    assert_eq!(sibling.active(), committed.active());
+    assert_eq!(sibling.rollback_profile(), committed.rollback_profile());
+    // Matching digests after activate/rollback/activate must not admit an old CAS.
+    let revision = sibling.configuration_revision().clone();
+    assert_eq!(
+        sibling.rollback(
+            &capability(revision.clone()),
+            &expected,
+            &runtime,
+            "stale restore".into(),
+            commit_metadata(revision, typed("configuration.stale-aba")),
+        ),
+        Err(RetrievalProfileActivationErrorV1::CasConflict),
+    );
+}
+
+/// A transition that lost a race on its own scope must stay a *retryable*
+/// refusal.
+///
+/// Keying the compare-and-swap on the scope's own semantic token (rather than
+/// the project configuration revision) removed the revision guard that used to
+/// answer `Conflict` here, so the same-scope race fell through to the profile
+/// CAS and was reported as a non-retryable rejection. The refusal is still
+/// typed and the state is still untouched; only the classification is at risk,
+/// and callers retry on `Conflict` alone.
+#[tokio::test]
+async fn concurrent_same_scope_transition_is_refused_as_a_retryable_conflict() {
+    use tracedecay_domain::configuration::{ConfigurationLayerIdV1, SettingKey};
+    use tracedecay_global_db::configuration::contracts::DirectConfigurationMutation;
+
+    let directory = tempfile::tempdir().expect("temporary profile");
+    let project = ProjectId::new("project.same-scope-race").expect("project");
+    let scope = scope(&project, "repository.race", "worktree.race");
+    let runtime = RegisteredGlobalDbTestRuntime::profile(&directory.path().join("profile"))
+        .await
+        .expect("open profile database");
+    let store = ProductionSemanticRetrievalConfigurationStoreV1::open(
+        runtime.profile_database_arc(),
+        scope,
+    )
+    .expect("configuration store");
+
+    let (base_pin, installed) = initial_state("a");
+    store
+        .install_initial_state(&base_pin, &installed)
+        .await
+        .expect("install initial state");
+    let (result_pin, candidate) = initial_state("b");
+    let compatibility = compat(&installed);
+    let mutation = DirectConfigurationMutation::Unset {
+        layer: ConfigurationLayerIdV1::Project {
+            project_id: project.clone(),
+        },
+        key: SettingKey::new("semantic.runtime").expect("setting key"),
+    };
+    let freshness = ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).expect("digest");
+
+    // The winner of the race commits this scope's semantic state; the loser is
+    // still holding the compare-and-swap token it read beforehand.
+    let mut won = installed.clone();
+    won.activate(
+        &capability(base_pin.revision_id.clone()),
+        &cas(&installed),
+        candidate.active().clone(),
+        &compatibility,
+        &compatibility,
+        commit_metadata(base_pin.revision_id.clone(), result_pin.revision_id.clone()),
+    )
+    .expect("the winning same-scope transition");
+    assert_ne!(cas(&won), cas(&installed));
+
+    let refusal = store
+        .stage_activation(
+            base_pin.clone(),
+            result_pin.clone(),
+            &capability(base_pin.revision_id.clone()),
+            cas(&won),
+            candidate.active().clone(),
+            &compatibility,
+            &compatibility,
+            mutation.clone(),
+            freshness.clone(),
+            UtcMicros(2),
+        )
+        .await
+        .expect_err("a lost same-scope race must not stage");
+    assert_eq!(refusal, SemanticConfigurationBackendErrorV1::Conflict);
+
+    // Not every refusal became retryable: an unusable grant is still a typed,
+    // non-retryable rejection that names its stage.
+    let unauthorized = store
+        .stage_activation(
+            base_pin.clone(),
+            result_pin.clone(),
+            &capability(typed::<ConfigurationRevisionId>("configuration.elsewhere")),
+            cas(&installed),
+            candidate.active().clone(),
+            &compatibility,
+            &compatibility,
+            mutation,
+            freshness,
+            UtcMicros(2),
+        )
+        .await
+        .expect_err("a grant minted for another revision must not stage");
+    assert_eq!(
+        unauthorized,
+        SemanticConfigurationBackendErrorV1::RejectedAt("stage_activation.state_activate"),
+    );
+
+    // Neither refusal moved the scope.
+    assert_eq!(
+        store
+            .current_state_if_present()
+            .await
+            .expect("read back the scope state"),
+        Some(installed),
+    );
 }

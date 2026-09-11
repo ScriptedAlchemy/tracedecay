@@ -1,6 +1,6 @@
 // Compiled twice on purpose: `build.rs` mounts this file as a `#[path]`
 // module to stage the dashboard bundle it embeds, and
-// `tests/dashboard_bundle_test.rs` mounts the same file so the tests exercise
+// `tests/core_cli_suite/dashboard_bundle_test.rs` mounts the same file so the tests exercise
 // the code the build script runs rather than a copy that can drift. Both hosts
 // also mount `dashboard_manifest.rs` beside it under that name. Items are
 // otherwise fully qualified so the file stays self-contained.

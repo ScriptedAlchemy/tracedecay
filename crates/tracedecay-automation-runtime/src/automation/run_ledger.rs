@@ -374,7 +374,7 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
             })?;
             exact_publication::ensure_no_exact_append_intent(dashboard_root)?;
             let mut file =
-                exact_publication::open_run_ledger_nofollow(path, true, false, true, true)?
+                exact_publication::open_run_ledger_nofollow(path, true, true, true, true)?
                     .ok_or_else(|| {
                         std::io::Error::new(
                             std::io::ErrorKind::NotFound,

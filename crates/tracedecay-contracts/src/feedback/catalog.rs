@@ -5,25 +5,24 @@
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, OperationId,
-    PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, ServiceId, StreamingContract, TerminalState,
-    TerminalStateContract, UnavailabilityReason, UseCaseId,
+    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
+    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
+    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
+    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
+    LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
-use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
     APPLICATION_COMPACT_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
+use crate::{current_application_bindings, current_bindings};
 
 use super::read::{
     CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
@@ -216,117 +215,34 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
     },
 ];
 
-/// Specs with concrete internal application owners.
-///
-/// Registration proves the handler exists; it does not prove that a host can
-/// construct the request. Transport availability is narrowed independently
-/// below.
-const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
 pub fn feedback_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
-    let handlers = feedback_surface_handler_descriptors()?;
-    feedback_surface_catalog_contribution_for_handlers(&handlers)
+    feedback_surface_catalog_contribution_from_specs()
 }
 
-/// Daemon-owned public HTTP bindings for every feedback operation mounted by
-/// the complete application router.
-pub fn feedback_http_executable_binding_registry()
--> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
-    let contribution = feedback_surface_catalog_contribution()?;
-    let feedback_service_id = ServiceId::new("service.application.feedback")?;
-    let primitive_service_id = ServiceId::new("service.application.primitive")?;
-    let mut bindings = Vec::new();
-    for spec in FEEDBACK_SPECS
-        .iter()
-        .filter(|spec| spec.surfaces.contains(&BindingSurface::Http))
-    {
-        let capability_id = CapabilityId::new(spec.capability)?;
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| manifest.capability_id() == &capability_id)
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "feedback HTTP executable capability",
-            })?;
-        let schema = contribution.executable_schema(&capability_id).ok_or(
-            ApplicationContractError::Inconsistent {
-                field: "feedback HTTP executable schema",
-            },
-        )?;
-        let http_binding = contribution
-            .bindings()
-            .iter()
-            .find(|binding| {
-                binding.capability_id() == &capability_id
-                    && binding.surface() == BindingSurface::Http
-            })
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "feedback HTTP surface binding",
-            })?;
-        let route_path = match spec.operation {
-            "affected_tests" => "/application/tests/affected".to_owned(),
-            "test_results" => "/application/tests/results".to_owned(),
-            operation => format!(
-                "/application/feedback/{}",
-                operation.strip_prefix("feedback_").ok_or(
-                    ApplicationContractError::Inconsistent {
-                        field: "feedback HTTP route operation",
-                    },
-                )?
-            ),
-        };
-        let service_id = if spec.operation == "test_results" {
-            primitive_service_id.clone()
-        } else {
-            feedback_service_id.clone()
-        };
-        bindings.push(ExecutableBindingAvailabilityV1::available(
-            ExecutableBindingV1::daemon_owned(
-                manifest,
-                OperationId::new(format!("operation.application.{}", spec.operation))?,
-                service_id,
-                schema.request_schema().clone(),
-                schema.result_schema().clone(),
-                CodecBindingKey::new(format!(
-                    "codec.application.feedback.{}.json.v1",
-                    spec.operation
-                ))?,
-                RouteExposureV1::Public {
-                    binding_id: http_binding.binding_id().clone(),
-                    route_path,
-                },
-            )?,
-        ));
-    }
-    Ok(ExecutableBindingRegistryV1::new(bindings)?)
-}
-
-fn feedback_surface_catalog_contribution_for_handlers(
-    handlers: &[ApplicationHandlerDescriptor],
-) -> Result<CatalogContributionV1, ApplicationContractError> {
+fn feedback_surface_catalog_contribution_from_specs()
+-> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(FEEDBACK_SPECS.len());
     let mut bindings =
         Vec::with_capacity(FEEDBACK_SPECS.iter().map(|spec| spec.surfaces.len()).sum());
 
     for spec in &FEEDBACK_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
-        // Handler registration is the executable-owner proof. Keep this
-        // symmetric with `feedback_surface_handler_descriptors`: narrowing a
-        // registered handler here leaves root composition with a handler for
-        // an unavailable capability and breaks the catalog/handler bijection.
-        let callable = handlers.contains(&handler_descriptor(spec)?);
-        let mut binding_ids = Vec::new();
-        if callable {
-            let (spec_bindings, spec_binding_ids) = current_bindings(
-                &capability_id,
-                spec.operation,
-                spec.surfaces.iter().copied(),
-            )?;
-            bindings.extend(spec_bindings);
-            binding_ids = spec_binding_ids;
-        }
-        capabilities.push(capability(spec, capability_id, binding_ids, callable)?);
+        let (spec_bindings, binding_ids) =
+            match ApplicationSurfaceOperation::from_catalog_name(spec.operation) {
+                Some(operation) => current_application_bindings(
+                    &capability_id,
+                    operation,
+                    spec.surfaces.iter().copied(),
+                )?,
+                None => current_bindings(
+                    &capability_id,
+                    spec.operation,
+                    spec.surfaces.iter().copied(),
+                )?,
+            };
+        bindings.extend(spec_bindings);
+        capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
 
     let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
@@ -433,17 +349,7 @@ where
 
 pub fn feedback_surface_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
-    REGISTERED_FEEDBACK_HANDLER_SPECS
-        .iter()
-        .map(|index| {
-            FEEDBACK_SPECS
-                .get(*index)
-                .ok_or(ApplicationContractError::Inconsistent {
-                    field: "registered feedback handler spec",
-                })
-                .and_then(handler_descriptor)
-        })
-        .collect()
+    FEEDBACK_SPECS.iter().map(handler_descriptor).collect()
 }
 
 pub fn feedback_surface_operation(
@@ -470,7 +376,6 @@ fn capability(
     spec: &FeedbackSurfaceSpec,
     capability_id: CapabilityId,
     binding_ids: Vec<BindingId>,
-    callable: bool,
 ) -> Result<CapabilityManifestV1, ApplicationContractError> {
     Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id,
@@ -519,15 +424,9 @@ fn capability(
             TerminalState::Unavailable,
             TerminalState::Partial,
         ])?,
-        availability: if callable {
-            AvailabilityContract::Available
-        } else {
-            AvailabilityContract::Unavailable {
-                reason: UnavailabilityReason::NotImplemented,
-            }
-        },
+        availability: AvailabilityContract::Available,
         binding_ids,
-        profile_eligibility: if callable && !spec.surfaces.is_empty() {
+        profile_eligibility: if !spec.surfaces.is_empty() {
             application_profile_ids(if spec.operation == "test_results" {
                 &[
                     APPLICATION_DEFAULT_PROFILE_ID,
@@ -547,7 +446,13 @@ fn handler_descriptor(
     spec: &FeedbackSurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
     let result_schema = schema(spec.result_schema)?;
-    ApplicationHandlerDescriptor::new(
+    ApplicationHandlerDescriptor::for_catalog_operation(
+        spec.operation,
+        if spec.operation == "test_results" {
+            "service.application.primitive"
+        } else {
+            "service.application.feedback"
+        },
         application_operation(spec)?,
         schema(spec.request_schema)?,
         result_schema,
@@ -605,32 +510,6 @@ mod tests {
                 contribution.executable_schema(&capability).is_some(),
                 "{capability} requires the exact mounted wire schema"
             );
-        }
-    }
-
-    #[test]
-    fn internal_feedback_handlers_do_not_imply_transport_availability() {
-        let unavailable =
-            feedback_surface_catalog_contribution_for_handlers(&[]).expect("unavailable catalog");
-        for spec in &FEEDBACK_SPECS {
-            let capability = unavailable
-                .capabilities()
-                .iter()
-                .find(|capability| capability.capability_id().as_str() == spec.capability)
-                .expect("declared feedback capability");
-            assert!(!capability.availability().is_callable());
-            assert!(capability.binding_ids().is_empty());
-
-            let handler = handler_descriptor(spec).expect("registered feedback handler");
-            let available = feedback_surface_catalog_contribution_for_handlers(&[handler])
-                .expect("available catalog");
-            let capability = available
-                .capabilities()
-                .iter()
-                .find(|capability| capability.capability_id().as_str() == spec.capability)
-                .expect("registered feedback capability");
-            assert!(capability.availability().is_callable());
-            assert_eq!(capability.binding_ids().len(), spec.surfaces.len());
         }
     }
 }

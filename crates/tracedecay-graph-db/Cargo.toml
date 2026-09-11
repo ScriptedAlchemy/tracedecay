@@ -157,48 +157,15 @@ name = "publication_scale"
 harness = false
 required-features = ["test-helpers"]
 
+# Every contract suite that needs the `test-helpers` fixture surface is a
+# module of this one binary (tests/graph_db_suite/), so the crate links the
+# closure once instead of once per former tests/<contract>.rs file.
 [[test]]
-name = "backup_contract"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "cross_projection_contract"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "durability_crash_contract"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "open_error_contract"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "point_read_contract"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "projection_read_contract"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "registry_contract"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "runtime_contract"
-required-features = ["test-helpers"]
-
-[[test]]
-name = "paged_relation_ids"
+name = "graph_db_suite"
 required-features = ["test-helpers"]
 
 [[test]]
 name = "semantic_vector_staging_contract"
-
-[[test]]
-name = "verified_generation_contract"
-required-features = ["test-helpers"]
 
 # Peak-RSS measurement harness for the tiered storage features. Every test in
 # it is `#[ignore]`d, so it costs a compile and nothing else in a normal run.

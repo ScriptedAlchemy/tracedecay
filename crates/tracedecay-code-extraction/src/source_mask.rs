@@ -1,11 +1,10 @@
-//! Tree-sitter driven source masking for the text-scanning analysis handlers.
+//! Tree-sitter driven source masking for Rust token scans.
 //!
-//! Several analysis scanners (`unused_imports`, the recursion self-call probe,
-//! and `unsafe_patterns`) search Rust source *text* for tokens. A naive search
+//! Source-edit dependency discovery and the `unsafe_patterns` analysis scan
+//! search Rust source *text* for tokens. A naive search
 //! treats an identifier or keyword that appears only inside a comment or a
-//! string/char literal as a real occurrence — a false positive (or, for
-//! unused-imports, a false negative). This module blanks the byte ranges of
-//! comment and string/char literal nodes reported by the existing tree-sitter
+//! string/char literal as a real occurrence. This module blanks the byte ranges
+//! of comment and string/char literal nodes reported by the existing tree-sitter
 //! Rust grammar, replacing their bytes with spaces while preserving newlines
 //! and total byte length so 1-based line indexing stays valid.
 //!
@@ -32,7 +31,7 @@ pub struct MaskOptions {
 
 impl MaskOptions {
     /// Mask comments and string/char literals, preserving implicit format
-    /// captures. This is the behaviour the `unused_imports` scan depends on.
+    /// captures. This is the behaviour source-edit import discovery depends on.
     pub const UNUSED_IMPORTS: Self = Self {
         preserve_format_captures: true,
     };
@@ -80,6 +79,113 @@ pub fn masked_rust_source_with(source: &str, opts: MaskOptions) -> String {
     // Every replacement is an ASCII space and every untouched byte is the
     // original, so the result is always valid UTF-8; fall back defensively.
     String::from_utf8(out).unwrap_or_else(|_| source.to_string())
+}
+
+/// Returns one entry per source line identifying lines wholly contained in a
+/// Rust item enabled only for tests (`#[cfg(test)]`) or a `#[test]` function.
+pub fn rust_test_lines(source: &str) -> Result<Vec<bool>, String> {
+    let tree = parse(source).ok_or_else(|| "failed to parse Rust source".to_string())?;
+    if tree.root_node().has_error() {
+        return Err("Rust source contains syntax errors".to_string());
+    }
+    let mut spans = Vec::new();
+    collect_test_spans(tree.root_node(), source.as_bytes(), &mut spans);
+    let mut lines = vec![false; source.lines().count()];
+    let mut line_start = 0;
+    let mut span_index = 0;
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        let bytes = line.as_bytes();
+        let code_start = bytes
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(bytes.len());
+        let code_end = bytes
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+            .map_or(code_start, |position| position + 1);
+        let absolute_start = line_start + code_start;
+        while spans
+            .get(span_index)
+            .is_some_and(|span| span.end <= absolute_start)
+        {
+            span_index += 1;
+        }
+        lines[index] = code_start < code_end
+            && spans.get(span_index).is_some_and(|span| {
+                span.start <= absolute_start && line_start + code_end <= span.end
+            });
+        line_start += bytes.len();
+    }
+    Ok(lines)
+}
+
+struct TestSpan {
+    start: usize,
+    end: usize,
+}
+
+fn collect_test_spans(node: TsNode<'_>, source: &[u8], spans: &mut Vec<TestSpan>) {
+    let mut cursor = node.walk();
+    let mut attributes_start = None;
+    let mut cfg_test = false;
+    let mut test = false;
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "attribute_item" => {
+                attributes_start.get_or_insert(child.start_byte());
+                cfg_test |= attribute_matches(child, source, "cfg", Some("test"));
+                test |= attribute_matches(child, source, "test", None);
+            }
+            "line_comment" | "block_comment" => {}
+            _ => {
+                let in_test = cfg_test || (test && child.kind() == "function_item");
+                if in_test {
+                    spans.push(TestSpan {
+                        start: attributes_start.unwrap_or_else(|| child.start_byte()),
+                        end: child.end_byte(),
+                    });
+                } else {
+                    collect_test_spans(child, source, spans);
+                }
+                attributes_start = None;
+                cfg_test = false;
+                test = false;
+            }
+        }
+    }
+}
+
+fn attribute_matches(
+    item: TsNode<'_>,
+    source: &[u8],
+    expected_name: &str,
+    expected_argument: Option<&str>,
+) -> bool {
+    let Some(attribute) = item.named_child(0) else {
+        return false;
+    };
+    let Some(name) = attribute.named_child(0) else {
+        return false;
+    };
+    if name.utf8_text(source).ok() != Some(expected_name) {
+        return false;
+    }
+    match (
+        attribute.child_by_field_name("arguments"),
+        expected_argument,
+    ) {
+        (None, None) => true,
+        (Some(arguments), Some(expected)) => {
+            let mut cursor = arguments.walk();
+            let mut children = arguments
+                .named_children(&mut cursor)
+                .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"));
+            children.next().is_some_and(|child| {
+                child.kind() == "identifier" && child.utf8_text(source).ok() == Some(expected)
+            }) && children.next().is_none()
+        }
+        _ => false,
+    }
 }
 
 fn parse(source: &str) -> Option<tree_sitter::Tree> {
@@ -328,7 +434,7 @@ mod tests {
         false
     }
 
-    /// Does `identifier` survive default (unused-imports) masking of `source`?
+    /// Does `identifier` survive default import-discovery masking of `source`?
     fn referenced(source: &str, identifier: &str) -> bool {
         masked_rust_source(source)
             .lines()

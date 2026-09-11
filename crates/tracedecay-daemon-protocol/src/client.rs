@@ -1296,8 +1296,9 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                 ApplicationRequest::Surface { binding, payload } => {
                     let (_binding_id, surface, operation, result_contract, _page) =
                         binding.into_parts();
-                    let operation = ApplicationSurfaceOperation::from_tool_name(operation.as_str())
-                        .ok_or(InvocationError::InvalidRequest)?;
+                    let operation =
+                        ApplicationSurfaceOperation::from_surface_name(surface, operation.as_str())
+                            .ok_or(InvocationError::InvalidRequest)?;
                     let observed_at = invocation_now_micros();
                     let cancellation_context = cancellation.context();
                     let scope = match target {

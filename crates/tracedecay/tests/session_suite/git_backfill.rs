@@ -14,7 +14,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::ProjectId;

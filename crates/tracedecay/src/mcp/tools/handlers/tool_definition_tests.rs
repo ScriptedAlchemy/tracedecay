@@ -5,6 +5,23 @@ use super::super::get_tool_definitions;
 use super::*;
 
 #[test]
+fn retired_simplify_scan_is_absent_from_the_public_catalog() {
+    let retired = "tracedecay_simplify_scan";
+    assert!(
+        get_tool_definitions()
+            .expect("tool definitions")
+            .iter()
+            .all(|definition| definition.name != retired)
+    );
+    assert!(
+        crate::mcp::tools::binding::mcp_dispatch_catalog()
+            .expect("MCP dispatch catalog")
+            .contract(retired)
+            .is_none()
+    );
+}
+
+#[test]
 fn terminal_application_definitions_project_canonical_request_schemas() {
     let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");
@@ -51,10 +68,57 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
             }
         }
         assert_eq!(
-            &projected, canonical,
+            projected,
+            tracedecay_mcp::mcp_input_schema(canonical),
             "{tool_name} must project its canonical executable request schema before MCP transport fields",
         );
     }
+}
+
+#[test]
+fn diagnostics_public_name_preserves_one_shipped_flat_request_schema() {
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
+        .expect("MCP executable binding registry");
+    let operation_id = OperationId::new("operation.application.diagnostics_read")
+        .expect("diagnostics operation id");
+    let canonical = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+        .expect("diagnostics executable binding")
+        .request_schema()
+        .body();
+    let definitions = get_tool_definitions().expect("tool definitions");
+    let diagnostics = definitions
+        .iter()
+        .filter(|definition| {
+            matches!(
+                definition.name.as_str(),
+                "tracedecay_diagnostics" | "tracedecay_diagnostics_read"
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "diagnostics must have one public tool name"
+    );
+    assert_eq!(diagnostics[0].name, "tracedecay_diagnostics");
+    let mut projected = diagnostics[0].input_schema.clone();
+    let properties = projected["properties"]
+        .as_object_mut()
+        .expect("diagnostics request properties");
+    assert!(properties.remove("format").is_some());
+    assert_eq!(
+        properties["scope"]["enum"],
+        json!(["workspace", "file"]),
+        "the public diagnostics tool must preserve its shipped flat scope"
+    );
+    assert_eq!(properties["path"]["type"], "string");
+    assert_ne!(
+        &projected, canonical,
+        "only the MCP/CLI edge keeps the shipped flat request; the executable remains canonical"
+    );
 }
 
 #[test]
@@ -66,9 +130,9 @@ fn canonical_and_retired_tools_keep_truthful_discovery() {
         .collect::<std::collections::BTreeSet<_>>();
 
     for operation in ApplicationSurfaceOperation::ALL {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let tool_name = operation.mcp_tool_name();
         assert!(
-            tool_names.contains(tool_name.as_str()),
+            tool_names.contains(tool_name),
             "{tool_name} must be projected from the application registry"
         );
     }
@@ -184,8 +248,8 @@ fn work_definitions_cover_the_canonical_operation_registry() {
             .and_then(|availability| availability.binding())
             .expect("canonical Work operation must be executable");
         assert_eq!(
-            &definition.input_schema,
-            binding.request_schema().body(),
+            definition.input_schema,
+            tracedecay_mcp::mcp_input_schema(binding.request_schema().body()),
             "{tool_name} must expose the exact executable request schema",
         );
     }
@@ -241,7 +305,7 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 fn every_advertised_application_surface_uses_canonical_output_formats() {
     let tools = get_tool_definitions().expect("tool definitions");
     for operation in ApplicationSurfaceOperation::ALL {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let tool_name = operation.mcp_tool_name();
         let tool = tools
             .iter()
             .find(|tool| tool.name == tool_name)
@@ -308,7 +372,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_configuration_set",
         "tracedecay_configuration_unset",
         "tracedecay_configuration_batch",
-        "tracedecay_configuration_write_credential",
         "tracedecay_configuration_protected_apply",
         "tracedecay_configuration_rollback_apply",
         "tracedecay_context_scout_pause",

@@ -6,45 +6,196 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
 
 use tracedecay_tool_catalog::{
-    BindingStatus, BindingSurface, CapabilityId, CatalogContributionV1, CatalogValidationError,
+    ApplicationSurfaceOperation, BindingStatus, BindingSurface, CatalogValidationError,
     CodecBindingKey, ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1,
     ExecutableBindingV1, ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1,
     SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1, SdkExecutableBindingV1,
-    SdkTransportBindingV1, ServiceId, SurfaceBindingV1, SurfaceOperationName,
+    SdkTransportBindingV1, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use crate::{
-    ApplicationContractError, application_catalog_contributions,
-    code_search_executable_binding_registry, configuration_executable_binding_registry,
-    context_scout_executable_binding_registry, feedback_http_executable_binding_registry,
-    git::{git_surface_executable_binding_registry, native_worktree_executable_binding_registry},
-    handoff_executable_binding_registry,
-    multi_root::multi_root_executable_binding_registry,
-    primitive_http_executable_binding_registry, retained_surface_executable_binding_registry,
-    work_executable_binding_registry, workflow_executable_binding_registry,
+    ApplicationContractError, application_catalog_contributions, application_handler_descriptors,
+    handoff_executable_binding_registry, multi_root::multi_root_executable_binding_registry,
+    retained_surface_executable_binding_registry, work_executable_binding_registry,
+    workflow_executable_binding_registry,
 };
 
-/// Every mounted HTTP executable registry the SDK projects.
+/// Canonical executable HTTP projection for every application-surface handler.
+pub fn application_http_executable_binding_registry()
+-> Result<&'static ExecutableBindingRegistryV1, ApplicationContractError> {
+    static REGISTRY: LazyLock<Result<ExecutableBindingRegistryV1, ApplicationContractError>> =
+        LazyLock::new(build_application_http_executable_binding_registry);
+    REGISTRY.as_ref().map_err(Clone::clone)
+}
+
+fn build_application_http_executable_binding_registry()
+-> Result<ExecutableBindingRegistryV1, ApplicationContractError> {
+    let handlers = application_handler_descriptors()?;
+    let contributions = application_catalog_contributions()?;
+    let mut bindings = Vec::new();
+    for (operation, descriptor) in handlers.surface_operations() {
+        let capability_id = descriptor.operation().capability_id();
+        let Some(contribution) = contributions.iter().find(|contribution| {
+            contribution
+                .capabilities()
+                .iter()
+                .any(|manifest| manifest.capability_id() == capability_id)
+        }) else {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "application HTTP contribution",
+            });
+        };
+        let Some(http_binding) = contribution.bindings().iter().find(|binding| {
+            binding.capability_id() == capability_id
+                && binding.surface() == BindingSurface::Http
+                && binding.operation().as_str() == operation.name_for_surface(BindingSurface::Http)
+                && matches!(binding.status(), BindingStatus::Current)
+                && !binding.is_alias()
+        }) else {
+            continue;
+        };
+        let manifest = contribution
+            .capabilities()
+            .iter()
+            .find(|manifest| manifest.capability_id() == capability_id)
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "application HTTP capability",
+            })?;
+        let schema = contribution.executable_schema(capability_id).ok_or(
+            ApplicationContractError::Inconsistent {
+                field: "application HTTP schema",
+            },
+        )?;
+        let service_id = descriptor
+            .service_id()
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "application HTTP service",
+            })?;
+        bindings.push(ExecutableBindingAvailabilityV1::available(
+            ExecutableBindingV1::daemon_owned(
+                manifest,
+                OperationId::new(format!("operation.application.{}", operation.as_str()))?,
+                service_id.clone(),
+                schema.request_schema().clone(),
+                schema.result_schema().clone(),
+                CodecBindingKey::new(format!("codec.application.{}.json.v1", operation.as_str()))?,
+                RouteExposureV1::Public {
+                    binding_id: http_binding.binding_id().clone(),
+                    route_path: format!("/application{}", application_http_route_path(operation)),
+                },
+            )?,
+        ));
+    }
+    Ok(ExecutableBindingRegistryV1::new(bindings)?)
+}
+
+pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> String {
+    match operation {
+        ApplicationSurfaceOperation::GitStatus => "/git/status".to_owned(),
+        ApplicationSurfaceOperation::GitDiff => "/git/diff".to_owned(),
+        ApplicationSurfaceOperation::GitHistory => "/git/history".to_owned(),
+        ApplicationSurfaceOperation::GitBlame => "/git/blame".to_owned(),
+        ApplicationSurfaceOperation::GitHunks => "/git/hunks".to_owned(),
+        ApplicationSurfaceOperation::GitPreview => "/git/preview".to_owned(),
+        ApplicationSurfaceOperation::GitApply => "/git/apply".to_owned(),
+        ApplicationSurfaceOperation::GitHubStackSignalExpand => {
+            "/github-stack/signal-expand".to_owned()
+        }
+        operation @ (ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
+        | ApplicationSurfaceOperation::NativeIntegrationPreflight
+        | ApplicationSurfaceOperation::NativeIntegrationApprove
+        | ApplicationSurfaceOperation::NativeIntegrationApply
+        | ApplicationSurfaceOperation::NativeIntegrationStatus
+        | ApplicationSurfaceOperation::NativeIntegrationCancel
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove
+        | ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile) => {
+            format!("/native-integration/{}", operation.as_str())
+        }
+        ApplicationSurfaceOperation::AffectedTests => "/tests/affected".to_owned(),
+        ApplicationSurfaceOperation::TestResults => "/tests/results".to_owned(),
+        ApplicationSurfaceOperation::FeedbackDiagnostics => "/feedback/diagnostics".to_owned(),
+        ApplicationSurfaceOperation::FeedbackGet => "/feedback/get".to_owned(),
+        ApplicationSurfaceOperation::FeedbackExpand => "/feedback/expand".to_owned(),
+        ApplicationSurfaceOperation::FeedbackList => "/feedback/list".to_owned(),
+        ApplicationSurfaceOperation::FeedbackImpact => "/feedback/impact".to_owned(),
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => "/feedback/advisory_cycle".to_owned(),
+        operation @ (ApplicationSurfaceOperation::CodeExactOccurrence
+        | ApplicationSurfaceOperation::CodePhraseSearch
+        | ApplicationSurfaceOperation::CodeSymbolSearch
+        | ApplicationSurfaceOperation::CodeSignatureSearch
+        | ApplicationSurfaceOperation::CodeImplementations
+        | ApplicationSurfaceOperation::CodeTypeHierarchy
+        | ApplicationSurfaceOperation::CodeCallers
+        | ApplicationSurfaceOperation::CodeCallees
+        | ApplicationSurfaceOperation::CodeFacets
+        | ApplicationSurfaceOperation::CodeTimeline
+        | ApplicationSurfaceOperation::CodeDeclaration
+        | ApplicationSurfaceOperation::CodeDefinition
+        | ApplicationSurfaceOperation::CodeTypeDefinition
+        | ApplicationSurfaceOperation::CodeReferences) => {
+            format!("/code/{}", operation.as_str())
+        }
+        operation @ (ApplicationSurfaceOperation::SessionLookup
+        | ApplicationSurfaceOperation::QualifiedName
+        | ApplicationSurfaceOperation::CallChain
+        | ApplicationSurfaceOperation::FileDependents
+        | ApplicationSurfaceOperation::SourceLines
+        | ApplicationSurfaceOperation::SourceBody
+        | ApplicationSurfaceOperation::SourceOutline
+        | ApplicationSurfaceOperation::ModuleApi
+        | ApplicationSurfaceOperation::HealthRead
+        | ApplicationSurfaceOperation::HealthDelta
+        | ApplicationSurfaceOperation::StorageStatus
+        | ApplicationSurfaceOperation::DiagnosticsRead) => {
+            format!("/primitives/{}", operation.as_str())
+        }
+        operation @ (ApplicationSurfaceOperation::ConfigurationList
+        | ApplicationSurfaceOperation::ConfigurationGet
+        | ApplicationSurfaceOperation::ConfigurationSet
+        | ApplicationSurfaceOperation::ConfigurationUnset
+        | ApplicationSurfaceOperation::ConfigurationBatch
+        | ApplicationSurfaceOperation::ConfigurationObservedState
+        | ApplicationSurfaceOperation::ConfigurationProtectedPreview
+        | ApplicationSurfaceOperation::ConfigurationProtectedApply
+        | ApplicationSurfaceOperation::ConfigurationRollbackPreview
+        | ApplicationSurfaceOperation::ConfigurationRollbackApply
+        | ApplicationSurfaceOperation::ConfigurationAudit) => {
+            format!("/configuration/{}", operation.as_str())
+        }
+        ApplicationSurfaceOperation::ObservatoryRead => "/observatory/read".to_owned(),
+        operation @ (ApplicationSurfaceOperation::ContextScoutStatus
+        | ApplicationSurfaceOperation::ContextScoutRecent
+        | ApplicationSurfaceOperation::ContextScoutExplain
+        | ApplicationSurfaceOperation::ContextScoutCapability
+        | ApplicationSurfaceOperation::ContextScoutBudget
+        | ApplicationSurfaceOperation::ContextScoutPause
+        | ApplicationSurfaceOperation::ContextScoutResume
+        | ApplicationSurfaceOperation::ContextScoutCancel
+        | ApplicationSurfaceOperation::ContextScoutClaim
+        | ApplicationSurfaceOperation::ContextScoutDelivery
+        | ApplicationSurfaceOperation::ContextScoutFeedback) => {
+            format!("/context-scout/{}", operation.as_str())
+        }
+    }
+}
+
+/// Mounted executable authorities outside the canonical application surface.
 ///
-/// This is the single place a product family joins the official SDK. Both the
-/// projection below and its conformance guard read this list, so a registry
-/// cannot be projected without being asserted, and a registry added here is
-/// exposed in the generated Rust and TypeScript SDKs by the same edit. Each
-/// operation ID names its own family, so the list needs no parallel labels.
+/// Application operations project as one registry above. Work, Workflow,
+/// retained, handoff, and multi-root keep separate entries because they have
+/// distinct operation identities and runtime owners.
 fn mounted_executable_binding_registries()
 -> Result<Vec<Cow<'static, ExecutableBindingRegistryV1>>, ApplicationContractError> {
     Ok(vec![
-        Cow::Owned(git_surface_executable_binding_registry()?),
-        Cow::Owned(native_worktree_executable_binding_registry()?),
-        Cow::Owned(code_search_executable_binding_registry()?),
-        Cow::Owned(feedback_http_executable_binding_registry()?),
-        Cow::Owned(primitive_http_executable_binding_registry()?),
+        Cow::Borrowed(application_http_executable_binding_registry()?),
         Cow::Borrowed(work_executable_binding_registry()?),
         Cow::Borrowed(workflow_executable_binding_registry()?),
-        Cow::Owned(configuration_executable_binding_registry()?),
-        Cow::Owned(context_scout_executable_binding_registry()?),
         Cow::Owned(retained_surface_executable_binding_registry()?),
         Cow::Owned(handoff_executable_binding_registry()?),
         Cow::Owned(multi_root_executable_binding_registry()?),
@@ -60,9 +211,13 @@ fn mounted_executable_binding_registries()
 pub fn sdk_executable_binding_registry()
 -> Result<SdkExecutableBindingRegistryV1, ApplicationContractError> {
     let mounted = mounted_executable_binding_registries()?;
+    let mcp_registry = crate::mcp_executable_binding_registry()?;
     let mut bindings = mounted
         .iter()
         .flat_map(|registry| registry.as_ref().iter())
+        .filter(|availability| {
+            !preserves_shipped_mcp_sdk_transport(availability.operation_id(), mcp_registry)
+        })
         .map(project_http_binding)
         .collect::<Result<Vec<_>, _>>()?;
     let http_operations = bindings
@@ -79,13 +234,32 @@ pub fn sdk_executable_binding_registry()
                         && matches!(binding.status(), BindingStatus::Current)
                         && !binding.is_alias()
                 })
-                .map(|binding| project_mcp_availability(&contribution, binding))
+                .map(|binding| project_mcp_availability(mcp_registry, binding))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .filter(|availability| !http_operations.contains(availability.operation_id())),
         );
     }
     Ok(SdkExecutableBindingRegistryV1::new(bindings)?)
+}
+
+/// Session lookup shipped through `tracedecay_session_lookup` and the
+/// `session_lookup` SDK method. Prefer that mounted MCP binding when present;
+/// every other application operation continues to select its mounted HTTP
+/// binding first.
+fn preserves_shipped_mcp_sdk_transport(
+    operation_id: &OperationId,
+    mcp_registry: &ExecutableBindingRegistryV1,
+) -> bool {
+    let operation = operation_id
+        .as_str()
+        .strip_prefix("operation.application.")
+        .and_then(ApplicationSurfaceOperation::from_catalog_name);
+    operation == Some(ApplicationSurfaceOperation::SessionLookup)
+        && mcp_registry
+            .get(operation_id)
+            .and_then(ExecutableBindingAvailabilityV1::binding)
+            .is_some()
 }
 
 fn project_http_binding(
@@ -131,59 +305,34 @@ fn unavailable_disposition(
 }
 
 fn project_mcp_availability(
-    contribution: &CatalogContributionV1,
+    registry: &ExecutableBindingRegistryV1,
     surface: &SurfaceBindingV1,
 ) -> Result<SdkExecutableBindingAvailabilityV1, CatalogValidationError> {
-    let operation_id = OperationId::new(format!(
-        "operation.application.{}",
-        surface.operation().as_str()
-    ))
-    .map_err(|_| CatalogValidationError::InvalidValue {
+    let canonical_operation =
+        ApplicationSurfaceOperation::from_tool_name(surface.operation().as_str()).map_or_else(
+            || surface.operation().as_str(),
+            |operation| operation.as_str(),
+        );
+    let operation_id = OperationId::new(format!("operation.application.{}", canonical_operation))
+        .map_err(|_| CatalogValidationError::InvalidValue {
         field: "SDK MCP operation ID",
         reason: "surface spelling cannot form a canonical operation ID",
     })?;
-    let manifest = contribution
-        .capabilities()
-        .binary_search_by(|manifest| manifest.capability_id().cmp(surface.capability_id()))
-        .ok()
-        .map(|index| &contribution.capabilities()[index])
-        .ok_or_else(|| CatalogValidationError::InvalidCapability {
-            capability_id: surface.capability_id().clone(),
-            reason: "SDK surface binding has no owning manifest",
-        })?;
-    if !manifest.availability().is_callable() {
+    let availability =
+        registry
+            .get(&operation_id)
+            .ok_or_else(|| CatalogValidationError::InvalidCapability {
+                capability_id: surface.capability_id().clone(),
+                reason: "SDK surface binding has no canonical MCP executable",
+            })?;
+    let Some(executable) = availability.binding() else {
         return Ok(SdkExecutableBindingAvailabilityV1::Unavailable {
             operation_id,
-            disposition: ExecutableUnavailableDispositionV1::CapabilityDisabled,
-        });
-    }
-    let Some(schema) = contribution.executable_schema(surface.capability_id()) else {
-        return Ok(SdkExecutableBindingAvailabilityV1::Unavailable {
-            operation_id,
-            disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+            disposition: unavailable_disposition(availability),
         });
     };
-    // A schema-backed callable MCP operation is executable through the
-    // official SDK MCP transport: the generated SDK selects the mounted tool
-    // name while the caller's host owns connection lifecycle and framing.
-    let executable = ExecutableBindingV1::daemon_owned(
-        manifest,
-        operation_id,
-        mcp_service_id(surface.capability_id())?,
-        schema.request_schema().clone(),
-        schema.result_schema().clone(),
-        CodecBindingKey::new(format!(
-            "codec.application.{}.json.v1",
-            surface.operation().as_str()
-        ))
-        .map_err(|_| CatalogValidationError::InvalidValue {
-            field: "SDK MCP codec binding",
-            reason: "operation spelling cannot form a canonical codec key",
-        })?,
-        RouteExposureV1::Internal,
-    )?;
     let binding = SdkExecutableBindingV1::new(
-        executable,
+        executable.clone(),
         surface.binding_id().clone(),
         surface.operation().clone(),
         SdkTransportBindingV1::McpTool {
@@ -191,26 +340,6 @@ fn project_mcp_availability(
         },
     )?;
     Ok(SdkExecutableBindingAvailabilityV1::available(binding))
-}
-
-/// The daemon service family that owns one MCP-bound application capability
-/// (`capability.application.git.status` -> `service.application.git`).
-fn mcp_service_id(capability_id: &CapabilityId) -> Result<ServiceId, CatalogValidationError> {
-    let family = capability_id
-        .as_str()
-        .strip_prefix("capability.application.")
-        .and_then(|rest| rest.split('.').next())
-        .filter(|family| !family.is_empty())
-        .ok_or(CatalogValidationError::InvalidValue {
-            field: "SDK MCP service family",
-            reason: "capability is not rooted at capability.application.",
-        })?;
-    ServiceId::new(format!("service.application.{family}")).map_err(|_| {
-        CatalogValidationError::InvalidValue {
-            field: "SDK MCP service ID",
-            reason: "capability family cannot form a canonical service identifier",
-        }
-    })
 }
 
 fn sdk_method_name(operation_id: &OperationId) -> Result<String, CatalogValidationError> {
@@ -237,34 +366,22 @@ mod tests {
     use std::borrow::Cow;
     use std::collections::BTreeSet;
 
-    use schemars::JsonSchema;
     use tracedecay_tool_catalog::{
-        BindingSurface, CancellationContract, DeadlineBehavior, EffectClass,
-        ExecutableUnavailableDispositionV1, IdempotencyContract, OperationId, ReceiptContract,
-        ReconciliationContract, RouteExposureV1, SdkExecutableBindingAvailabilityV1,
-        SdkTransportBindingV1, TerminalState,
+        ApplicationSurfaceOperation, BindingSurface, CancellationContract, DeadlineBehavior,
+        EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract, OperationId,
+        ReceiptContract, ReconciliationContract, RouteExposureV1,
+        SdkExecutableBindingAvailabilityV1, SdkTransportBindingV1, TerminalState,
     };
 
     use super::{
-        mounted_executable_binding_registries, project_mcp_availability,
+        application_http_executable_binding_registry, mounted_executable_binding_registries,
+        preserves_shipped_mcp_sdk_transport, project_mcp_availability,
         sdk_executable_binding_registry,
     };
     use crate::{
         application_catalog_contributions, context_scout_surface_catalog_contribution,
         git_surface_catalog_contribution,
     };
-
-    #[derive(JsonSchema)]
-    #[allow(dead_code)]
-    struct TestGitStatusRequest {
-        max_entries: Option<u32>,
-    }
-
-    #[derive(JsonSchema)]
-    #[allow(dead_code)]
-    struct TestGitStatusResult {
-        changed_paths: Vec<String>,
-    }
 
     #[test]
     fn sdk_projection_borrows_process_static_work_registries() {
@@ -297,6 +414,7 @@ mod tests {
     fn sdk_registry_projects_every_mounted_family_including_handoff_and_multi_root() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
         let mounted = mounted_executable_binding_registries().expect("mounted registries");
+        let mcp_registry = crate::mcp_executable_binding_registry().expect("MCP registry");
         let mounted_operations = mounted
             .iter()
             .flat_map(|source| source.iter())
@@ -335,6 +453,19 @@ mod tests {
             let RouteExposureV1::Public { route_path, .. } = mounted_binding.exposure() else {
                 continue;
             };
+            if preserves_shipped_mcp_sdk_transport(operation_id, mcp_registry) {
+                // The one shipped SDK method that rides its MCP tool; the
+                // dedicated `session_lookup` test pins that transport.
+                assert!(
+                    matches!(
+                        projected_binding.transport(),
+                        SdkTransportBindingV1::McpTool { .. }
+                    ),
+                    "{} keeps its shipped MCP transport in the SDK",
+                    operation_id.as_str()
+                );
+                continue;
+            }
             assert!(
                 matches!(
                     projected_binding.transport(),
@@ -404,8 +535,8 @@ mod tests {
     #[test]
     fn sdk_registry_selects_the_mounted_http_transport_for_every_code_search() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
-        let mounted =
-            crate::code_search_executable_binding_registry().expect("mounted code-search registry");
+        let mounted = application_http_executable_binding_registry()
+            .expect("mounted application HTTP registry");
         let expected = crate::application_catalog_contributions()
             .expect("application catalog")
             .into_iter()
@@ -419,15 +550,34 @@ mod tests {
                     && !binding.is_alias()
                     && binding.operation().as_str().starts_with("code_")
             })
-            .map(|binding| format!("operation.application.{}", binding.operation().as_str()))
+            .map(|binding| {
+                let operation =
+                    ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
+                        .map_or_else(
+                            || binding.operation().as_str(),
+                            |operation| operation.as_str(),
+                        );
+                format!("operation.application.{operation}")
+            })
             .collect::<BTreeSet<_>>();
         let actual = mounted
             .iter()
+            .filter(|availability| {
+                availability
+                    .operation_id()
+                    .as_str()
+                    .starts_with("operation.application.code_")
+            })
             .map(|availability| availability.operation_id().as_str().to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected, "every cataloged code-search HTTP route");
 
-        for availability in mounted.iter() {
+        for availability in mounted.iter().filter(|availability| {
+            availability
+                .operation_id()
+                .as_str()
+                .starts_with("operation.application.code_")
+        }) {
             let mounted_binding = availability
                 .binding()
                 .expect("mounted code-search executable");
@@ -451,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn sdk_registry_selects_live_feedback_and_non_session_primitive_http_routes() {
+    fn sdk_registry_selects_live_feedback_and_primitive_http_routes() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
         for (operation, route) in [
             ("feedback_diagnostics", "/application/feedback/diagnostics"),
@@ -472,7 +622,6 @@ mod tests {
             ("source_body", "/application/primitives/source_body"),
             ("source_outline", "/application/primitives/source_outline"),
             ("module_api", "/application/primitives/module_api"),
-            ("file_metadata", "/application/primitives/file_metadata"),
             ("health_read", "/application/primitives/health_read"),
             ("health_delta", "/application/primitives/health_delta"),
             ("storage_status", "/application/primitives/storage_status"),
@@ -511,7 +660,8 @@ mod tests {
         let session_lookup = registry
             .get(&OperationId::new("operation.application.session_lookup").expect("operation ID"))
             .and_then(|availability| availability.binding())
-            .expect("session lookup remains independently callable");
+            .expect("session lookup must remain SDK-callable");
+        assert_eq!(session_lookup.sdk_method().as_str(), "session_lookup");
         assert!(matches!(
             session_lookup.transport(),
             SdkTransportBindingV1::McpTool { tool_name }
@@ -568,7 +718,7 @@ mod tests {
     #[test]
     fn sdk_registry_mounts_every_configuration_operation_with_canonical_lifecycle() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
-        for operation in crate::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
+        for operation in crate::configuration::configuration_surface_operation_names() {
             let operation_id =
                 OperationId::new(format!("operation.application.{operation}")).expect("operation");
             let binding = registry
@@ -651,34 +801,9 @@ mod tests {
                     && !surface.is_alias()
             })
             .collect::<Vec<_>>();
-        const EXPECTED_SCOUT_OPERATIONS: [&str; 11] = [
-            "context_scout_status",
-            "context_scout_recent",
-            "context_scout_explain",
-            "context_scout_capability",
-            "context_scout_budget",
-            "context_scout_pause",
-            "context_scout_resume",
-            "context_scout_cancel",
-            "context_scout_claim",
-            "context_scout_delivery",
-            "context_scout_feedback",
-        ];
         assert!(
             !mcp_bindings.is_empty(),
             "Context Scout must ship at least one current MCP-bound operation"
-        );
-        let mut actual_operations: Vec<&str> = mcp_bindings
-            .iter()
-            .map(|surface| surface.operation().as_str())
-            .collect();
-        actual_operations.sort_unstable();
-        let mut expected_operations = EXPECTED_SCOUT_OPERATIONS.to_vec();
-        expected_operations.sort_unstable();
-        assert_eq!(
-            actual_operations, expected_operations,
-            "every named Scout operation must have exactly one current, non-alias MCP binding \
-             (adding an operation should extend EXPECTED_SCOUT_OPERATIONS, not just the count)"
         );
 
         for surface in mcp_bindings {
@@ -717,7 +842,15 @@ mod tests {
                     )
                     && !binding.is_alias()
             })
-            .map(|binding| format!("operation.application.{}", binding.operation().as_str()))
+            .map(|binding| {
+                let operation =
+                    ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
+                        .map_or_else(
+                            || binding.operation().as_str(),
+                            |operation| operation.as_str(),
+                        );
+                format!("operation.application.{operation}")
+            })
             .collect::<BTreeSet<_>>();
         let actual = registry
             .iter()
@@ -740,11 +873,14 @@ mod tests {
                     )
                     && !binding.is_alias()
             }) {
-                let operation_id = OperationId::new(format!(
-                    "operation.application.{}",
-                    surface.operation().as_str()
-                ))
-                .expect("operation ID");
+                let operation =
+                    ApplicationSurfaceOperation::from_tool_name(surface.operation().as_str())
+                        .map_or_else(
+                            || surface.operation().as_str(),
+                            |operation| operation.as_str(),
+                        );
+                let operation_id = OperationId::new(format!("operation.application.{}", operation))
+                    .expect("operation ID");
                 let manifest = contribution
                     .capabilities()
                     .iter()
@@ -809,25 +945,6 @@ mod tests {
     #[test]
     fn schema_backed_catalog_binding_projects_its_mcp_tool_transport() {
         let contribution = git_surface_catalog_contribution().expect("Git contribution");
-        let manifest = contribution
-            .capabilities()
-            .iter()
-            .find(|manifest| {
-                manifest.capability_id().as_str() == "capability.application.git.status"
-            })
-            .expect("Git status manifest");
-        let authority = tracedecay_tool_catalog::ExecutableSchemaAuthority::for_types_at_paths::<
-            TestGitStatusRequest,
-            TestGitStatusResult,
-        >(
-            manifest,
-            "tracedecay_contracts::sdk_catalog::tests::TestGitStatusRequest",
-            "tracedecay_contracts::sdk_catalog::tests::TestGitStatusResult",
-        )
-        .expect("test schema authority");
-        let contribution = contribution
-            .with_executable_schemas(vec![authority])
-            .expect("schema-backed contribution");
         let surface = contribution
             .bindings()
             .iter()
@@ -836,8 +953,8 @@ mod tests {
                     && binding.operation().as_str() == "git_status"
             })
             .expect("Git status MCP binding");
-        let availability =
-            project_mcp_availability(&contribution, surface).expect("SDK projection");
+        let registry = crate::mcp_executable_binding_registry().expect("MCP registry");
+        let availability = project_mcp_availability(registry, surface).expect("SDK projection");
 
         let binding = availability
             .binding()

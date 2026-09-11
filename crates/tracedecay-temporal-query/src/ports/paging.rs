@@ -64,7 +64,7 @@ pub struct CandidateFieldCaps {
 
 impl CandidateFieldCaps {
     #[hotpath::skip]
-    pub(super) const fn new(
+    pub const fn new(
         stable_id_bytes: usize,
         anchor_id_bytes: usize,
         metadata_field_bytes: usize,
@@ -256,7 +256,7 @@ impl<T> ReadState<T> {
         self.consumed_bytes
     }
 
-    pub(super) fn require_within_limits(
+    pub fn require_within_limits(
         &self,
         max_items: usize,
         max_total_bytes: usize,
@@ -281,7 +281,7 @@ impl<T> ReadState<T> {
         Ok(())
     }
 
-    pub(super) fn request(
+    pub fn request(
         &self,
         max_key_bytes: usize,
         candidate_field_caps: Option<CandidateFieldCaps>,
@@ -303,12 +303,12 @@ impl<T> ReadState<T> {
         }
     }
 
-    pub(super) fn is_exhausted(&self) -> bool {
+    pub fn is_exhausted(&self) -> bool {
         self.consumed_items == self.limits.max_items
             || self.consumed_bytes == self.limits.max_total_bytes
     }
 
-    pub(super) fn begin_page<'a>(
+    pub fn begin_page<'a>(
         &'a mut self,
         control: &'a ExecutionControl,
         max_key_bytes: usize,
@@ -332,15 +332,12 @@ impl<T> ReadState<T> {
         }
     }
 
-    pub(super) fn advanced_page(&mut self, continuation: Option<PageKey>) {
+    pub fn advanced_page(&mut self, continuation: Option<PageKey>) {
         self.page_index += 1;
         self.keyset = continuation;
     }
 
-    pub(super) fn incomplete_coverage_error(
-        &self,
-        resources: ReadBudgetResources,
-    ) -> TemporalPortError {
+    pub fn incomplete_coverage_error(&self, resources: ReadBudgetResources) -> TemporalPortError {
         if self.consumed_items == self.limits.max_items {
             TemporalPortError::BudgetExceeded {
                 resource: resources.item_count,
@@ -354,13 +351,13 @@ impl<T> ReadState<T> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct ReadBudgetResources {
+pub struct ReadBudgetResources {
     item_count: &'static str,
     item_bytes: &'static str,
     total_bytes: &'static str,
 }
 
-pub(super) const CANDIDATE_READ_BUDGET: ReadBudgetResources = ReadBudgetResources {
+pub const CANDIDATE_READ_BUDGET: ReadBudgetResources = ReadBudgetResources {
     item_count: "candidate item count",
     item_bytes: "candidate item bytes",
     total_bytes: "candidate total bytes",
@@ -448,7 +445,7 @@ impl<T: MeasuredTemporalValue> BoundedPageSink<'_, T> {
         Ok(())
     }
 
-    pub(super) fn finish(self, status: PageStatus) -> Result<BoundedPage<T>, TemporalPortError> {
+    pub fn finish(self, status: PageStatus) -> Result<BoundedPage<T>, TemporalPortError> {
         if status == PageStatus::More && self.items.is_empty() {
             return Err(TemporalPortError::Read {
                 operation: "produce bounded page",

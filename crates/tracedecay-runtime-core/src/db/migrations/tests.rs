@@ -5,6 +5,7 @@ use tracedecay_rusqlite_runtime::exact_sql::{
 };
 
 use crate::db::engine::{Connection, TestConnection};
+use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 use super::{
     PAYLOAD_DIGEST_BACKFILL_RECEIPT_KEY, PAYLOAD_DIGEST_STEP_SOURCE_VERSION, SCHEMA_VERSION,
@@ -117,6 +118,16 @@ async fn string_column(conn: &Connection, sql: &str) -> Vec<String> {
     values
 }
 
+async fn scalar_string(conn: &Connection, sql: &str) -> String {
+    let mut rows = conn.query(sql, ()).await.expect("failed to query string");
+    rows.next()
+        .await
+        .expect("failed to read string row")
+        .expect("string query should return a row")
+        .get(0)
+        .expect("failed to read string value")
+}
+
 async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let mut rows = conn
         .query(&format!("PRAGMA table_info({table})"), ())
@@ -149,6 +160,239 @@ async fn an_empty_database_is_created_at_the_supported_schema_version() {
         .await
         .expect("reopening a current store is an identity check");
     assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+}
+
+#[tokio::test]
+async fn a_shipped_v35_alias_trigger_is_repaired_without_losing_rows() {
+    let (conn, dir) = create_schema_db().await;
+    let path = dir.path().join("test.db");
+    conn.execute(
+        "INSERT INTO retrieval_anchors(
+             anchor_id, anchor_json, owner_json, projection_generation
+         ) VALUES ('anchor.fixture', '{}', '{}', 'generation.fixture')",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO retrieval_anchor_aliases(
+             owner_json, alias_kind, locator_digest, anchor_id
+         ) VALUES ('{}', 'native', 'digest.fixture', 'anchor.fixture')",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute_batch("DROP TRIGGER retrieval_anchor_aliases_immutable_update;")
+        .await
+        .unwrap();
+    conn.execute_batch(super::final_shape::SHIPPED_V35_ALIAS_UPDATE_TRIGGER)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let authority = DatabaseAuthority::acquire_test(&path, "shipped-v35 trigger repair fixture")
+        .expect("acquire production-open authority");
+    let (database, _initialized) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
+            .await
+            .expect("the production writer should repair the exact shipped-v35 trigger");
+    drop(database);
+    drop(authority);
+
+    let conn = TestConnection::open(&path);
+
+    assert_eq!(
+        scalar_string(
+            &conn,
+            "SELECT anchor_id FROM retrieval_anchor_aliases WHERE locator_digest = 'digest.fixture'"
+        )
+        .await,
+        "anchor.fixture"
+    );
+    let trigger = scalar_string(
+        &conn,
+        "SELECT sql FROM sqlite_master
+         WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
+    )
+    .await;
+    assert!(trigger.contains("retrieval anchor alias requires exact supersession"));
+    verify_final_schema_connection(&conn)
+        .await
+        .expect("the repaired store must carry the exact final shape");
+    let preserved_alias = scalar_string(
+        &conn,
+        "SELECT anchor_id FROM retrieval_anchor_aliases WHERE locator_digest = 'digest.fixture'",
+    )
+    .await;
+    let canonical_trigger = trigger;
+    drop(conn);
+
+    let authority = DatabaseAuthority::acquire_test(&path, "canonical v35 reopen fixture")
+        .expect("reacquire production-open authority");
+    let (database, _initialized) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
+            .await
+            .expect("a canonical store should reopen without mutation");
+    drop(database);
+    drop(authority);
+    let conn = TestConnection::open(&path);
+    assert_eq!(
+        scalar_string(
+            &conn,
+            "SELECT anchor_id FROM retrieval_anchor_aliases WHERE locator_digest = 'digest.fixture'",
+        )
+        .await,
+        preserved_alias
+    );
+    assert_eq!(
+        scalar_string(
+            &conn,
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
+        )
+        .await,
+        canonical_trigger
+    );
+    conn.execute(
+        "INSERT INTO retrieval_anchors(
+             anchor_id, anchor_json, owner_json, projection_generation
+         ) VALUES ('anchor.corrected', '{}', '{}', 'generation.fixture')",
+        (),
+    )
+    .await
+    .unwrap();
+    assert!(
+        conn.execute(
+            "UPDATE retrieval_anchor_aliases
+             SET anchor_id = 'anchor.corrected'
+             WHERE locator_digest = 'digest.fixture'",
+            (),
+        )
+        .await
+        .is_err()
+    );
+    conn.execute(
+        "INSERT INTO retrieval_anchor_dispositions(
+             disposition_id, anchor_id, owner_json, state, superseded_by,
+             reason_class, effective_at, record_json
+         ) VALUES (
+             'dis.fixture', 'anchor.fixture', '{}', 'superseded',
+             'anchor.corrected', 'correction', 1, '{}'
+         )",
+        (),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        conn.execute(
+            "UPDATE retrieval_anchor_aliases
+             SET anchor_id = 'anchor.corrected'
+             WHERE locator_digest = 'digest.fixture'",
+            (),
+        )
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_shipped_v35_alias_trigger_with_another_incompatibility_is_refused_unchanged() {
+    let (conn, dir) = create_schema_db().await;
+    let path = dir.path().join("test.db");
+    conn.execute_batch("DROP TRIGGER retrieval_anchor_aliases_immutable_update;")
+        .await
+        .unwrap();
+    conn.execute_batch(super::final_shape::SHIPPED_V35_ALIAS_UPDATE_TRIGGER)
+        .await
+        .unwrap();
+    conn.execute_batch("CREATE TABLE unexpected_v35_object(id INTEGER PRIMARY KEY);")
+        .await
+        .unwrap();
+    let shipped_trigger = scalar_string(
+        &conn,
+        "SELECT sql FROM sqlite_master
+         WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
+    )
+    .await;
+    drop(conn);
+
+    let authority = DatabaseAuthority::acquire_test(&path, "incompatible v35 fixture")
+        .expect("acquire production-open authority");
+    let error =
+        match Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
+            .await
+        {
+            Ok(_) => panic!("a second incompatibility must prevent the known trigger repair"),
+            Err(error) => error,
+        };
+
+    assert_eq!(
+        error
+            .reset_required_context()
+            .map(|(authority, _reason)| authority),
+        Some("SQLite store")
+    );
+    drop(authority);
+    let conn = TestConnection::open(&path);
+    assert_eq!(
+        scalar_string(
+            &conn,
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
+        )
+        .await,
+        shipped_trigger
+    );
+    assert!(table_exists(&conn, "unexpected_v35_object").await);
+    drop(conn);
+    drop(dir);
+
+    let (conn, dir) = create_schema_db().await;
+    let path = dir.path().join("test.db");
+    conn.execute_batch(
+        "DROP TRIGGER retrieval_anchor_aliases_immutable_update;
+         CREATE TRIGGER retrieval_anchor_aliases_immutable_update
+         BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
+             SELECT RAISE(ABORT, 'unrecognized alias trigger');
+         END;",
+    )
+    .await
+    .unwrap();
+    let unknown_trigger = scalar_string(
+        &conn,
+        "SELECT sql FROM sqlite_master
+         WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
+    )
+    .await;
+    drop(conn);
+
+    let authority = DatabaseAuthority::acquire_test(&path, "unknown v35 trigger fixture")
+        .expect("acquire production-open authority");
+    let error =
+        match Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
+            .await
+        {
+            Ok(_) => panic!("an unknown trigger body must remain reset-required"),
+            Err(error) => error,
+        };
+    assert_eq!(
+        error
+            .reset_required_context()
+            .map(|(authority, _reason)| authority),
+        Some("SQLite store")
+    );
+    drop(authority);
+    let conn = TestConnection::open(&path);
+    assert_eq!(
+        scalar_string(
+            &conn,
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'trigger' AND name = 'retrieval_anchor_aliases_immutable_update'",
+        )
+        .await,
+        unknown_trigger
+    );
 }
 
 /// A store stamped with any other version was written by an incompatible

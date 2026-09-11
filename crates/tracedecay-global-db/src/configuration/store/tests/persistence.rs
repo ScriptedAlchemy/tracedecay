@@ -1,28 +1,25 @@
-//! Credential, revision, and audit persistence tests.
+//! Revision and audit persistence tests.
 
 use super::super::mutation::{
     commit_configuration_transaction, map_store_error, validate_commit_bindings,
 };
 use super::super::{
     ActivationDriftV1, AuthorizedActor, ConfigurationControlStore, ConfigurationError,
-    ConfigurationRevisionStore, ConfigurationStoreError, CredentialWritePort, Executor,
-    QueryExecutor, params,
+    ConfigurationRevisionStore, ConfigurationStoreError, Executor,
+    OwnedGlobalDbConfigurationControlStore, params,
 };
 use super::{
     ConfigurationAuditEventKindV1, ConfigurationSqlStore, ConfigurationValueV1,
     GlobalDbConfigurationControlStore, HostAdmissionScope, TestConnection, TransactionBehavior,
-    UtcMicros, WriteOnlyCredentialMutation, control_authority,
-    control_authority_with_key_for_layer, count, direct_project_layer, global_setup, id,
-    protected_commit, root_revision, seed_revision, setup,
+    UtcMicros, control_authority, control_authority_with_key_for_layer, count,
+    direct_project_layer, global_setup, id, protected_commit, root_revision, seed_revision, setup,
 };
 use crate::configuration::contracts::DirectConfigurationMutation;
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
-use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
-    ConfigurationMutationOperationV1, CredentialKindV1, SettingKey,
-    USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    ConfigurationMutationOperationV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY,
 };
 
 #[tokio::test]
@@ -179,7 +176,7 @@ async fn project_revision_store_rejects_profile_worker_snapshot() {
 }
 
 #[tokio::test]
-async fn credential_references_are_opaque_and_activation_failure_preserves_last_working() {
+async fn activation_failure_preserves_last_working() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
         .registered_database(HostAdmissionScope::Project)
@@ -194,143 +191,6 @@ async fn credential_references_are_opaque_and_activation_failure_preserves_last_
         )
         .await
         .unwrap();
-
-    let credential_authority = control_authority(
-        ConfigurationMutationOperationV1::CredentialWrite,
-        &root.revision_id,
-    );
-    let handle = "opaque-credential-write-handle";
-    let write = WriteOnlyCredentialMutation {
-        expected_reference_id: None,
-        kind: CredentialKindV1::ApiToken,
-        write_handle: crate::configuration::contracts::CredentialWriteHandleV1::new(handle)
-            .unwrap(),
-    };
-    let expected_operation_digest = canonical_sha256(&(
-        "tracedecay.configuration.credential-write.v1",
-        &credential_authority.receipt.actor_id,
-        credential_authority.idempotency_key().unwrap(),
-        &root.revision_id,
-        &write.kind,
-        write.write_handle.as_str(),
-        &write.expected_reference_id,
-    ))
-    .unwrap();
-    let metadata = store
-        .write_reference(&credential_authority, &write, &root.revision_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        metadata.rotation, 0,
-        "an absent prior reference starts the canonical rotation sequence"
-    );
-    assert_eq!(metadata.operation_digest, expected_operation_digest);
-    assert_ne!(
-        metadata.operation_digest, metadata.reference_digest,
-        "effect input identity must not alias opaque reference metadata"
-    );
-    assert_eq!(
-        metadata.effective_deadline_at,
-        credential_authority.receipt.expires_at
-    );
-    assert_eq!(
-        store
-            .write_reference(&credential_authority, &write, &root.revision_id)
-            .await
-            .unwrap(),
-        metadata,
-        "an exact credential retry must replay its accepted digest and deadline"
-    );
-    assert_eq!(
-        store
-            .write_reference(
-                &credential_authority,
-                &WriteOnlyCredentialMutation {
-                    expected_reference_id: None,
-                    kind: CredentialKindV1::ApiToken,
-                    write_handle: crate::configuration::contracts::CredentialWriteHandleV1::new(
-                        "different-opaque-credential-write-handle",
-                    )
-                    .unwrap(),
-                },
-                &root.revision_id,
-            )
-            .await,
-        Err(ConfigurationError::IdempotencyConflict),
-        "same-key replay must bind the original opaque handle through its operation digest"
-    );
-    let read = db.read_snapshot().await.unwrap();
-    let mut count_rows = read
-        .query(
-            "SELECT COUNT(*) FROM configuration_credential_references",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        count_rows
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<i64>(0)
-            .unwrap(),
-        1,
-        "an absent prior reference must not manufacture a credential row"
-    );
-    drop(count_rows);
-    let mut rows = read
-        .query(
-            "SELECT reference_digest, operation_digest, effective_deadline_at
-             FROM configuration_credential_references
-             WHERE reference_id = ?1",
-            params![metadata.reference_id.as_str()],
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    let digest = row.get::<String>(0).unwrap();
-    assert!(!digest.contains(handle));
-    assert_eq!(
-        row.get::<String>(1).unwrap(),
-        expected_operation_digest.as_str()
-    );
-    assert_eq!(
-        row.get::<i64>(2).unwrap(),
-        credential_authority.receipt.expires_at.0
-    );
-    drop(rows);
-    let mut rows = read
-        .query(
-            "SELECT sealed_target_reference FROM configuration_audit_events",
-            (),
-        )
-        .await
-        .unwrap();
-    while let Some(row) = rows.next().await.unwrap() {
-        let target = row.get::<Option<Vec<u8>>>(0).unwrap().unwrap_or_default();
-        assert!(!String::from_utf8_lossy(&target).contains(handle));
-    }
-    drop(rows);
-    drop(read);
-
-    assert_eq!(
-        store
-            .write_reference(
-                &credential_authority,
-                &WriteOnlyCredentialMutation {
-                    expected_reference_id: Some(metadata.reference_id.clone()),
-                    kind: CredentialKindV1::AccessToken,
-                    write_handle: crate::configuration::contracts::CredentialWriteHandleV1::new(
-                        "opaque-credential-kind-mismatch",
-                    )
-                    .unwrap(),
-                },
-                &root.revision_id,
-            )
-            .await,
-        Err(ConfigurationError::IdempotencyConflict)
-    );
 
     let direct_authority = control_authority(
         ConfigurationMutationOperationV1::DirectMutation,
@@ -379,6 +239,33 @@ async fn credential_references_are_opaque_and_activation_failure_preserves_last_
         state.activation_error_code.as_deref(),
         Some("gateway_activation_failed")
     );
+}
+
+#[tokio::test]
+async fn owned_store_resolves_component_observation_from_revision_history() {
+    let (_directory, runtime, root) = global_setup().await;
+    let lease = runtime
+        .registered_database_lease(HostAdmissionScope::Project)
+        .unwrap();
+    let owned = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(lease);
+    owned
+        .record_component_activation(
+            "configuration.runtime-cache".to_owned(),
+            Some(root.revision_id.clone()),
+            None,
+            UtcMicros(11),
+        )
+        .await
+        .unwrap();
+
+    let observed = owned
+        .observed_component_configuration("configuration.runtime-cache".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(observed.revision_id, root.revision_id);
+    assert_eq!(observed.snapshot, root.snapshot);
 }
 
 #[tokio::test]

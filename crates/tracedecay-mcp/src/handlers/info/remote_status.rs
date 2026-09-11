@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tracedecay_contracts::remote::status::RemoteOperationalStatusReadPort;
 use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::remote::status::RemoteOperationalStatusReaderV1;
 use tracedecay_domain::errors::Result;
 
 use crate::ToolResult;
@@ -18,10 +18,10 @@ use crate::tool_json;
 pub fn handle_remote_status(
     project_root: &Path,
     args: &Value,
-    provider: Option<&dyn RemoteOperationalStatusReadPort>,
+    provider: Option<&RemoteOperationalStatusReaderV1>,
 ) -> Result<ToolResult> {
     let status = match provider {
-        Some(provider) => provider.read(),
+        Some(provider) => provider(),
         None => RemoteOperationalStatusReadV1::Unavailable,
     };
     let value = serde_json::to_value(&status)?;
@@ -35,7 +35,8 @@ mod tests {
 
     use serde_json::{Value, json};
     use tracedecay_contracts::remote::status::{
-        RemoteOperationalStatusReadV1, RemoteOperationalStatusV1, RemoteSpoolOperationalStatusV1,
+        RemoteOperationalStatusReadV1, RemoteOperationalStatusReaderV1, RemoteOperationalStatusV1,
+        RemoteSpoolOperationalStatusV1,
     };
     use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
     use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
@@ -97,14 +98,14 @@ mod tests {
     #[test]
     fn handler_returns_observed_json_when_provider_is_installed() {
         let expected = observed_fixture();
-        let provider = {
+        let provider: RemoteOperationalStatusReaderV1 = {
             let expected = expected.clone();
             Arc::new(move || expected.clone())
         };
         let result = handle_remote_status(
             Path::new("."),
             &json!({ "format": "json" }),
-            Some(provider.as_ref()),
+            Some(&provider),
         )
         .expect("observed remote status serializes");
         assert_eq!(

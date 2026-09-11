@@ -537,7 +537,7 @@ mod tests {
         let observed = observed.lock().expect("configuration observations");
         assert_eq!(
             observed.len(),
-            tracedecay_contracts::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES.len()
+            tracedecay_contracts::configuration::configuration_surface_operation_names().count()
         );
         for (index, (operation, body, actual_deadline, actual_cancellation)) in
             observed.iter().enumerate()

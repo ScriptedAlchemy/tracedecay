@@ -10,11 +10,28 @@ use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{OpaqueCursor, OperationBudgetUsage};
 
-use super::{ResultProjection, RetrievalOrder, RetrievalRequestMeta};
+use super::RetrievalRequestMeta;
 
 pub const MAX_SYMBOL_GRAPH_DEPTH: u32 = 10;
 pub const MAX_SYMBOL_GRAPH_QUERY_BYTES: usize = 4_096;
 pub const MAX_SYMBOL_GRAPH_FILTERS: usize = 32;
+
+/// Freshness of the generation a verified graph read serves.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum CodeGraphReadFreshnessV1 {
+    Current,
+    LastCompleteStale {
+        sealed_at: UtcMicros,
+        rebuild_in_flight: bool,
+    },
+}
+
+impl CodeGraphReadFreshnessV1 {
+    pub fn is_stale(self) -> bool {
+        matches!(self, Self::LastCompleteStale { .. })
+    }
+}
 
 /// Optional narrowing inside the immutable project/repository/worktree scope
 /// carried by [`RequestContext`]. A path prefix never establishes identity or
@@ -37,38 +54,6 @@ impl SymbolGraphScope {
         }
         Ok(())
     }
-}
-
-/// Public query controls shared by the callable code surfaces.
-///
-/// The HTTP and MCP adapters use one continuation field; the transport page
-/// limit is applied by the owner while decoding this request. Keeping the
-/// public wire DTO here prevents a root-adapter-only schema from drifting away
-/// from the executable SDK contract.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CallableCodeSurfaceMetaV1 {
-    pub projection: ResultProjection,
-    pub order: RetrievalOrder,
-    /// Opaque continuation token. The public schema exposes its bounded string
-    /// representation rather than the internal identifier type.
-    #[serde(default)]
-    #[schemars(with = "Option<String>")]
-    pub cursor: Option<OpaqueCursor>,
-}
-
-/// Exact public input accepted by `tracedecay_code_symbol_search`.
-///
-/// Its query text is deliberately sanitized only after the public request is
-/// admitted; a sanitized query view carries runtime-only provenance and is
-/// never exposed as a second SDK request model.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeSymbolSearchSurfaceRequestV1 {
-    pub query: String,
-    pub scope: SymbolGraphScope,
-    pub lazy_index_ignored_dependencies: bool,
-    pub meta: CallableCodeSurfaceMetaV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -179,6 +164,8 @@ impl PrimitiveSupportGap {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolGraphPage<T> {
+    pub generation: tracedecay_domain::CodeGenerationId,
+    pub freshness: CodeGraphReadFreshnessV1,
     pub items: Vec<T>,
     pub total: Option<u64>,
     /// Opaque resume token; its bounded string is the public wire form.
@@ -190,9 +177,17 @@ pub struct SymbolGraphPage<T> {
 }
 
 impl<T> SymbolGraphPage<T> {
-    pub fn complete(items: Vec<T>, total: Option<u64>, next_cursor: Option<OpaqueCursor>) -> Self {
+    pub fn complete(
+        generation: tracedecay_domain::CodeGenerationId,
+        freshness: CodeGraphReadFreshnessV1,
+        items: Vec<T>,
+        total: Option<u64>,
+        next_cursor: Option<OpaqueCursor>,
+    ) -> Self {
         let truncated = next_cursor.is_some();
         Self {
+            generation,
+            freshness,
             items,
             total,
             next_cursor,

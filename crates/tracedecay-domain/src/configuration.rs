@@ -152,7 +152,6 @@ const CONFIGURATION_GRANT_RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.configuratio
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationMutationOperationV1 {
     DirectMutation,
-    CredentialWrite,
     ProtectedDryRun,
     ProtectedApply,
     RollbackDryRun,
@@ -165,7 +164,6 @@ pub enum ConfigurationMutationOperationV1 {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationMutationSinkV1 {
     ConfigurationStore,
-    CredentialStore,
     ConfigurationAudit,
 }
 
@@ -177,7 +175,6 @@ pub enum ConfigurationMutationEffectV1 {
     AppendAuditOnly,
     CreateProtectedChangePlan,
     CommitConfigurationRevision,
-    WriteCredentialReference,
 }
 
 /// Immutable current-policy/grant receipt minted by the policy/application
@@ -287,14 +284,12 @@ impl ConfigurationMutationGrantReceiptV1 {
         match (self.operation, self.idempotency_key.as_ref()) {
             (
                 ConfigurationMutationOperationV1::DirectMutation
-                | ConfigurationMutationOperationV1::CredentialWrite
                 | ConfigurationMutationOperationV1::ProtectedApply
                 | ConfigurationMutationOperationV1::RollbackApply,
                 Some(key),
             ) => key.validate()?,
             (
                 ConfigurationMutationOperationV1::DirectMutation
-                | ConfigurationMutationOperationV1::CredentialWrite
                 | ConfigurationMutationOperationV1::ProtectedApply
                 | ConfigurationMutationOperationV1::RollbackApply,
                 None,
@@ -471,7 +466,6 @@ impl ConfigurationLayerIdV1 {
 pub enum SettingSensitivityV1 {
     Public,
     Sensitive,
-    CredentialReference,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -528,7 +522,6 @@ pub enum ConfigurationValueKindV1 {
     WorkExpertiseConsent,
     ContextScoutSettings,
     AutomationSettings,
-    CredentialReference,
 }
 
 /// Profile-level worker-count intent for the process-wide code-index pool.
@@ -827,7 +820,7 @@ impl Default for AutomationSettingsV1 {
             enabled: true,
             backend: AutomationBackendV1::CodexAppServer,
             host_mode: AutomationHostModeV1::Standalone,
-            model_id: None,
+            model_id: Some("gpt-5.6-sol".to_owned()),
             timeout_secs: 60,
             scheduler_tick_secs: 60,
             combine_due_tasks: true,
@@ -852,7 +845,7 @@ mod automation_settings_tests {
         assert!(settings.enabled);
         assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
         assert_eq!(settings.host_mode, AutomationHostModeV1::Standalone);
-        assert_eq!(settings.model_id, None);
+        assert_eq!(settings.model_id.as_deref(), Some("gpt-5.6-sol"));
         assert!(settings.validate().is_ok());
         assert_eq!(settings.scheduler_tick_secs, 60);
         assert!(settings.combine_due_tasks);
@@ -1179,48 +1172,6 @@ impl AnalyzerSettingsV1 {
     }
 }
 
-/// Credential metadata contains only a reference and an integrity digest. No
-/// constructor, field, serializer, audit record, or error type accepts a
-/// plaintext credential.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialKindV1 {
-    ApiToken,
-    AccessToken,
-    SigningKeyReference,
-    Other,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialReferenceMetadataV1 {
-    pub reference_id: CredentialReferenceId,
-    pub kind: CredentialKindV1,
-    pub reference_digest: ManifestDigest,
-    pub operation_digest: ManifestDigest,
-    pub settlement_authority: ConfigurationSettlementAuthorityV1,
-    pub created_at: UtcMicros,
-    pub effective_deadline_at: UtcMicros,
-    pub rotation: u64,
-}
-
-impl CredentialReferenceMetadataV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.reference_id.validate()?;
-        self.reference_digest.validate()?;
-        self.operation_digest.validate()?;
-        self.settlement_authority.validate()?;
-        if self.settlement_authority.revalidated_at > self.created_at
-            || self.effective_deadline_at <= self.created_at
-        {
-            return Err(DomainError::NonCanonical {
-                field: "credential write receipt deadline",
-            });
-        }
-        Ok(())
-    }
-}
-
 /// Original authorization evidence pinned to a durable configuration effect.
 /// A retry reauthorizes access separately without replacing these fields.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1243,7 +1194,7 @@ impl ConfigurationSettlementAuthorityV1 {
     }
 }
 
-/// Values that the typed registry can accept. Credentials are references only.
+/// Values that the typed registry can accept.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum ConfigurationValueV1 {
@@ -1260,7 +1211,6 @@ pub enum ConfigurationValueV1 {
     WorkExpertiseConsent(WorkExpertiseConsentV1),
     ContextScoutSettings(ContextScoutSettingsV1),
     AutomationSettings(Box<AutomationSettingsV1>),
-    CredentialReference(CredentialReferenceMetadataV1),
 }
 
 impl ConfigurationValueV1 {
@@ -1279,7 +1229,6 @@ impl ConfigurationValueV1 {
             Self::WorkExpertiseConsent(_) => ConfigurationValueKindV1::WorkExpertiseConsent,
             Self::ContextScoutSettings(_) => ConfigurationValueKindV1::ContextScoutSettings,
             Self::AutomationSettings(_) => ConfigurationValueKindV1::AutomationSettings,
-            Self::CredentialReference(_) => ConfigurationValueKindV1::CredentialReference,
         }
     }
 
@@ -1317,7 +1266,6 @@ impl ConfigurationValueV1 {
             Self::WorkExpertiseConsent(consent) => consent.validate(),
             Self::ContextScoutSettings(settings) => settings.validate(),
             Self::AutomationSettings(settings) => settings.validate(),
-            Self::CredentialReference(metadata) => metadata.validate(),
         }
     }
 }

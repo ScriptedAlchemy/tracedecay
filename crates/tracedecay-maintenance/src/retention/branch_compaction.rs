@@ -1,8 +1,9 @@
 //! Free-page compaction for tracked branch databases (plan 38 §6).
 //!
-//! Daemon `git_watch::store_maintenance::run_project_compaction` and
-//! `run_global_compaction` already compact the live graph store and
-//! `global.db` off the hot path, through the daemon's writer-actor runtime.
+//! [`super::live_compaction::compact_project_store`] and
+//! [`super::live_compaction::compact_registered_store`] already compact the
+//! live graph store and `global.db` off the hot path, through their retained
+//! writer runtimes.
 //! Every *other* tracked branch gets its own `SQLite` family under
 //! `branches/`, cloned wholesale from an ancestor at `branch add` time and
 //! then never revisited by any compaction pass. This is the exact bloat class
@@ -20,7 +21,8 @@
 //!
 //! Branch databases inherit `PRAGMA auto_vacuum = INCREMENTAL` from the
 //! ancestor they were cloned from (every fresh store is created with it, see
-//! `src/db/migrations.rs::configure_fresh_auto_vacuum`), so `incremental_vacuum`
+//! `tracedecay-runtime-core/src/db/migrations.rs::configure_fresh_auto_vacuum`),
+//! so `incremental_vacuum`
 //! reclaims pages here exactly as it does on the live graph store. A branch
 //! database predating that migration carries `auto_vacuum = NONE`, which makes
 //! `incremental_vacuum` a *silent no-op* -- reclaiming its free pages would
@@ -41,43 +43,13 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
-use serde::{Deserialize, Serialize};
-use tracedecay_contracts::storage::compaction::CompactionTriggerPolicyV1;
+use tracedecay_contracts::storage::compaction::{
+    CompactionThresholdConfig, CompactionTriggerPolicyV1,
+};
 use tracedecay_contracts::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
 use tracedecay_contracts::storage::telemetry::StoreSizeSampleV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_runtime_core::sqlite_read_snapshot::{BOUNDED_PROBE_BUSY_TIMEOUT, pragma_u64};
-
-/// Incremental-vacuum compaction trigger consumed by this pass and by daemon
-/// owner config. Threads [`CompactionTriggerPolicyV1`] through configured
-/// thresholds: the pass samples a store's free-page ratio and, when this
-/// threshold is met, runs a bounded incremental vacuum off the hot path.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct CompactionThresholdConfig {
-    /// Free-page ratio at or above which an incremental vacuum is scheduled.
-    pub free_page_ratio_threshold: f64,
-    /// Minimum reclaimable free bytes below which compaction is not worth it.
-    #[serde(default)]
-    pub minimum_reclaimable_bytes: u64,
-    /// Upper bound on freelist pages reclaimed per tick, keeping each vacuum
-    /// bounded and off the hot path.
-    #[serde(default = "default_compaction_max_pages_per_tick")]
-    pub max_pages_per_tick: u32,
-}
-
-fn default_compaction_max_pages_per_tick() -> u32 {
-    1024
-}
-
-impl Default for CompactionThresholdConfig {
-    fn default() -> Self {
-        Self {
-            free_page_ratio_threshold: 0.25,
-            minimum_reclaimable_bytes: 64 * 1024 * 1024,
-            max_pages_per_tick: default_compaction_max_pages_per_tick(),
-        }
-    }
-}
 
 /// `PRAGMA auto_vacuum` mode in which `incremental_vacuum` actually reclaims
 /// pages. `0` is `NONE` and `1` is `FULL`; only `2` (`INCREMENTAL`) responds.

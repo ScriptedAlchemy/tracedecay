@@ -20,18 +20,18 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_graph_query::SourceReadRuntime;
+use tracedecay_graph_query::SourceReadContext;
 use tracedecay_graph_query::health::{dependency_depth, depth_score};
 use tracedecay_graph_query::queries::GraphQueryManager;
 
 pub struct TraceDecayAstGrepAuthorityV1 {
-    source_runtime: Arc<SourceReadRuntime>,
+    source_runtime: Arc<SourceReadContext>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
 }
 
 impl TraceDecayAstGrepAuthorityV1 {
     pub fn new(
-        source_runtime: Arc<SourceReadRuntime>,
+        source_runtime: Arc<SourceReadContext>,
         code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ) -> Self {
         Self {
@@ -197,15 +197,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
     }
 }
 
-pub struct TraceDecayComplexityAuthorityV1 {
-    code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
-}
-
-impl TraceDecayComplexityAuthorityV1 {
-    pub fn new(code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>) -> Self {
-        Self { code_graph }
-    }
-}
+pub struct TraceDecayComplexityAuthorityV1;
 
 impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
     fn complexity<'a>(
@@ -218,12 +210,11 @@ impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
                 if request.window.cursor.is_some() {
                     return unsupported_compatibility_cursor();
                 }
-                let path =
+                let _path =
                     match effective_scoped_path(request.path.as_deref(), context.scope_prefix) {
                         Ok(path) => path,
                         Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
                     };
-                let _ = (&self.code_graph, path);
                 PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
                 "the verified graph generation does not publish the full complexity metric contract"
                     .to_owned(),

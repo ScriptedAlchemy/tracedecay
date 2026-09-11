@@ -541,11 +541,36 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
     assert_eq!(repeated.stats.sessions_scanned, 0);
     assert_eq!(repeated.later_failure, None);
 
-    git(
-        repository.path(),
-        &["commit", "--allow-empty", "-m", "first"],
+    // A historical commit makes the epoch-zero scan independent of whether
+    // backfill happens in the same wall-clock second as repository creation.
+    let output = Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())
+        .current_dir(repository.path())
+        .args([
+            "-c",
+            "user.name=TraceDecay",
+            "-c",
+            "user.email=test@tracedecay.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "first",
+        ])
+        .env("GIT_AUTHOR_DATE", "@1000000000 +0000")
+        .env("GIT_COMMITTER_DATE", "@1000000000 +0000")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
     let timestamp = head_commit_time(repository.path());
+    for (since, expected) in [(0, 1), (-300, 1), (timestamp, 1), (timestamp + 1, 0)] {
+        let log = SystemGit
+            .commit_log(repository.path(), "main", since)
+            .unwrap();
+        assert_eq!(parse_commit_log(&log, 10).len(), expected, "since={since}");
+    }
     store
         .connection
         .execute("UPDATE sessions SET ended_at = ?1", params![timestamp])

@@ -4,6 +4,17 @@ use tracedecay_domain::errors::Result;
 
 use super::access_io_error;
 
+/// A scope key a later lookup can still match, whether or not the profile
+/// root exists yet.
+///
+/// A daemon may enter database scope before it creates its profile root. A
+/// plain `canonicalize` fails on the missing directory and leaves the raw
+/// spelling as the key, but by the time [`super::DatabaseIdentity::for_path`]
+/// resolves an opened database the directory exists and canonicalizes to a
+/// different name wherever an ancestor is an alias (macOS `/var` ->
+/// `/private/var`, Windows `\\?\`). The scope lookup then misses and the
+/// authority fails closed. Resolving through the deepest existing ancestor
+/// gives both sides the same spelling.
 pub(super) fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf> {
     let absolute = if profile_root.is_absolute() {
         profile_root.to_path_buf()
@@ -12,8 +23,8 @@ pub(super) fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf> {
             .map_err(|error| access_io_error("resolve profile", profile_root, &error))?
             .join(profile_root)
     };
-    Ok(platform_identity_key(
-        &absolute.canonicalize().unwrap_or(absolute),
+    Ok(crate::path_safety::canonicalize_path_or_existing_parent(
+        &absolute,
     ))
 }
 

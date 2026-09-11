@@ -42,6 +42,21 @@ const CORPUS_ROOT: &str = concat!(
 const REPLICAS: usize = 10;
 const WARMUPS: usize = 2;
 const MEASURED: usize = 5;
+/// Env overrides so one build can also measure a frozen `git archive` of a
+/// real tree: `PARTITIONED_CODEC_BENCH_CORPUS`, `_REPLICAS`, `_WARMUPS`,
+/// `_MEASURED`.
+const CORPUS_ENV: &str = "PARTITIONED_CODEC_BENCH_CORPUS";
+const REPLICAS_ENV: &str = "PARTITIONED_CODEC_BENCH_REPLICAS";
+const WARMUPS_ENV: &str = "PARTITIONED_CODEC_BENCH_WARMUPS";
+const MEASURED_ENV: &str = "PARTITIONED_CODEC_BENCH_MEASURED";
+
+fn env_usize(key: &str, default: usize) -> Result<usize, Box<dyn Error>> {
+    match std::env::var(key) {
+        Ok(value) => Ok(value.trim().parse::<usize>()?.max(1)),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error.into()),
+    }
+}
 const DEFAULT_HOTPATH_BYTES_PATH: &str = "/tmp/tracedecay-partitioned-codec-bytes.json";
 const DEFAULT_HOTPATH_COUNT_PATH: &str = "/tmp/tracedecay-partitioned-codec-count.json";
 
@@ -172,6 +187,12 @@ struct Measurement {
     replicas: usize,
     measured_iterations: usize,
     manifest_size_bytes: usize,
+    /// SHA-256 of the manifest bytes: the same input must seal to the same
+    /// digest across codec changes and worker widths.
+    manifest_digest: String,
+    /// SHA-256 over every segment's content address and bytes in digest
+    /// order.
+    segments_digest: String,
     segment_count: usize,
     segment_bytes: usize,
     bytes_per_file: f64,
@@ -184,11 +205,14 @@ struct Measurement {
 fn main() -> Result<(), Box<dyn Error>> {
     let count_allocations = std::env::args().any(|argument| argument == "--alloc-count");
     let output_path = configure_hotpath(count_allocations);
-    let sources = replicated_sources()?;
+    let replicas = env_usize(REPLICAS_ENV, REPLICAS)?;
+    let warmups = env_usize(WARMUPS_ENV, WARMUPS)?;
+    let measured = env_usize(MEASURED_ENV, MEASURED)?;
+    let sources = replicated_sources(replicas)?;
     let corpus_bytes = sources.iter().map(|source| source.bytes.len()).sum();
     let generation = build_generation(&sources)?;
     let fixture = encode_once(&generation)?;
-    for _ in 0..WARMUPS {
+    for _ in 0..warmups {
         black_box(encode_once(&generation)?);
         decode_and_open(&fixture)?;
         drain_lexical(&fixture)?;
@@ -199,10 +223,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .format(hotpath::Format::Json)
         .output_path(output_path)
         .build();
-    let mut encode_wall = Vec::with_capacity(MEASURED);
-    let mut decode_wall = Vec::with_capacity(MEASURED);
-    let mut lexical_drain_wall = Vec::with_capacity(MEASURED);
-    for _ in 0..MEASURED {
+    let mut encode_wall = Vec::with_capacity(measured);
+    let mut decode_wall = Vec::with_capacity(measured);
+    let mut lexical_drain_wall = Vec::with_capacity(measured);
+    for _ in 0..measured {
         let started = Instant::now();
         let encoded = hotpath::measure_block!(
             "code_index.generation.publish.segment_encode",
@@ -224,14 +248,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(guard);
 
     let segment_bytes = fixture.segments.values().map(Vec::len).sum::<usize>();
+    let mut segments_digest = Sha256::new();
+    for (digest, bytes) in fixture.segments.iter() {
+        segments_digest.update(digest.as_bytes());
+        segments_digest.update(bytes);
+    }
     let measurement = Measurement {
         schema_version: 2,
         allocation_metric: if count_allocations { "count" } else { "bytes" },
         corpus_files: sources.len(),
         corpus_bytes,
-        replicas: REPLICAS,
-        measured_iterations: MEASURED,
+        replicas,
+        measured_iterations: measured,
         manifest_size_bytes: fixture.manifest.len(),
+        manifest_digest: format!("sha256:{}", hex::encode(Sha256::digest(&fixture.manifest))),
+        segments_digest: format!("sha256:{}", hex::encode(segments_digest.finalize())),
         segment_count: fixture.segments.len(),
         segment_bytes,
         bytes_per_file: segment_bytes as f64 / sources.len() as f64,
@@ -256,7 +287,9 @@ fn configure_hotpath(count_allocations: bool) -> PathBuf {
         });
     unsafe {
         std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1");
-        std::env::set_var("HOTPATH_REPORT", "functions-alloc");
+        if std::env::var_os("HOTPATH_REPORT").is_none() {
+            std::env::set_var("HOTPATH_REPORT", "functions-alloc");
+        }
         std::env::set_var("HOTPATH_OUTPUT_PATH", &output_path);
         std::env::set_var(
             "HOTPATH_ALLOC_METRIC",
@@ -266,8 +299,11 @@ fn configure_hotpath(count_allocations: bool) -> PathBuf {
     output_path
 }
 
-fn replicated_sources() -> Result<Vec<SourceFile>, Box<dyn Error>> {
-    let root = Path::new(CORPUS_ROOT);
+fn replicated_sources(replicas: usize) -> Result<Vec<SourceFile>, Box<dyn Error>> {
+    let root = std::env::var_os(CORPUS_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(CORPUS_ROOT));
+    let root = root.as_path();
     let mut base = WalkBuilder::new(root)
         .hidden(false)
         .build()
@@ -279,22 +315,28 @@ fn replicated_sources() -> Result<Vec<SourceFile>, Box<dyn Error>> {
                 .strip_prefix(root)?
                 .to_string_lossy()
                 .replace('\\', "/");
-            let extension = path
+            // A frozen real tree carries manifests, docs, and fixtures the
+            // benchmark languages do not cover; admit only the files the
+            // production pipeline would parse.
+            let Some(language) = path
                 .extension()
                 .and_then(|value| value.to_str())
-                .ok_or("corpus file has no UTF-8 extension")?;
-            let language = language_for_extension(extension)?;
+                .and_then(|extension| language_for_extension(extension).ok())
+            else {
+                return Ok::<_, Box<dyn Error>>(None);
+            };
             let bytes: Arc<[u8]> = std::fs::read(path)?.into();
-            Ok::<_, Box<dyn Error>>(SourceFile {
+            Ok(Some(SourceFile {
                 logical_path: relative,
                 language,
                 bytes,
-            })
+            }))
         })
+        .filter_map(Result::transpose)
         .collect::<Result<Vec<_>, _>>()?;
     base.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-    let mut sources = Vec::with_capacity(base.len() * REPLICAS);
-    for replica in 0..REPLICAS {
+    let mut sources = Vec::with_capacity(base.len() * replicas);
+    for replica in 0..replicas {
         sources.extend(base.iter().map(|source| SourceFile {
             logical_path: format!("replica/{replica:02}/{}", source.logical_path),
             language: source.language.clone(),

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
 use tracedecay_global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 
 static PROJECTS_FORGET_TEST_LOCK: Mutex<()> = Mutex::const_new(());
@@ -17,6 +17,17 @@ static PROJECTS_FORGET_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 async fn close_profile_runtime(db: HostAdmissionTestRuntimeV1) {
     db.checkpoint_profile_database_for_test().await;
     drop(db);
+}
+
+async fn admit_profile_registry(profile_root: &Path) -> ProfileRegistryMaintenanceRuntime {
+    let identity =
+        tracedecay_daemon_identity::profile_identity::load_existing(profile_root).unwrap();
+    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .unwrap();
+    ProfileRegistryMaintenanceRuntime::from_admitted_lease(
+        registry.profile_database().await.unwrap(),
+    )
 }
 
 /// Registers one complete project identity: code project row, root alias,
@@ -109,9 +120,7 @@ async fn forget_project_removes_exactly_one_registered_project() {
             "projects forget test",
         )
         .unwrap();
-        let runtime = ProfileRegistryMaintenanceRuntime::open(profile.path())
-            .await
-            .unwrap();
+        let runtime = admit_profile_registry(profile.path()).await;
         // Path-shaped and id-shaped selectors must resolve the same identity.
         let by_path = runtime
             .resolve_registered_project(&root_a)
@@ -203,9 +212,7 @@ async fn forget_project_keep_store_retires_rows_but_preserves_bytes() {
             "projects forget test",
         )
         .unwrap();
-        let runtime = ProfileRegistryMaintenanceRuntime::open(profile.path())
-            .await
-            .unwrap();
+        let runtime = admit_profile_registry(profile.path()).await;
         let context = runtime
             .resolve_registered_project(Path::new("proj_kept"))
             .await
@@ -275,9 +282,7 @@ async fn forget_refuses_malformed_store_relpath_without_any_mutation() {
             "projects forget test",
         )
         .unwrap();
-        let runtime = ProfileRegistryMaintenanceRuntime::open(profile.path())
-            .await
-            .unwrap();
+        let runtime = admit_profile_registry(profile.path()).await;
         let context = runtime
             .resolve_registered_project(Path::new("proj_escape"))
             .await

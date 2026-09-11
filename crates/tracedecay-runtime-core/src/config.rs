@@ -6,7 +6,6 @@
 //! every item declared here, so `crate::config::<item>` keeps resolving on
 //! both sides of the split.
 
-#[cfg(any(test, feature = "test-helpers"))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -284,49 +283,67 @@ impl Default for PinnedUserDataDir {
     }
 }
 
-/// Narrows the ambient `PATH` for the guard's lifetime under the shared
-/// profile-discovery lock.
+/// The search path for host and service program resolution (`kiro-cli`,
+/// `gemini`, `systemctl`, env-shebang interpreters, ...).
 ///
-/// The `git` program authority is resolved before `PATH` changes: it caches
-/// per process, so the first resolution must never happen inside a narrowed
-/// window, and fixtures that spawn through [`crate::git::try_git_program`]
-/// keep an absolute program while this guard is alive. Tests that read
-/// ambient `PATH` for consistency (for example resolving the product binary
-/// twice) take [`lock_user_data_dir_test_env`] so they never run inside a
-/// narrowed window.
-#[cfg(any(test, feature = "test-helpers"))]
-pub struct AmbientPathGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    previous: Option<OsString>,
+/// Production reads the ambient `PATH` at each call. Tests substitute a
+/// fixture directory through [`HostProgramSearchPathGuard`] instead of
+/// mutating the process environment: a narrowed process-global `PATH` is
+/// visible to every concurrently running test, so unrelated `sh`/`git` spawns
+/// fail with `NotFound` for the guard's lifetime.
+///
+/// [`crate::git::try_git_program`] deliberately does not consult this seam:
+/// the Git authority is process-wide and must never observe a test fixture.
+pub fn host_program_search_path() -> Option<OsString> {
+    #[cfg(any(test, feature = "test-helpers"))]
+    if let Some(path) = HOST_PROGRAM_SEARCH_PATH_OVERRIDE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return Some(path);
+    }
+    std::env::var_os("PATH")
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-impl AmbientPathGuard {
+static HOST_PROGRAM_SEARCH_PATH_OVERRIDE: std::sync::RwLock<Option<OsString>> =
+    std::sync::RwLock::new(None);
+#[cfg(any(test, feature = "test-helpers"))]
+static HOST_PROGRAM_SEARCH_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Substitutes [`host_program_search_path`] for the guard's lifetime without
+/// touching the process `PATH`.
+///
+/// Guards serialize on their own lock, acquired after
+/// [`lock_user_data_dir_test_env`] whenever a test holds both (never the
+/// reverse), so sibling tests that spawn `sh`, `git`, or the product binary
+/// keep seeing the ambient environment.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct HostProgramSearchPathGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl HostProgramSearchPathGuard {
     pub fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
-        let lock = lock_user_data_dir_test_env();
-        crate::git::try_git_program()
-            .unwrap_or_else(|error| panic!("git must resolve before PATH is narrowed: {error}"));
-        let previous = std::env::var_os("PATH");
-        // SAFETY: the shared profile-discovery lock serializes this
-        // process-global test environment mutation.
-        unsafe { std::env::set_var("PATH", path) };
-        Self {
-            _lock: lock,
-            previous,
-        }
+        let lock = HOST_PROGRAM_SEARCH_PATH_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *HOST_PROGRAM_SEARCH_PATH_OVERRIDE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(path.as_ref().to_os_string());
+        Self { _lock: lock }
     }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-impl Drop for AmbientPathGuard {
+impl Drop for HostProgramSearchPathGuard {
     fn drop(&mut self) {
-        // SAFETY: see `AmbientPathGuard::set`.
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var("PATH", previous),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        *HOST_PROGRAM_SEARCH_PATH_OVERRIDE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
@@ -347,5 +364,25 @@ impl Drop for PinnedUserDataDir {
                 None => std::env::remove_var("USERPROFILE"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod host_program_search_path_tests {
+    use super::*;
+
+    #[test]
+    fn fixture_search_path_leaves_process_path_untouched() {
+        let ambient = std::env::var_os("PATH");
+        let fixture = tempfile::tempdir().expect("fixture search directory");
+        {
+            let _guard = HostProgramSearchPathGuard::set(fixture.path());
+            assert_eq!(
+                host_program_search_path().as_deref(),
+                Some(fixture.path().as_os_str())
+            );
+            assert_eq!(std::env::var_os("PATH"), ambient);
+        }
+        assert_eq!(host_program_search_path(), ambient);
     }
 }

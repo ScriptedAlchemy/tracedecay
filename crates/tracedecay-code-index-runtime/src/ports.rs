@@ -8,7 +8,6 @@ use tokio::time::{Duration, timeout};
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_query::retrieval::QueryAuthorityV1;
-use tracedecay_tool_catalog::CatalogSnapshotV1;
 
 /// Scheduler-facing view of a prepared query activation.
 pub struct PreparedQueryActivationViewV1 {
@@ -82,34 +81,6 @@ impl GitWatchMaintenanceWakeV1 {
 impl Default for GitWatchMaintenanceWakeV1 {
     fn default() -> Self {
         Self::new(|| {})
-    }
-}
-
-/// Catalog snapshot provider the git-transaction owner consults for capability
-/// manifests. Root hands one to each owner at construction; there is no ambient
-/// registration, so an owner cannot exist without a composer.
-#[derive(Clone)]
-pub struct ApplicationCatalogProviderV1 {
-    compose:
-        Arc<dyn Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> + Send + Sync>,
-}
-
-impl ApplicationCatalogProviderV1 {
-    pub fn new(
-        compose: impl Fn() -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
-        Self {
-            compose: Arc::new(compose),
-        }
-    }
-
-    /// Composes the current snapshot. Root composes lazily per call, so this is
-    /// deliberately not a captured snapshot.
-    pub fn snapshot(&self) -> Result<CatalogSnapshotV1, ApplicationCatalogSnapshotErrorV1> {
-        (self.compose)()
     }
 }
 

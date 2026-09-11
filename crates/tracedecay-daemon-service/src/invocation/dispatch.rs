@@ -187,6 +187,8 @@ impl DaemonInvocationService {
         admitted_cancellation: Option<CancellationToken>,
         project_admission: Option<&crate::project_runtime::ProjectRuntimeRequestLeaseV1>,
     ) -> DaemonInvocationResponse {
+        // Keep the admitted dispatch frame behind one allocation for every invocation entry point.
+        Box::pin(async move {
         let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
@@ -318,6 +320,7 @@ impl DaemonInvocationService {
         let work_runtime = runtimes.work;
         let retained_runtime = runtimes.retained;
         let lsp_owner = runtimes.lsp_owner;
+        let source_edit_owner = runtimes.source_edit;
 
         let response = match request.payload {
             DaemonInvocationPayload::GitRead {
@@ -812,10 +815,7 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let Some(registered) = work_runtime else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 let observability_producer = self.observability_producer(project_root).await;
                 Box::pin(execute_work_application(
@@ -844,10 +844,7 @@ impl DaemonInvocationService {
                     );
                 };
                 let Some(registered) = work_runtime.clone() else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 let observability_producer = self.observability_producer(Some(project_root)).await;
                 Box::pin(execute_workflow_application(
@@ -871,10 +868,7 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let Some(registered) = work_runtime else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 Box::pin(execute_handoff_application(
                     registered,
@@ -1018,6 +1012,54 @@ impl DaemonInvocationService {
                 }
                 Err(response) => *response,
             },
+            DaemonInvocationPayload::SourceEdit {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::SourceEditReconcile {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit_reconcile(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::SourceEditRollback {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit_rollback(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
         };
         if is_observable_operation(operation) {
             hotpath::measure_block!(
@@ -1033,7 +1075,18 @@ impl DaemonInvocationService {
             );
         }
         response
+        }).await
     }
+}
+
+fn missing_work_runtime_problem(
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
+    request_id: String,
+) -> DaemonInvocationResponse {
+    if publication == Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Ready) {
+        return super::work::concealed_application_problem(request_id);
+    }
+    super::work::missing_registered_owner_problem(publication, request_id)
 }
 
 #[cfg(test)]

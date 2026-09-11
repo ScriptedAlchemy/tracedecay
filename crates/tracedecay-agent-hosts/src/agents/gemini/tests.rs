@@ -362,7 +362,8 @@ fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
     std::fs::write(&user_context, "# my own rules\n").unwrap();
 
     let empty_path_dir = tempfile::tempdir().unwrap();
-    let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(empty_path_dir.path());
+    let _path =
+        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path_dir.path());
 
     let error = GeminiIntegration
         .prepare_non_interactive_install(&install_context(home.path(), "/bin/tracedecay"))
@@ -529,7 +530,8 @@ fn doctor_warns_when_nothing_is_staged_or_installed() {
 fn doctor_only_treats_an_absent_gemini_cli_as_unobserved_state() {
     let home = tempfile::tempdir().unwrap();
     let empty_path_dir = tempfile::tempdir().unwrap();
-    let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(empty_path_dir.path());
+    let _path =
+        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path_dir.path());
 
     assert!(
         host_reported_extensions(home.path())
@@ -551,7 +553,7 @@ fn doctor_fails_when_a_present_gemini_cli_is_not_executable() {
     let bin_dir = tempfile::tempdir().unwrap();
     let candidate = bin_dir.path().join("gemini");
     std::fs::write(&candidate, b"not executable").unwrap();
-    let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(bin_dir.path());
+    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
 
     let error = host_reported_extensions(home.path())
         .expect_err("a present unusable Gemini candidate is not an absent CLI");

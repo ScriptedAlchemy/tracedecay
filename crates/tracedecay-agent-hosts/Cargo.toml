@@ -69,6 +69,8 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 
 # Linux-only extended-attribute probe in `agents::mod` (host install provenance).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -77,5 +79,6 @@ xattr = "1"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }

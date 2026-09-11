@@ -131,11 +131,7 @@ impl RuntimeEnvironmentV1 {
     pub fn detect_embedding_process(
         backend: EmbeddingRuntimeFamilyV1,
     ) -> Result<Self, SemanticCapabilityDisabledV1> {
-        let compiled = match backend {
-            EmbeddingRuntimeFamilyV1::FastEmbedOrt => cfg!(feature = "semantic-fastembed"),
-            EmbeddingRuntimeFamilyV1::Model2VecStatic => cfg!(feature = "semantic-model2vec"),
-        };
-        if !compiled {
+        if !backend.is_compiled() {
             return Err(SemanticCapabilityDisabledV1::IncompatibleRuntime);
         }
         let available_threads = std::thread::available_parallelism()

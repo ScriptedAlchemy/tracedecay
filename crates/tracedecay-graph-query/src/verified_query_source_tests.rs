@@ -24,66 +24,14 @@ use super::{
     CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
     VerifiedGraphQuery, VerifiedGraphQueryRequest, open_verified_graph_query,
 };
-use crate::SourceReadRuntimePort;
+use crate::SourceReadContext;
 use crate::context::read_modes::ReadMode;
 use crate::context::source_read::SourceReadRequest;
 use tracedecay_session_memory::context::read_cache::{self, GLOBAL_SESSION};
 
-/// Identity-only runtime: bind-time denial must refuse it before consulting
-/// any other surface, so touching the database is a test failure.
-struct IdentityOnlySource {
-    project_root: PathBuf,
-    project_id: String,
-}
-
-impl SourceReadRuntimePort for IdentityOnlySource {
-    fn project_root(&self) -> &Path {
-        &self.project_root
-    }
-
-    fn db(&self) -> &Database {
-        unreachable!("identity-only fixture source")
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn project_id(&self) -> &str {
-        &self.project_id
-    }
-}
-
-struct CountingSource {
-    project_root: PathBuf,
-    project_id: String,
-    db: Database,
-    db_hits: Arc<AtomicUsize>,
-}
-
-impl SourceReadRuntimePort for CountingSource {
-    fn project_root(&self) -> &Path {
-        &self.project_root
-    }
-
-    fn db(&self) -> &Database {
-        self.db_hits.fetch_add(1, Ordering::SeqCst);
-        &self.db
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn project_id(&self) -> &str {
-        &self.project_id
-    }
-}
-
-/// Same-identity, same-root facade that swaps its database answer after the
-/// flip. With source authority frozen at admitted open, the flip must never
-/// be observable.
-struct SwappingSource {
+/// Same-identity, same-root provider that swaps its database answer after the
+/// flip. The source authority must bind once and freeze that answer.
+struct SwitchingSourceBind {
     project_root: PathBuf,
     project_id: String,
     bound_db: Database,
@@ -93,32 +41,35 @@ struct SwappingSource {
     forged_hits: AtomicUsize,
 }
 
-impl SourceReadRuntimePort for SwappingSource {
-    fn project_root(&self) -> &Path {
-        &self.project_root
-    }
-
-    fn db(&self) -> &Database {
+impl CodeGraphSourceAuthorityPort for SwitchingSourceBind {
+    fn bind<'a>(
+        &'a self,
+        _request: CodeGraphSourceBindRequest<'a>,
+    ) -> CodeGraphSourceBindFuture<'a> {
         if self.forged.load(Ordering::SeqCst) {
             self.forged_hits.fetch_add(1, Ordering::SeqCst);
-            &self.forged_db
+            let source = SourceReadContext::new(
+                self.project_root.clone(),
+                self.forged_db.clone(),
+                true,
+                self.project_id.clone(),
+            );
+            Box::pin(async move { Ok(source) })
         } else {
             self.bound_hits.fetch_add(1, Ordering::SeqCst);
-            &self.bound_db
+            let source = SourceReadContext::new(
+                self.project_root.clone(),
+                self.bound_db.clone(),
+                true,
+                self.project_id.clone(),
+            );
+            Box::pin(async move { Ok(source) })
         }
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn project_id(&self) -> &str {
-        &self.project_id
     }
 }
 
 struct FixtureSourceBind {
-    runtime: Arc<dyn SourceReadRuntimePort>,
+    source: SourceReadContext,
 }
 
 impl CodeGraphSourceAuthorityPort for FixtureSourceBind {
@@ -126,8 +77,8 @@ impl CodeGraphSourceAuthorityPort for FixtureSourceBind {
         &'a self,
         _request: CodeGraphSourceBindRequest<'a>,
     ) -> CodeGraphSourceBindFuture<'a> {
-        let runtime = Arc::clone(&self.runtime);
-        Box::pin(async move { Ok(runtime) })
+        let source = self.source.clone();
+        Box::pin(async move { Ok(source) })
     }
 }
 
@@ -234,12 +185,12 @@ async fn resolve_rejects_absolute_path_under_another_project_root() {
     std::fs::write(project_b.join("src/secret.rs"), "fn secret() {}\n").expect("foreign file");
     let db = test_database(&project_a.join("bound.db")).await;
     let query =
-        fixture_query("project.verified-query-source.a").with_source(Arc::new(CountingSource {
-            project_root: project_a,
-            project_id: "project.verified-query-source.a".to_owned(),
+        fixture_query("project.verified-query-source.a").with_source(SourceReadContext::new(
+            project_a,
             db,
-            db_hits: Arc::new(AtomicUsize::new(0)),
-        }));
+            true,
+            "project.verified-query-source.a".to_owned(),
+        ));
     let error = query
         .resolve_indexed_source_file(project_b.join("src/secret.rs").to_str().expect("utf8"))
         .expect_err("foreign root must be denied");
@@ -259,12 +210,12 @@ async fn read_source_rejects_request_project_id_outside_bound_source() {
     std::fs::create_dir_all(&project_a).expect("project a");
     let db = test_database(&project_a.join("bound.db")).await;
     let query =
-        fixture_query("project.verified-query-source.a").with_source(Arc::new(CountingSource {
-            project_root: project_a,
-            project_id: "project.verified-query-source.a".to_owned(),
+        fixture_query("project.verified-query-source.a").with_source(SourceReadContext::new(
+            project_a,
             db,
-            db_hits: Arc::new(AtomicUsize::new(0)),
-        }));
+            true,
+            "project.verified-query-source.a".to_owned(),
+        ));
     let error = match query
         .read_source(full_read_request("project.verified-query-source.b"))
         .await
@@ -285,11 +236,14 @@ async fn open_denies_cross_project_source_at_bind() {
         scope: fixture_scope("verified-query-source-deny"),
         store: fixture_store("verified-query-source-deny"),
     };
+    let db = test_database(&home.path().join("bound.db")).await;
     let bind = FixtureSourceBind {
-        runtime: Arc::new(IdentityOnlySource {
-            project_root: home.path().to_path_buf(),
-            project_id: "project.verified-query-source-other".to_owned(),
-        }),
+        source: SourceReadContext::new(
+            home.path().to_path_buf(),
+            db,
+            true,
+            "project.verified-query-source-other".to_owned(),
+        ),
     };
     let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("deadline");
     let cancellation =
@@ -344,7 +298,7 @@ async fn forged_runtime_cannot_redirect_reads_after_admitted_open() {
     )
     .await
     .expect("poison forged cache");
-    let facade = Arc::new(SwappingSource {
+    let source = Arc::new(SwitchingSourceBind {
         project_root: project,
         project_id: project_id.to_owned(),
         bound_db,
@@ -360,9 +314,6 @@ async fn forged_runtime_cannot_redirect_reads_after_admitted_open() {
         scope: fixture_scope("verified-query-source-swap"),
         store: fixture_store("verified-query-source-swap"),
     };
-    let bind = FixtureSourceBind {
-        runtime: Arc::clone(&facade) as Arc<dyn SourceReadRuntimePort>,
-    };
     let deadline =
         Deadline::new(UtcMicros(now_micros().0.saturating_add(60_000_000))).expect("deadline");
     let cancellation =
@@ -377,31 +328,31 @@ async fn forged_runtime_cannot_redirect_reads_after_admitted_open() {
             deadline,
             &cancellation,
         ),
-        Some(&bind),
+        Some(source.as_ref()),
     )
     .await
     .expect("admitted open with bound source");
     assert_eq!(
-        facade.bound_hits.load(Ordering::SeqCst),
+        source.bound_hits.load(Ordering::SeqCst),
         1,
         "the database authority is captured exactly once at admitted open"
     );
-    // Flip the facade after admission: a live runtime would now answer with
+    // Flip the provider after admission: a second bind would now answer with
     // the forged database, but the frozen authority must never consult it.
-    facade.forged.store(true, Ordering::SeqCst);
+    source.forged.store(true, Ordering::SeqCst);
     let output = query
         .read_source(full_read_request(project_id))
         .await
         .expect("bound source read");
     assert_eq!(
-        facade.forged_hits.load(Ordering::SeqCst),
+        source.forged_hits.load(Ordering::SeqCst),
         0,
-        "same-id/same-root forged runtime must not be readable"
+        "same-id/same-root forged provider must not be rebound"
     );
     assert_eq!(
-        facade.bound_hits.load(Ordering::SeqCst),
+        source.bound_hits.load(Ordering::SeqCst),
         1,
-        "reads use the frozen authority, never the runtime facade"
+        "reads use the frozen authority without rebinding the provider"
     );
     assert_ne!(output.digest, "forged-cache-digest");
     assert!(!output.unchanged);

@@ -14,8 +14,8 @@ pub use ports::{
 };
 pub use refresh::{
     SessionRefreshConfiguration, SessionRefreshDigest, SessionRefreshHandle, SessionRefreshOutcome,
-    SessionRefreshRequestError, SessionRefreshSchedulerError, SessionRefreshSchedulerPort,
-    SessionRefreshService, SessionRefreshTarget,
+    SessionRefreshRequestError, SessionRefreshSchedulerError, SessionRefreshService,
+    SessionRefreshTarget,
 };
 pub use refresh_service::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,

@@ -99,9 +99,10 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::NativeIntegrationWorktreeInspect
         | DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
         | DaemonInvocationOperation::NativeIntegrationWorktreeRemove
-        | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile => {
-            FeedbackOperationV1::FeedbackCycle
-        }
+        | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
+        | DaemonInvocationOperation::SourceEdit
+        | DaemonInvocationOperation::SourceEditReconcile
+        | DaemonInvocationOperation::SourceEditRollback => FeedbackOperationV1::FeedbackCycle,
     }
 }
 
@@ -141,7 +142,8 @@ pub(super) fn invocation_response_outcome(
         | DaemonInvocationOutcome::LspOpened { .. }
         | DaemonInvocationOutcome::LspAcknowledged { .. }
         | DaemonInvocationOutcome::LspReconnected { .. }
-        | DaemonInvocationOutcome::LspDetached => FeedbackOutcomeV1::Completed,
+        | DaemonInvocationOutcome::LspDetached
+        | DaemonInvocationOutcome::SourceEdit { .. } => FeedbackOutcomeV1::Completed,
         DaemonInvocationOutcome::Feedback { result, .. }
         | DaemonInvocationOutcome::Primitive { result, .. }
         | DaemonInvocationOutcome::CallableCode { result, .. }

@@ -21,7 +21,9 @@ pub enum MemoryApplicationError {
         request_owner: FactOwnerV1,
     },
     #[error("fact store operation failed")]
-    Store(#[from] FactStoreError),
+    Store(#[source] FactStoreError),
+    #[error("fact store operation was cancelled")]
+    Cancelled(#[source] FactStoreError),
     #[error("memory input is invalid: {invariant}")]
     InvalidInput { invariant: &'static str },
     #[error("memory authority returned a result violating {invariant}")]
@@ -73,6 +75,25 @@ impl<T: Debug> From<MemoryMutationError<T>> for MemoryApplicationError {
             MemoryMutationError::Application(error) => error,
             MemoryMutationError::InvalidAuthorityResult { error, .. } => error,
         }
+    }
+}
+
+impl From<FactStoreError> for MemoryApplicationError {
+    fn from(error: FactStoreError) -> Self {
+        match error {
+            FactStoreError::ReadCancelled
+            | FactStoreError::GraphCancelled
+            | FactStoreError::GraphDeadlineExceeded => Self::Cancelled(error),
+            // FactStoreError is #[non_exhaustive]; a future cancellation variant would land in Store.
+            error => Self::Store(error),
+        }
+    }
+}
+
+impl MemoryApplicationError {
+    /// True for store cancellation and deadline failures, not ordinary store errors.
+    pub fn is_cancellation(&self) -> bool {
+        matches!(self, Self::Cancelled(_))
     }
 }
 

@@ -627,7 +627,7 @@ fn failed_kiro_cli_effect_rolls_back_the_peer_containing_registry() {
     let kiro_cli = bin_dir.path().join("kiro-cli");
     let log = bin_dir.path().join("invocations.log");
     fake_kiro_cli(&kiro_cli, &log, FAKE_FAIL_AFTER_WRITE_BODY);
-    let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(bin_dir.path());
+    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
 
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
@@ -685,7 +685,7 @@ fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
     let kiro_cli = bin_dir.path().join("kiro-cli");
     let log = bin_dir.path().join("invocations.log");
     fake_kiro_cli(&kiro_cli, &log, FAKE_REGISTRY_BODY);
-    let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(bin_dir.path());
+    let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
 
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();

@@ -128,42 +128,6 @@ pub(super) fn def_run_affected_tests() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_diagnostics() -> ToolDefinition {
-    def(
-        "tracedecay_diagnostics",
-        "Read Canonical Diagnostics",
-        "Read the daemon-retained clean-generation diagnostic authority. This \
-         compatibility name does not start an analyzer or execute a build; \
-         configured producers publish new diagnostics through their owned \
-         lifecycle.",
-        json!({
-            "type": "object",
-            "properties": {
-                "scope": {
-                    "type": "string",
-                    "enum": ["workspace", "file"],
-                    "description": "Read scope. Default 'workspace'. 'file' requires `path`."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Project-relative file path when scope='file'."
-                },
-                "maximum_diagnostics": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000,
-                    "description": "Maximum diagnostics returned in this page."
-                },
-                "cursor": {
-                    "type": ["string", "null"],
-                    "minLength": 1,
-                    "description": "Opaque cursor returned by the prior page."
-                }
-            }
-        }),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::def_run_affected_tests;

@@ -347,6 +347,13 @@ impl WatchState {
         self.signal_retirement();
     }
 
+    pub fn is_retired(&self) -> bool {
+        self.ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retired
+    }
+
     fn signal_retirement(&self) {
         self.retirement.cancel();
         self.wake.notify_waiters();

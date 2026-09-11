@@ -31,16 +31,23 @@ def build_example(
     profile: str,
     target: str | None,
     workspace: bool,
+    packages: list[str],
     base_features: str | None,
     hotpath: bool,
 ) -> None:
-    # Package selection drives feature unification. `--workspace` lets a CI
-    # lane that already compiled the workspace reuse that graph for the
-    # feature-off build instead of resolving a second one for this package.
-    selection = ["--workspace"] if workspace else ["-p", PACKAGE]
+    # Package selection drives feature unification. `--workspace`, or the
+    # exact `-p` set a CI partition compiled its tests with, lets that lane
+    # reuse its graph for the feature-off build instead of resolving a second
+    # one for this package.
+    if workspace:
+        selection = ["--workspace"]
+    elif packages:
+        selection = [flag for package in packages for flag in ("-p", package)]
+    else:
+        selection = ["-p", PACKAGE]
     features = [] if base_features is None else [base_features]
     if hotpath:
-        features.append(f"{PACKAGE}/{FEATURE}" if workspace else FEATURE)
+        features.append(FEATURE if selection == ["-p", PACKAGE] else f"{PACKAGE}/{FEATURE}")
     command = [
         "cargo",
         "build",
@@ -76,11 +83,25 @@ def main() -> None:
         "the caller's dependency graph",
     )
     parser.add_argument(
+        "-p",
+        "--package",
+        dest="packages",
+        action="append",
+        default=[],
+        help=f"select these packages instead of -p {PACKAGE} (repeatable); the "
+        "set must include it and should be the one the calling lane compiled "
+        "its tests with, so the feature-off build is a cache hit",
+    )
+    parser.add_argument(
         "--features",
         help="cargo features to enable on both builds (for example the "
         "root fixture feature the CI test lane compiles with)",
     )
     args = parser.parse_args()
+    if args.workspace and args.packages:
+        parser.error("--workspace and --package are exclusive")
+    if args.packages and PACKAGE not in args.packages:
+        parser.error(f"--package selection must include {PACKAGE}")
 
     source = args.source.resolve()
     target_root = cargo_target_directory(source)
@@ -99,9 +120,13 @@ def main() -> None:
         staged_off = staging / f"hotpath-off{suffix}"
         staged_on = staging / f"hotpath-on{suffix}"
 
-        build_example(source, args.profile, args.target, args.workspace, args.features, False)
+        build_example(
+            source, args.profile, args.target, args.workspace, args.packages, args.features, False
+        )
         shutil.copy2(example, staged_off)
-        build_example(source, args.profile, args.target, args.workspace, args.features, True)
+        build_example(
+            source, args.profile, args.target, args.workspace, args.packages, args.features, True
+        )
         shutil.copy2(example, staged_on)
 
         off = helper_directory / staged_off.name

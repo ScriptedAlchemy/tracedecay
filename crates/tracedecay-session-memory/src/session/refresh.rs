@@ -199,19 +199,6 @@ impl fmt::Display for SessionRefreshSchedulerError {
 
 impl std::error::Error for SessionRefreshSchedulerError {}
 
-pub trait SessionRefreshSchedulerPort {
-    fn wake(&self) -> Result<(), SessionRefreshSchedulerError>;
-}
-
-impl<T> SessionRefreshSchedulerPort for &T
-where
-    T: SessionRefreshSchedulerPort + ?Sized,
-{
-    fn wake(&self) -> Result<(), SessionRefreshSchedulerError> {
-        (*self).wake()
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionRefreshRequestError {
     InvalidProjectorVersion,
@@ -258,7 +245,7 @@ impl<A, S, W> SessionRefreshService<A, S, W>
 where
     A: SessionScopeAuthorizer,
     S: SessionRefreshStore,
-    W: SessionRefreshSchedulerPort,
+    W: Fn() -> Result<(), SessionRefreshSchedulerError>,
 {
     #[hotpath::measure(label = "usecases.session.refresh.begin", future = true)]
     pub async fn begin_or_join(
@@ -336,7 +323,7 @@ where
         // The durable operation is authoritative once the store call returns.
         // Delivery failure must preserve that commit and require reconciliation
         // through the persisted recovery row rather than report plain acceptance.
-        match (receipt.disposition(), self.scheduler.wake()) {
+        match (receipt.disposition(), (self.scheduler)()) {
             (SessionRefreshDispositionV1::Started, Ok(())) => {
                 SessionRefreshOutcome::Started(handle)
             }
@@ -455,7 +442,7 @@ where
         .await
         {
             Ok(Ok(receipt)) => {
-                if self.scheduler.wake().is_err() {
+                if (self.scheduler)().is_err() {
                     SessionRefreshOutcome::CancelledReconciliationRequired(receipt)
                 } else {
                     terminal_outcome(receipt)

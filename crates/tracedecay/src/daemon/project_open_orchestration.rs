@@ -5,18 +5,27 @@
 //! and a draining daemon never starts a new one.
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Bounds how long a foreground request waits for a route's background open.
 /// The open task itself is deliberately left running after the deadline.
 pub(super) async fn wait_for_project_open_publication<Publication, Output>(
     project_path: &Path,
+    deadline: tokio::time::Instant,
     publication: Publication,
 ) -> Result<Output>
 where
     Publication: std::future::Future<Output = Result<Output>>,
 {
+    // The bound is a plain deadline: a waiter resumed after it elapsed still
+    // needs one more await — `route_bound_project_server` — before its
+    // publication loop can read the route's terminal state, so an elapsed
+    // deadline preempts a failure that was already recorded and the caller
+    // would see warming for a route that is no longer opening. Callers repair
+    // that with `prefer_recorded_open_failure` against the claim's own watch
+    // channel instead of weakening the bound.
     hotpath::future!(
-        timeout(PROJECT_OPEN_REQUEST_DEADLINE, publication),
+        tokio::time::timeout_at(deadline, publication),
         label = "daemon.project.open.publication_wait"
     )
     .await
@@ -42,56 +51,50 @@ where
             "daemon is draining before project warm-up".to_string(),
         ));
     }
-    tasks
-        .start_cancellable(route, move |cancellation| async move {
-            let Some(activity) = lifecycle.try_enter() else {
-                hotpath::gauge!("daemon.project.open.refused.draining").inc(1.0);
-                return Err(TraceDecayError::Config {
-                    message: "daemon is draining before project warm-up".to_string(),
-                });
-            };
-            let _activity = activity;
-            // Once admitted, warm-up may be inside a schema migration. The
-            // cancellation token is observed only at explicit boundaries around
-            // those transactionally safe units; dropping this future on drain
-            // would untrack the database owner and can interrupt SQLite
-            // mid-statement. The lifecycle activity remains held until the task
-            // reports its terminal outcome and shutdown explicitly joins it.
-            let result = Box::pin(open_project_server(cancellation.clone())).await;
-            match result {
-                Ok(server) => {
-                    project_open_cancellation_checkpoint(&cancellation)?;
-                    if let Some(initialize_request) = initialize_request {
-                        // Preserve the regular initialize side effect that records
-                        // the negotiated MCP client name on the real server.
-                        let initialize: std::pin::Pin<
-                            Box<
-                                dyn std::future::Future<Output = Option<JsonRpcResponse>>
-                                    + Send
-                                    + '_,
-                            >,
-                        > = Box::pin(server.handle_request(&initialize_request));
-                        let _ = initialize.await;
-                    }
-                    Ok(())
+    tasks.start_cancellable(route, move |cancellation| async move {
+        let Some(activity) = lifecycle.try_enter() else {
+            hotpath::gauge!("daemon.project.open.refused.draining").inc(1.0);
+            return Err(TraceDecayError::Config {
+                message: "daemon is draining before project warm-up".to_string(),
+            });
+        };
+        let _activity = activity;
+        // Once admitted, warm-up may be inside a schema migration. The
+        // cancellation token is observed only at explicit boundaries around
+        // those transactionally safe units; dropping this future on drain
+        // would untrack the database owner and can interrupt SQLite
+        // mid-statement. The lifecycle activity remains held until the task
+        // reports its terminal outcome and shutdown explicitly joins it.
+        let result = Box::pin(open_project_server(cancellation.clone())).await;
+        match result {
+            Ok(server) => {
+                project_open_cancellation_checkpoint(&cancellation)?;
+                if let Some(initialize_request) = initialize_request {
+                    // Preserve the regular initialize side effect that records
+                    // the negotiated MCP client name on the real server.
+                    let initialize: std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Option<JsonRpcResponse>> + Send + '_>,
+                    > = Box::pin(server.handle_request(&initialize_request));
+                    let _ = initialize.await;
                 }
-                Err(error) => {
-                    if cancellation.is_cancelled() {
-                        return Err(error);
-                    }
-                    log_daemon_event(
-                        "project_server_warmup",
-                        &[
-                            ("outcome", "error".to_string()),
-                            ("project", project_path.display().to_string()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                    Err(error)
-                }
+                Ok(())
             }
-        })
-        .await
+            Err(error) => {
+                if cancellation.is_cancelled() {
+                    return Err(error);
+                }
+                log_daemon_event(
+                    "project_server_warmup",
+                    &[
+                        ("outcome", "error".to_string()),
+                        ("project", project_path.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                Err(error)
+            }
+        }
+    })
 }
 
 #[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
@@ -118,6 +121,10 @@ pub(super) fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
 }
 
 #[hotpath::measure(label = "daemon.project.enroll.route", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Registered route ensure is one lookup-or-open for the admitted project."
+)]
 pub(super) async fn ensure_registered_project_route(
     store_administration: &StoreAdministration,
     project_path: &Path,
@@ -379,6 +386,10 @@ async fn begin_portable_project_open(
 
 #[cfg(any(not(unix), test))]
 #[hotpath::measure(label = "daemon.project.orchestrate.warmup", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Warmup retains the independent daemon owners across the background handoff; the extra argument is a test probe."
+)]
 pub(super) async fn schedule_portable_project_server_warmup(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
@@ -424,6 +435,10 @@ pub(super) async fn schedule_portable_project_server_warmup(
 
 #[cfg(any(not(unix), test))]
 #[hotpath::measure(label = "daemon.project.orchestrate.request", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Foreground admission borrows the handshake while retaining independent daemon owners; the extra argument is a test probe."
+)]
 pub(super) async fn portable_project_server_for_request(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
@@ -451,86 +466,109 @@ pub(super) async fn portable_project_server_for_request(
     // Foreground requests must never pin a connection while a cold project
     // warm-up runs. The open task remains tracked and continues in the
     // background after this bounded wait expires.
-    let claim = Box::pin(begin_portable_project_open(
-        lifecycle,
-        store_administration.clone(),
-        project_open_gates,
-        invocation,
-        http_application_registry,
-        handshake.clone(),
-        canonical_project_path.clone(),
-        route,
-        None,
-        #[cfg(test)]
-        project_open_attempts,
-    ))
-    .await;
-    match claim {
-        ProjectOpenTaskClaim::InFlight(mut state) => {
-            let publication = async {
-                loop {
-                    if let Some(server) = portable_cached_project_server(
-                        &store_administration,
-                        &canonical_project_path,
-                        handshake,
-                        requirement,
-                    )
-                    .await?
-                    {
-                        return Ok(server);
-                    }
-                    let current = state.borrow().clone();
-                    match current {
-                        ProjectOpenTaskState::Opening => {
-                            tokio::select! {
-                                changed = state.changed() => {
-                                    changed.map_err(|_| TraceDecayError::Config {
-                                        message: "project open task ended before reporting an outcome"
-                                            .to_string(),
-                                    })?;
+    let mut retry_init = handshake.allow_init;
+    let publication_deadline = tokio::time::Instant::now() + PROJECT_OPEN_REQUEST_DEADLINE;
+    loop {
+        let claim = Box::pin(begin_portable_project_open(
+            lifecycle.clone(),
+            store_administration.clone(),
+            Arc::clone(&project_open_gates),
+            invocation.clone(),
+            http_application_registry.clone(),
+            handshake.clone(),
+            canonical_project_path.clone(),
+            route.clone(),
+            None,
+            #[cfg(test)]
+            project_open_attempts.clone(),
+        ))
+        .await;
+        let result = match claim {
+            ProjectOpenTaskClaim::InFlight(state) => {
+                let recorded = state.clone();
+                let publication = async {
+                    let mut state = state;
+                    loop {
+                        if let Some(server) = portable_cached_project_server(
+                            &store_administration,
+                            &canonical_project_path,
+                            handshake,
+                            requirement,
+                        )
+                        .await?
+                        {
+                            return Ok(server);
+                        }
+                        let current = state.borrow().clone();
+                        match current {
+                            ProjectOpenTaskState::Opening => {
+                                tokio::select! {
+                                    changed = state.changed() => {
+                                        changed.map_err(|_| TraceDecayError::Config {
+                                            message: "project open task ended before reporting an outcome"
+                                                .to_string(),
+                                        })?;
+                                    }
+                                    () = tokio::time::sleep(Duration::from_millis(25)) => {}
                                 }
-                                () = tokio::time::sleep(Duration::from_millis(25)) => {}
                             }
-                        }
-                        ProjectOpenTaskState::Ready => {
-                            // The open task publishes the server before it
-                            // flips to Ready, but this waiter read the cache
-                            // before it read the state, so a publication that
-                            // raced this iteration must be honored with one
-                            // final cache check instead of a spurious failure.
-                            if let Some(server) = portable_cached_project_server(
-                                &store_administration,
-                                &canonical_project_path,
-                                handshake,
-                                requirement,
-                            )
-                            .await?
-                            {
-                                return Ok(server);
+                            ProjectOpenTaskState::Ready => {
+                                // The open task publishes the server before it
+                                // flips to Ready, but this waiter read the cache
+                                // before it read the state, so a publication that
+                                // raced this iteration must be honored with one
+                                // final cache check instead of a spurious failure.
+                                if let Some(server) = portable_cached_project_server(
+                                    &store_administration,
+                                    &canonical_project_path,
+                                    handshake,
+                                    requirement,
+                                )
+                                .await?
+                                {
+                                    return Ok(server);
+                                }
+                                return Err(TraceDecayError::Config {
+                                    message: "project open completed without publishing a server"
+                                        .to_string(),
+                                });
                             }
-                            return Err(TraceDecayError::Config {
-                                message: "project open completed without publishing a server"
-                                    .to_string(),
-                            });
-                        }
-                        ProjectOpenTaskState::Failed(failure) => {
-                            return Err(failure.to_error());
+                            ProjectOpenTaskState::Failed(failure) => {
+                                return Err(failure.to_error());
+                            }
                         }
                     }
-                }
-            };
-            // Riding out an open is a park, not work: the admission slot is
-            // released for the wait's duration so a tool that needs no project
-            // owner is never shed by a queue of warming clients. The wait stays
-            // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
-            park_admission(wait_for_project_open_publication(
-                &canonical_project_path,
-                publication,
-            ))
+                };
+                // Riding out an open is a park, not work: the admission slot is
+                // released for the wait's duration so a tool that needs no project
+                // owner is never shed by a queue of warming clients. The wait stays
+                // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
+                prefer_recorded_open_failure(
+                    park_admission(wait_for_project_open_publication(
+                        &canonical_project_path,
+                        publication_deadline,
+                        publication,
+                    ))
+                    .await,
+                    &recorded,
+                )
+            }
+            ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
+            ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+        };
+        if project_open_tasks(project_open_gates.as_ref())
             .await
+            .admit_explicit_init_retry(
+                &route,
+                &mut retry_init,
+                result.as_ref().err(),
+                publication_deadline,
+            )
+            .await?
+        {
+            continue;
         }
-        ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
-        ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+        return result;
     }
 }
 
@@ -541,5 +579,5 @@ pub(super) async fn portable_cached_project_open_failure(
 ) -> Result<Option<ProjectOpenFailure>> {
     let (_, route) = project_route_for_handshake(handshake)?;
     let tasks = project_open_tasks(project_open_gates).await;
-    Ok(tasks.cached_failure(&route).await)
+    Ok(tasks.cached_failure(&route))
 }

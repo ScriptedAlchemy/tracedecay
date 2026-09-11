@@ -3,13 +3,13 @@
 use std::path::Path;
 
 use crate::ToolResult;
-use crate::host_cli::ast_grep_command;
 use crate::rendered_tool_result;
 use crate::tools::definitions;
 use crate::tools::render::{self, Md};
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_runtime_core::ast_grep::ast_grep_command;
 
 use super::{enrich_markdown_sections, render_section_md};
 
