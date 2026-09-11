@@ -2041,32 +2041,59 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     .expect("open publication store over a retired generation");
 
     let pointer_path = store.path().join("active-code-generation-v1.json");
-    let mut moved = observed.clone();
-    let moved_generation = "generation.v1.moved-under-the-writer".to_owned();
-    for entry in &mut moved.generation_index {
-        if entry.generation_id == moved.generation_id {
-            entry.generation_id = moved_generation.clone();
-        }
-    }
-    moved.generation_id = moved_generation;
-    write_repaired_pointer(&pointer_path, &mut moved);
+    type PointerMutation = fn(&mut DurablePublicationPointerV1);
+    let mutations: [(&str, PointerMutation); 3] = [
+        ("generation id", |pointer| {
+            let moved = "generation.v1.moved-under-the-writer".to_owned();
+            for entry in &mut pointer.generation_index {
+                if entry.generation_id == pointer.generation_id {
+                    entry.generation_id = moved.clone();
+                }
+            }
+            pointer.generation_id = moved;
+        }),
+        ("state digest", |pointer| {
+            let moved = format!("sha256:{}", "5".repeat(64));
+            for entry in &mut pointer.generation_index {
+                if entry.state_digest == pointer.state_digest {
+                    entry.state_digest = moved.clone();
+                }
+            }
+            pointer.state_digest = moved;
+        }),
+        ("generation file", |pointer| {
+            let moved = format!("generation-{}.json", "6".repeat(64));
+            for entry in &mut pointer.generation_index {
+                if entry.generation_file == pointer.generation_file {
+                    entry.generation_file = moved.clone();
+                }
+            }
+            pointer.generation_file = moved;
+        }),
+    ];
+    for (term, mutate) in mutations {
+        let mut moved = observed.clone();
+        mutate(&mut moved);
+        assert_ne!(moved, observed, "the {term} mutation must move the pointer");
+        write_repaired_pointer(&pointer_path, &mut moved);
 
-    let mut refusing = publication.for_undecoded_active_rebuild(&observed);
-    let error = refusing
-        .publish_atomically(&scope, None, Arc::clone(&seeded))
-        .expect_err("a pointer that moved under the writer must refuse the publication");
-    assert!(
-        matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
-        "a moved pointer reached the wrong refusal: {error}"
-    );
-    assert_eq!(
-        serde_json::from_slice::<DurablePublicationPointerV1>(
-            &std::fs::read(&pointer_path).expect("read active pointer")
-        )
-        .expect("decode active pointer"),
-        moved,
-        "a refused publication must leave the pointer it did not expect untouched"
-    );
+        let mut refusing = publication.for_undecoded_active_rebuild(&observed);
+        let error = refusing
+            .publish_atomically(&scope, None, Arc::clone(&seeded))
+            .expect_err("a pointer that moved under the writer must refuse the publication");
+        assert!(
+            matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
+            "a moved {term} reached the wrong refusal: {error}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<DurablePublicationPointerV1>(
+                &std::fs::read(&pointer_path).expect("read active pointer")
+            )
+            .expect("decode active pointer"),
+            moved,
+            "a refused publication must leave the {term} it did not expect untouched"
+        );
+    }
 
     let mut restored = observed.clone();
     write_repaired_pointer(&pointer_path, &mut restored);
