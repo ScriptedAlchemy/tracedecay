@@ -3,7 +3,7 @@ use super::*;
 use std::path::{Component, Path, PathBuf};
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
-use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1};
+use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
 use crate::chunks::{CROSS_FILE_REFERENCE_BLOCKLIST, relation_target_kind_is_compatible};
 use crate::lineage::LineageSymbolRecordV1;
@@ -249,118 +249,179 @@ fn resolve_cross_file_references<T>(files: &[T]) -> Vec<CanonicalRelationEdgeV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    let mut by_simple_name: BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> = BTreeMap::new();
-    for (index, file) in files.iter().enumerate() {
-        for symbol in &file.as_ref().artifacts.symbols {
-            by_simple_name
-                .entry(symbol.simple_name.as_str())
-                .or_default()
-                .push((index, symbol));
-        }
-    }
+    let (by_simple_name, rust_files) =
+        hotpath::measure_block!("code_index.seal.reference_index", {
+            let mut by_simple_name: BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>> =
+                BTreeMap::new();
+            for (index, file) in files.iter().enumerate() {
+                for symbol in &file.as_ref().artifacts.symbols {
+                    by_simple_name
+                        .entry(symbol.simple_name.as_str())
+                        .or_default()
+                        .push((index, symbol));
+                }
+            }
+            (by_simple_name, RustFileIndexV1::new(files))
+        });
+    let mut resolved_references = ResolvedReferenceCacheV1::new();
+    let mut reexport_cache = BTreeMap::new();
     let mut edges = Vec::new();
     for (index, file) in files.iter().enumerate() {
         for reference in &file.as_ref().artifacts.unresolved_references {
-            let import = if reference.reference_name.contains("::") {
-                None
+            let cache_key = (index, reference.reference_name.as_str(), reference.kind);
+            let resolved = if let Some(resolved) = resolved_references.get(&cache_key) {
+                resolved.clone()
             } else {
-                unique_import(file.as_ref(), &reference.reference_name, reference.kind)
-            };
-            let has_rust_glob = file.as_ref().extraction.language.as_str() == "rust"
-                && file
-                    .as_ref()
-                    .artifacts
-                    .imports
-                    .iter()
-                    .any(|binding| binding.is_glob);
-            if !reference.reference_name.contains("::") && import.is_none() && !has_rust_glob {
-                continue;
-            }
-            let simple_name = import
-                .and_then(|binding| binding.imported_name.as_deref())
-                .or_else(|| reference.reference_name.rsplit("::").next())
-                .unwrap_or(reference.reference_name.as_str());
-            let crate_qualified = reference.reference_name.strip_prefix("crate::");
-            // Retention already narrows names, but carried artifacts outlive
-            // policy revisions; the blocklist is a resolution rule, so apply
-            // it to every retained reference regardless of when it was sealed.
-            if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
-                continue;
-            }
-            let Some(candidates) = by_simple_name.get(simple_name) else {
-                continue;
-            };
-            let source_path = &file.as_ref().authority.logical_path;
-            let mut compatible = candidates.iter().filter(|(candidate_index, symbol)| {
-                files[*candidate_index].as_ref().extraction.language
-                    == file.as_ref().extraction.language
-                    && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
-                    && import.map_or_else(
-                        || {
-                            crate_qualified.map_or_else(
-                                || {
-                                    if has_rust_glob
-                                        && rust_parent_glob_import_matches(
-                                            files,
-                                            index,
-                                            &reference.reference_name,
-                                            reference.kind,
-                                            *candidate_index,
-                                            symbol,
-                                        )
-                                    {
-                                        return true;
-                                    }
-                                    file_qualified_name_matches(
-                                        &reference.reference_name,
-                                        &files[*candidate_index].as_ref().authority.logical_path,
-                                        &symbol.qualified_name,
-                                    )
-                                },
-                                |qualified| {
-                                    rust_crate_qualified_name_matches(
-                                        qualified,
-                                        source_path,
-                                        &files[*candidate_index].as_ref().authority.logical_path,
-                                        &symbol.qualified_name,
-                                    )
-                                },
-                            )
-                        },
-                        |binding| match binding.module_kind {
-                            ImportModuleKindV1::ProjectRelative => project_import_matches(
-                                binding,
-                                &binding.logical_path,
-                                &files[*candidate_index].as_ref().authority.logical_path,
-                                &symbol.qualified_name,
-                            ),
-                            ImportModuleKindV1::BareModule
-                                if file.as_ref().extraction.language.as_str() == "rust" =>
-                            {
-                                rust_bare_import_matches(files, binding, *candidate_index, symbol)
-                            }
-                            ImportModuleKindV1::BareModule => false,
-                        },
+                let resolved = hotpath::measure_block!(
+                    "code_index.seal.reference_candidate_lookup",
+                    resolve_cross_file_reference(
+                        files,
+                        &by_simple_name,
+                        &rust_files,
+                        &mut reexport_cache,
+                        index,
+                        reference,
                     )
-            });
-            let Some((first_index, target)) = compatible.next() else {
+                );
+                resolved_references.insert(cache_key, resolved.clone());
+                resolved
+            };
+            let Some((target_index, target)) = resolved else {
                 continue;
             };
-            if *first_index == index || compatible.next().is_some() {
+            if target_index == index {
                 continue;
             }
             edges.push(CanonicalRelationEdgeV1 {
                 from_occurrence: reference.from_occurrence.clone(),
-                to_occurrence: target.occurrence.clone(),
+                to_occurrence: target,
                 kind: reference.kind,
                 authority: EdgeAuthorityV1::NameResolved,
                 evidence_span: reference.evidence_span,
             });
         }
     }
-    edges.sort_by(edge_order);
-    edges.dedup();
+    hotpath::measure_block!("code_index.seal.edge_materialization", {
+        edges.sort_by(edge_order);
+        edges.dedup();
+    });
     edges
+}
+
+type ResolvedReferenceCacheV1<'a> =
+    BTreeMap<(usize, &'a str, RelationEdgeKindV1), Option<(usize, SymbolOccurrenceId)>>;
+
+fn resolve_cross_file_reference<T>(
+    files: &[T],
+    by_simple_name: &BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
+    rust_files: &RustFileIndexV1,
+    reexport_cache: &mut RustReexportCacheV1,
+    index: usize,
+    reference: &CodeIndexUnresolvedReferenceV1,
+) -> Option<(usize, SymbolOccurrenceId)>
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let file = files[index].as_ref();
+    let qualified = reference.reference_name.contains("::");
+    let import = (!qualified)
+        .then(|| unique_import(file, &reference.reference_name, reference.kind))
+        .flatten();
+    let has_rust_glob = file.extraction.language.as_str() == "rust"
+        && file.artifacts.imports.iter().any(|binding| binding.is_glob);
+    if !qualified && import.is_none() && !has_rust_glob {
+        return None;
+    }
+    let simple_name = import
+        .and_then(|binding| binding.imported_name.as_deref())
+        .or_else(|| reference.reference_name.rsplit("::").next())
+        .unwrap_or(reference.reference_name.as_str());
+    // Retention already narrows names, but carried artifacts outlive policy
+    // revisions; apply the current blocklist to every retained reference.
+    if simple_name.is_empty() || CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name) {
+        return None;
+    }
+    let candidates = by_simple_name.get(simple_name)?;
+    if !qualified
+        && import.is_none()
+        && has_rust_glob
+        && candidates.iter().any(|(candidate_index, symbol)| {
+            *candidate_index == index
+                && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+        })
+    {
+        return None;
+    }
+    let source_path = &file.authority.logical_path;
+    let crate_qualified = reference.reference_name.strip_prefix("crate::");
+    let mut rust = RustResolutionContextV1 {
+        files: rust_files,
+        reexports: reexport_cache,
+    };
+    let mut compatible = candidates.iter().filter(|(candidate_index, symbol)| {
+        let target = RustSymbolTargetV1 {
+            index: *candidate_index,
+            symbol,
+        };
+        files[*candidate_index].as_ref().extraction.language == file.extraction.language
+            && relation_target_kind_is_compatible(reference.kind, &symbol.kind)
+            && match import {
+                None => crate_qualified.map_or_else(
+                    || {
+                        if has_rust_glob
+                            && hotpath::measure_block!(
+                                "code_index.seal.glob_expansion",
+                                rust_parent_glob_import_matches(
+                                    files,
+                                    &mut rust,
+                                    index,
+                                    &reference.reference_name,
+                                    reference.kind,
+                                    target,
+                                )
+                            )
+                        {
+                            return true;
+                        }
+                        file_qualified_name_matches(
+                            &reference.reference_name,
+                            &files[*candidate_index].as_ref().authority.logical_path,
+                            &symbol.qualified_name,
+                        )
+                    },
+                    |qualified| {
+                        rust_crate_qualified_name_matches(
+                            qualified,
+                            source_path,
+                            &files[*candidate_index].as_ref().authority.logical_path,
+                            &symbol.qualified_name,
+                        )
+                    },
+                ),
+                Some(binding) => match binding.module_kind {
+                    ImportModuleKindV1::ProjectRelative => project_import_matches(
+                        binding,
+                        &binding.logical_path,
+                        &files[*candidate_index].as_ref().authority.logical_path,
+                        &symbol.qualified_name,
+                    ),
+                    ImportModuleKindV1::BareModule
+                        if file.extraction.language.as_str() == "rust" =>
+                    {
+                        hotpath::measure_block!(
+                            "code_index.seal.reexport_walk",
+                            rust_bare_import_matches(files, &mut rust, binding, target,)
+                        )
+                    }
+                    ImportModuleKindV1::BareModule => false,
+                },
+            }
+    });
+    let (first_index, target) = compatible.next()?;
+    if *first_index == index || compatible.next().is_some() {
+        return None;
+    }
+    Some((*first_index, target.occurrence.clone()))
 }
 
 fn unique_import<'a>(
@@ -385,13 +446,96 @@ fn unique_import<'a>(
     matches.next().is_none().then_some(binding)
 }
 
+type RustReexportCacheV1 = BTreeMap<(usize, usize, String, usize, String), bool>;
+
+struct RustResolutionContextV1<'a> {
+    files: &'a RustFileIndexV1,
+    reexports: &'a mut RustReexportCacheV1,
+}
+
+#[derive(Clone, Copy)]
+struct RustSymbolTargetV1<'a> {
+    index: usize,
+    symbol: &'a LineageSymbolRecordV1,
+}
+
+struct RustFileIndexV1 {
+    modules: BTreeMap<(String, String), Option<usize>>,
+    crate_roots: BTreeMap<String, Option<usize>>,
+}
+
+impl RustFileIndexV1 {
+    fn new<T>(files: &[T]) -> Self
+    where
+        T: AsRef<FileGenerationArtifactsV1>,
+    {
+        let mut modules = BTreeMap::new();
+        let mut crate_roots = BTreeMap::new();
+        for (index, file) in files.iter().enumerate() {
+            let file = file.as_ref();
+            if file.extraction.language.as_str() != "rust" {
+                continue;
+            }
+            let Some(source_root) = rust_source_root(&file.authority.logical_path) else {
+                continue;
+            };
+            let Some(relative) = file
+                .authority
+                .logical_path
+                .strip_prefix(source_root)
+                .and_then(|path| path.strip_prefix('/'))
+            else {
+                continue;
+            };
+            if let Some(module) = rust_file_module(relative) {
+                insert_unique_index(
+                    &mut modules,
+                    (source_root.to_owned(), module.to_owned()),
+                    index,
+                );
+            }
+            if relative == "lib.rs"
+                && let Some(crate_name) = Path::new(source_root)
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+            {
+                insert_unique_index(&mut crate_roots, crate_name.replace('-', "_"), index);
+            }
+        }
+        Self {
+            modules,
+            crate_roots,
+        }
+    }
+
+    fn module(&self, source_path: &str, module: &str) -> Option<usize> {
+        let source_root = rust_source_root(source_path)?;
+        self.modules
+            .get(&(source_root.to_owned(), module.to_owned()))
+            .copied()
+            .flatten()
+    }
+
+    fn crate_root(&self, crate_name: &str) -> Option<usize> {
+        self.crate_roots.get(crate_name).copied().flatten()
+    }
+}
+
+fn insert_unique_index<K: Ord>(index: &mut BTreeMap<K, Option<usize>>, key: K, value: usize) {
+    index
+        .entry(key)
+        .and_modify(|slot| *slot = None)
+        .or_insert(Some(value));
+}
+
 fn rust_parent_glob_import_matches<T>(
     files: &[T],
+    rust: &mut RustResolutionContextV1<'_>,
     source_index: usize,
     local_name: &str,
     relation: RelationEdgeKindV1,
-    target_index: usize,
-    target: &LineageSymbolRecordV1,
+    target: RustSymbolTargetV1<'_>,
 ) -> bool
 where
     T: AsRef<FileGenerationArtifactsV1>,
@@ -409,31 +553,31 @@ where
         .filter_map(|binding| {
             rust_relative_module(&binding.module_specifier, &source.authority.logical_path)
         })
-        .filter_map(|module| rust_module_file_index(files, &source.authority.logical_path, &module))
+        .filter_map(|module| rust.files.module(&source.authority.logical_path, &module))
         .filter_map(|scope_index| unique_import(files[scope_index].as_ref(), local_name, relation))
         .any(|binding| match binding.module_kind {
             ImportModuleKindV1::ProjectRelative => project_import_matches(
                 binding,
                 &binding.logical_path,
-                &files[target_index].as_ref().authority.logical_path,
-                &target.qualified_name,
+                &files[target.index].as_ref().authority.logical_path,
+                &target.symbol.qualified_name,
             ),
             ImportModuleKindV1::BareModule => {
-                rust_bare_import_matches(files, binding, target_index, target)
+                rust_bare_import_matches(files, rust, binding, target)
             }
         })
 }
 
 fn rust_bare_import_matches<T>(
     files: &[T],
+    rust: &mut RustResolutionContextV1<'_>,
     binding: &CodeIndexImportEvidenceV1,
-    target_index: usize,
-    target: &LineageSymbolRecordV1,
+    target: RustSymbolTargetV1<'_>,
 ) -> bool
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    if target.visibility != "public" {
+    if target.symbol.visibility != "public" {
         return false;
     }
     let Some(imported_name) = binding.imported_name.as_deref() else {
@@ -444,14 +588,14 @@ where
         return false;
     };
     let module = module.collect::<Vec<_>>().join("/");
-    let Some(root_index) = rust_crate_root_file_index(files, crate_name) else {
+    let Some(root_index) = rust.files.crate_root(crate_name) else {
         return false;
     };
     let scope_index = if module.is_empty() {
         root_index
     } else {
         let root_path = &files[root_index].as_ref().authority.logical_path;
-        let Some(index) = rust_module_file_index(files, root_path, &module) else {
+        let Some(index) = rust.files.module(root_path, &module) else {
             return false;
         };
         index
@@ -459,10 +603,10 @@ where
     let mut visited = BTreeSet::new();
     rust_export_resolves_to_target(
         files,
+        rust,
         root_index,
         scope_index,
         imported_name,
-        target_index,
         target,
         &mut visited,
     )
@@ -470,16 +614,26 @@ where
 
 fn rust_export_resolves_to_target<T>(
     files: &[T],
+    rust: &mut RustResolutionContextV1<'_>,
     root_index: usize,
     scope_index: usize,
     exported_name: &str,
-    target_index: usize,
-    target: &LineageSymbolRecordV1,
+    target: RustSymbolTargetV1<'_>,
     visited: &mut BTreeSet<(usize, String)>,
 ) -> bool
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
+    let cache_key = (
+        root_index,
+        scope_index,
+        exported_name.to_owned(),
+        target.index,
+        target.symbol.qualified_name.clone(),
+    );
+    if let Some(resolves) = rust.reexports.get(&cache_key) {
+        return *resolves;
+    }
     if !visited.insert((scope_index, exported_name.to_owned())) {
         return false;
     }
@@ -502,71 +656,69 @@ where
     } else {
         format!("{}::{exported_name}", scope_module.replace('/', "::"))
     };
-    if target_index == scope_index
+    let resolves = if target.index == scope_index
         && rust_crate_qualified_name_matches(
             &qualified,
             root_path,
-            &files[target_index].as_ref().authority.logical_path,
-            &target.qualified_name,
-        )
-    {
-        return true;
-    }
-
-    let mut bindings = files[scope_index]
-        .as_ref()
-        .artifacts
-        .imports
-        .iter()
-        .filter(|binding| {
-            binding.is_public && binding.local_name.as_deref() == Some(exported_name)
-        });
-    let Some(binding) = bindings.next() else {
-        return false;
+            &files[target.index].as_ref().authority.logical_path,
+            &target.symbol.qualified_name,
+        ) {
+        true
+    } else {
+        let mut bindings = files[scope_index]
+            .as_ref()
+            .artifacts
+            .imports
+            .iter()
+            .filter(|binding| {
+                binding.is_public && binding.local_name.as_deref() == Some(exported_name)
+            });
+        match (bindings.next(), bindings.next()) {
+            (Some(binding), None) => match binding.module_kind {
+                ImportModuleKindV1::BareModule => {
+                    rust_bare_import_matches(files, rust, binding, target)
+                }
+                ImportModuleKindV1::ProjectRelative => {
+                    let Some(imported_name) = binding.imported_name.as_deref() else {
+                        return false;
+                    };
+                    let Some(qualified) = rust_import_qualified_name(
+                        &binding.module_specifier,
+                        imported_name,
+                        scope_path,
+                    ) else {
+                        return false;
+                    };
+                    if rust_crate_qualified_name_matches(
+                        &qualified,
+                        root_path,
+                        &files[target.index].as_ref().authority.logical_path,
+                        &target.symbol.qualified_name,
+                    ) {
+                        true
+                    } else if let Some((module, imported_name)) = qualified.rsplit_once("::")
+                        && let Some(next_scope) =
+                            rust.files.module(scope_path, &module.replace("::", "/"))
+                    {
+                        rust_export_resolves_to_target(
+                            files,
+                            rust,
+                            root_index,
+                            next_scope,
+                            imported_name,
+                            target,
+                            visited,
+                        )
+                    } else {
+                        false
+                    }
+                }
+            },
+            _ => false,
+        }
     };
-    if bindings.next().is_some() {
-        return false;
-    }
-    match binding.module_kind {
-        ImportModuleKindV1::BareModule => {
-            rust_bare_import_matches(files, binding, target_index, target)
-        }
-        ImportModuleKindV1::ProjectRelative => {
-            let Some(imported_name) = binding.imported_name.as_deref() else {
-                return false;
-            };
-            let Some(qualified) =
-                rust_import_qualified_name(&binding.module_specifier, imported_name, scope_path)
-            else {
-                return false;
-            };
-            if rust_crate_qualified_name_matches(
-                &qualified,
-                root_path,
-                &files[target_index].as_ref().authority.logical_path,
-                &target.qualified_name,
-            ) {
-                return true;
-            }
-            let Some((module, imported_name)) = qualified.rsplit_once("::") else {
-                return false;
-            };
-            let Some(next_scope) =
-                rust_module_file_index(files, scope_path, &module.replace("::", "/"))
-            else {
-                return false;
-            };
-            rust_export_resolves_to_target(
-                files,
-                root_index,
-                next_scope,
-                imported_name,
-                target_index,
-                target,
-                visited,
-            )
-        }
-    }
+    rust.reexports.insert(cache_key, resolves);
+    resolves
 }
 
 fn project_import_matches(
@@ -657,49 +809,6 @@ fn rust_relative_module(module_specifier: &str, source_path: &str) -> Option<Str
         module
     };
     Some(module.join("/"))
-}
-
-fn rust_module_file_index<T>(files: &[T], source_path: &str, module: &str) -> Option<usize>
-where
-    T: AsRef<FileGenerationArtifactsV1>,
-{
-    let source_root = rust_source_root(source_path)?;
-    let mut matches = files.iter().enumerate().filter_map(|(index, file)| {
-        let file = file.as_ref();
-        (file.extraction.language.as_str() == "rust"
-            && rust_source_root(&file.authority.logical_path) == Some(source_root))
-        .then_some(())?;
-        let relative = file
-            .authority
-            .logical_path
-            .strip_prefix(source_root)?
-            .strip_prefix('/')?;
-        (rust_file_module(relative) == Some(module)).then_some(index)
-    });
-    let index = matches.next()?;
-    matches.next().is_none().then_some(index)
-}
-
-fn rust_crate_root_file_index<T>(files: &[T], crate_name: &str) -> Option<usize>
-where
-    T: AsRef<FileGenerationArtifactsV1>,
-{
-    let mut matches = files.iter().enumerate().filter_map(|(index, file)| {
-        let file = file.as_ref();
-        let source_root = rust_source_root(&file.authority.logical_path)?;
-        let relative = file
-            .authority
-            .logical_path
-            .strip_prefix(source_root)?
-            .strip_prefix('/')?;
-        if relative != "lib.rs" {
-            return None;
-        }
-        let directory = Path::new(source_root).parent()?.file_name()?.to_str()?;
-        (directory.replace('-', "_") == crate_name).then_some(index)
-    });
-    let index = matches.next()?;
-    matches.next().is_none().then_some(index)
 }
 
 fn module_file_matches(module: &Path, target: &Path) -> bool {

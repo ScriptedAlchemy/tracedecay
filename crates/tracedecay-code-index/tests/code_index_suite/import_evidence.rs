@@ -194,7 +194,7 @@ fn rust_child_glob_imports_parent_use_bindings_for_calls() {
         (
             "file.glob.dispatch",
             "crates/service/src/parent/dispatch.rs",
-            "use super::*;\npub fn g() { f(); }\n",
+            "use super::*;\npub fn g() { f(); f(); }\n",
         ),
     ]);
     let caller = symbol_occurrence(&generation, "crates/service/src/parent/dispatch.rs::g");
@@ -210,6 +210,19 @@ fn rust_child_glob_imports_parent_use_bindings_for_calls() {
     );
 
     assert_resolved_edge(&generation, &caller, &target, RelationEdgeKindV1::Calls);
+    assert_eq!(
+        generation
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.from_occurrence == caller
+                    && edge.to_occurrence == target
+                    && edge.kind == RelationEdgeKindV1::Calls
+            })
+            .count(),
+        2,
+        "resolution caching must preserve each call site's evidence edge"
+    );
 }
 
 #[test]
@@ -244,6 +257,38 @@ fn rust_cross_crate_impl_binds_through_public_reexport_chain() {
         &implementor,
         &target,
         RelationEdgeKindV1::Implements,
+    );
+}
+
+#[test]
+fn rust_parent_glob_does_not_override_a_local_type_binding() {
+    let generation = published_rust_workspace(&[
+        (
+            "file.shadow.parent",
+            "crates/service/src/parent.rs",
+            "mod target;\nuse target::T;\nmod dispatch;\n",
+        ),
+        (
+            "file.shadow.target",
+            "crates/service/src/parent/target.rs",
+            "pub trait T {}\n",
+        ),
+        (
+            "file.shadow.dispatch",
+            "crates/service/src/parent/dispatch.rs",
+            "use super::*;\ntrait T {}\npub struct S;\nimpl T for S {}\n",
+        ),
+    ]);
+    let implementor = symbol_occurrence(&generation, "crates/service/src/parent/dispatch.rs::S");
+    let glob_target = symbol_occurrence(&generation, "crates/service/src/parent/target.rs::T");
+
+    assert!(
+        generation.edges().iter().all(|edge| {
+            edge.from_occurrence != implementor
+                || edge.to_occurrence != glob_target
+                || edge.kind != RelationEdgeKindV1::Implements
+        }),
+        "a local binding must suppress the parent-glob candidate"
     );
 }
 
