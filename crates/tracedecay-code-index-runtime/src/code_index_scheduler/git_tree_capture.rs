@@ -59,6 +59,7 @@ pub struct NativeCandidateGenerationIdentityV1 {
 #[derive(Debug)]
 pub struct WithheldSourceV1 {
     pub logical_path: String,
+    file: Option<SanitizedCodeFileV1>,
     pub reason: String,
 }
 
@@ -73,6 +74,7 @@ pub fn classify_capture_failure(
     match error {
         CodeIndexSchedulerErrorV1::Privacy(reason) => Ok(WithheldSourceV1 {
             logical_path: logical_path.to_owned(),
+            file: None,
             reason,
         }),
         other => Err(other),
@@ -321,6 +323,34 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
+    fn withheld_source(
+        &self,
+        logical_path: &str,
+        raw_bytes: &[u8],
+        disposition: SnapshotFileDispositionV1,
+        reason: String,
+    ) -> Result<WithheldSourceV1, CodeIndexSchedulerErrorV1> {
+        let digest = content_digest(raw_bytes);
+        let occurrence = omitted_file_occurrence_id(
+            &self.repository_id,
+            &self.worktree_id,
+            logical_path,
+            &digest,
+            disposition,
+        )?;
+        Ok(WithheldSourceV1 {
+            logical_path: logical_path.to_owned(),
+            file: Some(SanitizedCodeFileV1 {
+                file_occurrence_id: occurrence,
+                logical_path: logical_path.to_owned(),
+                language: None,
+                content_digest: digest,
+                disposition,
+            }),
+            reason,
+        })
+    }
+
     pub(super) fn capture_candidate_bytes_with_progress(
         &self,
         registry: &StaticLanguageRegistry,
@@ -494,6 +524,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         visit(&mut |logical_path, raw_bytes| {
             control.termination().map_or(Ok(()), Err)?;
             if crate::config::is_generated_path_segment(logical_path) {
+                withheld_sources.push(
+                    self.withheld_source(
+                        logical_path,
+                        raw_bytes,
+                        SnapshotFileDispositionV1::Generated,
+                        "generated source excluded from indexing".to_owned(),
+                    )
+                    .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,
+                );
                 return Ok(());
             }
             let candidate = match self.capture_candidate_bytes_with_progress(
@@ -503,14 +542,33 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Some(&progress),
             ) {
                 Ok(Some(candidate)) => candidate,
-                Ok(None) => return Ok(()),
+                Ok(None) => {
+                    withheld_sources.push(
+                        self.withheld_source(
+                            logical_path,
+                            raw_bytes,
+                            SnapshotFileDispositionV1::UnsupportedLanguage,
+                            "source language is unsupported".to_owned(),
+                        )
+                        .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,
+                    );
+                    return Ok(());
+                }
                 Err(error) => {
                     if self.shutting_down.load(Ordering::Acquire) {
                         return Err(CodeIndexSearchUnavailableReasonV1::Cancelled);
                     }
                     match classify_capture_failure(logical_path, error) {
                         Ok(withheld) => {
-                            withheld_sources.push(withheld);
+                            withheld_sources.push(
+                                self.withheld_source(
+                                    logical_path,
+                                    raw_bytes,
+                                    SnapshotFileDispositionV1::Ignored,
+                                    withheld.reason,
+                                )
+                                .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,
+                            );
                             return Ok(());
                         }
                         Err(error) => {
@@ -545,6 +603,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         if files.is_empty() && !withheld_sources.is_empty() {
             return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
         }
+        files.extend(
+            withheld_sources
+                .into_iter()
+                .filter_map(|withheld| withheld.file),
+        );
         let mut changed_paths = BTreeSet::new();
         if let Some(active) = self
             .publication
@@ -855,7 +918,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             && snapshot
                 .source_revision
                 .as_ref()
-                .map(|revision| revision.as_str())
+                .map(tracedecay_domain::CommitId::as_str)
                 == expected
                     .source_revision
                     .as_ref()
@@ -1005,6 +1068,9 @@ mod tests {
             .snapshot
             .files
             .into_iter()
+            .filter(|file| {
+                file.disposition == tracedecay_domain::SnapshotFileDispositionV1::Present
+            })
             .map(|file| file.logical_path)
             .collect()
     }
@@ -1338,12 +1404,11 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert!(names.contains("main_only") && names.contains("feature_only"));
         assert!(
-            candidate
-                .snapshot()
-                .files
-                .iter()
-                .all(|file| file.logical_path != "malformed.json"),
-            "privacy-refused candidate files remain withheld"
+            candidate.snapshot().files.iter().any(|file| {
+                file.logical_path == "malformed.json"
+                    && file.disposition != tracedecay_domain::SnapshotFileDispositionV1::Present
+            }),
+            "privacy-refused candidate files remain explicitly withheld"
         );
         assert_eq!(
             scheduler
