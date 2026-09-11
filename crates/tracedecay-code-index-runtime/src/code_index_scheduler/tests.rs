@@ -2799,6 +2799,13 @@ fn query_meta() -> RetrievalRequestMeta {
 }
 
 fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
+    query_authority_with_candidate_cap(privacy_domain, 32)
+}
+
+fn query_authority_with_candidate_cap(
+    privacy_domain: PrivacyDomainId,
+    max_candidates_per_lane: u32,
+) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {
         profile_id: id("profile.code-index.fixture")
@@ -2868,7 +2875,7 @@ fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
             .expect("diversity id"),
         rerank_policy_id: None,
         retrieval_budget: RetrievalBudget {
-            max_candidates_per_lane: 32,
+            max_candidates_per_lane,
             max_fused_candidates: 32,
             max_hydrated_results: 32,
             max_hydration_bytes: 32 * 65_536,
@@ -12788,6 +12795,55 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     );
     assert_eq!(implementation.depth, Some(1));
     assert!(continuation.next_cursor.is_none());
+
+    registry
+        .mount_query_authority(
+            fixture.path(),
+            graph_context.scope(),
+            query_authority_with_candidate_cap(
+                latest.generation.manifest().privacy_domain.clone(),
+                1,
+            ),
+        )
+        .await
+        .expect("mount candidate-capped query authority");
+    let capped_dispatch_request = CodeRelationRequest {
+        node_id: continuation_request.node_id.clone(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: true,
+        scope: scope.clone(),
+        meta: query_meta(),
+    };
+    let capped_dispatch = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &capped_dispatch_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Partial(capped_dispatch) = capped_dispatch else {
+        panic!("candidate-capped trait dispatch must report partial coverage");
+    };
+    let capped_page = capped_dispatch
+        .payload
+        .expect("candidate-capped trait dispatch page");
+    assert_eq!(capped_page.items.len(), 1);
+    assert_eq!(capped_page.items[0].symbol.node_id, trait_method);
+    assert!(
+        capped_dispatch
+            .omissions
+            .iter()
+            .any(|omission| omission.reason == OmissionReason::Budget)
+    );
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &graph_context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
 
     let qualified_name = latest
         .generation

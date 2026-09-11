@@ -1294,46 +1294,87 @@ fn application_graph_record(record: NativeGraphRecordV1) -> SymbolRelationRecord
     }
 }
 
-fn trait_dispatch_target_ids(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DispatchExpansionStop {
+    Cancelled,
+    TimedOut,
+}
+
+fn check_dispatch_control(
+    control: &dyn GraphExecutionControl,
+    budget: RetrievalBudget,
+) -> Result<(), DispatchExpansionStop> {
+    if control.is_cancelled() {
+        return Err(DispatchExpansionStop::Cancelled);
+    }
+    if budget
+        .deadline_micros
+        .is_some_and(|deadline| control.elapsed_micros() >= deadline)
+    {
+        return Err(DispatchExpansionStop::TimedOut);
+    }
+    Ok(())
+}
+
+/// Visits canonical same-generation adjacency and stops as soon as `visit`
+/// reports that the shared candidate capacity is exhausted.
+///
+/// The Boolean return is false when adjacency remains unvisited, allowing the
+/// public coverage receipt to expose that remainder as unknown rather than
+/// claiming complete trait dispatch.
+fn visit_trait_dispatch_targets(
     latest: &LatestCompleteCodeIndexV1,
     callee: &SymbolOccurrenceId,
     scope: &tracedecay_contracts::CodeQueryScope,
-) -> Vec<SymbolOccurrenceId> {
+    budget: RetrievalBudget,
+    control: &dyn GraphExecutionControl,
+    examined: &mut u64,
+    mut visit: impl FnMut(&SymbolOccurrenceId) -> bool,
+) -> Result<bool, DispatchExpansionStop> {
     let index = latest.record_index();
     let edges = latest.generation.edges();
     let symbols = &latest.generation.symbols().symbols;
     let Some(callee_position) = index.symbol_position(callee) else {
-        return Vec::new();
+        return Ok(true);
     };
     let callee_name = symbols[callee_position].simple_name.as_str();
-    let trait_ids = index
-        .incident_edge_positions(callee, true)
-        .iter()
-        .map(|position| &edges[*position])
-        .filter(|edge| edge.kind == RelationEdgeKindV1::Contains)
-        .filter_map(|edge| {
-            let parent_position = index.symbol_position(&edge.from_occurrence)?;
-            matches!(
-                NodeKind::from_str(&symbols[parent_position].kind),
-                Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
-            )
-            .then_some(&edge.from_occurrence)
-        });
-
-    let mut targets = BTreeSet::new();
-    for trait_id in trait_ids {
+    for parent_position in index.incident_edge_positions(callee, true) {
+        check_dispatch_control(control, budget)?;
+        *examined = examined.saturating_add(1);
+        let parent_edge = &edges[*parent_position];
+        if parent_edge.kind != RelationEdgeKindV1::Contains {
+            continue;
+        }
+        let Some(parent_symbol_position) = index.symbol_position(&parent_edge.from_occurrence)
+        else {
+            continue;
+        };
+        if !matches!(
+            NodeKind::from_str(&symbols[parent_symbol_position].kind),
+            Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+        ) {
+            continue;
+        }
         for implementor_edge in index
-            .incident_edge_positions(trait_id, true)
+            .incident_edge_positions(&parent_edge.from_occurrence, true)
             .iter()
             .map(|position| &edges[*position])
-            .filter(|edge| edge.kind == RelationEdgeKindV1::Implements)
         {
+            check_dispatch_control(control, budget)?;
+            *examined = examined.saturating_add(1);
+            if implementor_edge.kind != RelationEdgeKindV1::Implements {
+                continue;
+            }
             for child_edge in index
                 .incident_edge_positions(&implementor_edge.from_occurrence, false)
                 .iter()
                 .map(|position| &edges[*position])
-                .filter(|edge| edge.kind == RelationEdgeKindV1::Contains)
             {
+                check_dispatch_control(control, budget)?;
+                *examined = examined.saturating_add(1);
+                if child_edge.kind != RelationEdgeKindV1::Contains {
+                    continue;
+                }
                 let Some(child_position) = index.symbol_position(&child_edge.to_occurrence) else {
                     continue;
                 };
@@ -1347,11 +1388,14 @@ fn trait_dispatch_target_ids(
                 {
                     continue;
                 }
-                targets.insert(child.occurrence.clone());
+                if !visit(&child.occurrence) {
+                    return Ok(false);
+                }
             }
         }
     }
-    targets.into_iter().collect()
+    check_dispatch_control(control, budget)?;
+    Ok(true)
 }
 
 fn callee_dispatch_usage(
@@ -1394,31 +1438,40 @@ fn augment_callee_dispatch_page(
     let mut examined = 0_u64;
     let mut eligible = 0_u64;
 
-    for callee in direct {
-        if control.is_cancelled() {
-            return Err(NativeLaneOutcomeV1::Cancelled);
+    'callees: for callee in direct {
+        match check_dispatch_control(control, budget) {
+            Ok(()) => {}
+            Err(DispatchExpansionStop::Cancelled) => {
+                return Err(NativeLaneOutcomeV1::Cancelled);
+            }
+            Err(DispatchExpansionStop::TimedOut) => {
+                return Err(NativeLaneOutcomeV1::TimedOut(callee_dispatch_usage(
+                    &page, examined, control,
+                )));
+            }
         }
-        if budget
-            .deadline_micros
-            .is_some_and(|deadline| control.elapsed_micros() >= deadline)
-        {
-            return Err(NativeLaneOutcomeV1::TimedOut(callee_dispatch_usage(
-                &page, examined, control,
-            )));
+        if page.items.len() >= candidate_cap {
+            page.coverage.unknown = page.coverage.unknown.saturating_add(1);
+            break;
         }
         let Ok(callee_id) = SymbolOccurrenceId::new(callee.symbol.node_id.clone()) else {
             continue;
         };
-        for target_id in trait_dispatch_target_ids(latest, &callee_id, scope) {
-            examined = examined.saturating_add(1);
-            if !seen.insert(target_id.as_str().to_owned()) {
-                continue;
-            }
-            let Some(symbol) = symbol_record_by_id(latest, &target_id) else {
-                continue;
-            };
-            eligible = eligible.saturating_add(1);
-            if page.items.len() < candidate_cap {
+        let exhausted = visit_trait_dispatch_targets(
+            latest,
+            &callee_id,
+            scope,
+            budget,
+            control,
+            &mut examined,
+            |target_id| {
+                if !seen.insert(target_id.as_str().to_owned()) {
+                    return true;
+                }
+                let Some(symbol) = symbol_record_by_id(latest, target_id) else {
+                    return true;
+                };
+                eligible = eligible.saturating_add(1);
                 page.items.push(SymbolRelationRecord {
                     symbol,
                     edge_kind: relation_edge_kind_name(RelationEdgeKindV1::Calls).to_owned(),
@@ -1426,8 +1479,22 @@ fn augment_callee_dispatch_page(
                     dispatch_from: Some(callee.symbol.node_id.clone()),
                     depth: callee.depth,
                 });
-            } else {
-                page.coverage.capped = page.coverage.capped.saturating_add(1);
+                page.items.len() < candidate_cap
+            },
+        );
+        match exhausted {
+            Ok(true) => {}
+            Ok(false) => {
+                page.coverage.unknown = page.coverage.unknown.saturating_add(1);
+                break 'callees;
+            }
+            Err(DispatchExpansionStop::Cancelled) => {
+                return Err(NativeLaneOutcomeV1::Cancelled);
+            }
+            Err(DispatchExpansionStop::TimedOut) => {
+                return Err(NativeLaneOutcomeV1::TimedOut(callee_dispatch_usage(
+                    &page, examined, control,
+                )));
             }
         }
     }
