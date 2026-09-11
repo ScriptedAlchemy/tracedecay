@@ -12,6 +12,7 @@
 //! `git stash --include-untracked` at the end of the run reverts all
 //! scratch-file churn.
 
+#![allow(clippy::too_many_lines)]
 use std::fmt::Write as _;
 use std::path::Path;
 
