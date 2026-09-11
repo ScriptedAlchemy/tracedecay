@@ -526,19 +526,6 @@ impl<A: CodeIndexMcpReadAdmissionV1> tracedecay_query::retrieval::ports::Retriev
     }
 }
 
-impl<A: CodeIndexMcpReadAdmissionV1>
-    tracedecay_query::retrieval::ports::RetrievalExecutionControl
-    for McpRetrievalExecutionControlV1<A>
-{
-    fn elapsed_micros(&self) -> u64 {
-        tracedecay_query::retrieval::ports::RetrievalExecutionControl::elapsed_micros(self)
-    }
-
-    fn is_cancelled(&self) -> bool {
-        !self.admission_provider.route_is_registered() || self.request_termination().is_some()
-    }
-}
-
 pub fn code_index_search_executor<A, S>(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_id: tracedecay_domain::ProjectId,

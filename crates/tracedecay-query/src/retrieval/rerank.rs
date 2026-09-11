@@ -14,7 +14,7 @@ use tracedecay_domain::{
     SanitizedStageFailure,
 };
 
-pub use super::ports::RetrievalExecutionControl;
+use super::ports::RetrievalExecutionControl;
 
 /// A strict permit for producing one ephemeral authorized view.
 #[derive(Clone, Debug, PartialEq, Eq)]

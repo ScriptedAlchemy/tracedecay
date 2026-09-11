@@ -28,11 +28,10 @@ use tracedecay_domain::{
     SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl, RetrievalPortError,
 };
 use tracedecay_query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, SemanticCodeRetriever, RetrievalExecutionControl,
-    SemanticLaneRetriever, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
+    EphemeralQueryEmbeddingV1, SemanticCodeRetriever, SemanticLaneRetriever, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
     SemanticRetrievalRequestV1, SemanticVectorReadPort, SemanticVectorReadRequestV1,
     SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
 };

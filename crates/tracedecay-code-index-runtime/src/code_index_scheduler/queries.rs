@@ -51,13 +51,13 @@ use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
 };
-use tracedecay_query::retrieval::graph::{
-    RetrievalExecutionControl, GraphLaneRequest, GraphLaneRetriever,
-};
+use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
 use tracedecay_query::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest,
 };
-use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
+use tracedecay_query::retrieval::ports::{
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl,
+};
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
