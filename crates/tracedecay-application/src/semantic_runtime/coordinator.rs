@@ -19,7 +19,7 @@ use crate::config::retrieval::{
     RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use tracedecay_global_db::configuration::contracts::types::{
+use tracedecay_global_db::configuration::contracts::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, DirectConfigurationMutation,
 };
 use tracedecay_global_db::configuration::store::ConfigurationDirectCommitOutcomeV1;

@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use axum::Router;
 use tokio::sync::Mutex;
-use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_contracts::{
     ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResponse, InvocationError,
@@ -13,6 +12,7 @@ use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
