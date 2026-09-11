@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId};
 
 use super::McpServer;
-use crate::host_admission::HostAdmissionTestRuntimeV1;
+use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use crate::tracedecay::TraceDecayOpenOptions;
 use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_mcp::transport::JsonRpcRequest;

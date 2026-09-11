@@ -19,7 +19,7 @@ use tracedecay_code_extraction::parsed_extraction::{
     ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionDisposition,
 };
 use tracedecay_code_extraction::{ExtractionArtifactV1, LanguageExtractor};
-use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+use tracedecay_domain::{ExtractorRevision, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 
 const DEFAULT_MAX_RETAINED_DOCUMENTS: usize = 256;
 const DEFAULT_MAX_RETAINED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
@@ -116,6 +116,7 @@ impl ParseDocumentKey {
 struct RetainedEntry {
     document: RetainedParseDocument,
     artifact: Option<ExtractionArtifactV1>,
+    artifact_revision: Option<ExtractorRevision>,
 }
 
 #[derive(Default)]
@@ -203,16 +204,38 @@ impl SharedRetainedParsePool {
         source: &str,
         extractor: &dyn LanguageExtractor,
     ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
+        let prepared_source = extractor.prepare_parse_source(source);
+        let (report, extraction) = self.parse_internal(
+            identity,
+            language_id,
+            source,
+            prepared_source.as_ref(),
+            Some((extractor, None)),
+            None,
+        )?;
+        extraction
+            .map(|extraction| (report, extraction))
+            .ok_or(ParseError::ParseFailed)
+    }
+
+    pub fn parse_and_extract_artifact_for_revision_with_control(
+        &self,
+        identity: ParseDocumentIdentity,
+        language_id: &str,
+        source: &str,
+        extractor: &dyn LanguageExtractor,
+        artifact_revision: &ExtractorRevision,
+        control: Option<&dyn Fn() -> bool>,
+    ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
         crate::hotpath_observe::measure_hot_loop!("code_index.collect.retained_artifact", {
-            let grammar_key = extractor.retained_grammar_key(identity.logical_path());
             let prepared_source = extractor.prepare_parse_source(source);
             let (report, extraction) = self.parse_internal(
                 identity,
                 language_id,
                 source,
                 prepared_source.as_ref(),
-                Some(&grammar_key),
-                Some(extractor),
+                Some((extractor, Some(artifact_revision))),
+                control,
             )?;
             match extraction {
                 Some(extraction) => Ok((report, extraction)),
@@ -227,9 +250,12 @@ impl SharedRetainedParsePool {
         language_id: &str,
         source: &str,
         prepared_source: &str,
-        grammar_key: Option<&str>,
-        extractor: Option<&dyn LanguageExtractor>,
+        extraction: Option<(&dyn LanguageExtractor, Option<&ExtractorRevision>)>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<(ParseReport, Option<ParsedExtractionArtifactV1>), ParseError> {
+        let grammar_key = extraction
+            .map(|(extractor, _)| extractor.retained_grammar_key(identity.logical_path()));
+        let grammar_key = grammar_key.as_deref();
         crate::hotpath_observe::measure_hot_loop!("code_index.collect.parse", {
             if source.len() > self.limits.max_total_source_bytes {
                 self.record_failure();
@@ -257,7 +283,8 @@ impl SharedRetainedParsePool {
                     source,
                     prepared_source,
                     grammar_key,
-                    extractor,
+                    extraction,
+                    control,
                 ),
                 None => {
                     // Serialize first admission per document. Unrelated documents
@@ -282,18 +309,20 @@ impl SharedRetainedParsePool {
                             source,
                             prepared_source,
                             grammar_key,
-                            extractor,
+                            extraction,
+                            control,
                         );
                     }
                     drop(state);
                     let opened = match grammar_key {
-                        Some(grammar_key) => RetainedParseDocument::open_prepared(
+                        Some(grammar_key) => RetainedParseDocument::open_prepared_with_control(
                             identity,
                             language_id,
                             grammar_key,
                             source,
                             prepared_source,
                             self.limits.document,
+                            control,
                         ),
                         None => RetainedParseDocument::open(
                             identity,
@@ -309,8 +338,8 @@ impl SharedRetainedParsePool {
                             return Err(error);
                         }
                     };
-                    let extraction = match extractor {
-                        Some(extractor) => {
+                    let parsed = match extraction {
+                        Some((extractor, _)) => {
                             match document.extract_canonical_artifact(extractor, &report, None) {
                                 Ok(extraction) => Some(extraction),
                                 Err(error) => {
@@ -321,28 +350,28 @@ impl SharedRetainedParsePool {
                         }
                         None => None,
                     };
-                    let retained_artifact =
-                        extraction.as_ref().map(|parsed| parsed.artifact.clone());
+                    let retained_artifact = parsed.as_ref().map(|parsed| parsed.artifact.clone());
                     let current_size = document.retained_source_bytes();
                     let entry = Arc::new(Mutex::new(RetainedEntry {
                         document,
                         artifact: retained_artifact,
+                        artifact_revision: extraction.and_then(|(_, revision)| revision.cloned()),
                     }));
                     let mut state = self
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if state.clear_epoch != admission_epoch {
-                        return Ok((report, extraction));
+                        return Ok((report, parsed));
                     }
                     state.documents.insert(key.clone(), Arc::clone(&entry));
                     state.source_bytes.insert(key.clone(), current_size);
                     touch(&mut state.lru, &key);
                     evict_to_limits(&mut state, &key, self.limits);
-                    record_success(&mut state.stats, &report, extraction.as_ref());
+                    record_success(&mut state.stats, &report, parsed.as_ref());
                     state.stats.retained_documents = state.documents.len();
                     state.stats.retained_source_bytes = state.source_bytes.values().copied().sum();
-                    Ok((report, extraction))
+                    Ok((report, parsed))
                 }
             }
         })
@@ -358,7 +387,8 @@ impl SharedRetainedParsePool {
         source: &str,
         prepared_source: &str,
         grammar_key: Option<&str>,
-        extractor: Option<&dyn LanguageExtractor>,
+        extraction: Option<(&dyn LanguageExtractor, Option<&ExtractorRevision>)>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<(ParseReport, Option<ParsedExtractionArtifactV1>), ParseError> {
         let mut retained = entry
             .lock()
@@ -366,20 +396,24 @@ impl SharedRetainedParsePool {
         let language_changed = retained.document.language_id() != language_id;
         let report = if !language_changed {
             match grammar_key {
-                Some(_) => retained
-                    .document
-                    .reparse_prepared(identity, source, prepared_source),
+                Some(_) => retained.document.reparse_prepared_with_control(
+                    identity,
+                    source,
+                    prepared_source,
+                    control,
+                ),
                 None => retained.document.reparse(identity, source),
             }
         } else {
             let opened = match grammar_key {
-                Some(grammar_key) => RetainedParseDocument::open_prepared(
+                Some(grammar_key) => RetainedParseDocument::open_prepared_with_control(
                     identity,
                     language_id,
                     grammar_key,
                     source,
                     prepared_source,
                     self.limits.document,
+                    control,
                 ),
                 None => {
                     RetainedParseDocument::open(identity, language_id, source, self.limits.document)
@@ -401,9 +435,11 @@ impl SharedRetainedParsePool {
                 return Err(error);
             }
         };
-        let extraction = match extractor {
-            Some(extractor) => {
-                let previous = if language_changed {
+        let extraction = match extraction {
+            Some((extractor, artifact_revision)) => {
+                let previous = if language_changed
+                    || retained.artifact_revision.as_ref() != artifact_revision
+                {
                     None
                 } else {
                     retained.artifact.as_ref()
@@ -414,10 +450,12 @@ impl SharedRetainedParsePool {
                 {
                     Ok(extraction) => {
                         retained.artifact = Some(extraction.artifact.clone());
+                        retained.artifact_revision = artifact_revision.cloned();
                         Some(extraction)
                     }
                     Err(error) => {
                         retained.artifact = None;
+                        retained.artifact_revision = None;
                         drop(retained);
                         self.record_failure();
                         return Err(error);
@@ -426,6 +464,7 @@ impl SharedRetainedParsePool {
             }
             None => {
                 retained.artifact = None;
+                retained.artifact_revision = None;
                 None
             }
         };
@@ -590,5 +629,102 @@ fn record_success(
     crate::hotpath_observe::add_parse_bytes(report.metrics.source_bytes as u64);
     if matches!(report.reuse, ParseReuse::Noop | ParseReuse::Incremental) {
         crate::hotpath_observe::add_reused_parses(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_code_extraction::{
+        LanguageRegistry, parsed_extraction::ParsedExtractionResetReason,
+    };
+    use tracedecay_domain::RepositoryDirtyStateV1;
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("valid test identity")
+    }
+
+    fn identity() -> ParseDocumentIdentity {
+        ParseDocumentIdentity::Repository {
+            project_id: id("project.retained"),
+            repository_id: id("repository.retained"),
+            worktree_id: None,
+            reference: None,
+            commit: None,
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+            logical_path: "src/lib.rs".to_owned(),
+        }
+    }
+
+    #[test]
+    fn extractor_revision_change_discards_retained_extraction_artifact() {
+        let source = "mod inner { pub fn value() {} }\npub use inner::*;\n";
+        let pool = SharedRetainedParsePool::default();
+        let registry = LanguageRegistry::new();
+        let extractor = registry
+            .extractor_for_file("src/lib.rs")
+            .expect("Rust extractor");
+        let v3 = id::<ExtractorRevision>("extractor.rust.v3");
+        let v4 = id::<ExtractorRevision>("extractor.rust.v4");
+
+        pool.parse_and_extract_artifact_for_revision_with_control(
+            identity(),
+            "rust",
+            source,
+            extractor,
+            &v3,
+            None,
+        )
+        .expect("historical extraction");
+        {
+            let entry = pool
+                .state
+                .lock()
+                .expect("retained pool lock")
+                .documents
+                .values()
+                .next()
+                .cloned()
+                .expect("retained document");
+            entry
+                .lock()
+                .expect("retained entry lock")
+                .artifact
+                .as_mut()
+                .expect("retained artifact")
+                .imports
+                .clear();
+        }
+
+        let (_, extraction) = pool
+            .parse_and_extract_artifact_for_revision_with_control(
+                identity(),
+                "rust",
+                source,
+                extractor,
+                &v4,
+                None,
+            )
+            .expect("current extraction");
+
+        assert_eq!(
+            extraction.disposition,
+            ParsedExtractionDisposition::Reset {
+                reason: ParsedExtractionResetReason::MissingPriorExtraction,
+            }
+        );
+        assert!(
+            extraction
+                .artifact
+                .imports
+                .iter()
+                .any(|row| row.is_public && row.is_glob),
+            "current extraction must not inherit the stale import row set"
+        );
     }
 }

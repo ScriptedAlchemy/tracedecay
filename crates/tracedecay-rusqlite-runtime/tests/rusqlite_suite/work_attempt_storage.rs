@@ -19,8 +19,8 @@ use tracedecay_contracts::{
     WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
     WorkAttemptProviderOutcomeV1, WorkAttemptReceiptReadPortV1, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkOwnerObservationMarkOutcomeV1, WorkOwnerObservationStoragePortV1,
-    WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetryReceiptV1, WorkRetrySourceV1,
-    WorkRetryStoragePortV1, WorkRetryWriteV1, WorkRunControlStoragePort,
+    WorkRetryAttemptOutcomeV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetryReceiptV1,
+    WorkRetrySourceV1, WorkRetryStoragePortV1, WorkRetryWriteV1, WorkRunControlStoragePort,
     WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort, WorkSynthesisAdmissionV1,
     WorkSynthesisEvidenceGroupV1, WorkSynthesisInsertOutcome, WorkSynthesisSourceEnvelopeV1,
     WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1, WorkflowSynthesisDraft,
@@ -42,6 +42,7 @@ use tracedecay_domain::{
 };
 
 use common::fixture_abs_root;
+use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 use work_registered_store::RegisteredWorkStore;
 
 fn id<T>(value: &str) -> T
@@ -410,6 +411,169 @@ fn retry_reservation_cannot_overbook_project_global_capacity() {
     );
     assert_eq!(store.count("work_attempts_v1"), 2);
     assert_eq!(store.count("work_retry_receipts_v1"), 0);
+}
+
+#[test]
+fn recovery_retry_replaces_the_original_across_active_attempt_census() {
+    let store =
+        RegisteredWorkStore::start_with_setup("recovery-retry-capacity-slot", |connection| {
+            install_workflow_schema(connection).unwrap()
+        });
+    let authority = authority_in_scope(
+        "project.retry.recovery",
+        "repository.retry.recovery",
+        "actor.retry.recovery",
+        "worktree.retry.recovery",
+    );
+    let original = recovery_required(&attempt_at(
+        "task.retry.recovery",
+        "run.retry.recovery",
+        "attempt.retry.recovery.original",
+    ));
+    store.storage().insert(&authority, &original).unwrap();
+
+    let outcome = store
+        .storage()
+        .insert_retry_bounded(&authority, &retry_write(&original), &concurrency(1, 1, 1))
+        .unwrap();
+    assert!(matches!(outcome, WorkRetryAttemptOutcomeV1::Created { .. }));
+    let replacement = outcome.attempt().clone();
+    assert_eq!(store.count("work_attempts_v1"), 2);
+    assert_eq!(store.count("work_retry_receipts_v1"), 1);
+    let task_id = original.identity().task_id().clone();
+    assert!(matches!(
+        store
+            .storage()
+            .admission_capacities(
+                &authority,
+                std::slice::from_ref(&task_id),
+                &concurrency(1, 1, 1),
+            )
+            .unwrap()
+            .get(&task_id)
+            .unwrap()
+            .verdict(),
+        WorkAttemptCapacityVerdictV1::Exhausted(_)
+    ));
+
+    assert_eq!(
+        store.storage().open_attempts(&authority).unwrap(),
+        vec![replacement.clone()]
+    );
+    assert!(
+        store
+            .storage()
+            .has_open_attempts_in_exact_scope(
+                authority.project_id(),
+                authority.repository_id(),
+                authority.worktree_id(),
+            )
+            .unwrap()
+    );
+    let admission = store
+        .storage()
+        .run_admission(
+            &authority,
+            original.identity().task_id(),
+            original.identity().run_id(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(admission.total_attempts, 2);
+    assert_eq!(
+        admission.live_attempts,
+        vec![replacement.identity().attempt_id().clone()]
+    );
+    let workflow_live = store
+        .storage()
+        .workflow_bound_live_attempts(
+            &authority,
+            original.identity().task_id(),
+            original.identity().run_id(),
+        )
+        .unwrap();
+    assert_eq!(workflow_live.len(), 1);
+    assert_eq!(
+        workflow_live[0].attempt_id,
+        *replacement.identity().attempt_id()
+    );
+
+    let running_replacement = replacement
+        .transition(
+            WorkAttemptStateV1::Running,
+            None,
+            Vec::new(),
+            WorkCancellationStateV1::None,
+            WorkRecoveryStateV1::Restarted {
+                source_attempt_id: original.identity().attempt_id().clone(),
+                reason: WorkRestartReasonV1::ProcessLost,
+            },
+            Some(requested_route()),
+            None,
+            replacement.lease().clone(),
+        )
+        .unwrap();
+    store
+        .storage()
+        .update(
+            &authority,
+            replacement.lease(),
+            replacement.state(),
+            &running_replacement,
+            None,
+        )
+        .unwrap();
+    let finished_replacement = succeeded(&running_replacement);
+    store
+        .storage()
+        .update(
+            &authority,
+            running_replacement.lease(),
+            running_replacement.state(),
+            &finished_replacement,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .storage()
+            .open_attempts(&authority)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !store
+            .storage()
+            .has_open_attempts_in_exact_scope(
+                authority.project_id(),
+                authority.repository_id(),
+                authority.worktree_id(),
+            )
+            .unwrap()
+    );
+    let admission = store
+        .storage()
+        .run_admission(
+            &authority,
+            original.identity().task_id(),
+            original.identity().run_id(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(admission.total_attempts, 2);
+    assert!(admission.live_attempts.is_empty());
+    assert!(
+        store
+            .storage()
+            .workflow_bound_live_attempts(
+                &authority,
+                original.identity().task_id(),
+                original.identity().run_id(),
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -851,7 +1015,75 @@ fn failed(attempt: &WorkAttemptV1) -> WorkAttemptV1 {
         .unwrap()
 }
 
+fn recovery_required(attempt: &WorkAttemptV1) -> WorkAttemptV1 {
+    WorkAttemptV1::new(
+        attempt.identity().clone(),
+        attempt.projection_binding().clone(),
+        attempt.execution().clone(),
+        attempt.lease().clone(),
+        WorkAttemptStateV1::RecoveryRequired,
+        None,
+        Vec::new(),
+        WorkCancellationStateV1::None,
+        WorkRecoveryStateV1::RecoveryRequired {
+            source_attempt_id: None,
+            reason: WorkRestartReasonV1::ProcessLost,
+            observed_at: UtcMicros(500),
+        },
+        attempt.requested_route().clone(),
+        None,
+        None,
+    )
+    .unwrap()
+}
+
 fn retry_write(original: &WorkAttemptV1) -> WorkRetryWriteV1 {
+    let (failure, evidence_digest, observed_at, restart_reason) = match original.recovery() {
+        WorkRecoveryStateV1::RecoveryRequired {
+            reason,
+            observed_at,
+            ..
+        } => {
+            let evidence_digest = tracedecay_domain::canonical_sha256(&(
+                "tracedecay.application.work-retry-recovery-required-evidence.v1",
+                original.identity(),
+                original.lease(),
+                reason,
+                observed_at,
+            ))
+            .unwrap();
+            (
+                WorkRetryFailureSelectorV1 {
+                    source: WorkRetrySourceV1::Runtime,
+                    cause: WorkRetryCauseV1::RestartRecoveryRequired,
+                    evidence_ref: "recovery-required".to_owned(),
+                },
+                evidence_digest,
+                *observed_at,
+                *reason,
+            )
+        }
+        _ => {
+            let terminal = original.terminal().expect("failed attempt terminal");
+            let (evidence_digest, observed_at) = match terminal {
+                WorkTerminalEvidenceV1::Failed {
+                    evidence_digest,
+                    observed_at,
+                } => (evidence_digest.clone(), *observed_at),
+                _ => panic!("fixture is failed"),
+            };
+            (
+                WorkRetryFailureSelectorV1 {
+                    source: WorkRetrySourceV1::Runtime,
+                    cause: WorkRetryCauseV1::RuntimeFailure,
+                    evidence_ref: format!("runtime-terminal:{}", evidence_digest.as_str()),
+                },
+                evidence_digest,
+                observed_at,
+                WorkRestartReasonV1::FailureObserved,
+            )
+        }
+    };
     let new_identity = WorkAttemptIdentityV1::new(
         original.identity().task_id().clone(),
         original.identity().run_id().clone(),
@@ -891,26 +1123,14 @@ fn retry_write(original: &WorkAttemptV1) -> WorkRetryWriteV1 {
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::RecoveryRequired {
             source_attempt_id: Some(original.identity().attempt_id().clone()),
-            reason: WorkRestartReasonV1::FailureObserved,
+            reason: restart_reason,
+            observed_at,
         },
         original.requested_route().clone(),
         None,
         None,
     )
     .unwrap();
-    let terminal = original.terminal().expect("failed attempt terminal");
-    let (evidence_digest, observed_at) = match terminal {
-        WorkTerminalEvidenceV1::Failed {
-            evidence_digest,
-            observed_at,
-        } => (evidence_digest.clone(), *observed_at),
-        _ => panic!("fixture is failed"),
-    };
-    let failure = WorkRetryFailureSelectorV1 {
-        source: WorkRetrySourceV1::Runtime,
-        cause: WorkRetryCauseV1::RuntimeFailure,
-        evidence_ref: format!("runtime-terminal:{}", evidence_digest.as_str()),
-    };
     let command = tracedecay_contracts::RetryWorkAttemptCommandV1 {
         original_attempt: original.identity().clone(),
         new_attempt_id: new_identity.attempt_id().clone(),

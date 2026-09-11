@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use tracedecay_contracts::context_scout::ContextScoutDeliveryReceiptV1;
+use tracedecay_contracts::context_scout::{ContextScoutAddressV1, ContextScoutDeliveryReceiptV1};
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HookAdmissionFutureV1,
@@ -25,11 +25,15 @@ use crate::ports::hook_runtime::HookRuntimeV1;
 use super::analytics::HookTimingSpan;
 use super::dispatch::NativeContextScoutLifecycleV1;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DaemonAdmissionRetentionUnavailable;
+
 pub(crate) struct DaemonAdmissionPort<'a> {
     runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
     session_id: Option<&'a str>,
     lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
+    context_scout_address: Mutex<Option<ContextScoutAddressV1>>,
     feedback_notice: Mutex<Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>>,
     github_stack_signal_available: Mutex<bool>,
     /// The caller's hook span, so the admission round trip is attributed like
@@ -51,10 +55,20 @@ impl<'a> DaemonAdmissionPort<'a> {
             project_root,
             session_id,
             lifecycle,
+            context_scout_address: Mutex::new(None),
             feedback_notice: Mutex::new(None),
             github_stack_signal_available: Mutex::new(false),
             telemetry,
         }
+    }
+
+    pub(crate) fn take_context_scout_address(
+        &self,
+    ) -> Result<Option<ContextScoutAddressV1>, DaemonAdmissionRetentionUnavailable> {
+        self.context_scout_address
+            .lock()
+            .map_err(|_| DaemonAdmissionRetentionUnavailable)
+            .map(|mut address| address.take())
     }
 
     pub(crate) fn take_feedback_notice(
@@ -77,6 +91,7 @@ impl<'a> DaemonAdmissionPort<'a> {
 
 pub(crate) struct DaemonAdmissionResponseV1 {
     pub(crate) immediate: HookImmediateAdmissionV1,
+    pub(crate) context_scout_address: Option<ContextScoutAddressV1>,
     pub(crate) feedback_notice:
         Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     pub(crate) github_stack_signal_available: bool,
@@ -100,6 +115,7 @@ struct DaemonAdmissionResponseWireV1 {
     status: DaemonAdmissionStatusV1,
     disposition: Option<HookTransportDispositionV1>,
     orchestration: Option<serde_json::Value>,
+    context_scout_address: Option<ContextScoutAddressV1>,
     ready_guidance: Option<HookReadyGuidanceV1>,
     feedback_notice: Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     github_stack_signal_available: Option<bool>,
@@ -119,6 +135,7 @@ pub(crate) fn now_utc() -> UtcMicros {
 pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonAdmissionResponseV1 {
     let unavailable = || DaemonAdmissionResponseV1 {
         immediate: HookImmediateAdmissionV1::Unavailable,
+        context_scout_address: None,
         feedback_notice: None,
         github_stack_signal_available: false,
     };
@@ -133,6 +150,7 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
         (DaemonAdmissionStatusV1::Rejected, Some(HookTransportDispositionV1::CatchupRequired)) => {
             DaemonAdmissionResponseV1 {
                 immediate: HookImmediateAdmissionV1::CatchupRequired,
+                context_scout_address: None,
                 feedback_notice: None,
                 github_stack_signal_available: false,
             }
@@ -155,12 +173,14 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
                     admitted_at: now_utc(),
                     ready_guidance: wire.ready_guidance,
                 },
+                context_scout_address: wire.context_scout_address,
                 feedback_notice: wire.feedback_notice,
                 github_stack_signal_available: wire.github_stack_signal_available.unwrap_or(false),
             }
         }
         (DaemonAdmissionStatusV1::Backpressured, None) => DaemonAdmissionResponseV1 {
             immediate: HookImmediateAdmissionV1::Backpressured,
+            context_scout_address: None,
             feedback_notice: None,
             github_stack_signal_available: false,
         },
@@ -198,6 +218,12 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
                 return HookImmediateAdmissionV1::Unavailable;
             };
             let response = daemon_admission_response(&response);
+            if let Some(address) = response.context_scout_address {
+                let Ok(mut retained) = self.context_scout_address.lock() else {
+                    return HookImmediateAdmissionV1::Unavailable;
+                };
+                *retained = Some(address);
+            }
             if let Some(notice) = response.feedback_notice
                 && let Ok(mut retained) = self.feedback_notice.lock()
             {

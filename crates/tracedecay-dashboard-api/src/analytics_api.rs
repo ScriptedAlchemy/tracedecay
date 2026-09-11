@@ -5,6 +5,7 @@
 //! falls back to the legacy `dashboard_hint_events` table when present.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use axum::extract::State;
 use axum::response::Json;
@@ -652,7 +653,7 @@ fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNo
 async fn subagent_tree_reading(
     host_io: &HostIo,
     db: Option<&RegisteredGlobalDb>,
-    project_key: &str,
+    project_root: &Path,
 ) -> Result<AnalyticsSubagentTreePayloadV1, String> {
     let Some(db) = db else {
         return Ok(AnalyticsSubagentTreePayloadV1 {
@@ -671,6 +672,8 @@ async fn subagent_tree_reading(
     };
 
     let connection = db.read_connection();
+    let canonical = RegisteredGlobalDb::canonical_project_key(project_root);
+    let opened = project_root.to_string_lossy().into_owned();
     let rows = query_rows(
         &connection,
         "SELECT provider,
@@ -685,14 +688,16 @@ async fn subagent_tree_reading(
                 COALESCE(parent_tool_use_id, '') AS parent_tool_use_id
          FROM sessions
          -- Either column may carry the project: `project_key` is a provider's
-         -- own label and `project_path` the canonical root. Matching both is
+         -- own label and `project_path` the stored root. Matching both is
          -- the convention every scoped session read in `registered_sessions`
-         -- already uses, and matching only one silently empties the tree for
-         -- whichever provider labels its sessions the other way.
-         WHERE (project_key = ?1 OR project_path = ?1)
+         -- already uses. The opened spelling and the canonical OS identity
+         -- (`/var` vs `/private/var`) are one project; matching only the
+         -- canonical key silently empties the tree for rows stored under the
+         -- alias the host wrote.
+         WHERE (project_key IN (?1, ?2) OR project_path IN (?1, ?2))
          ORDER BY COALESCE(started_at, 0), provider, session_id
-         LIMIT ?2",
-        params![project_key, SUBAGENT_TREE_SESSION_CEILING],
+         LIMIT ?3",
+        params![canonical, opened, SUBAGENT_TREE_SESSION_CEILING],
     )
     .await
     .map_err(|error| format!("analytics subagent tree query failed: {error}"))?;
@@ -751,8 +756,12 @@ pub async fn subagent_tree(
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>> {
     hotpath::future!(
         async move {
-            let project_key = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-            match subagent_tree_reading(&state.host_io, state.lcm_db.as_deref(), &project_key).await
+            match subagent_tree_reading(
+                &state.host_io,
+                state.lcm_db.as_deref(),
+                &state.project_root,
+            )
+            .await
             {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),

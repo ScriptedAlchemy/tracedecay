@@ -68,7 +68,7 @@ fn sample_manifest() -> ModelArtifactManifestV1 {
             pooling: EmbeddingPoolingV1::Mean,
             truncation: TruncationPolicyV1 {
                 side: EmbeddingTruncationSideV1::Right,
-                max_length: 512,
+                max_length: 4096,
             },
             precision: EmbeddingPrecisionV1::Fp32,
             runtime: RuntimeCompatibilityV1 {
@@ -86,7 +86,7 @@ fn sample_manifest() -> ModelArtifactManifestV1 {
                 max_resident_bytes: 100,
                 max_threads: 4,
                 max_batch_size: 32,
-                max_sequence_length: 512,
+                max_sequence_length: 4096,
                 load_deadline_ms: 30_000,
             },
             upstream: UpstreamSourceV1 {
@@ -136,7 +136,7 @@ fn semantic_config_serialization_preserves_contract_field_order() {
 
 #[test]
 fn semantic_config_without_a_document_composition_selects_sanitized_text() {
-    let legacy = r#"{"selected_model":"JinaEmbeddingsV2BaseCode","auto_download":true,"active_profile":null,"rollback_profile":null,"resources":{"max_model_bytes":734003200,"max_tokenizer_bytes":67108864,"max_resident_bytes":2147483648,"max_threads":4,"max_concurrent_sessions":16,"max_batch_size":32,"max_sequence_length":512,"load_deadline_ms":30000}}"#;
+    let legacy = r#"{"selected_model":"JinaEmbeddingsV2BaseCode","auto_download":true,"active_profile":null,"rollback_profile":null,"resources":{"max_model_bytes":734003200,"max_tokenizer_bytes":67108864,"max_resident_bytes":2147483648,"max_threads":4,"max_concurrent_sessions":16,"max_batch_size":32,"max_sequence_length":4096,"load_deadline_ms":30000}}"#;
     let config: SemanticConfig = serde_json::from_str(legacy).expect("persisted configuration");
     assert_eq!(
         config.document_composition,
@@ -279,12 +279,12 @@ fn manifest_canonical_bytes_are_exact_and_digest_the_same_bytes() {
             r#"{{"role":"tokenizer","path":"tokenizer.json","digest":"{b}","byte_length":5}},"#,
             r#"{{"role":"config","path":"config.json","digest":"{c}","byte_length":2}}],"#,
             r#""dimensions":384,"metric":"cosine","normalization":"l2","pooling":"mean","#,
-            r#""truncation":{{"side":"right","max_length":512}},"precision":"fp32","#,
+            r#""truncation":{{"side":"right","max_length":4096}},"precision":"fp32","#,
             r#""runtime":{{"runtime":"fastembed-ort","build_revision":"ort-fixture","#,
             r#""platforms":[{{"os":"linux","arch":"x86_64"}}]}},"device":"cpu","#,
             r#""resource_ceiling":{{"max_model_bytes":20,"max_tokenizer_bytes":10,"#,
             r#""max_resident_bytes":100,"max_threads":4,"max_batch_size":32,"#,
-            r#""max_sequence_length":512,"load_deadline_ms":30000}},"#,
+            r#""max_sequence_length":4096,"load_deadline_ms":30000}},"#,
             r#""upstream":{{"name":"fixture/model","version":"1","#,
             r#""revision":"immutable-revision"}}}}}}"#
         ),

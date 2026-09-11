@@ -140,6 +140,7 @@ pub enum DiagnosticPublicationDispositionV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticPublicationReceiptV1 {
     generation_id: CodeGenerationId,
+    publication_revision: u64,
     inserted_records: u64,
     cleared_records: u64,
     disposition: DiagnosticPublicationDispositionV1,
@@ -148,12 +149,14 @@ pub struct DiagnosticPublicationReceiptV1 {
 impl DiagnosticPublicationReceiptV1 {
     pub fn new(
         generation_id: CodeGenerationId,
+        publication_revision: u64,
         inserted_records: u64,
         cleared_records: u64,
         disposition: DiagnosticPublicationDispositionV1,
     ) -> Self {
         Self {
             generation_id,
+            publication_revision,
             inserted_records,
             cleared_records,
             disposition,
@@ -162,6 +165,12 @@ impl DiagnosticPublicationReceiptV1 {
 
     pub fn generation_id(&self) -> &CodeGenerationId {
         &self.generation_id
+    }
+
+    /// Store-issued monotone revision of this generation's diagnostic snapshot.
+    #[hotpath::skip]
+    pub const fn publication_revision(&self) -> u64 {
+        self.publication_revision
     }
 
     #[hotpath::skip]
@@ -208,3 +217,16 @@ pub enum DiagnosticStoreError {
 }
 
 pub type DiagnosticStoreResult<T> = Result<T, DiagnosticStoreError>;
+
+/// Exact diagnostic observation equality for an ordered snapshot, excluding
+/// only the server ingestion clock carried by each record.
+pub fn diagnostic_snapshot_observation_eq(
+    stored: &[GenerationDiagnosticV1],
+    incoming: &[GenerationDiagnosticV1],
+) -> bool {
+    stored.len() == incoming.len()
+        && stored
+            .iter()
+            .zip(incoming)
+            .all(|(left, right)| left.same_observation_as(right))
+}

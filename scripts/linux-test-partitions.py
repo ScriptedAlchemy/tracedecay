@@ -12,18 +12,28 @@ metadata` with cargo's own selection rules and fails unless every test target
 in the workspace is selected by exactly one partition, or is listed under
 `not_run` with a reason.
 
+macOS runs the same partitions grouped: every partition names one of the
+`macos_groups` under `macos_group`, and each group is one hosted 3-vCPU job
+that runs its partitions' selections in turn against one target directory.
+`check` also proves that every partition names a listed group and every group
+runs at least one partition, and that the manifest stays within the
+MACOS_GROUP_CAP concurrent macOS jobs a run may take. A group's
+`budget_basis` is documentation: the measurement its `timeout_minutes` rests
+on.
+
     linux-test-partitions.py [--metadata FILE] check
     linux-test-partitions.py [--metadata FILE] cargo-args <partition>
     linux-test-partitions.py [--metadata FILE] build-args <partition>
     linux-test-partitions.py matrix
+    linux-test-partitions.py macos-matrix
 
 `cargo-args` prints the selection for one partition as a shell-quoted
 argument list. `build-args` prints that selection plus the partition's
 `executables` — the binaries and examples its tests spawn rather than link,
 which a test build does not produce on its own — for a `cargo build` that
 shares the test build's resolution; it prints nothing for a partition with no
-executables. `matrix` prints the `strategy.matrix` document the workflow feeds
-through `fromJSON`.
+executables. `matrix` and `macos-matrix` print the `strategy.matrix`
+documents the Linux and macOS jobs feed through `fromJSON`.
 """
 
 from __future__ import annotations
@@ -58,6 +68,9 @@ NAMED_TARGET_FLAGS = {
     "example": ("example", "--example"),
     "bench": ("bench", "--bench"),
 }
+# The account's hosted concurrency admits five macOS jobs at once. One run
+# takes at most four, so another run's macOS jobs can start beside it.
+MACOS_GROUP_CAP = 4
 
 
 class PartitionError(ValueError):
@@ -139,7 +152,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
     if len(set(names)) != len(names):
         raise PartitionError(f"{path}: partition names repeat")
     for partition in partitions:
-        for key in ("packages", "timeout_minutes"):
+        for key in ("packages", "timeout_minutes", "macos_group"):
             if key not in partition:
                 raise PartitionError(f"partition {partition['name']!r} has no {key!r}")
         if not isinstance(partition["packages"], list) or not partition["packages"]:
@@ -158,7 +171,50 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict[str, Any]:
         not isinstance(reason, str) or not reason for reason in not_run.values()
     ):
         raise PartitionError(f"{path}: not_run must map `package::target` to a reason")
+    macos_groups(document)
     return document
+
+
+def macos_groups(document: dict[str, Any]) -> dict[str, list[str]]:
+    """The macOS groups and the partitions each runs, in manifest order.
+
+    Every partition names exactly one listed group and every group runs at
+    least one partition, so a partition cannot fall out of the macOS lane and
+    a group job cannot run nothing; the group count is bounded by the macOS
+    concurrency one run may take.
+    """
+    groups = document.get("macos_groups")
+    if not isinstance(groups, list) or not groups:
+        raise PartitionError("manifest has no macos_groups")
+    members: dict[str, list[str]] = {}
+    for group in groups:
+        name = group.get("name") if isinstance(group, dict) else None
+        if not isinstance(name, str) or not name:
+            raise PartitionError("every macOS group needs a name")
+        if name in members:
+            raise PartitionError(f"macOS group names repeat: {name!r}")
+        timeout = group.get("timeout_minutes")
+        if not isinstance(timeout, int) or timeout <= 0:
+            raise PartitionError(f"macOS group {name!r} needs a positive timeout")
+        members[name] = []
+    if len(members) > MACOS_GROUP_CAP:
+        raise PartitionError(
+            f"{len(members)} macOS groups exceed the {MACOS_GROUP_CAP} concurrent macOS jobs a run may take"
+        )
+    for partition in document["partitions"]:
+        if "macos_group" not in partition:
+            raise PartitionError(f"partition {partition['name']!r} has no 'macos_group'")
+        group = partition["macos_group"]
+        if group not in members:
+            raise PartitionError(
+                f"partition {partition['name']!r} names macOS group {group!r}, "
+                f"which is not listed under macos_groups"
+            )
+        members[group].append(partition["name"])
+    for name, partitions in members.items():
+        if not partitions:
+            raise PartitionError(f"macOS group {name!r} runs no partition")
+    return members
 
 
 def enabled_features(
@@ -297,6 +353,12 @@ def check(document: dict[str, Any], metadata: dict[str, Any]) -> list[str]:
         f"{len(universe)} test targets: {sum(1 for names in owners.values() if names)} in exactly "
         f"one partition, {len(not_run)} listed under not_run"
     )
+    groups = macos_groups(document)
+    for group, partitions in groups.items():
+        lines.append(f"macOS {group}: {', '.join(partitions)}")
+    lines.append(
+        f"{len(document['partitions'])} partitions: each in exactly one of {len(groups)} macOS groups"
+    )
     return lines
 
 
@@ -349,6 +411,21 @@ def matrix(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def macos_matrix(document: dict[str, Any]) -> dict[str, Any]:
+    """One matrix entry per macOS group; `partitions` is the space-separated run order."""
+    members = macos_groups(document)
+    return {
+        "include": [
+            {
+                "group": group["name"],
+                "timeout": group["timeout_minutes"],
+                "partitions": " ".join(members[group["name"]]),
+            }
+            for group in document["macos_groups"]
+        ]
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
@@ -358,12 +435,16 @@ def main() -> None:
     for command in ("cargo-args", "build-args"):
         commands.add_parser(command).add_argument("partition")
     commands.add_parser("matrix")
+    commands.add_parser("macos-matrix")
     args = parser.parse_args()
 
     try:
         document = load_manifest(args.manifest)
         if args.command == "matrix":
             print(json.dumps(matrix(document)))
+            return
+        if args.command == "macos-matrix":
+            print(json.dumps(macos_matrix(document)))
             return
         metadata = load_metadata(args.metadata)
         if args.command == "check":

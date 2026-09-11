@@ -5,14 +5,14 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
-    http_agent, pick_free_port, wait_for_dashboard,
+    GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, TraceDecayStorageEnvGuard,
+    canonicalize_test_dir, create_runtime, get_json, http_agent, pick_free_port, tempdir_or_panic,
+    wait_for_dashboard,
 };
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
@@ -26,8 +26,7 @@ use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 struct Fixture {
     _tmp: TempDir,
-    _env_guard: EnvVarGuard,
-    _data_dir_guard: EnvVarGuard,
+    _storage: TraceDecayStorageEnvGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     project_root: PathBuf,
@@ -472,21 +471,21 @@ async fn seed_fallback_analytics(runtime: &DashboardTestRuntimeV1, project_root:
 }
 
 async fn start_fixture(seed_durable_events: bool) -> Fixture {
-    let tmp = TempDir::new().expect("temp dir");
-    let project_root = tmp.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("project dir");
+    let tmp = tempdir_or_panic();
+    let storage = TraceDecayStorageEnvGuard::for_tempdir(&tmp);
+    let project_root = canonicalize_test_dir(&tmp.path().join("project"));
     std::fs::write(
         project_root.join("lib.rs"),
         "pub fn analytics_fixture() {}\n",
     )
     .expect("seed source file");
 
-    let global_db_path = tmp.path().join("global").join("global.db");
-    let env_guard = EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path);
-    let profile_root = tmp.path().join("profile").join(".tracedecay");
-    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-    let project_id =
-        tracedecay_domain::ProjectId::new("dashboard_analytics_fixture").expect("project identity");
+    let profile_root = storage.profile_root().to_path_buf();
+    let global_db_path = storage.global_db_path().to_path_buf();
+    let project_id = tracedecay_domain::ProjectId::new(
+        tracedecay_runtime_core::storage::default_profile_project_id(&project_root),
+    )
+    .expect("project identity");
     let host_runtime = Arc::new(
         DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
             .await
@@ -534,8 +533,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
 
     Fixture {
         _tmp: tmp,
-        _env_guard: env_guard,
-        _data_dir_guard: data_dir_guard,
+        _storage: storage,
         base_url,
         server,
         project_root,

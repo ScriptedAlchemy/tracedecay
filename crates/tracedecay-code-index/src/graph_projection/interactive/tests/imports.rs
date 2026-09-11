@@ -42,6 +42,8 @@ fn import(
         module_specifier: module_specifier.to_owned(),
         imported_name: names.imported.map(str::to_owned),
         local_name: names.local.map(str::to_owned),
+        is_public: false,
+        is_glob: false,
         namespace,
         module_kind,
         span: SourceSpan {

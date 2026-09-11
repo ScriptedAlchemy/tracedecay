@@ -8,7 +8,7 @@
 //!
 //! Both typed dimensions now have a real server-side source:
 //! - **budget**: the owner-configurable soft budgets live in the configuration
-//!   control plane under [`crate::config::SYNC_RETENTION_SETTING_KEY`]
+//!   control plane under [`tracedecay_configuration::SYNC_RETENTION_SETTING_KEY`]
 //!   (`sync.retention.v1` → `store_soft_budgets_bytes`, keyed by store key).
 //!   A configured budget is evaluated against the live sample; a store with no
 //!   entry reports `unset` — *the owner has not configured a budget*, which is
@@ -202,7 +202,7 @@ enum ResolvedStoreBudgetV1 {
 /// Resolve one store's owner-configured soft budget from the retention config.
 fn resolve_store_budget(
     store_name: &str,
-    retention: Option<&crate::config::RetentionConfig>,
+    retention: Option<&tracedecay_configuration::RetentionConfig>,
 ) -> ResolvedStoreBudgetV1 {
     let Some(retention) = retention else {
         return ResolvedStoreBudgetV1::Unknown(
@@ -553,7 +553,7 @@ async fn sample_store(
 /// and growth dimensions.
 fn telemetry_entry(
     sampled: SampledStoreV1,
-    retention: Option<&crate::config::RetentionConfig>,
+    retention: Option<&tracedecay_configuration::RetentionConfig>,
 ) -> StoreTelemetryEntryV1 {
     let sample = sampled.sample();
     let (total_bytes, free_bytes, free_page_ratio) = sample.map_or((None, None, None), |sample| {
@@ -590,7 +590,7 @@ fn telemetry_entry(
 fn budget_dimension(
     store_name: &str,
     sample: Option<&StoreSizeSampleV1>,
-    retention: Option<&crate::config::RetentionConfig>,
+    retention: Option<&tracedecay_configuration::RetentionConfig>,
 ) -> StoreBudgetDimensionV1 {
     let budget = match resolve_store_budget(store_name, retention) {
         ResolvedStoreBudgetV1::Configured(budget) => budget,
@@ -666,16 +666,24 @@ fn fallback_store_key() -> StoreKeyV1 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::config::RetentionConfig;
+    use tracedecay_configuration::RetentionConfig;
 
-    async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
-        crate::events_api::dashboard_state_fixture("project.dashboard-storage-telemetry").await
+    async fn state_for_test() -> (tempfile::TempDir, DashboardState, u64) {
+        let (project, state) =
+            crate::events_api::dashboard_state_fixture("project.dashboard-storage-telemetry").await;
+        let (page_size, page_count, _) = state
+            .mem_db
+            .storage_page_counts()
+            .await
+            .expect("authoritative graph page counts");
+        let graph_total_bytes = page_size.saturating_mul(page_count);
+        (project, state, graph_total_bytes)
     }
 
     #[tokio::test]
     async fn storage_telemetry_without_resolved_scope_fails_closed() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, mut state) = state_for_test().await;
+        let (_project, mut state, _) = state_for_test().await;
         state.resolved_scope = None;
 
         // No exact scope means no per-request application context; the handler
@@ -699,7 +707,7 @@ mod tests {
     #[tokio::test]
     async fn roles_sharing_one_store_file_are_reported_once_with_both_roles() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, state) = state_for_test().await;
+        let (_project, state, _) = state_for_test().await;
         let Json(envelope) = telemetry(State(state)).await;
 
         // No two entries may name the same store file: identical sizes reported

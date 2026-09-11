@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use tracedecay_contracts::doctor::{IngestRefusalCensusReadV1, IngestRefusalCountV1};
 use tracedecay_runtime_core::db::engine::QueryExecutor;
 use tracedecay_store::ObservationCoverageReason;
 
@@ -38,6 +39,37 @@ pub enum ObservationRefusalCensusV1 {
     },
     /// The ledger could not be consulted.
     Unavailable,
+}
+
+#[must_use]
+pub fn ingest_refusal_read_from_censuses(
+    censuses: &[ObservationRefusalCensusV1],
+) -> IngestRefusalCensusReadV1 {
+    let mut merged = std::collections::BTreeMap::new();
+    for census in censuses {
+        match census {
+            ObservationRefusalCensusV1::Observed { refusals } => {
+                for refusal in refusals {
+                    let key = (refusal.provider.clone(), refusal.reason.clone());
+                    let entry = merged.entry(key).or_insert(0_u64);
+                    *entry = entry.saturating_add(refusal.count);
+                }
+            }
+            ObservationRefusalCensusV1::Unavailable => {
+                return IngestRefusalCensusReadV1::Unknown;
+            }
+        }
+    }
+    IngestRefusalCensusReadV1::Observed {
+        refusals: merged
+            .into_iter()
+            .map(|((provider, reason), count)| IngestRefusalCountV1 {
+                provider,
+                reason,
+                count,
+            })
+            .collect(),
+    }
 }
 
 impl RegisteredGlobalDb {

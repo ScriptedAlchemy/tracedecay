@@ -10,9 +10,8 @@ use std::sync::{Arc, OnceLock};
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-    CredentialReferenceMetadataV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
-    SettingKey,
+    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, ProtectedApplyRequest,
+    ProtectedChange, ProtectedChangePlan, SettingKey,
 };
 
 use crate::config::{
@@ -24,14 +23,13 @@ use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 
 use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 use super::ports::{
-    ConfigurationClock, ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationClock, ConfigurationCurrentStateV1, ConfigurationMutationAuthorizationPort,
+    ConfigurationOperationFuture, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 use super::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
     ConfigurationRollbackRequest, DirectConfigurationMutation, ResolvedSetting, SettingSummary,
-    WriteOnlyCredentialMutation,
 };
 use super::user_settings::{ProductionUserSettingsDaemonClient, UserSettingsDaemonClient};
 
@@ -146,6 +144,17 @@ impl ProjectConfigurationRuntime {
             activation_error_code,
             occurred_at,
         )
+    }
+
+    /// Resolves the runtime component's durable observed revision through the
+    /// canonical configuration history. A missing value means this component
+    /// has never recorded activation.
+    pub fn observed_runtime_configuration(
+        &self,
+    ) -> ConfigurationOperationFuture<'_, Option<ConfigurationCurrentStateV1>> {
+        self.client
+            .store
+            .observed_component_configuration(RUNTIME_CONFIGURATION_COMPONENT.to_owned())
     }
 
     /// First-wins type-erased semantic activation payload. Callers in
@@ -285,30 +294,10 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
             .list(actor)
-            .await
-        })
-    }
-
-    fn explain(
-        &self,
-        actor: AuthorizedActor,
-        key: SettingKey,
-    ) -> ConfigurationOperationFuture<'_, ResolvedSetting> {
-        Box::pin(async move {
-            ConfigurationControlPlaneOperations::new(
-                self.registry.as_ref(),
-                &self.store,
-                &self.scopes,
-                &self.store,
-                &self.authorization,
-                &self.clock,
-            )
-            .explain(actor, key)
             .await
         })
     }
@@ -323,7 +312,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -343,31 +331,10 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
             .mutate_direct(authority, mutation, expected_revision)
-            .await
-        })
-    }
-
-    fn write_credential(
-        &self,
-        authority: ConfigurationMutationAuthority,
-        write: WriteOnlyCredentialMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        Box::pin(async move {
-            ConfigurationControlPlaneOperations::new(
-                self.registry.as_ref(),
-                &self.store,
-                &self.scopes,
-                &self.store,
-                &self.authorization,
-                &self.clock,
-            )
-            .write_credential(authority, write, expected_revision)
             .await
         })
     }
@@ -381,7 +348,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -401,7 +367,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -420,7 +385,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -439,7 +403,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -458,7 +421,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )
@@ -477,7 +439,6 @@ impl ConfigurationControlPlane for RetainedConfigurationControlPlane {
                 self.registry.as_ref(),
                 &self.store,
                 &self.scopes,
-                &self.store,
                 &self.authorization,
                 &self.clock,
             )

@@ -11,12 +11,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::DashboardProjectContext;
 
 pub type RetainedProjectGraphFuture = std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = tracedecay_domain::errors::Result<Option<Arc<TraceDecay>>>>
-            + Send
+        dyn std::future::Future<
+                Output = tracedecay_domain::errors::Result<Option<Arc<DashboardProjectContext>>>,
+            > + Send
             + 'static,
     >,
 >;

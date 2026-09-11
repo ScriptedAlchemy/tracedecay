@@ -111,8 +111,8 @@ pub trait CanonicalApplicationDispatcher<Request> {
     fn invoke(&self, operation: &ApplicationOperation, request: Request) -> Self::Output;
 }
 
-/// A resolved application handler bound to the one dispatcher retained by
-/// root composition.
+/// A resolved application handler bound to the one canonical dispatcher
+/// retained by `tracedecay-daemon-service`.
 pub struct BoundApplicationHandler<'a, Dispatcher> {
     descriptor: &'a ApplicationHandlerDescriptor,
     dispatcher: &'a Dispatcher,
@@ -150,7 +150,8 @@ impl<'a, Dispatcher> BoundApplicationHandler<'a, Dispatcher> {
 }
 
 /// Proof that one concrete application use case owns a request/result schema
-/// pair and can be bound to root composition's canonical dispatcher.
+/// pair and can be bound to the canonical dispatcher that
+/// `tracedecay-daemon-service` binds and the composition root mounts.
 ///
 /// Canonical public operations also retain their typed surface identity and
 /// execution service here so MCP, HTTP, SDK, and dispatch projections do not
@@ -237,7 +238,7 @@ impl ApplicationHandlerDescriptor {
     }
 }
 
-/// Closed set of handler descriptors supplied to root catalog composition.
+/// Closed set of handler descriptors supplied to [`crate::catalog_composition`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApplicationHandlerDescriptors {
     descriptors: BTreeMap<UseCaseId, ApplicationHandlerDescriptor>,
@@ -381,8 +382,10 @@ fn validate_descriptor_mapping(
     Ok(())
 }
 
-/// Application-owned descriptor source. Root catalog composition remains
-/// intentionally outside this crate and is introduced by its owning packet.
+/// Application-owned descriptor source. [`crate::catalog_composition`]
+/// validates these descriptors against the catalog contributions;
+/// `tracedecay-daemon-service` binds the canonical dispatcher and the
+/// composition root mounts the result.
 pub fn application_handler_descriptors()
 -> Result<ApplicationHandlerDescriptors, ApplicationContractError> {
     let mut descriptors = vec![crate::retrieval::catalog::symbol_search_handler_descriptor()?];

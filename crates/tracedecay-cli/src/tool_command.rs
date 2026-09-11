@@ -47,17 +47,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 
-use tracedecay::application_surface::{
-    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
-    adapt_application_tool_request, observe_surface_argument_rejection,
-    parse_application_surface_request,
-};
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
+use tracedecay::mcp::server::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
 use tracedecay_daemon_protocol::{
+    ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult,
+    adapt_application_tool_request, parse_application_surface_request,
+};
+use tracedecay_daemon_protocol::{
     DaemonHandshake, RequestedOutputFormat, TOOL_REQUEST_DEADLINE_ENV, tool_request_deadline,
 };
+use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::{
@@ -108,6 +109,8 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_expand",
     "tracedecay_lcm_expand_query",
 ];
+
+const MAX_SURFACE_ATTEMPTS: usize = 3;
 
 fn tool_deadline_range_error() -> TraceDecayError {
     TraceDecayError::Config {
@@ -169,8 +172,11 @@ fn run_inner(
             let requested_name = name.as_deref().map(canonical_tool_name);
             hotpath::val!("cli.tool.name").set(&requested_name.as_deref().unwrap_or("list"));
         }
-        if let Some(canonical) = name.as_deref().map(canonical_tool_name)
-            && let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&canonical)
+        let requested_operation = name
+            .as_deref()
+            .map(canonical_tool_name)
+            .and_then(|canonical| cli_application_operation(&canonical));
+        if let Some(operation) = requested_operation
             && let Some(parsed) = parse_whole_payload_invocation(&args)?
         {
             let ParsedInvocation {
@@ -184,8 +190,9 @@ fn run_inner(
             let deadline = Instant::now()
                 .checked_add(tool_command_deadline()?)
                 .ok_or_else(tool_deadline_range_error)?;
+            let tool_name = operation.mcp_tool_name();
             let (request, requested_format) =
-                cli_surface_invocation(&canonical, tool_args, raw_json).map_err(|error| {
+                cli_surface_invocation(tool_name, tool_args, raw_json).map_err(|error| {
                     TraceDecayError::Config {
                         message: error.to_string(),
                     }
@@ -193,7 +200,7 @@ fn run_inner(
             return dispatch_cli_application_surface(
                 operation,
                 request,
-                DaemonToolDispatch::project_scoped(explicit_project, &canonical).project_path,
+                DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path,
                 requested_format,
                 deadline,
             )
@@ -213,10 +220,17 @@ fn run_inner(
         };
 
         let canonical = canonical_tool_name(&raw_name);
-        let internal_def = internal_daemon_tool_definition(&canonical);
+        // An application operation advertises one MCP definition under its
+        // transport spelling; a canonical-identity request selects that same
+        // definition instead of a second, unadvertised one.
+        let advertised_name: &str = match requested_operation {
+            Some(operation) => operation.mcp_tool_name(),
+            None => canonical.as_str(),
+        };
+        let internal_def = internal_daemon_tool_definition(advertised_name);
         let Some(def) = defs
             .iter()
-            .find(|definition| definition.name == canonical)
+            .find(|definition| definition.name == advertised_name)
             .or(internal_def.as_ref())
         else {
             let suggestion = nearest_tool_name(&canonical, &defs)
@@ -285,6 +299,18 @@ fn run_inner(
         )
         .await
     })
+}
+
+/// Resolves a canonicalised `tracedecay tool` name to its application operation.
+///
+/// The CLI answers to both spellings the catalog gives an operation: its CLI
+/// binding name, which is the MCP tool spelling, and its canonical identity,
+/// which every other surface and every rendered envelope reports. They differ
+/// only for `diagnostics` / `diagnostics_read`, so neither spelling needs a
+/// name table of its own.
+fn cli_application_operation(canonical: &str) -> Option<ApplicationSurfaceOperation> {
+    ApplicationSurfaceOperation::from_tool_name(canonical)
+        .or_else(|| ApplicationSurfaceOperation::from_catalog_name(short_tool_name(canonical)))
 }
 
 /// Dispatch one catalogued application-surface operation on behalf of a
@@ -403,9 +429,12 @@ fn dispatch_cli_application_surface_inner(
         // foreground open wait). The compatibility tool path rides that state out
         // through its project-open retry loop; the typed surface path must present
         // the same transport behavior, so re-send the same request per the
-        // envelope's own retry directive until the CLI deadline expires.
+        // envelope's own retry directive, bounded by both the CLI deadline and
+        // three attempts so a persistent refusal remains visible to callers.
         let mut next_request = Some(request);
+        let mut attempts = 0usize;
         let result = loop {
+            attempts += 1;
             let request = match next_request.take() {
                 Some(request) => request,
                 None => parse_application_surface_request(operation, tool_args.clone()).map_err(
@@ -452,16 +481,27 @@ fn dispatch_cli_application_surface_inner(
                     message: error.to_string(),
                 },
             })?;
-            let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
+            let Some(delay) = bounded_surface_retry_delay(
+                crate::cli::dispatch::surface_retry_delay(&result),
+                attempts,
+                deadline,
+            ) else {
                 break result;
             };
-            if deadline.saturating_duration_since(Instant::now()) <= delay {
-                break result;
-            }
             tokio::time::sleep(delay).await;
         };
         print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
     })
+}
+
+fn bounded_surface_retry_delay(
+    delay: Option<Duration>,
+    attempts: usize,
+    deadline: Instant,
+) -> Option<Duration> {
+    let delay = delay?;
+    (attempts < MAX_SURFACE_ATTEMPTS && deadline.saturating_duration_since(Instant::now()) > delay)
+        .then_some(delay)
 }
 
 fn print_cli_application_surface(
@@ -519,7 +559,7 @@ impl DaemonToolDispatch {
         // the user profile into an accidental project handshake.
         let explicitly_targeted = explicit_project.is_some();
         let project_path = match explicit_project {
-            Some(path) => Some(tracedecay::config::resolve_path(Some(path))),
+            Some(path) => Some(tracedecay_configuration::resolve_path(Some(path))),
             None => std::env::current_dir()
                 .ok()
                 .and_then(|cwd| implicit_tool_project_path(&cwd)),
@@ -668,6 +708,11 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
 
 fn print_tool_output(result_value: &Value, raw_json: bool) {
     println!("{}", rendered_tool_output(result_value, raw_json));
+    if !raw_json {
+        for footer in token_accounting_footers(result_value) {
+            eprintln!("{footer}");
+        }
+    }
 }
 
 /// The bytes `tracedecay tool` writes to stdout for a completed compatibility
@@ -682,23 +727,41 @@ fn rendered_tool_output(result_value: &Value, raw_json: bool) -> String {
     }
 }
 
-/// Joins every `content[*].text` block in an MCP tool result, separated by a
-/// blank line. Handlers sometimes prepend a warning/notice block ahead of the
-/// real payload+metrics block; printing only `content[0].text` would silently
-/// drop the payload. Falls back to the empty string when no text blocks exist.
+/// Joins every payload `content[*].text` block in an MCP tool result,
+/// separated by a blank line. Handlers sometimes prepend a warning/notice block
+/// ahead of the real payload; printing only `content[0].text` would silently
+/// drop the payload. The daemon's separate token-accounting footer block is
+/// excluded (see [`token_accounting_footers`]): with `--format json` the
+/// payload block is the whole stdout document and a trailing footer would make
+/// it unparseable. Falls back to the empty string when no text blocks exist.
 fn join_content_text(result_value: &Value) -> String {
+    content_text_blocks(result_value)
+        .filter(|text| !is_token_accounting_footer(text))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The daemon's token-accounting footer blocks, printed to stderr.
+fn token_accounting_footers(result_value: &Value) -> Vec<String> {
+    content_text_blocks(result_value)
+        .filter(|text| is_token_accounting_footer(text))
+        .map(|text| text.trim().to_owned())
+        .collect()
+}
+
+fn content_text_blocks(result_value: &Value) -> impl Iterator<Item = &str> {
     result_value
         .get("content")
         .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+}
+
+fn is_token_accounting_footer(text: &str) -> bool {
+    text.trim_start()
+        .starts_with(TOKEN_ACCOUNTING_FOOTER_PREFIX)
 }
 
 /// Print a grouped list of every available tool. Tools annotated as
@@ -832,7 +895,6 @@ fn group_for(def: &ToolDefinition) -> &'static str {
     {
         "workflow"
     } else if n == "tracedecay_dead_code"
-        || n == "tracedecay_unused_imports"
         || n == "tracedecay_unmounted_files"
         || n == "tracedecay_module_api"
         || n == "tracedecay_circular"

@@ -170,12 +170,11 @@ impl NativeIntegrationAuthorizationPort for DaemonNativeIntegrationAuthorization
         {
             return NativeIntegrationAuthorizationOutcomeV1::Stale;
         }
-        // The destination this grant resolved must be the destination the
-        // preview froze, including the exact ref.
+        // The grant authorizes this repository. The preview digest and
+        // approval bind the exact selected destination ref and expected OID.
         let snapshot = &request.preview.repository_snapshot;
         if context.scope().project_id != snapshot.project_id
             || context.scope().repository_id != snapshot.repository_id
-            || context.scope().reference.as_ref() != Some(&snapshot.destination_ref)
         {
             return NativeIntegrationAuthorizationOutcomeV1::Denied;
         }

@@ -153,6 +153,104 @@ pub struct ScopeRootAuthorityReceiptV1 {
     pub digest: String,
 }
 
+const MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY: usize = 256;
+
+/// The shared `code-index-v1/` parent that holds every scope root for one
+/// repository.
+#[must_use]
+pub fn code_index_scope_store_root(data_root: &Path) -> PathBuf {
+    data_root.join("code-index-v1")
+}
+
+/// The exact per-project code-index store root this cadence sweeps.
+///
+/// This must stay the scoped root the scheduler publishes into and Doctor
+/// reports on. A cadence pointed at any other directory would find no sealed
+/// generations and silently reclaim nothing, which is the failure this pass
+/// exists to end.
+#[must_use]
+pub fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
+    super::scoped_code_index_store_root(&code_index_scope_store_root(data_root), project_root)
+}
+
+/// Bounded, fail-closed inventory of every worktree root registered by Git.
+pub fn git_worktree_scope_root_inventory(
+    project_root: &Path,
+) -> Result<(BTreeSet<PathBuf>, ScopeRootAuthorityReceiptV1), &'static str> {
+    let repository = gix::open(project_root).map_err(|_| "git_repository_unavailable")?;
+    let linked = repository
+        .worktrees()
+        .map_err(|_| "git_worktree_inventory_unavailable")?;
+    if linked.len() >= MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY {
+        return Err("git_worktree_inventory_exceeds_bound");
+    }
+
+    let mut exact_roots = BTreeSet::from([project_root.to_path_buf()]);
+    if let Ok(main) = repository.main_repo()
+        && let Some(worktree) = main.worktree()
+    {
+        exact_roots.insert(worktree.base().to_path_buf());
+    }
+    let mut linked_material = Vec::with_capacity(linked.len());
+    for worktree in linked {
+        let base = worktree
+            .base()
+            .map_err(|_| "git_worktree_root_unavailable")?;
+        linked_material.push((
+            worktree.git_dir().to_string_lossy().into_owned(),
+            base.to_string_lossy().into_owned(),
+        ));
+        exact_roots.insert(base);
+    }
+    if exact_roots.is_empty() || exact_roots.len() > MAX_GIT_WORKTREES_PER_SCOPE_INVENTORY {
+        return Err("git_worktree_inventory_invalid");
+    }
+    let terminal_count =
+        u64::try_from(exact_roots.len()).map_err(|_| "git_worktree_count_overflow")?;
+    let material = (
+        "tracedecay.git-worktree-root-inventory.v1",
+        repository.common_dir().to_string_lossy().into_owned(),
+        linked_material,
+        exact_roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    );
+    let digest = canonical_sha256(&material).map_err(|_| "git_worktree_inventory_digest_failed")?;
+    let receipt = ScopeRootAuthorityReceiptV1 {
+        revision: digest.as_str().to_owned(),
+        terminal_count,
+        digest: digest.as_str().to_owned(),
+    };
+    let mut roots = BTreeSet::new();
+    for root in exact_roots {
+        insert_live_root_variants(&mut roots, &root);
+    }
+    Ok((roots, receipt))
+}
+
+/// Apply never uses this projection by itself: scope collection combines it
+/// with durable project enrollment, mounted leases, configuration roots,
+/// vector dependencies, and the exact source binding in one proof receipt.
+///
+/// Every failure is an `Err`, never a smaller set: a truncated live set is
+/// indistinguishable from stranding and would authorize deletion.
+pub fn resolve_live_code_index_roots(
+    project_root: &Path,
+) -> Result<BTreeSet<PathBuf>, &'static str> {
+    git_worktree_scope_root_inventory(project_root).map(|(roots, _)| roots)
+}
+
+/// Record both the literal path and its symlink-resolved form. The scope hash
+/// is taken over the canonical root string recorded at publication time, and a
+/// live root spelled differently must never be mistaken for a dead one.
+pub fn insert_live_root_variants(roots: &mut BTreeSet<PathBuf>, root: &Path) {
+    roots.insert(root.to_path_buf());
+    if let Ok(resolved) = std::fs::canonicalize(root) {
+        roots.insert(resolved);
+    }
+}
+
 /// Exact relational source bound to one physical code-index scope at the
 /// vector census revision recorded by the proof.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1198,5 +1296,89 @@ pub(super) fn scope_directory_exists(path: &Path) -> Result<bool, CodeGeneration
             Ok(false)
         }
         Err(error) => Err(storage(error)),
+    }
+}
+
+#[cfg(test)]
+mod worktree_inventory_tests {
+    use std::process::Command;
+
+    use super::*;
+    use crate::code_index_generations::code_index_scope_hash;
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let status = Command::new(
+            tracedecay_runtime_core::git::try_git_program()
+                .expect("absolute git executable should resolve"),
+        )
+        .current_dir(root)
+        .args(args)
+        .status()
+        .expect("run git fixture command");
+        assert!(status.success(), "git fixture command failed: {args:?}");
+    }
+
+    #[test]
+    fn live_roots_cover_every_linked_worktree() {
+        let temporary = tempfile::TempDir::new().expect("repository root");
+        let primary = temporary.path().join("primary");
+        let linked = temporary.path().join("linked");
+        std::fs::create_dir_all(&primary).expect("create primary checkout");
+        run_git(&primary, &["init", "-q", "-b", "main"]);
+        run_git(&primary, &["config", "user.name", "TraceDecay Test"]);
+        run_git(
+            &primary,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::write(primary.join("README.md"), b"fixture").expect("seed repository file");
+        run_git(&primary, &["add", "."]);
+        run_git(&primary, &["commit", "-qm", "fixture"]);
+        run_git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked",
+                linked.to_str().expect("worktree path"),
+            ],
+        );
+
+        let roots = resolve_live_code_index_roots(&primary)
+            .expect("git's own worktree registry is readable");
+        let hashes = roots
+            .iter()
+            .map(|root| code_index_scope_hash(root))
+            .collect::<BTreeSet<_>>();
+        for root in [&primary, &linked] {
+            let canonical = std::fs::canonicalize(root).expect("canonical worktree root");
+            assert!(
+                hashes.contains(&code_index_scope_hash(&canonical)),
+                "every live worktree root must be represented: {}",
+                canonical.display()
+            );
+        }
+    }
+
+    #[test]
+    fn live_roots_fail_closed_outside_a_repository() {
+        let temporary = tempfile::TempDir::new().expect("non-repository root");
+        assert!(
+            resolve_live_code_index_roots(temporary.path()).is_err(),
+            "an unresolvable repository must never produce a smaller live set"
+        );
+    }
+
+    #[test]
+    fn generation_root_is_scoped_below_the_shared_parent() {
+        let data_root = PathBuf::from("/profile/projects/alpha");
+        let project_root = PathBuf::from("/work/alpha");
+        let parent = code_index_scope_store_root(&data_root);
+        let scoped = code_index_store_root(&data_root, &project_root);
+
+        assert_eq!(parent, data_root.join("code-index-v1"));
+        assert_eq!(scoped.parent(), Some(parent.as_path()));
+        assert_ne!(scoped, parent);
     }
 }

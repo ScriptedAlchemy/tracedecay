@@ -12,11 +12,19 @@ use tracedecay_runtime_core::path_safety::{canonicalize_path_or_existing_parent,
 /// One filesystem identity, one spelling: resolves aliases (`/var` firmlinks,
 /// symlinked family roots) and drops the Windows verbatim prefix
 /// `canonicalize` adds.
+///
+/// macOS `canonicalize` expands `/var` to `/private/var`. Stored session keys
+/// keep the public `/var/...` spelling (same policy as
+/// [`tracedecay_sessions::runtime::git_correlation::normalize_worktree`]), so
+/// search selectors built from this helper must fold that expansion back.
 pub fn normalize_path_text(raw: &str) -> String {
     let plain = plain_host_path(Path::new(raw));
-    plain_host_path(&canonicalize_path_or_existing_parent(&plain))
-        .to_string_lossy()
-        .into_owned()
+    let canonical = plain_host_path(&canonicalize_path_or_existing_parent(&plain));
+    let text = canonical.to_string_lossy();
+    match text.strip_prefix("/private/var/") {
+        Some(rest) => format!("/var/{rest}"),
+        None => text.into_owned(),
+    }
 }
 
 pub fn assert_path_text_eq(actual: &str, expected: &Path) {

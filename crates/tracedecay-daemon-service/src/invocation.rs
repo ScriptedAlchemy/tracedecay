@@ -19,28 +19,24 @@ use std::time::Duration;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify, Semaphore};
-use tracedecay_contracts::feedback::{
-    FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
-};
+use tracedecay_contracts::feedback::{FeedbackReadPort, FeedbackRouteAuthorizationPort};
 use tracedecay_contracts::{
-    AffectedTestsRetrievalPort, AnalyzerAdmittedDiagnosticProviderV1, ApplicationContractError,
-    ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
-    ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
-    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryService,
-    CancellationContext, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot,
-    CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticProviderIdentity,
-    DisclosureClass, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
-    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
+    ApplicationContractError, ApplicationOperation, ApplicationOutcome, ApplicationProblem,
+    ApplicationProblemKind, ApplicationResult, AuthorityReceipt, AuthorizedScopeSet,
+    AuthorizedScopeSetAuthority, CallableCodeAuthorizationPort, CallableCodeOperationKind,
+    CallableCodeQueryService, CancellationContext, CancellationState, CapabilityGrantId,
+    CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
+    EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
+    EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
     GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
     GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
     GitIndexTransactionApplicationError, GitIndexTransactionPort, GitIndexTransactionPortError,
     GitIndexTransactionService, IdempotencyKey, MultiRootScopeSetCasRequestV1,
     MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, Omission, OmissionReason,
     OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
-    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestAdmission,
-    RequestContext, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic, TemporalState,
-    WorkEvidenceRetrievalPortV1, callable_code_operations,
+    PolicyDecisionRef, PolicyEvaluatorCompositionV1, PreviewId, PreviewResult, ReconciliationState,
+    RequestAdmission, RequestContext, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic,
+    TemporalState, WorkEvidenceRetrievalPortV1, callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -69,8 +65,8 @@ use tracedecay_policy::configuration::{
     ConfigurationMutationPermissionV1,
 };
 use tracedecay_policy::{
-    AnalyzerAdmissionInputV1, CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1,
-    TruthFreshnessRequirementV1, TruthSourceStateV1,
+    CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1, TruthFreshnessRequirementV1,
+    TruthSourceStateV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
@@ -96,14 +92,13 @@ use tracedecay_configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,
     ConfigurationMutationGrantAuthority, ConfigurationMutationGrantAuthorityError,
     ConfigurationMutationGrantAuthorityFuture, ConfigurationRollbackRequest,
-    CredentialWriteHandleV1, DirectConfigurationMutation,
-    PolicyBackedConfigurationMutationAuthorization, ProjectConfigurationRuntime,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
+    DirectConfigurationMutation, PolicyBackedConfigurationMutationAuthorization,
+    ProjectConfigurationRuntime, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
     configuration_layer_scope_digest,
 };
 use tracedecay_contracts::ConfigurationWireRequestV1;
 use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_daemon_protocol::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
+use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 
 use tracedecay_application::advisory::{
     AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
@@ -120,8 +115,7 @@ use tracedecay_application::feedback::owner::{
     FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
 };
 use tracedecay_application::feedback::{
-    FeedbackCycleLspInput, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
-    ProductionFeedbackCycleProximityPortV1, open_feedback_cycle_runtime,
+    FeedbackCycleRuntime, FeedbackCycleRuntimeError, open_feedback_cycle_runtime,
 };
 use tracedecay_application::lsp_runtime::{
     DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
@@ -187,6 +181,7 @@ mod registrars;
 mod retained;
 mod semantic_activation;
 pub mod semantic_evaluation;
+mod source_edit;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -216,6 +211,9 @@ use native_integration::execute_native_integration;
 use observatory::execute_observatory_read;
 use primitive::*;
 use retained::*;
+use source_edit::{
+    execute_source_edit, execute_source_edit_reconcile, execute_source_edit_rollback,
+};
 use types::*;
 use work::*;
 pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
@@ -256,7 +254,8 @@ pub use registrars::{
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
     DaemonLspOwnerRegistrar, DaemonNativeIntegrationRuntimeRegistrar,
     DaemonRetainedRuntimeRegistrar, DaemonSemanticOwnerRuntimeRegistrar,
-    DaemonWorkRuntimeRegistrar,
+    DaemonSourceEditOwnerRegistrationError, DaemonWorkRuntimeRegistrar,
+    FeedbackCycleRuntimeBuilderV1,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use types::{
@@ -264,6 +263,7 @@ pub use types::{
     RuntimeLspSession,
 };
 pub use types::{
+    ConfigurationRuntimeRefreshFuture, ConfigurationRuntimeRefreshPort,
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
     RegisteredRetainedRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
     UnavailableFeedbackCycleRuntimeV1,
@@ -473,6 +473,38 @@ impl DaemonInvocationService {
         &self,
     ) -> Arc<tracedecay_application::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
         Arc::clone(&self.github_stack_coordinator)
+    }
+
+    /// Registers this project's one source-edit owner, or joins the incumbent.
+    ///
+    /// Identity is the authorized scope, exactly as
+    /// [`DaemonRetainedRuntimeRegistrar::register`] keys the retained runtime.
+    /// A linked worktree or a reopen of the same canonical root builds its own
+    /// owner object; that route aliases the incumbent instead of being refused,
+    /// while a foreign scope is refused with a typed error rather than
+    /// replacing the incumbent.
+    #[hotpath::skip]
+    pub async fn register_source_edit_owner(
+        &self,
+        project_root: PathBuf,
+        owner: Arc<crate::project_owner_registration::ProjectSourceEditOwnerV1>,
+    ) -> Result<(), DaemonSourceEditOwnerRegistrationError> {
+        let scope = owner.scope();
+        self.project_runtimes
+            .register_or_reconcile(
+                project_root,
+                |incumbent: &mut Arc<
+                    crate::project_owner_registration::ProjectSourceEditOwnerV1,
+                >| {
+                    if incumbent.scope() == scope {
+                        Ok(())
+                    } else {
+                        Err(DaemonSourceEditOwnerRegistrationError::ForeignAuthority)
+                    }
+                },
+                || async { Ok(owner) },
+            )
+            .await
     }
 
     #[hotpath::measure(label = "daemon.service.invocation.retained_context", future = true)]

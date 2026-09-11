@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,11 @@ import tempfile
 
 
 SMOKE = Path(__file__).with_name("check-packaged-mcp-stdio.py")
+SPEC = importlib.util.spec_from_file_location("check_packaged_mcp_stdio", SMOKE)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError(f"could not load {SMOKE}")
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
 REQUIRED_TOOLS = [
     "tracedecay_search",
     "tracedecay_diagnostics",
@@ -40,26 +46,63 @@ def write_python_launcher(path: Path, source: str) -> Path:
 
 
 def main() -> int:
+    binary_path = Path("tracedecay.exe")
+    socket_path = Path("home/.tracedecay/daemon.sock")
+    assert MODULE.daemon_command(binary_path, socket_path, platform_name="nt") == [
+        str(binary_path),
+        "daemon",
+        "run",
+    ]
+    assert "TRACEDECAY_DAEMON_SOCKET" not in MODULE.daemon_environment(
+        {"TRACEDECAY_DAEMON_SOCKET": "fake"}, socket_path, platform_name="nt"
+    )
+    assert MODULE.daemon_command(binary_path, socket_path, platform_name="posix") == [
+        str(binary_path),
+        "daemon",
+        "run",
+        "--socket",
+        str(socket_path),
+    ]
+    assert MODULE.daemon_environment(
+        {"HOME": "home"}, socket_path, platform_name="posix"
+    )["TRACEDECAY_DAEMON_SOCKET"] == str(socket_path)
+
+    assert not MODULE.daemon_endpoint_is_ready(0, f"socket: {socket_path} (missing)")
+    assert not MODULE.daemon_endpoint_is_ready(0, f"socket: {socket_path} (stale)")
+    assert not MODULE.daemon_endpoint_is_ready(
+        1, "endpoint: tcp://127.0.0.1:9 (connectable)"
+    )
+    assert MODULE.daemon_endpoint_is_ready(0, f"socket: {socket_path} (connectable)")
+    assert MODULE.daemon_endpoint_is_ready(
+        0, "endpoint: tcp://127.0.0.1:39181 (connectable)"
+    )
+
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         bin_directory = root / "bin"
         bin_directory.mkdir()
         binary = write_python_launcher(
             bin_directory / "tracedecay",
-            """import sys
+            """import os
+import sys
 import time
 from pathlib import Path
 
 args = sys.argv[1:]
+ready = Path(os.environ["HOME"]) / ".tracedecay" / "fixture-daemon-ready"
 if args[:2] == ["daemon", "run"]:
-    if "--socket" in args:
-        socket = Path(args[args.index("--socket") + 1])
-        socket.parent.mkdir(parents=True, exist_ok=True)
-        socket.write_text("", encoding="utf-8")
+    ready.parent.mkdir(parents=True, exist_ok=True)
+    ready.write_text("", encoding="utf-8")
     while True:
         time.sleep(60)
+if args == ["daemon", "status"]:
+    state = "connectable" if ready.exists() else "missing"
+    print(f"endpoint: fixture ({state})")
+    raise SystemExit(0)
 if args == ["init"]:
     raise SystemExit(0)
+if args == ["fixture-probe-daemon"]:
+    raise SystemExit(0 if ready.exists() else 1)
 raise SystemExit(1)
 """,
         )
@@ -70,9 +113,12 @@ raise SystemExit(1)
         write_python_launcher(
             bin_directory / "npx",
             f"""import json
+import subprocess
 import sys
 
 arguments = sys.argv[1:]
+binary = arguments[arguments.index("--cli") + 1]
+subprocess.run([binary, "fixture-probe-daemon"], check=True)
 method = arguments[arguments.index("--method") + 1]
 if method == "tools/list":
     print(json.dumps({{"tools": {json.dumps(tools)}}}))

@@ -62,20 +62,16 @@ impl Default for BenchOptions {
 pub const DEFAULT_QUERIES_TOML: &str = include_str!("../../../benchmark_data/queries/default.toml");
 
 /// Run the bench from a TOML query file on disk.
-pub async fn run_bench(
-    cg: &TraceDecay,
-    queries_path: &Path,
-    opts: BenchOptions,
-) -> Result<BenchReport> {
+pub fn run_bench(cg: &TraceDecay, queries_path: &Path, opts: BenchOptions) -> Result<BenchReport> {
     let raw = std::fs::read_to_string(queries_path).map_err(|e| TraceDecayError::Config {
         message: format!("failed to read query file {}: {e}", queries_path.display()),
     })?;
-    run_bench_with_toml(cg, &raw, opts).await
+    run_bench_with_toml(cg, &raw, opts)
 }
 
 /// Run the bench from an in-memory TOML string. Used by the CLI's default path
 /// (avoids a filesystem dependency on the embedded query set).
-pub async fn run_bench_with_toml(
+pub fn run_bench_with_toml(
     _cg: &TraceDecay,
     _toml_str: &str,
     _opts: BenchOptions,
@@ -91,6 +87,10 @@ pub async fn run_bench_with_toml(
 /// Numbers use compact units (`k`, `M`); savings percentages are colored by
 /// tier (green ≥80%, yellow ≥50%, red <50%). Matches the ANSI style used
 /// elsewhere in `tracedecay status`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Console report rendering walks every query row and aggregate field as one display unit."
+)]
 pub fn format_report_console(report: &BenchReport) -> String {
     use tracedecay_runtime_core::text::{format_number, format_token_count};
 

@@ -231,8 +231,7 @@ const FIXTURE_PROVIDER: ProductRuntimeProvider = ProductRuntimeProvider {
 /// Invariant: a test process only ever registers this fixture, never a real
 /// provider, so every in-process read across a suite observes one identical
 /// runtime regardless of test order. The fixture bypasses [`validated`] only
-/// because it is a constant; `the_fixture_provider_passes_registration_validation`
-/// pins that the constant stays valid.
+/// because it is a constant.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn register_fixture_product_runtime() -> &'static RegisteredProductRuntime {
     PRODUCT_RUNTIME.get_or_init(|| RegisteredProductRuntime {

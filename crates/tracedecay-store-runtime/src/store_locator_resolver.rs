@@ -29,6 +29,7 @@ use hotpath::rw_locks::{
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::DatabaseAuthority;
+use tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent;
 use tracedecay_runtime_core::shard_runtime::registry::{
     ResolvedStoreLocator, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
     StoreRuntimeRegistryFuture, StoreRuntimeResolver,
@@ -92,7 +93,13 @@ pub struct LocalProjectEnrollmentAuthorityV1 {
 
 impl LocalProjectEnrollmentAuthorityV1 {
     pub fn new(project_id: ProjectId, enrollment_roots: impl IntoIterator<Item = PathBuf>) -> Self {
-        let mut enrollment_roots = enrollment_roots.into_iter().collect::<Vec<_>>();
+        // macOS `/var` and `/private/var` are one directory. Two registrations
+        // of the same project that differ only by that alias are one authority,
+        // not DuplicateProjectAuthority.
+        let mut enrollment_roots = enrollment_roots
+            .into_iter()
+            .map(|root| canonicalize_path_or_existing_parent(&root))
+            .collect::<Vec<_>>();
         enrollment_roots.sort();
         enrollment_roots.dedup();
         Self {
@@ -2429,5 +2436,35 @@ mod tests {
                 },
             })
         );
+    }
+
+    /// macOS `/var` versus `/private/var`, reproduced with an explicit alias.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_enrollment_root_is_the_same_project_authority() {
+        let temp = tempfile::TempDir::new().expect("temporary root");
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        fs::create_dir_all(&real).expect("real enrollment root");
+        std::os::unix::fs::symlink(&real, &link).expect("directory alias");
+        let project_id = id::<ProjectId>("project.enrollment-alias");
+
+        let via_link = LocalProjectEnrollmentAuthorityV1::new(project_id.clone(), [link]);
+        let via_real = LocalProjectEnrollmentAuthorityV1::new(project_id.clone(), [real]);
+        assert_eq!(
+            via_link, via_real,
+            "one project reached through a symlink alias is one authority"
+        );
+
+        let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+            id::<BrainId>("brain.enrollment-alias"),
+            id::<UserProfileId>("profile.enrollment-alias"),
+            temp.path().join("profile"),
+        ))
+        .with_project_authority(via_link)
+        .expect("first spelling")
+        .with_project_authority(via_real)
+        .expect("alias spelling must not be DuplicateProjectAuthority");
+        let _ = resolver;
     }
 }

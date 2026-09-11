@@ -562,6 +562,13 @@ async fn healthy_observation_authority_refuses_the_scoped_reset() {
     install_registered_store(&database_path).await;
 
     let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    raw.execute(
+        "INSERT INTO session_query_cursor_keys
+            (key_id, key_version, key_material, created_at, retired_at)
+         VALUES ('cursor-key-healthy', 1, ?1, 1, NULL)",
+        rusqlite::params![vec![9_u8; 32]],
+    )
+    .unwrap();
     let error = reset_refused_observation_authority(&mut raw)
         .expect_err("a healthy authority must never be reset");
     assert!(
@@ -570,6 +577,18 @@ async fn healthy_observation_authority_refuses_the_scoped_reset() {
             TraceDecayError::Config { message } if message.contains("not in a refused state")
         ),
         "unexpected error resetting a healthy authority: {error}"
+    );
+    assert_eq!(count(&raw, "session_query_cursor_keys"), 1);
+    let unchanged_key: (String, Vec<u8>, Option<i64>) = raw
+        .query_row(
+            "SELECT key_id, key_material, retired_at FROM session_query_cursor_keys",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        unchanged_key,
+        ("cursor-key-healthy".to_owned(), vec![9_u8; 32], None)
     );
     assert!(
         table_exists(&raw, "observations"),
@@ -996,6 +1015,13 @@ async fn a_failure_after_deletion_leaves_the_refused_store_unchanged() {
         seed_preserved_transcript_rows(&raw);
         install_legacy_observation_shape(&raw);
         seed_active_temporal_generation(&raw);
+        raw.execute(
+            "INSERT INTO session_query_cursor_keys
+                (key_id, key_version, key_material, created_at, retired_at)
+             VALUES ('cursor-key-reset-rollback', 1, ?1, 1, NULL)",
+            rusqlite::params![vec![7_u8; 32]],
+        )
+        .unwrap();
         // Old-scheme rows: the enrollment marker this reset would add is
         // absent, so its premature appearance would be visible.
         raw.execute(
@@ -1041,6 +1067,18 @@ async fn a_failure_after_deletion_leaves_the_refused_store_unchanged() {
             "{trigger} must be back before the transaction that dropped it ends"
         );
     }
+    assert_eq!(count(&reopened, "session_query_cursor_keys"), 1);
+    let retained_key: (String, Vec<u8>, Option<i64>) = reopened
+        .query_row(
+            "SELECT key_id, key_material, retired_at FROM session_query_cursor_keys",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        retained_key,
+        ("cursor-key-reset-rollback".to_owned(), vec![7_u8; 32], None)
+    );
     assert_eq!(count(&reopened, "session_temporal_generations"), 1);
     assert_eq!(count(&reopened, "session_occurrences"), 1);
     assert_eq!(count(&reopened, "session_refresh_operations"), 1);
@@ -1164,4 +1202,52 @@ async fn pre_reset_cursors_are_refused_and_the_rebuilt_stream_is_rediscovered() 
         foreign_key_violations(&raw).is_empty(),
         "the re-ingested stream must be referentially coherent"
     );
+}
+
+/// The host-observation journal attests the stream the reset destroys.
+/// Leaving those receipts makes the next admission of the same observation
+/// id a conflicting reuse. The writer ledger is installed only when the
+/// runtime mounts a store; this offline fixture covers the receipt tables
+/// the registered schema always carries.
+#[tokio::test]
+async fn host_observation_journal_resets_with_the_stream() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        install_legacy_observation_shape(&raw);
+        raw.execute_batch(
+            "INSERT INTO external_source_states_v1 (
+                binding_id, source_id, owner_kind, owner_id, definition_revision,
+                definition_digest, binding_revision, binding_digest,
+                source_frontier_digest, source_frontier_json,
+                latest_source_receipt_digest
+             ) VALUES (
+                'binding.host', 'source.host-observation.codex', 'project',
+                'project.fixture', 1, 'digest.definition', 1, 'digest.binding',
+                'digest.frontier', '{}', 'digest.receipt'
+             );
+             INSERT INTO external_source_commit_receipts_v1 (
+                binding_id, idempotency_key, request_digest, definition_revision,
+                binding_revision, predecessor_frontier_digest,
+                successor_frontier_digest, receipt_digest, receipt_json
+             ) VALUES (
+                'binding.host', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                1, 1, 'digest.pred', 'digest.succ', 'digest.receipt', '{}'
+             );",
+        )
+        .expect("seed a host-observation journal");
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report = reset_refused_observation_authority(&mut raw)
+        .expect("scoped reset of a store with a host-observation journal");
+    assert_eq!(
+        report.cleared_external_source_rows, 2,
+        "state and receipt must be accounted for: {report:?}"
+    );
+    assert_eq!(count(&raw, "external_source_states_v1"), 0);
+    assert_eq!(count(&raw, "external_source_commit_receipts_v1"), 0);
 }

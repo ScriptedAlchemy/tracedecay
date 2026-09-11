@@ -1,5 +1,6 @@
 //! Query-owned translation over one frozen code-index graph reader.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -10,7 +11,7 @@ use tracedecay_domain::{
     CanonicalRelationEdgeV1, CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore,
     FreshnessCompatibilityV1, LogicalEvidenceId, RetrievalAnchorId, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
-    SourceOccurrenceId, UtcMicros,
+    SourceOccurrenceId, UtcMicros, canonical_sha256,
 };
 
 use super::{GraphExecutionControl, GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
@@ -102,7 +103,37 @@ fn project_graph_batch(
     let raw_candidate_count = raw.candidates.len();
     let mut candidates = Vec::with_capacity(raw_candidate_count.min(cap));
     let mut evidence_by_occurrence = BTreeMap::new();
-    for (ordinal, raw_candidate) in raw.candidates.into_iter().take(cap).enumerate() {
+    // Select before truncating: traversal order can use generation-scoped IDs.
+    // Retain only cap + 1 source keys while scanning the bounded traversal batch.
+    let mut selected = BTreeMap::new();
+    for raw_candidate in raw.candidates {
+        check_request_control(request, control)?;
+        let retriever_evidence_anchor = retrieval_anchor(match &raw_candidate.binding.chunk {
+            Some(chunk) => format!("code-graph:chunk:{chunk}"),
+            None => format!(
+                "code-graph:source:{}",
+                canonical_sha256(&(
+                    &raw_candidate.binding.logical_path,
+                    &raw_candidate.binding.source_span,
+                ))
+                .map_err(contract_error)?
+            ),
+        })?;
+        selected.insert(
+            (
+                Reverse(raw_candidate.score_micros),
+                retriever_evidence_anchor,
+                raw_candidate.target.clone(),
+            ),
+            raw_candidate,
+        );
+        if selected.len() > cap {
+            selected.pop_last();
+        }
+    }
+    for (ordinal, ((_, retriever_evidence_anchor, _), raw_candidate)) in
+        selected.into_iter().enumerate()
+    {
         check_request_control(request, control)?;
         let target = raw_candidate.target;
         let occurrence = format!("code-graph:{}", target.as_str());
@@ -126,7 +157,7 @@ fn project_graph_batch(
             raw_score: FixedPointScore(raw_candidate.score_micros),
             ordinal_rank: ordinal as u32,
             exact_admission_proof: None,
-            retriever_evidence_anchor: retrieval_anchor(format!("evidence.{occurrence}"))?,
+            retriever_evidence_anchor,
             freshness: reader.freshness().clone(),
         };
         let evidence = GraphLaneEvidence {

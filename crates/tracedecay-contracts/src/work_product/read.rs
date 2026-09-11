@@ -1,12 +1,17 @@
+use std::collections::BTreeSet;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     UtcMicros, WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductProjectionBundleV1,
-    WorkRuntimeProjectionV1,
+    WorkRuntimeProjectionV1, canonical_sha256,
 };
 
-use crate::{OpaqueCursor, RequestAdmission, RequestContext};
+use crate::{
+    OpaqueCursor, RequestAdmission, RequestContext, WorkAttemptTopologyBindingV1,
+    WorkAttemptTopologyStateV1, WorkRelationScopeV1,
+};
 
 use super::{
     AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkProductApplicationErrorV1,
@@ -599,6 +604,48 @@ where
         let result = self.graph.read_graph(&port_context, &request)?;
         validate_result(&request, &authorized_scope, &result)?;
         Ok(result)
+    }
+
+    /// Resolves the attempt-page cursor binding from the canonical Work
+    /// product graph selected by this request's exact repository scope.
+    pub fn read_attempt_topology(
+        &self,
+        context: &RequestContext,
+        observed_at: UtcMicros,
+    ) -> Result<WorkAttemptTopologyStateV1, WorkProductApplicationErrorV1> {
+        let selection = WorkProductSelectionScopeV1::relations(BTreeSet::from([
+            WorkRelationScopeV1::Repository {
+                project_id: context.scope().project_id.clone(),
+                repository_id: context.scope().repository_id.clone(),
+            },
+        ]))
+        .map_err(|_| WorkProductApplicationErrorV1::InvalidRequest)?;
+        let read = match self.read_graph(
+            context,
+            WorkGraphReadRequestV1::current(selection, observed_at),
+        ) {
+            Ok(read) => read,
+            Err(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized) => {
+                return Ok(WorkAttemptTopologyStateV1::Absent);
+            }
+            Err(error) => return Err(error),
+        };
+        let WorkGraphReadV1::Current { snapshot, .. } = read else {
+            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+        };
+        let generation = canonical_sha256(&(
+            "tracedecay.work-attempt-topology-generation.v1",
+            snapshot.verified_version(),
+        ))
+        .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
+        let task_count = u32::try_from(snapshot.graph().items().len())
+            .map_err(|_| WorkProductApplicationErrorV1::GraphAuthorityUnavailable)?;
+        Ok(WorkAttemptTopologyStateV1::Verified(
+            WorkAttemptTopologyBindingV1 {
+                generation: generation.as_str().to_owned(),
+                task_count,
+            },
+        ))
     }
 }
 

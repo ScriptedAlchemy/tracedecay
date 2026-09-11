@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -143,30 +144,38 @@ fn load_scenario(id: &str) -> Scenario {
     scenario
 }
 
+/// Drains one child pipe on its own thread so a child blocked on a full pipe
+/// cannot be mistaken for a hang (see the same harness in the CLI suite).
+fn drain_pipe<R: std::io::Read + Send + 'static>(mut pipe: R) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        pipe.read_to_end(&mut buf)
+            .unwrap_or_else(|error| panic!("failed to drain child pipe: {error}"));
+        buf
+    })
+}
+
 fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
     let mut child = command
         .spawn()
         .unwrap_or_else(|error| panic!("failed to spawn tracedecay: {error}"));
+    let stdout = child.stdout.take().map(drain_pipe);
+    let stderr = child.stderr.take().map(drain_pipe);
     let started = Instant::now();
     loop {
         if let Some(status) = child
             .try_wait()
             .unwrap_or_else(|error| panic!("failed to poll tracedecay: {error}"))
         {
-            let mut stdout = Vec::new();
-            if let Some(mut output) = child.stdout.take() {
-                std::io::Read::read_to_end(&mut output, &mut stdout)
-                    .unwrap_or_else(|error| panic!("failed to read stdout: {error}"));
-            }
-            let mut stderr = Vec::new();
-            if let Some(mut output) = child.stderr.take() {
-                std::io::Read::read_to_end(&mut output, &mut stderr)
-                    .unwrap_or_else(|error| panic!("failed to read stderr: {error}"));
-            }
+            let join = |handle: Option<JoinHandle<Vec<u8>>>| {
+                handle
+                    .map(|handle| handle.join().expect("child pipe drain thread panicked"))
+                    .unwrap_or_default()
+            };
             return Output {
                 status,
-                stdout,
-                stderr,
+                stdout: join(stdout),
+                stderr: join(stderr),
             };
         }
         assert!(
@@ -465,6 +474,10 @@ fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<FactSearchHit
 fn available_fact(projection: FactProjectionV1) -> FactV1 {
     match projection {
         FactProjectionV1::Available { fact } => *fact,
+        FactProjectionV1::Superseded {
+            fact,
+            superseded_by,
+        } => panic!("expected current fact, got {fact:?} superseded by {superseded_by}"),
         FactProjectionV1::Unavailable { status } => {
             panic!("expected available fact projection, got {status:?}")
         }

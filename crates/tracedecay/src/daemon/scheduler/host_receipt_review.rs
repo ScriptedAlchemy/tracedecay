@@ -7,9 +7,8 @@ use tracedecay_automation_runtime::automation::AutomationRunControl;
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::{
-    DaemonEngine, DaemonHandshake, effective_automation_config_for_project, log_daemon_event,
-};
+use super::{DaemonEngine, DaemonHandshake, effective_automation_config_for_project};
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 const HOST_RECEIPT_REVIEW_BATCH_LIMIT: usize = 8;
 
@@ -85,6 +84,45 @@ where
     Ok(completed)
 }
 
+/// A terminal host receipt is never reviewed until its exact completed-turn
+/// watermark is durable in LCM: an absent watermark defers the review, and an
+/// unreadable snapshot is a typed error, never a pass.
+async fn transcript_watermark_is_durable(
+    session_database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    watermark: &str,
+) -> Result<bool> {
+    let snapshot =
+        session_database
+            .read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("host receipt session snapshot unavailable: {error}"),
+            })?;
+    let mut rows = snapshot
+        .query(
+            "SELECT 1
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2
+                 LIMIT 1",
+            tracedecay_runtime_core::db::engine::params!["hermes", watermark],
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt transcript watermark query failed: {error}"),
+        })?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt transcript watermark read failed: {error}"),
+        })?
+        .is_some())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Host-receipt review is one load-review-settle pass for a single receipt."
+)]
 async fn run_one_host_receipt_review(
     project_path: &Path,
     cg: &TraceDecay,
@@ -115,61 +153,30 @@ async fn run_one_host_receipt_review(
     }
     let configuration = effective_automation_config_for_project(cg).await?;
     let config = &configuration.settings;
+    let automation_context = cg.automation_project_context()?;
     let session_id = pending
         .route
         .as_ref()
         .and_then(|route| route.session_id.clone());
-    let Some(authoritative_project_id) = cg.store_layout().identity.project_id.as_deref() else {
-        return Ok(HostReceiptReviewProgress::Deferred);
-    };
-    let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "host receipt review has an invalid authoritative project identity: {error}"
-            ),
-        })?;
     let session_database = engine
         .store_administration
-        .registered_project_session_database(project_path, cg.store_layout())
+        .registered_project_session_database(automation_context.project_root(), cg.store_layout())
         .await?;
     let watermark_durable =
-        {
-            let snapshot = session_database.read_snapshot().await.map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("host receipt session snapshot unavailable: {error}"),
-                }
-            })?;
-            let mut rows = snapshot
-                .query(
-                    "SELECT 1
-                 FROM lcm_raw_messages
-                 WHERE provider = ?1 AND message_id = ?2
-                 LIMIT 1",
-                    tracedecay_runtime_core::db::engine::params![
-                        "hermes",
-                        ready.transcript_watermark.as_str()
-                    ],
-                )
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("host receipt transcript watermark query failed: {error}"),
-                })?;
-            rows.next()
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("host receipt transcript watermark read failed: {error}"),
-                })?
-                .is_some()
-        };
+        transcript_watermark_is_durable(&session_database, ready.transcript_watermark.as_str())
+            .await?;
     if !watermark_durable {
         // Never review a terminal receipt until the exact completed-turn
         // watermark is durable in LCM.
         return Ok(HostReceiptReviewProgress::Deferred);
     }
     let profile_identity = engine.store_administration.profile_identity()?.clone();
-    let retrieval =
-        registered_project_automation_retrieval(session_database, &profile_identity, &project_id)
-            .await?;
+    let retrieval = registered_project_automation_retrieval(
+        session_database,
+        &profile_identity,
+        automation_context.project_id(),
+    )
+    .await?;
     let backend = CodexAppServerBackend::from_automation_config(config);
     let host_run_id = format!("host_receipt_{}", pending.generation);
     let combined_options = CombinedReviewAutomationOptions {
@@ -192,8 +199,8 @@ async fn run_one_host_receipt_review(
         engine,
         cg,
         run_control,
-        project_path,
-        &dashboard_root,
+        automation_context.project_root(),
+        &automation_context.dashboard_root,
         Some(&host_run_id),
         configuration.configuration_digest.clone(),
         &combined_options,
@@ -203,9 +210,7 @@ async fn run_one_host_receipt_review(
     let outcome = Box::pin(super::combined_effect::run_combined_scheduler_effect(
         admission,
         engine,
-        cg,
-        &project_id,
-        project_path,
+        &automation_context,
         config,
         &configuration.configuration_revision_id,
         &backend,
@@ -245,8 +250,13 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake, MovedStoreAdoption};
+    use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
+
     use super::{
-        HOST_RECEIPT_REVIEW_BATCH_LIMIT, HostReceiptReviewProgress, drain_ready_host_receipts,
+        DaemonEngine, HOST_RECEIPT_REVIEW_BATCH_LIMIT, HostReceiptReviewProgress,
+        drain_ready_host_receipts, run_one_host_receipt_review,
     };
 
     #[tokio::test]
@@ -291,6 +301,92 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::SeqCst),
             HOST_RECEIPT_REVIEW_BATCH_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn context_failure_precedes_host_receipt_admission() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        let project_root = directory.path().join("project");
+        let profile_root = directory.path().join("profile");
+        std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+        std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
+            .expect("project source");
+        let options = crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        };
+        let writable =
+            crate::tracedecay::TraceDecay::init_with_options(&project_root, options.clone())
+                .await
+                .expect("initialize host receipt project");
+        let dashboard_root = writable.store_layout().dashboard_root.clone();
+        let route = Some(HookRouteMetadata {
+            session_id: Some("session.context-failure".to_owned()),
+            thread_id: None,
+            cwd: None,
+            worktree: None,
+            branch: None,
+        });
+        tracedecay_automation_runtime::automation::host_receipts::record(
+            &dashboard_root,
+            route.clone(),
+            HookTerminalReceipt {
+                tool_call_id: Some("call.context-failure".to_owned()),
+                turn_id: Some("turn.context-failure".to_owned()),
+                status: Some("success".to_owned()),
+                duration_ms: Some(1),
+                transcript_watermark: Some("message.context-failure".to_owned()),
+            },
+        )
+        .await
+        .expect("record host receipt");
+        tracedecay_automation_runtime::automation::host_receipts::mark_turn_ingested(
+            &dashboard_root,
+            route,
+            "message.context-failure",
+        )
+        .await
+        .expect("mark host receipt ready");
+        writable.close();
+        let read_only =
+            crate::tracedecay::TraceDecay::open_read_only_with_options(&project_root, options)
+                .await
+                .expect("open read-only host receipt project");
+        let handshake = DaemonHandshake {
+            project_path: Some(project_root.clone()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: DaemonClientIdentity::new(
+                profile_root.clone(),
+                profile_root.join("global.db"),
+            ),
+            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            client_instance_id: "client.context-failure".to_owned(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+            moved_store_adoption: MovedStoreAdoption::Never,
+        };
+
+        let error = run_one_host_receipt_review(
+            &project_root,
+            &read_only,
+            &handshake,
+            &DaemonEngine::default(),
+            &AutomationRunControl::from_interrupted(Arc::new(|| false)),
+        )
+        .await
+        .expect_err("read-only automation context must fail before admission");
+
+        assert!(
+            error.to_string().contains("open read-only"),
+            "context failure must win over admission: {error}"
+        );
+        assert!(
+            !dashboard_root.join("automation_effects").exists(),
+            "context failure must not leave a durable automation reservation"
         );
     }
 }

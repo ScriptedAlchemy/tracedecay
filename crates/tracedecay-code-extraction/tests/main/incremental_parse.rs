@@ -944,3 +944,52 @@ fn incremental_import_artifact_does_not_keep_stale_rows_after_add_change_and_del
         deleted.artifact.imports
     );
 }
+
+#[test]
+fn admitted_parse_continuation_preserves_incremental_rows_and_prior_state_on_abort() {
+    let source = (0..2_000)
+        .map(|n| format!("fn item_{n}() -> u64 {{ {n} }}\n"))
+        .collect::<String>();
+    let identity = identity("commit.parse", "tree.parse", RepositoryDirtyStateV1::Clean);
+    let limits = ParseLimits {
+        max_parse_time: Duration::from_nanos(1),
+        ..ParseLimits::default()
+    };
+    let checks = std::cell::Cell::new(0);
+    let admitted = || {
+        checks.set(checks.get() + 1);
+        true
+    };
+    let (mut document, _) = RetainedParseDocument::open_prepared_with_control(
+        identity.clone(),
+        "rust",
+        "rust",
+        &source,
+        &source,
+        limits,
+        Some(&admitted),
+    )
+    .unwrap();
+    assert!(checks.get() > 10, "many quanta must have resumed");
+    let changed = source.replace("{ 100 }", "{ 101 }");
+    let report = document
+        .reparse_prepared_with_control(identity.clone(), &changed, &changed, Some(&admitted))
+        .unwrap();
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    let artifact = document
+        .extract_canonical_artifact(&RustExtractor, &report, None)
+        .unwrap()
+        .artifact;
+    let fresh = RustExtractor.extract_artifact("src/lib.rs", &changed);
+    assert_artifact_rows_match_fresh_parse(&artifact, &fresh);
+    let abort = || false;
+    assert!(matches!(
+        document.reparse_prepared_with_control(identity.clone(), &source, &source, Some(&abort)),
+        Err(ParseError::TimedOut { .. })
+    ));
+    assert_eq!(document.source(), changed);
+    document
+        .reparse_prepared_with_control(identity, &source, &source, Some(&admitted))
+        .unwrap();
+    assert_eq!(document.source(), source);
+}

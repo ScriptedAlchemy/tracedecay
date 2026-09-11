@@ -34,7 +34,9 @@ use super::config_error;
 use super::managed_skills::{ManagedSkillState, list_managed_skills};
 use super::skill_usage::{SkillUsageSummary, summarize_skill_usage};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_session_memory::memory::{
+    MemoryApplication, MemoryApplicationError, memory_application_error,
+};
 
 const AUTOMATION_OUTCOMES_FILENAME: &str = "automation_outcomes.json";
 /// Outcome refreshes update independent halves of one snapshot. This lock
@@ -404,6 +406,13 @@ pub fn compute_skill_outcomes(
         .collect()
 }
 
+fn map_fact_outcome_memory_error(context: &str, error: MemoryApplicationError) -> TraceDecayError {
+    if error.is_cancellation() {
+        return memory_application_error(error);
+    }
+    config_error(format!("{context}: {error}"))
+}
+
 pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
     application: &MemoryApplication<A>,
     now_unix: i64,
@@ -421,7 +430,9 @@ pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
                 read_control,
             )
             .await
-            .map_err(|error| config_error(format!("list automatic fact receipts: {error}")))?;
+            .map_err(|error| {
+                map_fact_outcome_memory_error("list automatic fact receipts", error)
+            })?;
         let next_after_apply_id = page.next_after_apply_id().cloned();
 
         for receipt in page.receipts() {
@@ -446,10 +457,13 @@ pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
                     .get_project_memory_fact(fact_id, read_control)
                     .await
                     .map_err(|error| {
-                        config_error(format!(
-                            "read applied automatic fact receipt '{}': {error}",
-                            receipt.apply_id().as_str()
-                        ))
+                        map_fact_outcome_memory_error(
+                            &format!(
+                                "read applied automatic fact receipt '{}'",
+                                receipt.apply_id().as_str()
+                            ),
+                            error,
+                        )
                     })?
             } else {
                 None

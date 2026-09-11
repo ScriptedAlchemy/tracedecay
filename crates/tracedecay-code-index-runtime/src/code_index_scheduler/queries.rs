@@ -32,7 +32,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
-    ExactAdmissionRuleRevision, FileOccurrenceId, FreshnessVectorDigest, ManifestDigest,
+    ExactAdmissionRuleRevision, FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind,
     PrincipalId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId,
     RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest, RetrievalScope,
     RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId,
@@ -51,7 +51,9 @@ use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
 };
-use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
+use tracedecay_query::retrieval::graph::{
+    GraphExecutionControl, GraphLaneRequest, GraphLaneRetriever,
+};
 use tracedecay_query::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest,
 };
@@ -1074,32 +1076,28 @@ impl GenerationRecordIndexV1 {
     }
 }
 
-struct LatestCompleteNativeRecordReadPortV1<'a> {
-    latest: &'a LatestCompleteCodeIndexV1,
-}
-
-impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
+impl NativeRecordReadPortV1 for LatestCompleteCodeIndexV1 {
     fn generation(&self) -> &CodeGenerationId {
-        &self.latest.generation.manifest().generation_id
+        &self.generation.manifest().generation_id
     }
 
     fn occurrence(
         &self,
         binding: &CodeCandidateBindingV1,
     ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        if &binding.occurrence.generation != self.generation() {
+        if &binding.occurrence.generation != NativeRecordReadPortV1::generation(self) {
             return Err(QueryExecutionContractErrorV1::GenerationMismatch);
         }
-        let index = self.latest.record_index();
+        let index = self.record_index();
         let file = index
             .file_position(&binding.occurrence.file)
-            .map(|position| &self.latest.generation.snapshot().files[position])
+            .map(|position| &self.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let chunk = match binding.occurrence.chunk.as_ref() {
             Some(chunk_id) => Some(
                 index
                     .chunk_position(chunk_id)
-                    .map(|position| &self.latest.generation.chunks().chunks()[position])
+                    .map(|position| &self.generation.chunks().chunks()[position])
                     .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?,
             ),
             None => None,
@@ -1123,14 +1121,14 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         &self,
         chunk_id: &CodeSearchChunkId,
     ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        let index = self.latest.record_index();
+        let index = self.record_index();
         let chunk = index
             .chunk_position(chunk_id)
-            .map(|position| &self.latest.generation.chunks().chunks()[position])
+            .map(|position| &self.generation.chunks().chunks()[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let file = index
             .file_position(&chunk.anchor.file_occurrence_id)
-            .map(|position| &self.latest.generation.snapshot().files[position])
+            .map(|position| &self.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         Ok(NativeCodeOccurrenceV1 {
             file: chunk.anchor.file_occurrence_id.clone(),
@@ -1146,38 +1144,40 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         symbol: &SymbolOccurrenceId,
         file: &FileOccurrenceId,
     ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
-        let index = self.latest.record_index();
+        let index = self.record_index();
         let lineage = index
             .symbol_position(symbol)
-            .map(|position| &self.latest.generation.symbols().symbols[position])
+            .map(|position| &self.generation.symbols().symbols[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let source = index
             .file_position(file)
-            .map(|position| &self.latest.generation.snapshot().files[position])
+            .map(|position| &self.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let chunk = index
             .chunk_position_for_file_symbol(file, symbol)
-            .map(|position| &self.latest.generation.chunks().chunks()[position]);
-        let signature = chunk
-            .and_then(|chunk| {
-                chunk
-                    .sanitized_text
-                    .as_str()
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-            })
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned);
-        let is_async = signature
-            .as_deref()
-            .is_some_and(|line| line.split_whitespace().any(|part| part == "async"));
+            .map(|position| &self.generation.chunks().chunks()[position]);
         let qualified_name = lineage.qualified_name.clone();
         let name = qualified_name
             .rsplit("::")
             .next()
             .unwrap_or(&qualified_name)
             .to_owned();
+        let end_line_zero_based = lineage
+            .start_line
+            .checked_add(
+                lineage
+                    .line_span
+                    .checked_sub(1)
+                    .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?,
+            )
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
+        let line = lineage
+            .start_line
+            .checked_add(1)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
+        let end_line = end_line_zero_based
+            .checked_add(1)
+            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         Ok(NativeSymbolRecordV1 {
             occurrence: symbol.clone(),
             name,
@@ -1191,8 +1191,12 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
                 },
                 |chunk| chunk.anchor.source_span,
             ),
-            signature,
-            is_async,
+            start_line_zero_based: lineage.start_line,
+            end_line_zero_based,
+            line,
+            end_line,
+            signature: lineage.signature.clone(),
+            is_async: lineage.is_async,
         })
     }
 }
@@ -1267,10 +1271,10 @@ fn application_symbol_record(record: NativeSymbolRecordV1) -> SymbolPrimitiveRec
         qualified_name: record.qualified_name,
         kind: record.kind,
         file: record.path,
-        start_line_zero_based: 0,
-        end_line_zero_based: 0,
-        line: 1,
-        end_line: 1,
+        start_line_zero_based: record.start_line_zero_based,
+        end_line_zero_based: record.end_line_zero_based,
+        line: record.line,
+        end_line: record.end_line,
         signature: record.signature,
         is_async: record.is_async,
         score: None,
@@ -1290,13 +1294,252 @@ fn application_graph_record(record: NativeGraphRecordV1) -> SymbolRelationRecord
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DispatchExpansionStop {
+    Cancelled,
+    TimedOut,
+}
+
+fn check_dispatch_control(
+    control: &dyn GraphExecutionControl,
+    budget: RetrievalBudget,
+) -> Result<(), DispatchExpansionStop> {
+    if control.is_cancelled() {
+        return Err(DispatchExpansionStop::Cancelled);
+    }
+    if budget
+        .deadline_micros
+        .is_some_and(|deadline| control.elapsed_micros() >= deadline)
+    {
+        return Err(DispatchExpansionStop::TimedOut);
+    }
+    Ok(())
+}
+
+/// Visits canonical same-generation adjacency and stops as soon as `visit`
+/// reports that the shared candidate capacity is exhausted.
+///
+/// The Boolean return is false when adjacency remains unvisited, allowing the
+/// public coverage receipt to expose that remainder as unknown rather than
+/// claiming complete trait dispatch.
+fn visit_trait_dispatch_targets(
+    latest: &LatestCompleteCodeIndexV1,
+    callee: &SymbolOccurrenceId,
+    scope: &tracedecay_contracts::CodeQueryScope,
+    budget: RetrievalBudget,
+    control: &dyn GraphExecutionControl,
+    examined: &mut u64,
+    mut visit: impl FnMut(&SymbolOccurrenceId) -> bool,
+) -> Result<bool, DispatchExpansionStop> {
+    let index = latest.record_index();
+    let edges = latest.generation.edges();
+    let symbols = &latest.generation.symbols().symbols;
+    let Some(callee_position) = index.symbol_position(callee) else {
+        return Ok(true);
+    };
+    let callee_name = symbols[callee_position].simple_name.as_str();
+    for parent_position in index.incident_edge_positions(callee, true) {
+        check_dispatch_control(control, budget)?;
+        *examined = examined.saturating_add(1);
+        let parent_edge = &edges[*parent_position];
+        if parent_edge.kind != RelationEdgeKindV1::Contains {
+            continue;
+        }
+        let Some(parent_symbol_position) = index.symbol_position(&parent_edge.from_occurrence)
+        else {
+            continue;
+        };
+        if !matches!(
+            NodeKind::from_str(&symbols[parent_symbol_position].kind),
+            Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+        ) {
+            continue;
+        }
+        for implementor_edge in index
+            .incident_edge_positions(&parent_edge.from_occurrence, true)
+            .iter()
+            .map(|position| &edges[*position])
+        {
+            check_dispatch_control(control, budget)?;
+            *examined = examined.saturating_add(1);
+            if implementor_edge.kind != RelationEdgeKindV1::Implements {
+                continue;
+            }
+            for child_edge in index
+                .incident_edge_positions(&implementor_edge.from_occurrence, false)
+                .iter()
+                .map(|position| &edges[*position])
+            {
+                check_dispatch_control(control, budget)?;
+                *examined = examined.saturating_add(1);
+                if child_edge.kind != RelationEdgeKindV1::Contains {
+                    continue;
+                }
+                let Some(child_position) = index.symbol_position(&child_edge.to_occurrence) else {
+                    continue;
+                };
+                let child = &symbols[child_position];
+                if !matches!(
+                    NodeKind::from_str(&child.kind),
+                    Some(NodeKind::Function | NodeKind::Method)
+                ) || child.simple_name != callee_name
+                    || !symbol_scope_path(latest, &child.occurrence)
+                        .is_some_and(|path| path_is_in_code_query_scope(path, scope))
+                {
+                    continue;
+                }
+                if !visit(&child.occurrence) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    check_dispatch_control(control, budget)?;
+    Ok(true)
+}
+
+fn callee_dispatch_usage(
+    page: &NativeLanePageV1<SymbolRelationRecord>,
+    examined: u64,
+    control: &dyn GraphExecutionControl,
+) -> RetrievalBudgetUsage {
+    RetrievalBudgetUsage {
+        candidates_examined: page.coverage.examined.saturating_add(examined),
+        candidates_returned: u64::try_from(page.items.len()).unwrap_or(u64::MAX),
+        hydrated_results: u64::try_from(page.items.len()).unwrap_or(u64::MAX),
+        hydration_bytes: 0,
+        elapsed_micros: control.elapsed_micros(),
+    }
+}
+
+fn augment_callee_dispatch_page(
+    latest: &LatestCompleteCodeIndexV1,
+    page: NativeLanePageV1<NativeGraphRecordV1>,
+    scope: &tracedecay_contracts::CodeQueryScope,
+    budget: RetrievalBudget,
+    control: &dyn GraphExecutionControl,
+) -> Result<NativeLanePageV1<SymbolRelationRecord>, Box<NativeLaneOutcomeV1<SymbolRelationRecord>>>
+{
+    let candidate_cap = usize::try_from(budget.max_candidates_per_lane).unwrap_or(usize::MAX);
+    let mut page = NativeLanePageV1 {
+        generation: page.generation,
+        items: page
+            .items
+            .into_iter()
+            .map(application_graph_record)
+            .collect(),
+        total_eligible: page.total_eligible,
+        coverage: page.coverage,
+    };
+    let direct = page.items.clone();
+    let mut seen = direct
+        .iter()
+        .map(|record| record.symbol.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut examined = 0_u64;
+    let mut eligible = 0_u64;
+
+    'callees: for callee in direct {
+        match check_dispatch_control(control, budget) {
+            Ok(()) => {}
+            Err(DispatchExpansionStop::Cancelled) => {
+                return Err(Box::new(NativeLaneOutcomeV1::Cancelled));
+            }
+            Err(DispatchExpansionStop::TimedOut) => {
+                return Err(Box::new(NativeLaneOutcomeV1::TimedOut(
+                    callee_dispatch_usage(&page, examined, control),
+                )));
+            }
+        }
+        if page.items.len() >= candidate_cap {
+            page.coverage.unknown = page.coverage.unknown.saturating_add(1);
+            break;
+        }
+        let Ok(callee_id) = SymbolOccurrenceId::new(callee.symbol.node_id.clone()) else {
+            continue;
+        };
+        let exhausted = visit_trait_dispatch_targets(
+            latest,
+            &callee_id,
+            scope,
+            budget,
+            control,
+            &mut examined,
+            |target_id| {
+                if !seen.insert(target_id.as_str().to_owned()) {
+                    return true;
+                }
+                let Some(symbol) = symbol_record_by_id(latest, target_id) else {
+                    return true;
+                };
+                eligible = eligible.saturating_add(1);
+                page.items.push(SymbolRelationRecord {
+                    symbol,
+                    edge_kind: relation_edge_kind_name(RelationEdgeKindV1::Calls).to_owned(),
+                    dispatch_via_trait: true,
+                    dispatch_from: Some(callee.symbol.node_id.clone()),
+                    depth: callee.depth,
+                });
+                page.items.len() < candidate_cap
+            },
+        );
+        match exhausted {
+            Ok(true) => {}
+            Ok(false) => {
+                page.coverage.unknown = page.coverage.unknown.saturating_add(1);
+                break 'callees;
+            }
+            Err(DispatchExpansionStop::Cancelled) => {
+                return Err(Box::new(NativeLaneOutcomeV1::Cancelled));
+            }
+            Err(DispatchExpansionStop::TimedOut) => {
+                return Err(Box::new(NativeLaneOutcomeV1::TimedOut(
+                    callee_dispatch_usage(&page, examined, control),
+                )));
+            }
+        }
+    }
+    page.total_eligible = page.total_eligible.saturating_add(eligible);
+    page.coverage.examined = page.coverage.examined.saturating_add(examined);
+    page.coverage.eligible = page.coverage.eligible.saturating_add(eligible);
+    Ok(page)
+}
+
+fn augment_callee_dispatch(
+    latest: &LatestCompleteCodeIndexV1,
+    outcome: NativeLaneOutcomeV1<NativeGraphRecordV1>,
+    scope: &tracedecay_contracts::CodeQueryScope,
+    budget: RetrievalBudget,
+    control: &dyn GraphExecutionControl,
+) -> NativeLaneOutcomeV1<SymbolRelationRecord> {
+    match outcome {
+        NativeLaneOutcomeV1::Complete(page) => {
+            match augment_callee_dispatch_page(latest, page, scope, budget, control) {
+                Ok(page) => NativeLaneOutcomeV1::Complete(page),
+                Err(terminal) => *terminal,
+            }
+        }
+        NativeLaneOutcomeV1::Partial { page, reason } => {
+            match augment_callee_dispatch_page(latest, page, scope, budget, control) {
+                Ok(page) => NativeLaneOutcomeV1::Partial { page, reason },
+                Err(terminal) => *terminal,
+            }
+        }
+        NativeLaneOutcomeV1::Unavailable(reason) => NativeLaneOutcomeV1::Unavailable(reason),
+        NativeLaneOutcomeV1::Denied => NativeLaneOutcomeV1::Denied,
+        NativeLaneOutcomeV1::Stale(source) => NativeLaneOutcomeV1::Stale(source),
+        NativeLaneOutcomeV1::BudgetExceeded(usage) => NativeLaneOutcomeV1::BudgetExceeded(usage),
+        NativeLaneOutcomeV1::TimedOut(usage) => NativeLaneOutcomeV1::TimedOut(usage),
+        NativeLaneOutcomeV1::Cancelled => NativeLaneOutcomeV1::Cancelled,
+    }
+}
+
 fn symbol_record(
     latest: &LatestCompleteCodeIndexV1,
     symbol: &SymbolOccurrenceId,
     file: &tracedecay_domain::FileOccurrenceId,
 ) -> Option<SymbolPrimitiveRecord> {
-    let records = LatestCompleteNativeRecordReadPortV1 { latest };
-    records
+    latest
         .symbol(symbol, file)
         .ok()
         .map(application_symbol_record)
@@ -1877,6 +2120,7 @@ fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
         RetrievalFailure::AuthorityUnavailable { .. } => OmissionReason::Unavailable,
         RetrievalFailure::IncompatibleProjection { .. } => OmissionReason::Unsupported,
         RetrievalFailure::StaleSource => OmissionReason::Stale,
+        RetrievalFailure::CandidateSourcesPruned { .. } => OmissionReason::Budget,
         RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. } => {
             OmissionReason::Failed
         }
@@ -2012,7 +2256,9 @@ where
             let evidence =
                 terminal_lane_evidence(finished_at, prepared.generation().clone(), omission);
             match reason {
-                RetrievalFailure::InvalidRequest { .. } | RetrievalFailure::Internal { .. } => {
+                RetrievalFailure::InvalidRequest { .. }
+                | RetrievalFailure::Internal { .. }
+                | RetrievalFailure::CandidateSourcesPruned { .. } => {
                     RetrievalPortOutcome::Failed(evidence)
                 }
                 RetrievalFailure::AuthorityUnavailable { .. }
@@ -2318,27 +2564,27 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 matched_term_kinds: Vec::new(),
                 source_occurrence,
             };
+            let graph_budget = graph_budget_for_request(base.budget, context.request);
             let lane_request = GraphLaneRequest {
                 generation: served_generation.clone(),
                 seed_anchors: vec![seed],
                 edge_kinds: vec![RelationEdgeKindV1::Calls],
                 max_depth: request.maximum_depth,
-                budget: graph_budget_for_request(base.budget, context.request),
+                budget: graph_budget,
                 base: base.clone(),
             };
             let Ok(graph_serving) = latest.production_graph_serving() else {
                 return unavailable(finished_at);
             };
-            let records = LatestCompleteNativeRecordReadPortV1 { latest };
             let Ok(native_context) =
-                AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
+                AdmittedGenerationContextV1::admit(served_generation.clone(), latest)
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
             let graph_control = CallableGraphExecutionControl::for_request(context.request);
             let outcome = graph_serving
                 .graph
-                .retrieve_graph(&lane_request, graph_control);
+                .retrieve_graph(&lane_request, Arc::clone(&graph_control));
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.graph(outcome, |path| {
@@ -2346,15 +2592,34 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     }) else {
                         return unavailable(finished_at);
                     };
-                    finish_native_lane_query(
-                        &prepared,
-                        &context,
-                        "code_callees",
-                        query_binding_digest,
-                        &request.meta.page,
-                        outcome,
-                        application_graph_record,
-                    )
+                    if request.resolve_trait_dispatch {
+                        let outcome = augment_callee_dispatch(
+                            latest,
+                            outcome,
+                            &request.scope,
+                            graph_budget,
+                            graph_control.as_ref(),
+                        );
+                        finish_native_lane_query(
+                            &prepared,
+                            &context,
+                            "code_callees",
+                            query_binding_digest,
+                            &request.meta.page,
+                            outcome,
+                            |record| record,
+                        )
+                    } else {
+                        finish_native_lane_query(
+                            &prepared,
+                            &context,
+                            "code_callees",
+                            query_binding_digest,
+                            &request.meta.page,
+                            outcome,
+                            application_graph_record,
+                        )
+                    }
                 }
                 Err(_) => unavailable(finished_at),
             }
@@ -2536,9 +2801,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     {
                         return None;
                     }
-                    if request.is_async.is_some_and(|is_async| {
-                        signature.split_whitespace().any(|part| part == "async") != is_async
-                    }) {
+                    if request
+                        .is_async
+                        .is_some_and(|is_async| symbol.is_async != is_async)
+                    {
                         return None;
                     }
                     symbol_record_by_id(&prepared.latest, &symbol.occurrence)

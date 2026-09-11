@@ -78,8 +78,37 @@ def inspect(
     )
 
 
-def wait_for_daemon_socket(
-    daemon: subprocess.Popen[bytes], socket_path: Path
+def daemon_command(
+    binary: Path, socket_path: Path, *, platform_name: str = os.name
+) -> list[str]:
+    command = [str(binary), "daemon", "run"]
+    if platform_name != "nt":
+        command.extend(["--socket", str(socket_path)])
+    return command
+
+
+def daemon_environment(
+    environment: dict[str, str],
+    socket_path: Path,
+    *,
+    platform_name: str = os.name,
+) -> dict[str, str]:
+    configured = environment.copy()
+    configured.pop("TRACEDECAY_DAEMON_SOCKET", None)
+    if platform_name != "nt":
+        configured["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
+    return configured
+
+
+def daemon_endpoint_is_ready(returncode: int, stdout: str) -> bool:
+    return returncode == 0 and "(connectable)" in stdout
+
+
+def wait_for_daemon(
+    daemon: subprocess.Popen[bytes],
+    binary: Path,
+    fixture: Path,
+    environment: dict[str, str],
 ) -> None:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -87,10 +116,16 @@ def wait_for_daemon_socket(
             raise SystemExit(
                 f"packaged daemon exited before init with {daemon.returncode}"
             )
-        if socket_path.exists():
+        status = run(
+            [str(binary), "daemon", "status"],
+            cwd=fixture,
+            environment=environment,
+            check=False,
+        )
+        if daemon_endpoint_is_ready(status.returncode, status.stdout):
             return
         time.sleep(0.05)
-    raise SystemExit("packaged daemon socket did not become ready")
+    raise SystemExit("packaged daemon endpoint did not become ready")
 
 
 def main() -> int:
@@ -144,9 +179,9 @@ def main() -> int:
     )
     socket_path = home / ".tracedecay" / "daemon.sock"
     socket_path.parent.mkdir(parents=True, exist_ok=True)
-    environment["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
+    environment = daemon_environment(environment, socket_path)
     daemon = subprocess.Popen(
-        [str(binary), "daemon", "run", "--socket", str(socket_path)],
+        daemon_command(binary, socket_path),
         cwd=fixture,
         env=environment,
         stdin=subprocess.DEVNULL,
@@ -154,7 +189,7 @@ def main() -> int:
         stderr=subprocess.DEVNULL,
     )
     try:
-        wait_for_daemon_socket(daemon, socket_path)
+        wait_for_daemon(daemon, binary, fixture, environment)
         run([str(binary), "init"], cwd=fixture, environment=environment)
 
         first = inspect(

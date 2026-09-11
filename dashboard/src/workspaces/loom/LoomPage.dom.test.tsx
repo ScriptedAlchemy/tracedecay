@@ -1,5 +1,6 @@
+import { MemoryRouter, useLocation } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
@@ -356,16 +357,21 @@ const HAPPY = {
   '/api/plugins/hermes-lcm/timeline': { status: 200, body: TEMPORAL_RETRIEVAL_UNAVAILABLE },
 };
 
-function renderLoom(routes: Record<string, { status: number; body: unknown }> = HAPPY) {
+function LocationProbe() {
+  return <output data-testid="loom-url">{useLocation().search}</output>;
+}
+
+function renderLoom(routes: Record<string, { status: number; body: unknown }> = HAPPY, entry = '/loom?scope=project-loom') {
   vi.stubGlobal('fetch', serve(routes));
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
-  return render(
+  const result = render(
     <QueryClientProvider client={client}>
-      <LoomPage />
+      <MemoryRouter initialEntries={[entry]}><LoomPage /><LocationProbe /></MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...result, client };
 }
 
 afterEach(() => {
@@ -388,6 +394,61 @@ beforeEach(() => {
 });
 
 describe('LoomPage', () => {
+  it('projects only admitted same-provider parent relations and keeps replay scoped to the selected page', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.sessions[1]!.provider = 'cursor';
+    const node = (sessionId: string, parent: string | null, provider = 'cursor', link = 'linked') => ({
+      session_id: sessionId, parent_session_id: parent, provider, link,
+      parent_tool_use_id: 'tool-parent-7', agent: null, title: null,
+      started_at: NOW - 20_000, ended_at: null, depth: parent ? 1 : 0,
+      descendants: parent ? 0 : 1, is_subagent: parent != null,
+    });
+    const hierarchy = {
+      available: true, source: 'sessions', error: null, sessions_read: 5,
+      root_count: 1, edge_count: 2, max_depth: 1, missing_parent_count: 1,
+      cycle_count: 1, truncated: true,
+      nodes: [node('sess-open', null, 'cursor', 'root'), node('sess-closed', 'sess-open'),
+        node('sess-hollow', 'sess-open', 'codex'),
+        node('outside-loaded-page', 'sess-open', 'cursor', 'missing_parent'),
+        node('cycle', 'cycle', 'cursor', 'cycle')],
+    };
+    const { container } = renderLoom({ ...HAPPY,
+      '/api/loom/temporal': { status: 200, body: temporal },
+      '/api/plugins/analytics/subagent-tree': { status: 200, body: readyEnvelope(hierarchy) },
+      '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) },
+    });
+    const parent = await screen.findByRole('button', { name: 'Recorded parent Deliver Git primitive runtime of Verify QUERY scheduler' });
+    expect(container.querySelectorAll('[data-parent-session]')).toHaveLength(1);
+    expect(screen.getByText(/Session hierarchy: partial/).textContent).toContain('1 missing parents · 1 cycles');
+    expect(parent.textContent).toContain('spawn time unavailable');
+    // The hierarchy's unrelated bounds do not reposition the temporal session.
+    const threads = [...container.querySelectorAll('[data-thread]')];
+    const lineFor = (id: string) => threads.find((thread) => thread.getAttribute('data-thread') === JSON.stringify(['cursor', id]))!.querySelector('line')!;
+    const parentLine = lineFor('sess-open');
+    const childLine = lineFor('sess-closed');
+    const path = parent.querySelector('path')!.getAttribute('d')!;
+    expect(path.startsWith(`M ${parentLine.getAttribute('x1')} ${parentLine.getAttribute('y1')} C`)).toBe(true);
+    expect(path.endsWith(`${childLine.getAttribute('x1')} ${childLine.getAttribute('y1')}`)).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse branch Deliver Git primitive runtime' }));
+    expect(container.querySelector('[data-child-session="sess-closed"]')).toBeNull();
+    expect(container.querySelector('[data-minimap-session="sess-closed"]')).toBeNull();
+    expect(screen.getByText(/2 \/ 3 loaded sessions/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand branch Deliver Git primitive runtime' }));
+    expect(container.querySelector('[data-minimap-session="sess-closed"]')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    const overviewSearch = screen.getByTestId('loom-url').textContent;
+    expect(overviewSearch).toContain('loomOverviewWindow=');
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Recorded parent Deliver Git primitive runtime of Verify QUERY scheduler' }), { key: 'Enter' });
+    await screen.findByRole('button', { name: 'Select stored event m0' });
+    expect(container.querySelector('[data-parent-session]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Select stored event m0' }));
+    expect(screen.queryByRole('button', { name: 'Select stored event m2' })).toBeNull();
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m0');
+    fireEvent.click(screen.getByRole('button', { name: '← All loaded sessions' }));
+    expect(screen.getByTestId('loom-url').textContent).toBe(overviewSearch);
+    expect(screen.getByRole('button', { name: 'Fit the whole extent' })).toHaveProperty('disabled', false);
+  });
+
   it('does not present unfed Delivery outcomes as a Loom relation', async () => {
     renderLoom();
 
@@ -405,7 +466,7 @@ describe('LoomPage', () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <LoomPage />
+        <MemoryRouter><LoomPage /></MemoryRouter>
       </QueryClientProvider>,
     );
     await screen.findByText('Deliver Git primitive runtime');
@@ -427,7 +488,7 @@ describe('LoomPage', () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <LoomPage />
+        <MemoryRouter><LoomPage /></MemoryRouter>
       </QueryClientProvider>,
     );
 
@@ -484,6 +545,60 @@ describe('LoomPage', () => {
     expect(await screen.findByText('~12 tokens · o200k approximate')).toBeTruthy();
     expect(screen.getByText('~20 tokens · o200k approximate')).toBeTruthy();
     expect(screen.getByText('tokens unknown')).toBeTruthy();
+  });
+
+  it('shares reveal, picking, minimap and exact evidence through one URL cursor', async () => {
+    renderLoom({ ...HAPPY, '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) } });
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('Deliver Git primitive runtime'));
+    await screen.findByText('stored ordinal 2');
+    expect(document.querySelector('[data-event="m2"]')).not.toBeNull();
+    expect(document.querySelector('[data-minimap-event="m2"]')).not.toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Select stored event m0' }));
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m0');
+    expect(screen.getByTestId('loom-url').textContent).toContain('scope=project-loom');
+    expect(document.querySelector('[data-event="m2"]')).toBeNull();
+    expect(document.querySelector('[data-minimap-event="m2"]')).toBeNull();
+    expect(screen.queryByText('Running the suite.')).toBeNull();
+    expect(screen.queryByText('Bash')).toBeNull();
+    expect(screen.queryByText('src/runtime.rs')).toBeNull();
+    expect(screen.queryByText('abc123def456')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Step to next stored event' }));
+    expect(document.querySelector('[data-event="m1"]')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Inspect stored event m1' })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Select stored event m0' }), { key: 'Enter' });
+    expect(screen.getByText('stored ordinal 0')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Zoom into execution' }));
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomWindow=');
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m0');
+    await user.click(screen.getByRole('button', { name: 'Return replay to latest loaded event' }));
+    expect(document.querySelector('[data-event="m2"]')).not.toBeNull();
+    expect(document.querySelector('[data-minimap-event="m2"]')).not.toBeNull();
+    expect(screen.getByTestId('loom-url').textContent).not.toContain('loomEvent');
+    expect(screen.getByTestId('loom-url').textContent).not.toContain('loomWindow');
+  });
+
+  it('follows appended admitted page members but retains or discloses an inspected identity on refetch', async () => {
+    const routes = { ...HAPPY, '/api/plugins/hermes-lcm/session/': { status: 200, body: readyEnvelope(CHAIN) } };
+    const { client } = renderLoom(routes);
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('Deliver Git primitive runtime'));
+    await screen.findByText('stored ordinal 2');
+    const appended = [...CHAIN.messages, chainMessage({ message_id: 'm3', ordinal: 3, content: 'New admitted page member' })];
+    routes['/api/plugins/hermes-lcm/session/'].body = readyEnvelope({ ...CHAIN, messages: appended });
+    await act(() => client.invalidateQueries({ queryKey: ['loom', 'chain'] }));
+    await screen.findByText('stored ordinal 3');
+    await user.click(screen.getByRole('button', { name: 'Select stored event m1' }));
+    routes['/api/plugins/hermes-lcm/session/'].body = readyEnvelope({ ...CHAIN, messages: appended.slice(1) });
+    await act(() => client.invalidateQueries({ queryKey: ['loom', 'chain'] }));
+    expect(screen.getByText('stored ordinal 1')).toBeTruthy();
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m1');
+    routes['/api/plugins/hermes-lcm/session/'].body = readyEnvelope({ ...CHAIN, messages: appended.slice(2) });
+    await act(() => client.invalidateQueries({ queryKey: ['loom', 'chain'] }));
+    expect(await screen.findByText(/Selected event m1 is outside this loaded page/)).toBeTruthy();
+    expect(document.querySelectorAll('[data-event]')).toHaveLength(0);
+    expect(screen.queryByText('New admitted page member')).toBeNull();
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomEvent=m1');
   });
 
   it('replays only the canonical loaded raw-turn order and keeps compaction linked', async () => {
@@ -554,7 +669,8 @@ describe('LoomPage', () => {
     await user.click(screen.getByRole('button', { name: 'Step to previous stored event' }));
     expect(screen.getByText('stored ordinal 0')).toBeTruthy();
     expect(screen.getByText('linked compaction boundaries')).toBeTruthy();
-    expect(screen.getByText(/checkpoint · depth 1/)).toBeTruthy();
+    expect(screen.queryByText(/checkpoint · depth 1/)).toBeNull();
+    expect(screen.getByText(/linked boundary is outside this loaded transcript page/)).toBeTruthy();
 
     await user.selectOptions(screen.getByLabelText('Replay speed'), '2');
     expect((screen.getByLabelText('Replay speed') as HTMLSelectElement).value).toBe('2');
@@ -700,12 +816,12 @@ describe('LoomPage', () => {
   it('gives the canvas an accessible description and a real table alongside', async () => {
     renderLoom();
     await screen.findByText('Deliver Git primitive runtime');
-    const figure = screen.getByRole('img', { name: /Weave:/ });
+    const figure = screen.getByRole('group', { name: /Weave:/ });
     expect(figure.getAttribute('aria-label')).toContain('drawn open');
     expect(figure.getAttribute('aria-label')).toContain(
-      'Provider-qualified causal rows are served and listed',
+      'Only recorded parent identities are drawn',
     );
-    expect(figure.getAttribute('aria-label')).toContain('not geometrically drawn');
+    expect(figure.getAttribute('aria-label')).toContain('timed spawn and rejoin remain unavailable');
     expect(screen.getByRole('table')).toBeTruthy();
   });
 });

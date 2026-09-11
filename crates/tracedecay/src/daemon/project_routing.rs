@@ -45,6 +45,28 @@ pub(super) fn project_warming_error(project_path: &Path) -> TraceDecayError {
     }
 }
 
+/// After the foreground publication bound, prefer a terminal open failure
+/// over a warming hint. Warming means the route is still opening.
+pub(super) fn prefer_recorded_open_failure<T>(
+    result: Result<T>,
+    state: &tokio::sync::watch::Receiver<ProjectOpenTaskState>,
+) -> Result<T> {
+    let error = match result {
+        Err(error) => error,
+        other => return other,
+    };
+    if !matches!(
+        &error,
+        TraceDecayError::Config { message } if error_message_is_project_warming(message)
+    ) {
+        return Err(error);
+    }
+    match state.borrow().clone() {
+        ProjectOpenTaskState::Failed(failure) => Err(failure.to_error()),
+        ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => Err(error),
+    }
+}
+
 pub(super) fn project_route_for_handshake(
     handshake: &DaemonHandshake,
 ) -> Result<(PathBuf, ProjectRouteKey)> {

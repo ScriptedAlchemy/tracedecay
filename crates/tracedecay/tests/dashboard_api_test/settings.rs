@@ -535,3 +535,35 @@ fn settings_dashboard_api_round_trips_profile_worker_selection_after_reviewed_pa
         );
     });
 }
+
+#[test]
+fn settings_patch_rejects_unreadable_pr_state_before_mutation() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    create_runtime().block_on(async {
+        let fixture = start_dashboard_configuration_fixture().await;
+        let agent = http_agent();
+        let url = format!("{}/api/settings", fixture.base_url);
+        let (status, before) = get_json(&agent, &url);
+        assert_eq!(status, 200, "{before}");
+        let payload = &before["payload"];
+        let pr_state = std::path::Path::new(payload["storage"]["store_root"].as_str().unwrap()).join("pr-autotrack.json");
+        std::fs::write(&pr_state, "{broken").unwrap();
+        for (route, patch) in [
+            ("project", json!({"expected_revision_id": payload["project"]["configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-project", "max_file_size": 4096})),
+            ("user", json!({"expected_revision_id": payload["user"]["configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-user", "watcher_debounce": "3s"})),
+            ("user/code-index-workers", json!({"expected_revision_id": payload["user"]["code_index_worker_configuration_revision_id"], "idempotency_key": "configuration.idempotency.corrupt-pr-workers", "code_index_workers": {"mode": "exact", "workers": 1}})),
+        ] {
+            let (status, error) = patch_json_body(&agent, &format!("{url}/{route}"), &patch);
+            assert_eq!(status, 503, "{route}: {error}");
+            assert_eq!(error["code"], "configuration_authority_unavailable");
+        }
+        std::fs::remove_file(pr_state).unwrap();
+        let (status, after) = get_json(&agent, &url);
+        assert_eq!(status, 200, "{after}");
+        for (scope, field) in [("project", "configuration_revision_id"), ("user", "configuration_revision_id"), ("user", "code_index_worker_configuration_revision_id")] {
+            assert_eq!(after["payload"][scope][field], payload[scope][field], "failed PATCH must not commit {scope}/{field}");
+        }
+    });
+}

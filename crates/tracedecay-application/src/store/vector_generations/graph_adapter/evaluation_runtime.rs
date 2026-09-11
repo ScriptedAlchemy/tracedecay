@@ -1139,3 +1139,65 @@ mod settlement_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::transitions::tests::{admitted_embedding, prepared_generation};
+    use super::*;
+    use crate::store::vector_generations::{
+        GraphVectorGenerationStoreV1, VectorGenerationBeginOutcomeV1,
+    };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_sql_transaction_does_not_starve_semantic_bootstrap_or_shutdown() {
+        let source = CodeGenerationId::new("code-generation.real-contention").unwrap();
+        let graph = Arc::new(
+            IsolatedSemanticEvaluationGraphV1::open_source_generations(
+                std::slice::from_ref(&source),
+                Arc::new(NeverCancelled),
+            )
+            .unwrap(),
+        );
+        let retained = graph.retained(&source).unwrap();
+        let store = GraphVectorGenerationStoreV1::open(&retained).await.unwrap();
+        let (plan, _, descriptor) =
+            prepared_generation(&source, "chunk.real-contention", 'f', &admitted_embedding());
+        store.configure_stage(descriptor).unwrap();
+        let handle = ExactSqlHandle::attach(&graph._writer.lock().unwrap(), &graph._readers)
+            .unwrap()
+            .with_write_authority(graph.write_authority.clone())
+            .unwrap();
+        let held = handle.begin_immediate().unwrap();
+        // Poll the contender first on the sole runtime worker. An inline SQL
+        // acquisition would block this worker until the 30-second idle lease,
+        // preventing the actual transaction holder below from committing.
+        let started = Instant::now();
+        let (outcome, (), bootstrap) = tokio::join!(biased;
+            store.begin_generation(plan, Arc::new(NeverCancelled)),
+            async {
+                held.commit_async().await.expect("the transaction holder can commit");
+            },
+            GraphVectorGenerationStoreV1::read_only(&retained),
+        );
+        assert!(
+            matches!(
+                outcome,
+                Ok(VectorGenerationBeginOutcomeV1::ReplayFromStart { .. })
+            ),
+            "{outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "progress must not wait for the idle lease"
+        );
+        bootstrap.expect("concurrent bootstrap still responds");
+        retained.operation_task_owner().begin_shutdown();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            retained.operation_task_owner().shutdown(),
+        )
+        .await
+        .expect("shutdown stays bounded")
+        .expect("owned operations settled");
+    }
+}

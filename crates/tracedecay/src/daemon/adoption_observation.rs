@@ -19,8 +19,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::{AdoptionEligibilityObservedV1, CoverageStateV1};
 use tracedecay_tool_catalog::{CatalogContributionV1, ProfileId};
 
-use super::log_daemon_event;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Composed capability namespaces mapped onto the closed adoption capability
 /// families (`AdoptionEligibilityObservedV1::validate`). Prefix, not equality:

@@ -38,10 +38,11 @@ use tracedecay_contracts::{
     PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1, PreviewId,
     PreviewResult, ReconciliationState, ReleaseWorkPlacementCommand, RequestId, ResolvedScope,
     ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetrieverContribution,
-    RetryWorkAttemptCommandV1, StartWorkAttemptCommand, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState, WorkArtifactHydrationRequestV1,
-    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    RetryWorkAttemptCommandV1, SourceEditInvocationV1, SourceEditReconciliationInvocationV1,
+    SourceEditRollbackInvocationV1, StartWorkAttemptCommand, TaskHandoffGrant,
+    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
@@ -66,8 +67,9 @@ use crate::lsp_wire::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
     MAX_LSP_WORKSPACE_ROOTS,
 };
-use crate::surface::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
+use crate::surface::GitReadSurfaceRequest;
 use tracedecay_contracts::ConfigurationWireRequestV1;
+use tracedecay_contracts::context_scout::ContextScoutSurfaceRequestV1;
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
@@ -440,6 +442,9 @@ pub enum DaemonInvocationOperation {
     LspAcknowledge,
     LspReconnect,
     LspDetach,
+    SourceEdit,
+    SourceEditReconcile,
+    SourceEditRollback,
 }
 
 impl DaemonInvocationOperation {
@@ -505,6 +510,9 @@ impl DaemonInvocationOperation {
             Self::LspAcknowledge => "lsp_acknowledge",
             Self::LspReconnect => "lsp_reconnect",
             Self::LspDetach => "lsp_detach",
+            Self::SourceEdit => "source_edit",
+            Self::SourceEditReconcile => "source_edit_reconcile",
+            Self::SourceEditRollback => "source_edit_rollback",
         }
     }
 }
@@ -842,7 +850,7 @@ pub enum DaemonInvocationPayload {
     },
     ContextScout {
         surface_operation: ApplicationSurfaceOperation,
-        request: ContextScoutSurfaceRequest,
+        request: ContextScoutSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -956,6 +964,24 @@ pub enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    SourceEdit {
+        request: SourceEditInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    SourceEditReconcile {
+        request: SourceEditReconciliationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    SourceEditRollback {
+        request: SourceEditRollbackInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
 }
 
 impl DaemonInvocationRequest {
@@ -1049,7 +1075,6 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::SourceBody
             | ApplicationSurfaceOperation::SourceOutline
             | ApplicationSurfaceOperation::ModuleApi
-            | ApplicationSurfaceOperation::FileMetadata
             | ApplicationSurfaceOperation::HealthRead
             | ApplicationSurfaceOperation::HealthDelta
             | ApplicationSurfaceOperation::StorageStatus
@@ -1098,12 +1123,10 @@ impl DaemonInvocationRequest {
                 unreachable!("native worktree operations use their typed constructor")
             }
             ApplicationSurfaceOperation::ConfigurationList
-            | ApplicationSurfaceOperation::ConfigurationExplain
             | ApplicationSurfaceOperation::ConfigurationGet
             | ApplicationSurfaceOperation::ConfigurationSet
             | ApplicationSurfaceOperation::ConfigurationUnset
             | ApplicationSurfaceOperation::ConfigurationBatch
-            | ApplicationSurfaceOperation::ConfigurationWriteCredential
             | ApplicationSurfaceOperation::ConfigurationObservedState
             | ApplicationSurfaceOperation::ConfigurationProtectedPreview
             | ApplicationSurfaceOperation::ConfigurationProtectedApply
@@ -1243,10 +1266,6 @@ impl DaemonInvocationRequest {
                 request @ PrimitiveRequest::ModuleApi(_),
             )
             | (
-                surface_operation @ ApplicationSurfaceOperation::FileMetadata,
-                request @ PrimitiveRequest::FileMetadata(_),
-            )
-            | (
                 surface_operation @ ApplicationSurfaceOperation::HealthRead,
                 request @ PrimitiveRequest::HealthRead(_),
             )
@@ -1306,7 +1325,7 @@ impl DaemonInvocationRequest {
     pub fn context_scout(
         request_id: impl Into<String>,
         surface_operation: ApplicationSurfaceOperation,
-        request: ContextScoutSurfaceRequest,
+        request: ContextScoutSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1973,6 +1992,13 @@ impl DaemonInvocationRequest {
             }
             DaemonInvocationPayload::LspReconnect { .. } => DaemonInvocationOperation::LspReconnect,
             DaemonInvocationPayload::LspDetach { .. } => DaemonInvocationOperation::LspDetach,
+            DaemonInvocationPayload::SourceEdit { .. } => DaemonInvocationOperation::SourceEdit,
+            DaemonInvocationPayload::SourceEditReconcile { .. } => {
+                DaemonInvocationOperation::SourceEditReconcile
+            }
+            DaemonInvocationPayload::SourceEditRollback { .. } => {
+                DaemonInvocationOperation::SourceEditRollback
+            }
         }
     }
 
@@ -2033,6 +2059,9 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::SemanticActivate
                 | DaemonInvocationOperation::SemanticQualify
                 | DaemonInvocationOperation::LspOpen
+                | DaemonInvocationOperation::SourceEdit
+                | DaemonInvocationOperation::SourceEditReconcile
+                | DaemonInvocationOperation::SourceEditRollback
         )
     }
 
@@ -2173,6 +2202,24 @@ impl DaemonInvocationRequest {
                 ..
             }
             | DaemonInvocationPayload::HandoffApplication {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::SourceEdit {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::SourceEditReconcile {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::SourceEditRollback {
                 observed_at,
                 deadline,
                 cancellation,
@@ -2354,8 +2401,8 @@ impl DaemonInvocationRequest {
                     || !request.matches(*surface_operation)
                     || matches!(
                         request,
-                        ContextScoutSurfaceRequest::Recent(request)
-                            | ContextScoutSurfaceRequest::Explain(request)
+                        ContextScoutSurfaceRequestV1::Recent(request)
+                            | ContextScoutSurfaceRequestV1::Explain(request)
                             if !(1..=32).contains(&request.limit)
                     )
                 {
@@ -2726,6 +2773,46 @@ pub enum DaemonInvocationProblem {
     ResetRequired,
     ApplicationContractViolation,
     Unavailable,
+}
+
+impl DaemonInvocationProblem {
+    /// Preserve the typed refusal as a reason-coded error. Never format the
+    /// variant with `Debug` into a user-facing message.
+    pub fn into_trace_decay_error(self) -> tracedecay_domain::errors::TraceDecayError {
+        let (reason_code, retryable, detail) = match self {
+            Self::InvalidRequest => (
+                "daemon_invocation.invalid_request",
+                false,
+                "The daemon invocation request is invalid",
+            ),
+            Self::UnsupportedRevision => (
+                "daemon_invocation.unsupported_revision",
+                false,
+                "The daemon invocation revision is unsupported",
+            ),
+            Self::NotFoundOrNotAuthorized => (
+                "daemon_invocation.not_found_or_not_authorized",
+                false,
+                "The requested daemon invocation was not found or is not authorized",
+            ),
+            Self::ResetRequired => (
+                "daemon_invocation.reset_required",
+                false,
+                "The daemon invocation store must be reset",
+            ),
+            Self::ApplicationContractViolation => (
+                "daemon_invocation.application_contract_violation",
+                false,
+                "The daemon invocation violated its application contract",
+            ),
+            Self::Unavailable => (
+                "daemon_invocation.unavailable",
+                true,
+                "The daemon invocation is unavailable",
+            ),
+        };
+        tracedecay_domain::errors::TraceDecayError::project_route(reason_code, retryable, detail)
+    }
 }
 
 #[cfg(test)]
@@ -3286,6 +3373,10 @@ pub enum DaemonInvocationOutcome {
         session: DaemonLspSessionAccess,
     },
     LspDetached,
+    SourceEdit {
+        scope: ResolvedScope,
+        result: tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+    },
     Problem {
         problem: DaemonInvocationProblem,
     },

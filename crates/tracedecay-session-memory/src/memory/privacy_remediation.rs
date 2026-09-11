@@ -50,6 +50,22 @@ pub struct ProjectMemoryPrivacyRemediationReceiptV1 {
     pub curation_receipts: Vec<ProjectMemoryFactCurationReceiptV1>,
 }
 
+impl From<ProjectMemoryPrivacyRemediationReceiptV1>
+    for tracedecay_privacy::PrivacyMemoryRemediationOutcomeV1
+{
+    fn from(receipt: ProjectMemoryPrivacyRemediationReceiptV1) -> Self {
+        Self {
+            detector_revision: receipt.detector_revision,
+            superseded_payloads_scanned: receipt.superseded_payloads_scanned,
+            superseded_payloads_purged: receipt.superseded_payloads_purged,
+            scanned_facts: receipt.scanned_facts,
+            clean_facts: receipt.clean_facts,
+            quarantined_facts: receipt.quarantined_facts,
+            curation_batches: receipt.curation_receipts.len(),
+        }
+    }
+}
+
 /// One page of currently served facts per authority read.
 const RESCAN_PAGE_LIMIT: usize = 64;
 

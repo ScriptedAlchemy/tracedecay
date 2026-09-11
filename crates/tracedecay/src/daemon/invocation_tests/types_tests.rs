@@ -2,9 +2,9 @@ use super::*;
 use std::any::Any;
 use std::sync::atomic::Ordering;
 
-use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_application::feedback::concrete::open_feedback_runtime;
+use tracedecay_daemon_service::DaemonCallableCodeAuthorizationSource;
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{ActorId, ConfigurationRevisionId, canonical_sha256};
 use tracedecay_hooks::HookBoundaryV1;
@@ -910,7 +910,7 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.feedback.atomic-publication").expect("project id");
-    let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let host = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
         tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
         project.path(),
         project_id.clone(),

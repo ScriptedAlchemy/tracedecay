@@ -20,9 +20,8 @@ use tracedecay_session_memory::context::{
 use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshHandle, SessionRefreshOutcome,
-    SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
-    SessionRefreshTarget, SessionRequestBinding, SessionScopeAuthorizationRequest,
-    SessionScopeAuthorizer,
+    SessionRefreshSchedulerError, SessionRefreshService, SessionRefreshTarget,
+    SessionRequestBinding, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
 };
 use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 use tracedecay_store::{
@@ -95,9 +94,7 @@ impl RecordingWake {
     fn calls(&self) -> usize {
         self.calls.load(Ordering::Acquire)
     }
-}
 
-impl SessionRefreshSchedulerPort for RecordingWake {
     fn wake(&self) -> Result<(), SessionRefreshSchedulerError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         if self.fail.load(Ordering::Acquire) {
@@ -106,6 +103,10 @@ impl SessionRefreshSchedulerPort for RecordingWake {
             Ok(())
         }
     }
+}
+
+fn recording_wake(wake: RecordingWake) -> impl Fn() -> Result<(), SessionRefreshSchedulerError> {
+    move || wake.wake()
 }
 
 fn configuration() -> SessionRefreshConfiguration {
@@ -405,7 +406,7 @@ async fn equivalent_requests_join_with_stable_digests_excluding_request_id() {
     let service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake.clone(),
+        recording_wake(wake.clone()),
         configuration(),
     );
     let first_context = project_context(
@@ -459,7 +460,7 @@ async fn query_only_mode_and_grain_share_one_projection_refresh() {
     let service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake.clone(),
+        recording_wake(wake.clone()),
         configuration(),
     );
     let context = project_context(
@@ -543,7 +544,7 @@ async fn conflicting_target_is_busy_and_does_not_wake_scheduler() {
     let service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake.clone(),
+        recording_wake(wake.clone()),
         configuration(),
     );
     let context = project_context(
@@ -593,7 +594,7 @@ async fn wake_failure_leaves_recoverable_operation_that_joins_after_restart() {
     let first = match SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        failing_wake.clone(),
+        recording_wake(failing_wake.clone()),
         configuration(),
     )
     .begin_or_join(&context, context.binding(), target.clone())
@@ -615,7 +616,7 @@ async fn wake_failure_leaves_recoverable_operation_that_joins_after_restart() {
     let restarted = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        healthy_wake.clone(),
+        recording_wake(healthy_wake.clone()),
         configuration(),
     );
     let joined = handle(
@@ -646,13 +647,13 @@ async fn status_and_cancel_reauthorize_and_preserve_terminal_coverage() {
     let denied = SessionRefreshService::new(
         DenyAuthorizer,
         session_temporal_store(&db),
-        wake.clone(),
+        recording_wake(wake.clone()),
         configuration(),
     );
     let allowed = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake.clone(),
+        recording_wake(wake.clone()),
         configuration(),
     );
     let target = target("session.refresh.cancel", 0);
@@ -716,13 +717,13 @@ async fn project_and_profile_scopes_are_isolated_without_root_fallback() {
     let project_service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&project_db),
-        RecordingWake::default(),
+        recording_wake(RecordingWake::default()),
         configuration(),
     );
     let profile_service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&profile_db),
-        RecordingWake::default(),
+        recording_wake(RecordingWake::default()),
         configuration(),
     );
     let target = target("session.refresh.scope", 0);
@@ -771,7 +772,7 @@ async fn status_maps_complete_and_failed_receipts_without_error_details() {
     let complete_service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&complete_db),
-        RecordingWake::default(),
+        recording_wake(RecordingWake::default()),
         configuration(),
     );
     let complete_target = target("session.refresh.complete", 0);
@@ -807,7 +808,7 @@ async fn status_maps_complete_and_failed_receipts_without_error_details() {
     let failed_service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&failed_db),
-        RecordingWake::default(),
+        recording_wake(RecordingWake::default()),
         configuration(),
     );
     let failed_target = target("session.refresh.failed", 0);
@@ -848,7 +849,7 @@ async fn concurrent_callers_share_one_operation_and_keep_caller_idempotency() {
     let service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake,
+        recording_wake(wake),
         configuration(),
     );
     let first_context = project_context(
@@ -908,7 +909,7 @@ async fn cancel_before_first_progress_returns_durable_zero_coverage_receipt() {
     let service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake.clone(),
+        recording_wake(wake.clone()),
         configuration(),
     );
     let context = project_context(
@@ -960,7 +961,7 @@ async fn application_preserves_each_temporal_mode_in_terminal_source_coverage() 
         let service = SessionRefreshService::new(
             AllowAuthorizer,
             session_temporal_store(&db),
-            RecordingWake::default(),
+            recording_wake(RecordingWake::default()),
             configuration(),
         );
         let context = project_context(
@@ -1002,7 +1003,7 @@ async fn expired_or_cancelled_requests_do_not_create_refresh_operations() {
     let service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake.clone(),
+        recording_wake(wake.clone()),
         configuration(),
     );
     let template = project_context(
@@ -1079,7 +1080,7 @@ async fn request_abort_and_deadline_do_not_claim_durable_operation_cancellation(
     let service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake,
+        recording_wake(wake),
         configuration(),
     );
     let context = project_context(
@@ -1143,7 +1144,7 @@ async fn status_is_read_only_and_does_not_wake_the_daemon() {
     let service = SessionRefreshService::new(
         AllowAuthorizer,
         session_temporal_store(&db),
-        wake.clone(),
+        recording_wake(wake.clone()),
         configuration(),
     );
     let context = project_context(

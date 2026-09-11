@@ -108,7 +108,7 @@ describe('Code index freshness', () => {
     expect(text).toContain('10k chunks committed');
     expect(text).toContain('480 imports committed');
     expect(text).toContain('16.0 MiB payload committed');
-    expect(text).toContain('250 files/s · 16.0 MiB lexical bytes/s');
+    expect(text).toContain('250 files/s · 16.8M lexical units/s');
     expect(text).toContain('ETA 2m');
     expect(text).toContain('last commit');
     expect(text).toContain('240ms');
@@ -126,7 +126,7 @@ describe('Code index freshness', () => {
           progress: {
             ...progress(),
             files_per_second: null,
-            lexical_bytes_per_second: null,
+            lexical_units_per_second: null,
             estimated_remaining_seconds: 120,
             blocked_reason: 'retry_backoff',
           },
@@ -359,7 +359,7 @@ describe('Code index freshness', () => {
       ...progress(),
       phase: 'ready',
       completed_files: 500,
-      completed_lexical_bytes: 64 * 1024 * 1024,
+      completed_lexical_units: 64 * 1024 * 1024,
       estimated_remaining_seconds: 0,
     };
     const transitioning = envelope('partial', {
@@ -490,14 +490,14 @@ function progress() {
     committed_payload_bytes: 16 * 1024 * 1024,
     completed_files: 250,
     total_files: 500,
-    completed_lexical_bytes: 32 * 1024 * 1024,
-    total_lexical_bytes: 64 * 1024 * 1024,
+    completed_lexical_units: 32 * 1024 * 1024,
+    total_lexical_units: 64 * 1024 * 1024,
     current_batch_pages: 4,
     current_batch_payload_bytes: 4 * 1024 * 1024,
     elapsed_micros: 120_000_000,
     last_commit_latency_micros: 240_000,
     files_per_second: 250,
-    lexical_bytes_per_second: 16 * 1024 * 1024,
+    lexical_units_per_second: 16 * 1024 * 1024,
     estimated_remaining_seconds: 120,
     last_progress_micros: NOW_MICROS,
     blocked_reason: null,

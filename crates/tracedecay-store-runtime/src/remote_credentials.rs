@@ -14,14 +14,19 @@ use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1, RemoteCredentialLookupErrorV1,
     RemoteCredentialLookupPortV1,
 };
+use tracedecay_contracts::remote::protocol::{
+    RemoteProtocolFailureV1, RemoteProtocolResponseV1, remote_protocol_problem,
+};
 use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
+use tracedecay_contracts::{ApplicationContractError, RequestId, ResultContractRef};
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1,
     RemoteCredentialFingerprintV1, UserProfileId, UtcMicros,
 };
 use tracedecay_rusqlite_runtime::remote::{
-    RemoteCredentialInventoryErrorV1, RemoteCredentialRegistrationV1,
-    RemoteRecoverySqliteAuthorityV1, RemoteSqliteStorageV1,
+    CredentialDerivedSpoolKeyringV1, RemoteCredentialInventoryErrorV1,
+    RemoteCredentialRegistrationV1, RemoteRecoverySqliteAuthorityV1, RemoteSpoolKeyringV1,
+    RemoteSqliteStorageV1,
 };
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 
@@ -594,4 +599,35 @@ fn map_inventory_error(
             DaemonRemoteCredentialRegistryErrorV1::Unavailable
         }
     }
+}
+
+/// Request-scoped spool keyring derived from the presented enrollment
+/// credential. Spool frames stay encrypted at rest; the key exists only while
+/// the authenticated request executes.
+pub fn presented_spool_keyring(
+    credential: &OpaqueRemoteCredential,
+    enrollment_revision: u64,
+) -> Option<Arc<dyn RemoteSpoolKeyringV1>> {
+    let bytes = credential.derive_spool_key_bytes().ok()?;
+    let keyring =
+        CredentialDerivedSpoolKeyringV1::from_secret_bytes(enrollment_revision, bytes).ok()?;
+    Some(Arc::new(keyring))
+}
+
+/// Conceal unavailable credential/store routing without disclosing a node identity.
+pub fn remote_authority_unavailable_response<T>(
+    request_id: RequestId,
+    observed_at: UtcMicros,
+    contract: ResultContractRef,
+) -> std::result::Result<RemoteProtocolResponseV1<T>, ApplicationContractError> {
+    let authority = CurrentRemoteAuthorityStateV1::Unavailable {
+        reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+        observed_at,
+    };
+    let problem = remote_protocol_problem(
+        contract,
+        request_id.clone(),
+        RemoteProtocolFailureV1::AuthorityUnavailable,
+    )?;
+    RemoteProtocolResponseV1::new(request_id, authority, Err(problem))
 }

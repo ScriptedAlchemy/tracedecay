@@ -33,6 +33,14 @@ pub enum EmbeddingRuntimeFamilyV1 {
 }
 
 impl EmbeddingRuntimeFamilyV1 {
+    /// Whether this binary can execute the backend, independent of stored artifacts.
+    pub const fn is_compiled(self) -> bool {
+        match self {
+            Self::FastEmbedOrt => cfg!(all(feature = "semantic-fastembed", not(windows))),
+            Self::Model2VecStatic => cfg!(feature = "semantic-model2vec"),
+        }
+    }
+
     pub const fn runtime_family(self) -> &'static str {
         match self {
             Self::FastEmbedOrt => FASTEMBED_RUNTIME_FAMILY_V1,
@@ -168,7 +176,11 @@ mod tests {
     };
 
     use super::super::artifact_store::AdmittedArtifactV1;
-    #[cfg(not(all(feature = "semantic-fastembed", feature = "semantic-model2vec")))]
+    #[cfg(not(all(
+        feature = "semantic-fastembed",
+        not(windows),
+        feature = "semantic-model2vec"
+    )))]
     use super::super::fastembed_adapter::ManualCancellation;
     use super::super::fastembed_adapter::ProjectionArtifactPinV1;
     use super::super::fastembed_adapter::lifecycle_test_support::{
@@ -179,7 +191,11 @@ mod tests {
     use super::*;
 
     // Only a compiled-out backend surfaces a runtime failure here.
-    #[cfg(not(all(feature = "semantic-fastembed", feature = "semantic-model2vec")))]
+    #[cfg(not(all(
+        feature = "semantic-fastembed",
+        not(windows),
+        feature = "semantic-model2vec"
+    )))]
     fn runtime_failure_detail(error: EmbedError) -> String {
         match error {
             EmbedError::Runtime(failure) => failure.detail,
@@ -300,11 +316,11 @@ mod tests {
             );
             assert!(detail.contains("semantic-model2vec"), "{detail}");
         }
-        #[cfg(feature = "semantic-fastembed")]
+        #[cfg(all(feature = "semantic-fastembed", not(windows)))]
         runtime
             .verify_artifact_compatibility(&fastembed)
             .expect("FastEmbed backend admits its descriptor");
-        #[cfg(not(feature = "semantic-fastembed"))]
+        #[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
         {
             let detail = runtime_failure_detail(
                 runtime

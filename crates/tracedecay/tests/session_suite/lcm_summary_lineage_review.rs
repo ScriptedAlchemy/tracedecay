@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, LcmLineageFaultForTest};
+use tracedecay::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
+};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{

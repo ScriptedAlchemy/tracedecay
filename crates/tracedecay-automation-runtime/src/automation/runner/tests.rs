@@ -369,6 +369,10 @@ async fn automation_evidence_request_within_2mib_reaches_authorized_execution() 
     assert_eq!(execution_calls.load(Ordering::SeqCst), 1);
 }
 
+/// The retrieval service owns two separate ceilings: the grant's response
+/// budget and the ranker's input workspace. A candidate workspace past the
+/// workspace ceiling is refused at `RequestCandidateBytes` before the
+/// execution port is ever reached.
 #[tokio::test]
 async fn oversized_automation_request_preserves_candidate_stage_without_execution() {
     let execution_calls = Arc::new(AtomicUsize::new(0));
@@ -410,7 +414,7 @@ async fn oversized_automation_request_preserves_candidate_stage_without_executio
     )
     .unwrap()
     .with_execution_limits(ExecutionLimits {
-        candidate_total_bytes: usize::try_from(AUTOMATION_SESSION_MAX_BYTES + 1).unwrap(),
+        candidate_total_bytes: ExecutionLimits::default().candidate_total_bytes + 1,
         ..ExecutionLimits::default()
     });
 

@@ -9,18 +9,22 @@
 //! a tool-level refusal, not a JSON-RPC failure — without poisoning the
 //! surrounding lanes.
 
-#![cfg(feature = "semantic-fastembed")]
+#![cfg(all(feature = "semantic-fastembed", not(windows)))]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::journey_test_support::{git, tool_answer, tool_payload};
+use super::journey_test_support::{git, resolved, tool_answer, tool_payload};
 use super::semantic_activation_journey_test::{
     assert_semantic_probe_contribution, evaluate_native_profile,
     install_project_distribution_fixture, installed_selection_material, selection,
     set_semantic_profile, wait_for_semantic_generation,
+};
+use super::semantic_availability_fallback_digest::{
+    assert_activation_preserves_ranking_and_transitions_anchor,
+    assert_core_policy_evaluation_result_anchor,
 };
 use super::*;
 
@@ -61,55 +65,6 @@ pub(super) async fn answered(
 ) -> Value {
     let payload = called(harness, project, tool, arguments).await;
     resolved(harness, project, tool, payload).await
-}
-
-/// The full payload behind a possibly truncated answer.
-async fn resolved(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    tool: &str,
-    payload: Value,
-) -> Value {
-    if payload["truncated"] != json!(true) {
-        return payload;
-    }
-    let handle = payload["handle"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{tool} truncated its answer without a handle: {payload}"))
-        .to_owned();
-    // `tracedecay_retrieve` pages the stored response through
-    // `offset` / `next_offset` / `has_more`; reassemble it exactly as an
-    // agent does before parsing.
-    let mut content = String::new();
-    let mut offset = 0_u64;
-    loop {
-        let retrieved = called(
-            harness,
-            project,
-            "tracedecay_retrieve",
-            json!({"handle": handle, "format": "json", "offset": offset}),
-        )
-        .await;
-        content.push_str(
-            retrieved["content"].as_str().unwrap_or_else(|| {
-                panic!("{tool} response handle carried no content: {retrieved}")
-            }),
-        );
-        if retrieved["has_more"] != json!(true) {
-            break;
-        }
-        let next_offset = retrieved["next_offset"].as_u64().unwrap_or_else(|| {
-            panic!("{tool} retrieval reported more pages without a next offset: {retrieved}")
-        });
-        assert!(
-            next_offset > offset,
-            "{tool} retrieval did not advance past offset {offset}: {retrieved}"
-        );
-        offset = next_offset;
-    }
-    serde_json::from_str(&content).unwrap_or_else(|error| {
-        panic!("{tool} response handle content is not JSON: {error}; content={content}")
-    })
 }
 
 fn search_arguments(strict: bool) -> Value {
@@ -346,7 +301,25 @@ pub(super) fn assert_semantic_pending(payload: &Value) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retrieval_answers_before_activation() {
+    run_semantic_availability_journey(ActivationHalf::StopBeforeQualification).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_activation() {
+    run_semantic_availability_journey(ActivationHalf::ThroughActivation).await;
+}
+
+enum ActivationHalf {
+    /// Phase 1 only. Native qualification (#1197) is owned by other lanes;
+    /// this half must stay green on the redesign tip.
+    StopBeforeQualification,
+    /// Continues through evaluation and live activation as soon as
+    /// qualification publishes an accepted profile.
+    ThroughActivation,
+}
+
+async fn run_semantic_availability_journey(activation: ActivationHalf) {
     // The journey needs the byte-pinned FastEmbed package from distribution
     // acceptance; it cannot be synthesized, and a default `cargo test --lib`
     // has no reason to have it. Skip explicitly rather than fail the lane.
@@ -438,6 +411,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         fallback_digest_before.is_string(),
         "the canonical core query bytes must be published while semantic is pending"
     );
+    assert_core_policy_evaluation_result_anchor(&core_before);
 
     let (refused_before, strict_before) = strict_search(&harness, &project).await;
     assert!(
@@ -494,6 +468,11 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
             .is_some_and(|count| count > 0),
         "ordinary session retrieval must answer non-vacuously before activation: {answers_before}"
     );
+
+    if matches!(activation, ActivationHalf::StopBeforeQualification) {
+        harness.shutdown().await;
+        return;
+    }
 
     // ---- Phase 2: the real accepted-profile evaluation. -------------------
     let accepted_profile = evaluate_native_profile(&harness, &project).await;
@@ -568,10 +547,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
     for lane in ["exact", "lexical", "graph"] {
         assert_lane_complete(&core_after["coverage"], lane);
     }
-    assert_eq!(
-        core_after["query_fallback_digest"], fallback_digest_before,
-        "activation must preserve the canonical core query bytes"
-    );
+    assert_activation_preserves_ranking_and_transitions_anchor(&core_before, &core_after);
     assert_eq!(
         non_semantic_answers(&harness, &project).await,
         answers_before,

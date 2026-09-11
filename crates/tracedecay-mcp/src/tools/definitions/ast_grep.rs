@@ -1,6 +1,7 @@
 //! External ast-grep CLI capability detection shared by tool gating.
 
 use serde_json::{Value, json};
+use tracedecay_runtime_core::ast_grep::ast_grep_command;
 
 const MIN_AST_GREP_OUTLINE_VERSION: (u64, u64, u64) = (0, 44, 0);
 
@@ -63,10 +64,7 @@ fn parse_ast_grep_version(text: &str) -> Option<(String, (u64, u64, u64))> {
 }
 
 fn ast_grep_diagnostics_uncached() -> AstGrepDiagnostics {
-    let version_output = match crate::host_cli::ast_grep_command()
-        .arg("--version")
-        .output()
-    {
+    let version_output = match ast_grep_command().arg("--version").output() {
         Ok(output) => output,
         Err(err) => {
             return AstGrepDiagnostics {
@@ -101,9 +99,7 @@ fn ast_grep_diagnostics_uncached() -> AstGrepDiagnostics {
     let (version, version_tuple) =
         parse_ast_grep_version(&version_text).unwrap_or_else(|| (version_text.clone(), (0, 0, 0)));
     let outline_version_ok = version_tuple >= MIN_AST_GREP_OUTLINE_VERSION;
-    let help_output = crate::host_cli::ast_grep_command()
-        .args(["outline", "--help"])
-        .output();
+    let help_output = ast_grep_command().args(["outline", "--help"]).output();
     let (outline_flags_ok, help_detail) = match help_output {
         Ok(output) => {
             let help_text = ast_grep_output_text(&output);

@@ -5,7 +5,7 @@
 //! longer relinks a dozen ~700 MiB test binaries.
 
 #![recursion_limit = "256"]
-
+#![allow(clippy::too_many_lines)]
 mod api_application_parity;
 mod catalog_composition_contract;
 mod git_intelligence_regression;

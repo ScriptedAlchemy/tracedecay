@@ -298,7 +298,7 @@ function CodeIndexPipeline({
 function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }) {
   const percentage = codeIndexProgressPercentage(progress);
   const hasRate =
-    progress.files_per_second != null && progress.lexical_bytes_per_second != null;
+    progress.files_per_second != null && progress.lexical_units_per_second != null;
   return (
     <article
       className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2.5"
@@ -327,7 +327,7 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
         <dt className="text-text-muted">throughput</dt>
         <dd className="text-right text-text-secondary">
           {hasRate
-            ? `${formatCount(progress.files_per_second)} files/s · ${formatBytes(progress.lexical_bytes_per_second)} lexical bytes/s`
+            ? `${formatCount(progress.files_per_second)} files/s · ${formatCount(progress.lexical_units_per_second)} lexical units/s`
             : 'throughput unavailable'}
         </dd>
         <dt className="text-text-muted">elapsed</dt>
@@ -447,8 +447,8 @@ function isCurrentOrNewerCodeIndexProgress(
 
 function codeIndexProgressPercentage(progress: CodeIndexBuildProgressV1): number {
   const completed =
-    progress.total_lexical_bytes > 0
-      ? progress.completed_lexical_bytes / progress.total_lexical_bytes
+    progress.total_lexical_units > 0
+      ? progress.completed_lexical_units / progress.total_lexical_units
       : progress.phase === 'ready'
         ? 1
         : 0;

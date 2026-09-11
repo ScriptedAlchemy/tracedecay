@@ -134,6 +134,11 @@ where
         while workers.len() < connections {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // macOS `accept` inherits `O_NONBLOCK` from a non-blocking
+                    // listener, so the first `read` returns `WouldBlock`.
+                    stream
+                        .set_nonblocking(false)
+                        .expect("accepted fake daemon stream must be blocking");
                     stream
                         .set_read_timeout(Some(LOCAL_TIMEOUT))
                         .expect("set read timeout");

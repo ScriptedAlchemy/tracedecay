@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// A nonterminal attempt is actionable only until a committed retry receipt
+/// replaces its capacity and recovery authority with the named new attempt.
+/// Queries using this predicate must alias `work_attempts_v1` as `attempt`.
+pub(crate) const ACTIVE_ATTEMPT_PREDICATE: &str = "attempt.terminal = 0
+    AND NOT EXISTS (
+        SELECT 1 FROM work_retry_receipts_v1 AS retry
+        WHERE retry.project_id = attempt.project_id
+          AND retry.repository_id = attempt.repository_id
+          AND retry.worktree_id = attempt.worktree_id
+          AND retry.actor_id = attempt.actor_id
+          AND retry.policy_digest = attempt.policy_digest
+          AND retry.task_id = attempt.task_id
+          AND retry.run_id = attempt.run_id
+          AND retry.original_attempt_id = attempt.attempt_id
+    )";
+
 pub(crate) fn authority_params(authority: &WorkAuthority) -> [&str; 5] {
     [
         authority.project_id().as_str(),

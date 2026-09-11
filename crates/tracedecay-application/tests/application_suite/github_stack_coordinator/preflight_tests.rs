@@ -6,19 +6,21 @@ use std::sync::{Arc, Condvar, Mutex};
 use tracedecay_application::stack_coordinator::*;
 use tracedecay_contracts::{
     AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, NativeIntegrationEvidenceRevisionsV1,
-    NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
-    NativeIntegrationSelectionBindingV1, NativeIntegrationStackResolutionRequestV1, RequestContext,
-    RequestId, ResolvedScope,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, NativeIntegrationPreflightOutcomeV1,
+    NativeIntegrationPreflightRequestV1, NativeIntegrationSelectionBindingV1,
+    NativeIntegrationStackResolutionRequestV1, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
-    BranchStackRevisionV1, BranchStackSourceV1, CommitId, FrozenIndependentBranchSelectionV1,
-    GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, MechanicalIntegrationModeV1,
-    NativeIntegrationDirectionV1, NativeIntegrationPreviewDispositionV1,
-    NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationRepositorySnapshotV1,
-    NativeIntegrationSelectionV1, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
-    StackNodeId, UtcMicros, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    BranchStackRevisionV1, BranchStackSourceV1, CodeGenerationId, CommitId, ContentDigest,
+    FrozenIndependentBranchSelectionV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
+    GitOperationStateV1, MechanicalIntegrationModeV1, NativeIntegrationAnalysisCoverageV1,
+    NativeIntegrationAnalysisLaneV1, NativeIntegrationAnalysisReportV1,
+    NativeIntegrationDirectionV1, NativeIntegrationGenerationBindingV1,
+    NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
+    NativeIntegrationRepositorySnapshotV1, NativeIntegrationSelectionV1, ProjectId, RefId,
+    RepositoryId, ScopeSetId, ScopeSetRevision, StackNodeId, UtcMicros, WorktreeId,
+    WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -26,6 +28,57 @@ use super::{actor, digest};
 
 fn oid(seed: char) -> GitOidV1 {
     GitOidV1::new(seed.to_string().repeat(40)).unwrap()
+}
+
+fn complete_analysis(
+    snapshot: &NativeIntegrationRepositorySnapshotV1,
+) -> NativeIntegrationAnalysisReportV1 {
+    let binding = |name: &str, revision: Option<GitOidV1>, tree: GitOidV1| {
+        NativeIntegrationGenerationBindingV1 {
+            generation_id: CodeGenerationId::new(format!("generation.stack.preview.{name}"))
+                .unwrap(),
+            project_id: snapshot.project_id.clone(),
+            repository_id: snapshot.repository_id.clone(),
+            worktree_id: None,
+            reference: Some(if name == "source" || name == "merge-base" {
+                snapshot.source_ref.clone()
+            } else {
+                snapshot.destination_ref.clone()
+            }),
+            snapshot_digest: digest('e'),
+            content_identity: ContentDigest::new(digest('f').as_str().to_owned()).unwrap(),
+            source_revision: revision,
+            source_tree: tree,
+            seal_digest: digest('0'),
+        }
+    };
+    let complete = NativeIntegrationAnalysisLaneV1 {
+        coverage: NativeIntegrationAnalysisCoverageV1::Complete,
+        gaps: Vec::new(),
+    };
+    NativeIntegrationAnalysisReportV1 {
+        merge_base: binding("merge-base", Some(snapshot.merge_base.clone()), oid('a')),
+        source: binding(
+            "source",
+            Some(snapshot.source_tip.clone()),
+            snapshot.source_tree.clone(),
+        ),
+        destination: binding(
+            "destination",
+            Some(snapshot.destination_tip.clone()),
+            snapshot.destination_tree.clone(),
+        ),
+        candidate: binding("candidate", None, snapshot.source_tree.clone()),
+        graph: complete.clone(),
+        tests: complete.clone(),
+        schema: complete.clone(),
+        migrations: complete,
+        conflicts: Vec::new(),
+        analyzer_revision: "native-stack-preview-test.v1".to_owned(),
+        digest: digest('1'),
+    }
+    .seal()
+    .unwrap()
 }
 
 fn complete_preview() -> NativeIntegrationPreviewV1 {
@@ -75,16 +128,14 @@ fn complete_preview() -> NativeIntegrationPreviewV1 {
     }
     .seal()
     .unwrap();
+    let analysis = complete_analysis(&repository_snapshot);
     NativeIntegrationPreviewV1 {
         preview_id: NativeIntegrationPreviewId::new("preview.stack.complete").unwrap(),
         selection: NativeIntegrationSelectionV1::IndependentBranch(selection),
         repository_snapshot,
         grant_digest: digest('c'),
         policy_digest: digest('d'),
-        graph_revision_digest: digest('e'),
-        test_revision_digest: digest('f'),
-        schema_revision_digest: digest('0'),
-        migration_revision_digest: digest('1'),
+        analysis: Some(analysis),
         disposition: NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(
             MechanicalIntegrationModeV1::TwoParentMerge,
         ),
@@ -266,12 +317,6 @@ fn preflight_request(index: usize) -> NativeIntegrationPreflightRequestV1 {
             grant_digest: digest('e'),
             policy_digest: digest('2'),
             observed_at: UtcMicros(2),
-        },
-        evidence: NativeIntegrationEvidenceRevisionsV1 {
-            graph_revision_digest: digest('3'),
-            test_revision_digest: digest('4'),
-            schema_revision_digest: digest('5'),
-            migration_revision_digest: digest('6'),
         },
         preview_id: NativeIntegrationPreviewId::new(format!("preview.stack.{index}")).unwrap(),
         preferred_mode: None,

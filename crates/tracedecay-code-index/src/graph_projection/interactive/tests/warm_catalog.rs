@@ -87,15 +87,6 @@ fn assert_catalog_is_cold(store: &CodeGraphProjectionStore) {
     );
 }
 
-fn assert_catalog_state_is_cold(store: &CodeGraphProjectionStore) {
-    let state = store
-        .interactive_catalog
-        .state
-        .read()
-        .expect("interactive catalog lock");
-    assert!(matches!(*state, InteractiveCatalogState::Cold));
-}
-
 fn assert_catalog_is_warming(store: &CodeGraphProjectionStore) {
     assert!(
         store
@@ -145,6 +136,41 @@ fn many_import_manifest() -> GraphGenerationManifest {
 }
 
 #[test]
+fn background_marked_catalog_refuses_without_scanning_on_the_request_path() {
+    let store = store_for(production_manifest());
+    store
+        .mark_interactive_catalog_warming()
+        .expect("mark background catalog warm");
+    assert_eq!(
+        reader(&store)
+            .resolve_qualified_name("beta::run", None, 8, request())
+            .expect_err("a request must not take over the background catalog scan"),
+        CodeGraphProjectionError::Unavailable(
+            "code graph interactive catalog is warming in the background".to_owned()
+        )
+    );
+    assert_eq!(store.interactive_catalog_scan_builds(), 0);
+}
+
+#[test]
+fn warmed_symbol_catalog_serves_a_budget_that_cannot_scan_the_projection() {
+    let warm_store = store_for(production_manifest());
+    assert_catalog_is_cold(&warm_store);
+    warm_store
+        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
+        .expect("warm valid symbol catalog");
+    assert!(
+        warm_store
+            .interactive_catalog_is_warm()
+            .expect("read warm state")
+    );
+    let hits = reader(&warm_store)
+        .resolve_qualified_name("beta::run", None, 8, cancellation_budget(3))
+        .expect("bounded lookup reuses the warm catalog");
+    assert_eq!(occurrences(&hits), vec!["sym.beta.run".to_owned()]);
+}
+
+#[test]
 fn cached_warm_still_honors_cancellation() {
     let store = store_for(production_manifest());
     store
@@ -159,7 +185,7 @@ fn cached_warm_still_honors_cancellation() {
 }
 
 #[test]
-fn pre_cancelled_background_warm_restores_the_marked_catalog_to_cold() {
+fn pre_cancelled_warm_preserves_background_ownership() {
     let store = store_for(production_manifest());
     store
         .mark_interactive_catalog_warming()
@@ -168,10 +194,17 @@ fn pre_cancelled_background_warm_restores_the_marked_catalog_to_cold() {
     assert_eq!(
         store
             .warm_interactive_catalog_with_cancellation(Arc::new(CancelledNow))
-            .expect_err("pre-cancelled background warm is refused"),
+            .expect_err("pre-cancelled warm is refused"),
         CodeGraphProjectionError::Cancelled
     );
-    assert_catalog_state_is_cold(&store);
+    assert!(matches!(
+        *store
+            .interactive_catalog
+            .state
+            .read()
+            .expect("interactive catalog lock"),
+        InteractiveCatalogState::Warming { owner: None }
+    ));
     store
         .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
         .expect("a later background warm can retry");
@@ -351,7 +384,7 @@ fn corrupt_import_payload_and_link_fail_warming_without_exposure() {
 }
 
 #[test]
-fn cancellation_during_warm_leaves_the_catalog_cold() {
+fn cancellation_during_background_warm_preserves_warming_ownership() {
     let cached_baseline = store_for(many_import_manifest());
     cached_baseline
         .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
@@ -367,6 +400,9 @@ fn cancellation_during_warm_leaves_the_catalog_cold() {
         cancelled: AtomicBool::new(false),
     });
     let store = Arc::new(store_for(many_import_manifest()));
+    store
+        .mark_interactive_catalog_warming()
+        .expect("mark background catalog warm");
     let warm_store = Arc::clone(&store);
     let warm_cancellation = Arc::clone(&cancellation);
     let warmer = thread::spawn(move || {
@@ -384,13 +420,20 @@ fn cancellation_during_warm_leaves_the_catalog_cold() {
             .expect_err("warm is cancelled during the projection scan"),
         CodeGraphProjectionError::Cancelled
     );
-    assert_catalog_is_cold(&store);
-    assert_eq!(
-        reader(&store)
-            .external_type_import_candidates("pkg", None, 1, cancellation_budget(6))
-            .expect_err("cancelled warm did not make the catalog usable"),
-        CodeGraphProjectionError::Cancelled
-    );
+    assert!(matches!(
+        *store
+            .interactive_catalog
+            .state
+            .read()
+            .expect("interactive catalog lock"),
+        InteractiveCatalogState::Warming { owner: None }
+    ));
+    assert!(matches!(
+        reader(&store).external_type_import_candidates("pkg", None, 1, request()),
+        Err(CodeGraphProjectionError::Unavailable(detail))
+            if detail.contains("warming in the background")
+    ));
+    assert_eq!(store.interactive_catalog_scan_builds(), 1);
 }
 
 #[test]

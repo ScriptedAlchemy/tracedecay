@@ -35,7 +35,6 @@ task = "what does world do"
             max_nodes: 20,
         },
     )
-    .await
     .expect_err("bench must not bypass admitted graph authority");
 
     match error {

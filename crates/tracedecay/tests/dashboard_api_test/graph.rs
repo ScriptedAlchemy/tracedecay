@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, create_runtime, get_json, http_agent,
-    pick_free_port, tempdir_or_panic, wait_for_dashboard,
+    GLOBAL_DB_ENV_LOCK, TraceDecayStorageEnvGuard, canonicalize_test_dir, create_runtime, get_json,
+    http_agent, pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
 use crate::dashboard_api_support::write_file;
 use crate::runtime::DashboardTestRuntimeV1;
@@ -23,7 +23,6 @@ fn assert_ready_verified_generation(body: &Value) {
         "graph reads must carry their verified generation: {body}"
     );
 }
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_code_index::graph_projection::{
@@ -54,8 +53,7 @@ use tracedecay_session_memory::context::RegisteredScopeResolver;
 
 struct DashboardFixture {
     _tmp: TempDir,
-    _env_guard: EnvVarGuard,
-    _data_dir_guard: EnvVarGuard,
+    _storage: TraceDecayStorageEnvGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
 }
@@ -200,14 +198,14 @@ async fn setup_project(
         &project_root.join("tests/dashboard_graph.rs"),
         "\n\n\n\n\n\n\n\n\n\n\nfn route_graph_test() {}\n",
     );
+    // Path-derived production identity so two fixtures never share a ProjectId.
+    let project_id =
+        ProjectId::new(tracedecay_runtime_core::storage::default_profile_project_id(project_root))
+            .expect("project identity");
     let runtime = std::sync::Arc::new(
-        DashboardTestRuntimeV1::project(
-            profile_root,
-            project_root,
-            ProjectId::new("dashboard_graph_fixture").expect("project identity"),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("open dashboard graph authority: {error}")),
+        DashboardTestRuntimeV1::project(profile_root, project_root, project_id)
+            .await
+            .unwrap_or_else(|error| panic!("open dashboard graph authority: {error}")),
     );
     let graph = runtime
         .initialize_project_graph_for_test(
@@ -461,6 +459,9 @@ fn compose_graph_authority(
                         .saturating_add(1),
                     start_line: node.start_line,
                     signature: node.signature.clone(),
+                    docstring: node.docstring.clone(),
+                    is_async: false,
+                    derives: Vec::new(),
                     skip_test_coverage: false,
                     file_identity: FileIdentityDigest::new(fixture_digest(
                         "dashboard-file-identity",
@@ -613,11 +614,12 @@ async fn start_dashboard_fixture_full(
     freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
-    let project_root = tmp.path().join("project");
-    let global_db_path = tmp.path().join("global").join("global.db");
-    let profile_root = tmp.path().join("profile").join(".tracedecay");
-    let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-    let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
+    // Canonicalize before the first project-session registration: later
+    // composers canonicalize again, and the in-process resolver treats
+    // `/var/folders` vs `/private/var/folders` as DuplicateProjectAuthority.
+    let storage = TraceDecayStorageEnvGuard::for_tempdir(&tmp);
+    let project_root = canonicalize_test_dir(&tmp.path().join("project"));
+    let profile_root = storage.profile_root().to_path_buf();
     let (cg, host_runtime) = setup_project(&project_root, &profile_root).await;
     let mut graph_seed = seed_graph_fixture();
     if with_orphan {
@@ -661,8 +663,7 @@ async fn start_dashboard_fixture_full(
 
     DashboardFixture {
         _tmp: tmp,
-        _env_guard: env_guard,
-        _data_dir_guard: data_dir_guard,
+        _storage: storage,
         base_url,
         server,
     }

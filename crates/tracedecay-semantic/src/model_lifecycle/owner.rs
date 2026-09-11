@@ -625,11 +625,20 @@ impl SemanticModelLifecycleOwnerV1 {
         ) {
             remediation.rollback = true;
         }
-        let semantics_omitted = guard
+        // Durable readiness describes verified artifacts. Executability belongs
+        // to this binary and must never retire another runtime's valid install.
+        let runtime_available = guard
             .durable
-            .state
-            .as_ref()
-            .is_none_or(SemanticModelLifecycleStateV1::omits_semantics);
+            .selected_model
+            .as_deref()
+            .and_then(|id| self.catalog.get(id))
+            .is_some_and(|model| model.backend.runtime_family().is_compiled());
+        let semantics_omitted = !runtime_available
+            || guard
+                .durable
+                .state
+                .as_ref()
+                .is_none_or(SemanticModelLifecycleStateV1::omits_semantics);
         SemanticModelLifecycleStatusV1 {
             selected_model: guard.durable.selected_model.clone(),
             auto_download: guard.durable.auto_download,
@@ -798,20 +807,12 @@ impl SemanticModelLifecycleOwnerV1 {
             .artifact_store
             .installed_digest(&durable_install_path)
             .ok_or(ModelLifecycleErrorV1::VerificationFailed)?;
-        let environment =
-            RuntimeEnvironmentV1::detect_embedding_process(model.backend.runtime_family())
-                .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        let admitted = self
-            .artifact_store
-            .admit_leased_for_runtime_by_digest(
-                &digest,
-                &environment,
-                &self.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1),
-                ArtifactLeaseKindV1::Active,
-                current_unix_seconds()?,
-            )
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        verify_catalog_manifest(model, admitted.manifest())?;
+        let record = self.artifact_store.verified_installed_record(&digest)?;
+        let manifest = record
+            .manifest
+            .as_ref()
+            .ok_or(ModelLifecycleErrorV1::VerificationFailed)?;
+        verify_catalog_manifest(model, manifest)?;
         let install_path = self.artifact_store.installed_directory(&digest);
         Ok(Some(if was_ready {
             SemanticModelLifecycleStateV1::Ready {

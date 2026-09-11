@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use serde_json::Value;
 use tracedecay_contracts::{
@@ -8,9 +8,11 @@ use tracedecay_contracts::{
 };
 use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
-use crate::application_surface::separate_application_tool_request;
-use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::tracedecay::TraceDecay;
+use tracedecay_contracts::catalog_composition::{
+    ApplicationCatalogComposition, compose_application_catalog,
+};
+use tracedecay_daemon_protocol::separate_application_tool_request;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{ToolCallRegistryOptions, application_surface};
@@ -184,9 +186,11 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     tool_name: &str,
     mut args: Value,
     runtime_registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
-    authority: &crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
+    authority: &tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
     lcm_authority: Option<&dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
-    session_refresh: Option<&dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1>,
+    session_refresh: Option<
+        &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
+    >,
     protocol_request_id: Option<tracedecay_contracts::RequestId>,
     protocol_deadline: Option<tracedecay_contracts::Deadline>,
     protocol_cancellation: Option<tracedecay_contracts::CancellationSignal>,
@@ -204,7 +208,10 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     let requested_format = normalized.requested_format;
     let typed_request = hotpath::measure_block!(
         "mcp.retained.profile.decode",
-        crate::application_surface::retained::decode_request(operation, normalized.request)
+        tracedecay_daemon_service::application_surface::retained::decode_request(
+            operation,
+            normalized.request
+        )
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("invalid retained application request for {tool_name}: {error}"),
@@ -233,13 +240,19 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
         )
     })?;
     let result = hotpath::future!(
-        crate::daemon::retained_owner::execute_profile_retained_application(
-            crate::daemon::retained_owner::ProfileRetainedAuthoritiesV1 {
-                runtime_registry: Some(runtime_registry),
+        tracedecay_session_runtime::retained::execute_profile_retained_application(
+            tracedecay_session_runtime::retained::ProfileRetainedAuthoritiesV1 {
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity: authority.session_identity().clone(),
                 configuration_digest: authority.configuration_digest().clone(),
                 lcm_authority,
                 session_refresh,
+                memory: Some(Arc::new(
+                    tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::profile(
+                        runtime_registry,
+                        authority.configuration_digest().clone(),
+                    ),
+                )),
             },
             authority,
             typed_request,

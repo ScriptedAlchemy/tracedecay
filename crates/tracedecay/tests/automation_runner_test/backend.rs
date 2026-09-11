@@ -314,7 +314,7 @@ fn fake_codex_app_server_returns_summary_and_logs_protocol() {
     assert!(messages[3]["params"].get("outputSchema").is_none());
     assert!(messages[3]["params"].get("maxOutputTokens").is_none());
     assert!(messages[3]["params"].get("temperature").is_none());
-    assert_eq!(messages[3]["params"]["effort"], "low");
+    assert_eq!(messages[3]["params"]["effort"], "medium");
     assert_eq!(messages[3]["params"]["summary"], "concise");
     assert_eq!(
         messages[3]["params"]["input"][0]["text"],

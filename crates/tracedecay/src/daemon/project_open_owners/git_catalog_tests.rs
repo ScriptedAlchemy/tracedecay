@@ -1,5 +1,5 @@
-use super::{GRANT_HORIZON, daemon_owned_project_source_access_at};
 use crate::runtime_ports::compose_application_catalog_snapshot;
+use crate::test_support::git::GIT_FIXTURE_CONFIG;
 use tracedecay_application::git_intelligence::NativeGitIntelligence;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_contracts::git::GitIndexTransactionPortError;
@@ -8,6 +8,7 @@ use tracedecay_contracts::{
     DisclosureClass, GitIndexOperationBindingV1, GitIndexPreviewRequestV1, GitIndexTransactionPort,
     IdempotencyKey, OperationTermination, PolicyDecisionRef, RequestContext, RequestId,
 };
+use tracedecay_daemon_service::{GRANT_HORIZON, daemon_owned_project_source_access_at};
 use tracedecay_domain::git::{
     GitDiffScopeV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
     GitIndexTransactionOperationV1, GitIndexUnsupportedStateV1,
@@ -41,7 +42,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     git(&project_root, &["add", "."]);
     git(&project_root, &["commit", "-m", "fixture"]);
     let project_id = ProjectId::new("project.git-catalog").unwrap();
-    let fixture = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let fixture = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
         &profile_root,
         &project_root,
         project_id.clone(),
@@ -269,14 +270,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
 
 fn git(root: &std::path::Path, arguments: &[&str]) -> Vec<u8> {
     let output = std::process::Command::new("git")
-        .args([
-            "-c",
-            "core.hooksPath=.git/no-hooks",
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.com",
-        ])
+        .args(GIT_FIXTURE_CONFIG)
         .args(arguments)
         .current_dir(root)
         .output()

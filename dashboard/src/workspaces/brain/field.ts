@@ -311,9 +311,9 @@ export function composeRegistryField(
   const edges: FieldEdge[] = [];
   let sharedRepoCount = 0;
   for (const group of groups) {
-    if (group.projects.length < 2) continue;
+    if (group.projects.length < 2 || group.git_common_dir == null) continue;
     sharedRepoCount += 1;
-    const hubId = `repo:${group.git_common_dir ?? group.label}`;
+    const hubId = `repo:${group.git_common_dir}`;
     const anchors = group.projects
       .map((project) => placedById.get(project.project_id))
       .filter((point): point is { x: number; y: number } => point != null);

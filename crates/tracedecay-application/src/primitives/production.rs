@@ -13,17 +13,17 @@ use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1,
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, HealthDeltaRequest,
     HealthDeltaResult, HealthReadRequest, HealthReadResult, OperationalRetrievalPort,
-    RankedAffectedTestV1, RetrievalPortContext, RetrievalPortOutcome, SourceLinesRequest,
-    SourceLinesResult, SourceReference, SourceRetrievalPort, SymbolPrimitiveRecord,
-    TemporalRetrievalPort, TestMapCoverageV1, TestMapPrimitiveRequest, TestMapPrimitiveResultV1,
-    TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
-    TestReferenceV1, UncoveredSourceV1,
+    RankedAffectedTestV1, ResultProjection, RetrievalPortContext, RetrievalPortOutcome,
+    SourceLinesRequest, SourceLinesResult, SourceReference, SourceRetrievalPort,
+    SymbolPrimitiveRecord, TemporalRetrievalPort, TestMapCoverageV1, TestMapPrimitiveRequest,
+    TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture,
+    TestPrimitivePortOutcome, TestReferenceV1, UncoveredSourceV1,
 };
 use tracedecay_contracts::{
-    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
-    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, PageCursor, PageState, RequestAdmission, RequestContext,
-    ResolvedScope, RetrievalEvidence, TemporalState, now_micros,
+    ApplicationContractError, CoverageCompleteness, CoverageDomainState, DisclosureClass,
+    EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState,
+    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor, PageState,
+    RequestAdmission, RequestContext, ResolvedScope, RetrievalEvidence, TemporalState, now_micros,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
@@ -42,7 +42,6 @@ use super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, ExtendedPrimitiveFuture,
     ExtendedPrimitivePort, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
-    FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, FileMetadataRecord,
     ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
     ManagedTestRunCurrentScopePort, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
     PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
@@ -68,7 +67,8 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_code_index::grep_search::{
-    GrepSearchQuery, search_tree_with_cancel as lexical_search_tree_with_cancel,
+    GrepSearchQuery, MAX_INTERACTIVE_SOURCE_BYTES,
+    search_tree_with_cancel as lexical_search_tree_with_cancel,
 };
 use tracedecay_code_index::provider::{
     GenerationProviderCoverageV1, GenerationProviderReadV1, GenerationTestAttributionJoinReadPort,
@@ -746,20 +746,12 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
     }
 }
 
-pub struct TraceDecayRedundancyAuthorityV1 {
-    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
-}
-
-impl TraceDecayRedundancyAuthorityV1 {
-    pub fn new(code_graph: Arc<dyn CodeGraphProjectionReadPort>) -> Self {
-        Self { code_graph }
-    }
-}
+pub struct TraceDecayRedundancyAuthorityV1;
 
 impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
     fn redundancy<'a>(
         &'a self,
-        context: &'a PrimitivePortContextV1<'a>,
+        _context: &'a PrimitivePortContextV1<'a>,
         request: &'a RedundancyRequestV1,
     ) -> PrimitiveFutureV1<'a, RedundancyResultV1> {
         Box::pin(hotpath::future!(
@@ -769,7 +761,6 @@ impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
                         "compatibility cursor unsupported".to_owned(),
                     ));
                 }
-                let _ = (&self.code_graph, request, context.scope_prefix);
                 PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
                     "the verified graph generation does not publish redundancy fingerprints"
                         .to_owned(),
@@ -1052,61 +1043,114 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
 
 pub struct TraceDecaySourceLinesPortV1 {
     source_runtime: Arc<SourceReadContext>,
+    code_index_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
 }
 
 impl TraceDecaySourceLinesPortV1 {
-    pub fn new(source_runtime: Arc<SourceReadContext>) -> Self {
-        Self { source_runtime }
+    pub fn new(
+        source_runtime: Arc<SourceReadContext>,
+        code_index_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    ) -> Self {
+        Self {
+            source_runtime,
+            code_index_identity,
+        }
     }
 }
 
 impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
-    #[hotpath::measure(label = "usecases.primitives.source_lines")]
-    fn source_lines(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &SourceLinesRequest,
-    ) -> RetrievalPortOutcome<SourceLinesResult> {
-        let _ = context;
-        let finished_at = now_observed();
-        if request.span.validate().is_err() {
-            return failed(EvidenceDomain::Source, finished_at);
-        }
-        let relative = request.file.as_str();
-        let path = self.source_runtime.project_root().join(relative);
-        let Ok(bytes) = std::fs::read(&path) else {
-            return failed(EvidenceDomain::Source, finished_at);
-        };
-        let start = request.span.start_byte as usize;
-        let end = request.span.end_byte as usize;
-        if end > bytes.len() || start > end {
-            return failed(EvidenceDomain::Source, finished_at);
-        }
-        let Ok(digest) = canonical_sha256(&(
-            "tracedecay.primitive.source-lines.v1",
-            relative,
-            request.span.start_byte,
-            request.span.end_byte,
-            &bytes[start..end],
-        )) else {
-            return failed(EvidenceDomain::Source, finished_at);
-        };
-        let Ok(anchor) = RetrievalAnchorId::new(format!(
-            "anchor.source-lines.{}",
-            digest.as_str().trim_start_matches("sha256:")
-        )) else {
-            return failed(EvidenceDomain::Source, finished_at);
-        };
-        completed(
-            SourceLinesResult {
-                references: vec![SourceReference {
-                    anchor,
-                    span: request.span,
-                }],
+    fn source_lines<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a SourceLinesRequest,
+    ) -> ExtendedPrimitiveFuture<'a, SourceLinesResult> {
+        Box::pin(hotpath::future!(
+            async move {
+                let finished_at = now_observed();
+                let unavailable =
+                    |reason| evidence_unavailable(EvidenceDomain::Source, finished_at, reason, 0);
+                if request.span.validate().is_err()
+                    || request.span.len() > MAX_INTERACTIVE_SOURCE_BYTES
+                {
+                    return failed(EvidenceDomain::Source, finished_at);
+                }
+                let disclose_source = match request.meta.projection {
+                    ResultProjection::Evidence
+                        if context.request.grant().disclosure >= DisclosureClass::Evidence =>
+                    {
+                        true
+                    }
+                    ResultProjection::Evidence => {
+                        return unavailable(OmissionReason::Redacted);
+                    }
+                    ResultProjection::Summary | ResultProjection::ReferencesOnly => false,
+                };
+                let Some(identity) = self
+                    .code_index_identity
+                    .resolve_current_for_scope(
+                        self.source_runtime.project_root().to_path_buf(),
+                        context.request.scope().clone(),
+                    )
+                    .await
+                else {
+                    return unavailable(OmissionReason::Unavailable);
+                };
+                let Some(relative) = identity.logical_path(&request.file) else {
+                    return unavailable(OmissionReason::Stale);
+                };
+                let Ok(bytes) =
+                    tokio::fs::read(self.source_runtime.project_root().join(relative)).await
+                else {
+                    return unavailable(OmissionReason::Unavailable);
+                };
+                let Some((_, indexed_digest)) = identity.file(relative) else {
+                    return unavailable(OmissionReason::Stale);
+                };
+                if &tracedecay_code_index::intake::content_digest(&bytes) != indexed_digest {
+                    return unavailable(OmissionReason::Stale);
+                }
+                let (Ok(start), Ok(end)) = (
+                    usize::try_from(request.span.start_byte),
+                    usize::try_from(request.span.end_byte),
+                ) else {
+                    return failed(EvidenceDomain::Source, finished_at);
+                };
+                if end > bytes.len() || start > end {
+                    return failed(EvidenceDomain::Source, finished_at);
+                }
+                let Ok(body) = std::str::from_utf8(&bytes[start..end]) else {
+                    return failed(EvidenceDomain::Source, finished_at);
+                };
+                let Ok(digest) = canonical_sha256(&(
+                    "tracedecay.primitive.source-lines.v1",
+                    relative,
+                    request.span.start_byte,
+                    request.span.end_byte,
+                    &bytes[start..end],
+                )) else {
+                    return failed(EvidenceDomain::Source, finished_at);
+                };
+                let Ok(anchor) = RetrievalAnchorId::new(format!(
+                    "anchor.source-lines.{}",
+                    digest.as_str().trim_start_matches("sha256:")
+                )) else {
+                    return failed(EvidenceDomain::Source, finished_at);
+                };
+                completed(
+                    SourceLinesResult {
+                        file: disclose_source.then(|| relative.to_owned()),
+                        body: disclose_source.then(|| body.to_owned()),
+                        references: vec![SourceReference {
+                            anchor,
+                            span: request.span,
+                        }],
+                    },
+                    EvidenceDomain::Source,
+                    finished_at,
+                )
             },
-            EvidenceDomain::Source,
-            finished_at,
-        )
+            label = "usecases.primitives.source_lines"
+        ))
     }
 }
 
@@ -1788,45 +1832,6 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         ))
     }
 
-    fn file_metadata<'a>(
-        &'a self,
-        _context: RetrievalPortContext<'a>,
-        request: &'a FileMetadataPrimitiveRequest,
-    ) -> ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult> {
-        Box::pin(hotpath::future!(
-            async move {
-                let root = self.source_runtime.project_root().to_path_buf();
-                let mut handles = Vec::with_capacity(request.files.len());
-                for file in &request.files {
-                    let path = root.join(file);
-                    let file = file.clone();
-                    handles.push(tokio::spawn(async move {
-                        let meta = tokio::fs::metadata(path).await.ok();
-                        FileMetadataRecord {
-                            file,
-                            language: None,
-                            indexed_at: None,
-                            byte_size: meta.map(|value| value.len()),
-                        }
-                    }));
-                }
-                let mut files = Vec::with_capacity(handles.len());
-                for handle in handles {
-                    match handle.await {
-                        Ok(record) => files.push(record),
-                        Err(_) => return failed(EvidenceDomain::Source, now_observed()),
-                    }
-                }
-                completed(
-                    FileMetadataPrimitiveResult { files },
-                    EvidenceDomain::Source,
-                    now_observed(),
-                )
-            },
-            label = "usecases.primitives.file_metadata"
-        ))
-    }
-
     fn health_delta<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
@@ -1925,6 +1930,16 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 if !(1..=1_000).contains(&request.maximum_diagnostics) {
                     return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
                 }
+                let query = DiagnosticsQuery::new(self.database.clone());
+                let current = query.current_generation().await;
+                let Some(current_generation) = current.generation else {
+                    // No diagnostic publication means there is no retained
+                    // source identity to validate yet.
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                };
+                if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
                 let Some(identity) = self
                     .diagnostic_identity
                     .resolve(self.source_runtime.project_root().to_path_buf())
@@ -1978,23 +1993,6 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 };
                 if current_index.code_generation_id != *identity.generation_id() {
                     return diagnostics_unavailable(finished_at, OmissionReason::Stale);
-                }
-                let query = DiagnosticsQuery::new(self.database.clone());
-                let current = query.current_generation().await;
-                let Some(current_generation) = current.generation else {
-                    // The store answered and holds no published generation at
-                    // all: no diagnostic producer has ever published for this
-                    // project. That is a terminal absence, not readiness. It is
-                    // cleared only by running a producer, never by re-issuing
-                    // this read, so reporting it as a retryable pre-admission
-                    // state told every caller to spin against a state its own
-                    // retries cannot change. `Stale` below still covers the
-                    // transient case where a producer published for an earlier
-                    // code generation.
-                    return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
-                };
-                if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
-                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
                 }
                 if current_generation != *identity.generation_id() {
                     return diagnostics_unavailable(finished_at, OmissionReason::Stale);
@@ -2142,10 +2140,13 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                 .code_index
                 .current_identity(self.project_root.clone(), None)
                 .await
-                .map_err(|_| {
+                .map_err(|failure| {
                     symbol_graph_snapshot_failure(
                         "application.symbol-graph.identity",
-                        "could not read the current symbol-graph identity",
+                        &format!(
+                            "could not read the current symbol-graph identity: {}",
+                            failure.class()
+                        ),
                     )
                 })?
                 .admit_worktree_scope(&self.scope)
@@ -2279,7 +2280,11 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                     "could not authorize temporal snapshot",
                 )
             })?;
-            Ok(SymbolGraphCursorSnapshot::new(temporal, code_generation_id))
+            Ok(SymbolGraphCursorSnapshot::new(
+                temporal,
+                code_generation_id,
+                graph_identity.freshness,
+            ))
         })
     }
 }
@@ -2801,7 +2806,7 @@ pub async fn open_production_primitive_runtime(
         database.clone(),
         session_db.clone(),
         code_index,
-        diagnostic_identity,
+        Arc::clone(&diagnostic_identity),
         AuthenticatedDiagnosticCursorAuthorityV1 {
             key,
             configuration_digest,
@@ -2819,13 +2824,12 @@ pub async fn open_production_primitive_runtime(
             Arc::clone(&source_runtime),
             Arc::clone(&code_graph),
         )),
-        Arc::new(TraceDecayRedundancyAuthorityV1::new(Arc::clone(
-            &code_graph,
-        ))),
+        Arc::new(TraceDecayRedundancyAuthorityV1),
         temporal,
-        Arc::new(TraceDecaySourceLinesPortV1::new(Arc::clone(
-            &source_runtime,
-        ))),
+        Arc::new(TraceDecaySourceLinesPortV1::new(
+            Arc::clone(&source_runtime),
+            Arc::clone(&diagnostic_identity),
+        )),
         Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&source_runtime))),
         extended,
         scope,
@@ -2839,8 +2843,13 @@ pub async fn open_production_primitive_runtime(
 pub fn admitted_root_uri_for_project(
     project_root: &Path,
 ) -> Result<String, ApplicationContractError> {
-    let uri =
-        Url::from_file_path(project_root).map_err(|()| ApplicationContractError::Inconsistent {
+    // The admitted root is published to clients and compared against the
+    // spelling each one addresses it through, so it names the root's identity
+    // rather than whichever alias the daemon happened to be handed.
+    let identity = tracedecay_runtime_core::path_safety::canonical_root_identity(project_root);
+    let uri = Url::from_file_path(&identity)
+        .or_else(|()| Url::from_file_path(project_root))
+        .map_err(|()| ApplicationContractError::Inconsistent {
             field: "application primitive admitted root URI",
         })?;
     Ok(uri.to_string())
@@ -3244,6 +3253,27 @@ mod affected_tests_tests {
         published: Mutex<(CodeGenerationId, ManifestDigest)>,
     }
 
+    struct RefusingCodeIndexIdentity;
+
+    impl LspCodeIndexProjectionIdentityPort for RefusingCodeIndexIdentity {
+        fn current_identity(
+            &self,
+            _project_root: PathBuf,
+            _document_relative_path: Option<String>,
+        ) -> tracedecay_lsp::LspRuntimeFuture<
+            Result<
+                crate::lsp_runtime::LspCodeIndexProjectionIdentity,
+                tracedecay_lsp::LspRuntimeFailure,
+            >,
+        > {
+            Box::pin(async {
+                Err(tracedecay_lsp::LspRuntimeFailure::new(
+                    "lsp-code-index-generation-unavailable",
+                ))
+            })
+        }
+    }
+
     impl PublishedCodeIndexIdentity {
         fn publish(&self, generation: &str, snapshot: char) {
             *self.published.lock().expect("published") = (
@@ -3271,6 +3301,8 @@ mod affected_tests_tests {
                 repository: self.scope.repository_id.clone(),
                 worktree: Some(self.scope.worktree_id.clone()),
                 reference: self.scope.reference.clone(),
+                freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
+                head_commit_id: self.source_revision.clone(),
                 source_revision: self.source_revision.clone(),
                 code_generation_id,
                 snapshot_digest,
@@ -3335,6 +3367,33 @@ mod affected_tests_tests {
     /// bound to one could not be built, and a snapshot bound to the
     /// correlation id could never be resumed by the next request. Both
     /// contexts here carry ids minted by the real production surfaces.
+    #[tokio::test]
+    async fn symbol_graph_identity_refusal_names_the_runtime_failure() {
+        let key = SignedCursorKeyRefV1 {
+            key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key"),
+            version: SessionCursorVersionV1::new(1).expect("version"),
+        };
+        let (_, mut authority) = symbol_graph_cursor_authority(key);
+        authority.code_index = Arc::new(RefusingCodeIndexIdentity);
+        let context = symbol_graph_context(
+            tracedecay_contracts::request_identity::mint_global_request_id(
+                tracedecay_contracts::request_identity::GlobalRequestSurface::McpFallback,
+            )
+            .expect("mcp fallback request id"),
+        );
+
+        let failure = authority
+            .snapshot(&context, "search", now_observed())
+            .await
+            .expect_err("runtime refusal must remain typed");
+        assert!(
+            failure
+                .message
+                .contains("lsp-code-index-generation-unavailable"),
+            "the public problem must name the underlying runtime refusal: {failure:?}"
+        );
+    }
+
     #[tokio::test]
     async fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
         let key = SignedCursorKeyRefV1 {

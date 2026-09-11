@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use tracedecay::cloud::{self, InstallMethod};
+use crate::cloud::{self, InstallMethod};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
 use tracedecay_session_memory::user_config::UserConfig;
@@ -115,12 +115,12 @@ impl StagedRelease {
     }
 }
 
-// Asset-naming and platform helpers live in `tracedecay::cloud` so the version-
+// Asset-naming and platform helpers live in `crate::cloud` so the version-
 // detection path can use the same naming convention to filter out releases
 // whose CI hasn't finished uploading the current platform's binary yet.
-use tracedecay::cloud::asset_name;
+use crate::cloud::asset_name;
 #[cfg(test)]
-use tracedecay::cloud::current_platform;
+use crate::cloud::current_platform;
 
 /// The GitHub release tag for a given version.
 fn release_tag(version: &str) -> String {

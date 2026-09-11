@@ -5,13 +5,10 @@
 //! additionally snapshots current configuration consent, so expertise never
 //! relies on caller-provided or stale authorization state.
 
-use std::sync::Arc;
-
 use tracedecay_contracts::{
     ApplicationProblem, Deadline, RequestContext, RequestId, SafeDiagnostic,
-    WorkAttemptListRequestV1, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
-    WorkExperienceRequestV1, WorkExpertiseConsentSnapshotV1, WorkProductBindingV1,
-    WorkProposalComparisonRequestV1,
+    WorkAttemptListRequestV1, WorkExperienceRequestV1, WorkExpertiseConsentSnapshotV1,
+    WorkProductBindingV1, WorkProposalComparisonRequestV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -23,10 +20,7 @@ use tracedecay_global_db::configuration::{
     OwnedGlobalDbConfigurationControlStore, contracts::ConfigurationControlStore as _,
 };
 
-use super::{
-    RegisteredWorkRuntime, complete_work_read, work_product_problem, work_topology_problem,
-    work_topology_unavailable_problem,
-};
+use super::{RegisteredWorkRuntime, complete_work_read, preparation, work_product_problem};
 
 #[hotpath::measure(label = "daemon.service.work.generate_proposal")]
 pub(super) fn generate_proposal(
@@ -66,28 +60,24 @@ pub(super) fn execution_history(
     context: &RequestContext,
     canonical_request_id: RequestId,
     operation_key: &str,
+    capability: &str,
     use_case: UseCaseId,
     input_digest: ManifestDigest,
     observed_at: UtcMicros,
     deadline: Deadline,
     request: WorkAttemptListRequestV1,
 ) -> DaemonInvocationResponse {
-    let attempts = services.attempts().list(context, &request, |authority| {
-        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        match services.topology().verified_snapshot(authority, cancelled) {
-            Ok(topology) => {
-                let task_count = u32::try_from(topology.task_count()).map_err(|_| {
-                    work_topology_unavailable_problem("the verified topology task count overflowed")
-                })?;
-                Ok(WorkAttemptTopologyStateV1::Verified(
-                    WorkAttemptTopologyBindingV1 {
-                        generation: topology.generation().as_str().to_owned(),
-                        task_count,
-                    },
-                ))
-            }
-            Err(error) => work_topology_problem(error),
-        }
+    // Initial attempt admission appends the accepted-attempt graph event and
+    // inserts the attempt row in one transaction. Read both from that committed
+    // generation; a fresh attempt does not need a session correlation.
+    let attempts = services.attempts().list(context, &request, |_authority| {
+        preparation::current_work_product_attempt_topology(
+            registered,
+            context,
+            capability,
+            &use_case,
+            observed_at,
+        )
     });
     let history = attempts.and_then(|attempts| {
         let storage = registered.database.work_storage().map_err(|_| {

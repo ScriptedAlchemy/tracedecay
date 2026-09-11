@@ -6,6 +6,7 @@ use serde_json::json;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_domain::errors::Result;
+use tracedecay_mcp::server::{LiveTranscriptRefreshJoin, join_required_live_transcript_refresh};
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, tool_error_response,
     tool_result_has_semantic_error,
@@ -33,7 +34,7 @@ where
 /// Request grants are issued only after the adapter supplies exact controls.
 struct ProjectlessConnectionStateV1 {
     client_identity: DaemonClientIdentity,
-    profile_authority: crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
+    profile_authority: tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
 }
 
 /// Two profile roots name the same profile when they resolve to the same
@@ -86,7 +87,7 @@ fn admit_projectless_connection(
         profile_identity.profile_id().clone(),
     );
     let serving_db = user_sessions_db_path(&pinned_profile_root);
-    let serving = crate::daemon::retained_owner::profile_session_retrieval_serving_identity(
+    let serving = tracedecay_session_runtime::retained::profile_session_retrieval_serving_identity(
         profile_identity,
         &shard,
         &serving_db,
@@ -98,10 +99,11 @@ fn admit_projectless_connection(
         DaemonSessionRetrievalRoot::profile(serving).ok_or_else(|| TraceDecayError::Config {
             message: "projectless profile session authority is unavailable".to_owned(),
         })?;
-    let profile_authority = crate::daemon::retained_owner::profile_retained_connection_authority(
-        profile_identity,
-        profile_session_root.identity(),
-    )?;
+    let profile_authority =
+        tracedecay_session_runtime::retained::profile_retained_connection_authority(
+            profile_identity,
+            profile_session_root.identity(),
+        )?;
     Ok(ProjectlessConnectionStateV1 {
         client_identity: DaemonClientIdentity::new(
             pinned_profile_root.clone(),
@@ -416,21 +418,19 @@ async fn projectless_hook_runtime_response(
         Ok(result) if tool_result_has_semantic_error(&result) => {
             JsonRpcResponse::success(id, result.value)
         }
-        Ok(result) => match boxed_projectless_phase(
-            crate::mcp::server::join_required_live_transcript_refresh(
-                "tracedecay_hook_runtime",
-                &arguments,
-                false,
-                None,
-                Some(&refresh_wake),
-            ),
-        )
+        Ok(result) => match boxed_projectless_phase(join_required_live_transcript_refresh(
+            "tracedecay_hook_runtime",
+            &arguments,
+            false,
+            None,
+            Some(&refresh_wake),
+        ))
         .await
         {
-            Ok(crate::mcp::server::LiveTranscriptRefreshJoin::PublicationJoined) => {
+            Ok(LiveTranscriptRefreshJoin::PublicationJoined) => {
                 JsonRpcResponse::success(id, result.value)
             }
-            Ok(crate::mcp::server::LiveTranscriptRefreshJoin::NotRequired) => {
+            Ok(LiveTranscriptRefreshJoin::NotRequired) => {
                 refresh_wake.wake();
                 JsonRpcResponse::success(id, result.value)
             }
@@ -557,7 +557,7 @@ async fn projectless_profile_retained_response(
         &connection.profile_authority,
         None,
         session_refresh.as_deref().map(|service| {
-            service as &dyn crate::daemon::retained_owner::RetainedSessionRefreshPortV1
+            service as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1
         }),
         None,
         None,
@@ -701,7 +701,7 @@ mod projectless_admission_tests {
                 .expect("restrict foreign profile root");
         }
         crate::product_runtime::register_fixture_product_runtime();
-        crate::host_admission::ensure_process_background_cpu_authority()
+        crate::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install fixture worker authority");
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
             .expect("pin profile identity");
@@ -770,7 +770,7 @@ mod projectless_admission_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let (real_root, linked_root) = linked_profile_root(temp.path());
         crate::product_runtime::register_fixture_product_runtime();
-        crate::host_admission::ensure_process_background_cpu_authority()
+        crate::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install fixture worker authority");
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
             .expect("pin profile identity");

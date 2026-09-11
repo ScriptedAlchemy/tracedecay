@@ -60,7 +60,7 @@ fn git(root: &std::path::Path, args: &[&str]) {
 
 struct FreshnessFixtureAuthority {
     _pin: PinnedUserDataDir,
-    _runtime: Arc<crate::host_admission::HostAdmissionTestRuntimeV1>,
+    _runtime: Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>,
 }
 
 async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority) {
@@ -103,6 +103,31 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
     let mut meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature", "branches/feature.db", "main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+    // `add_branch` only admits the branch; until its exact graph source is
+    // published the branch is still indexing and a reopen legitimately keeps
+    // serving the nearest published ancestor (`main`). This test pins the
+    // serve-old/await-new swap, so publish the feature provenance up front.
+    let published = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        &layout.data_root,
+        "feature",
+        None,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+            project_id: "project.mcp-freshness".to_owned(),
+            repository_id: "repository.mcp-freshness".to_owned(),
+            worktree_id: "worktree.mcp-freshness".to_owned(),
+            worktree_root: root.to_string_lossy().into_owned(),
+            reference: "refs/heads/feature".to_owned(),
+            source_oid: "a".repeat(40),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            published,
+            tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+        ),
+        "the feature branch must be query-eligible before the drift"
+    );
     std::fs::create_dir_all(layout.data_root.join("branches")).unwrap();
     std::fs::copy(
         &layout.graph_db_path,
@@ -168,7 +193,7 @@ async fn startup_catch_up_spawned_once_per_server() {
     let server = McpServer::new(cg, None).await;
     // The D1 spawn should have claimed the one-shot flag.
     assert!(
-        server.startup_catch_up.dispatch_claimed(),
+        !server.startup_catch_up.try_claim_dispatch(),
         "startup catch-up should have been dispatched by new_with_dbs"
     );
     assert!(
@@ -197,34 +222,34 @@ async fn startup_catch_up_spawned_once_per_server() {
 /// that landed in between observed a false "ready".
 #[tokio::test]
 async fn a_claimed_dispatch_is_never_observed_as_settled() {
-    use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
+    use tracedecay_mcp::server::StartupCatchUpMachineV1;
 
     let machine = StartupCatchUpMachineV1::default();
     // Undispatched machines are ready: nothing will ever run.
-    assert!(machine.settled_for_test());
+    assert!(machine.settled());
 
     assert!(machine.try_claim_dispatch());
-    assert!(machine.dispatch_claimed());
+    assert!(!machine.try_claim_dispatch());
     // Claiming dispatch is itself the transition into `Syncing`.
-    assert!(!machine.settled_for_test());
+    assert!(!machine.settled());
 
-    machine.settle_for_test();
-    assert!(machine.settled_for_test());
+    machine.settle();
+    assert!(machine.settled());
 }
 
 /// Shutdown must leave the startup sync readable as settled.
 #[tokio::test]
 async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
-    use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
+    use tracedecay_mcp::server::StartupCatchUpMachineV1;
 
     let machine = StartupCatchUpMachineV1::default();
     assert!(machine.try_claim_dispatch());
-    machine.mark_cancelled_for_test();
-    assert!(machine.settled_for_test());
+    machine.mark_cancelled();
+    assert!(machine.settled());
 
     // A late in-flight task settling after shutdown cannot resurrect it.
-    machine.settle_for_test();
-    assert!(machine.settled_for_test());
+    machine.settle();
+    assert!(machine.settled());
     assert!(!machine.try_claim_dispatch());
 }
 

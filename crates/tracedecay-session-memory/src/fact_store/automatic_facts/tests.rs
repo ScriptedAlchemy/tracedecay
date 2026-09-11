@@ -20,6 +20,7 @@ async fn database(label: &str) -> (TempDir, Database) {
     let path = directory.path().join(format!("{label}.db"));
     let authority = DatabaseAuthority::acquire_test(&path, "automatic fact read-control authority")
         .expect("acquire automatic fact read-control authority");
+    tracedecay_global_db::register_test_schema_installer();
     let (database, _) =
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await

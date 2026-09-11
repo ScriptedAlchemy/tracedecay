@@ -221,26 +221,53 @@ print(
 PY
 }
 
+# True when the daemon refused this phase with a typed, self-declared retryable
+# terminal. The MCP boundary renders every routed refusal as
+# `reason_code=<code> retryable=<bool>` (crates/tracedecay-mcp/src/tool_errors.rs),
+# so the retryability bit is read from the contract rather than guessed from
+# prose. A tool whose bounded deadline expired while its admitted worker was
+# still settling is exactly this: the daemon declined to wait, said so, and
+# said the call may be re-issued (issue #1203).
+retryable_daemon_refusal() {
+  local path="$1"
+  [[ -s "$path" ]] || return 1
+  grep -q 'reason_code=[^ ]* retryable=true' "$path"
+}
+
+# Run one journey phase, honouring a typed retryable refusal exactly once.
+#
+# The retry is not a workaround for a slow daemon: a refusal that repeats is
+# still a failed journey, and every attempt keeps its own timing line so a
+# reader sees the refusal happened. What it stops is a green daemon losing the
+# whole journey to a bounded budget it deliberately declined to exceed.
 run_timed() {
   local label="$1"
   local timeout_seconds="$2"
   local stdout_path="$3"
   local stderr_path="$4"
   shift 4
-  local started_ms status duration_ms
-  started_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
-  status=0
-  python3 -S "$PROCESS_HELPER" run \
-    --timeout "$timeout_seconds" --kill-after 5 -- "$@" \
-    >"$stdout_path" 2>"$stderr_path" || status=$?
-  duration_ms="$(elapsed_ms "$started_ms")"
-  echo "tracedecay_ci_timing phase=$label elapsed_ms=$duration_ms status=$status"
-  if ((status != 0)); then
+  local started_ms status duration_ms attempt
+  for attempt in 1 2; do
+    started_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
+    status=0
+    python3 -S "$PROCESS_HELPER" run \
+      --timeout "$timeout_seconds" --kill-after 5 -- "$@" \
+      >"$stdout_path" 2>"$stderr_path" || status=$?
+    duration_ms="$(elapsed_ms "$started_ms")"
+    echo "tracedecay_ci_timing phase=$label elapsed_ms=$duration_ms status=$status"
+    if ((status == 0)); then
+      break
+    fi
+    if ((attempt == 1)) && retryable_daemon_refusal "$stderr_path"; then
+      echo "tracedecay_ci_retryable_refusal phase=$label attempt=$attempt"
+      print_compact_file "$label stderr" "$stderr_path"
+      continue
+    fi
     echo "error: TraceDecay PR dogfood phase '$label' failed" >&2
     print_compact_file "$label stdout" "$stdout_path"
     print_compact_file "$label stderr" "$stderr_path"
     return "$status"
-  fi
+  done
   cat "$stdout_path"
   if [[ -s "$stderr_path" ]]; then
     cat "$stderr_path" >&2

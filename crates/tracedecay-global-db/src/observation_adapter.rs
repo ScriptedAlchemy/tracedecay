@@ -10,10 +10,10 @@ use tracedecay_domain::{
     EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, ManifestDigest,
     ObservationCollisionOutcomeV1, ObservationIdentityMaterialV1, ObservationScopeV1,
     PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, SanitizationReceiptV1, canonical_json_bytes_and_sha256,
-    canonical_sha256, classify_observation_collision, cline_native_source_successor_id,
-    cline_task_native_observation_id, is_canonical_payload_revision_replay,
-    prove_cline_native_source_transition,
+    RetrievalAnchorRecordV2, SanitizationReceiptV1, canonical_json_bytes,
+    canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
+    cline_native_source_successor_id, cline_task_native_observation_id,
+    is_canonical_payload_revision_replay, prove_cline_native_source_transition,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
@@ -21,8 +21,9 @@ use tracedecay_store::observation::{
 };
 use tracedecay_store::{
     AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
-    CommandDigestV1, ConsistencyModeV1, CursorAdvanceLedgerDisagreementV1,
-    CursorAdvanceLedgerIdentityV1, DurabilityClassV1, IdempotencyIdentityV1,
+    BACKGROUND_BATCH_MAX_BYTES, BACKGROUND_BATCH_MAX_OPERATIONS, CommandDigestV1,
+    ConsistencyModeV1, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
+    DurabilityClassV1, FOREGROUND_BATCH_MAX_BYTES, IdempotencyIdentityV1,
     ObservationBatchFallbackCause, ObservationBatchPersistOutcome, ObservationCommitReceipt,
     ObservationPersistOutcome, ObservationProjectionStatus, ObservationProjectionStore,
     ObservationReadOperationV1, ObservationReadResultV1, ObservationReplayRequest,
@@ -1355,7 +1356,7 @@ impl ObservationStore for GlobalDbObservationStore {
         &self,
         write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
-        let mut outcomes = self.persist_observations(vec![write]).await?;
+        let mut outcomes = Box::pin(self.persist_observations(vec![write])).await?;
         if outcomes.len() != 1 {
             return Err(runtime_storage_error(
                 "persist_observation",
@@ -1844,12 +1845,81 @@ async fn submit_observation_writes(
     writes: Vec<(usize, AnchoredObservationWrite)>,
     deferred_exact_duplicates: Vec<(usize, AnchoredObservationWrite)>,
 ) -> ObservationStoreResult<Vec<(usize, ObservationBatchPersistOutcome)>> {
+    let batches = partition_observation_writes(writes)?;
+    let mut deferred_exact_duplicates = Some(deferred_exact_duplicates);
+    let mut outcomes = Vec::new();
+    let batch_count = batches.len();
+    for (index, batch) in batches.into_iter().enumerate() {
+        let deferred = if index + 1 == batch_count {
+            deferred_exact_duplicates.take().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        outcomes.extend(submit_observation_write_batch(database, runtime, batch, deferred).await?);
+    }
+    Ok(outcomes)
+}
+
+fn partition_observation_writes(
+    writes: Vec<(usize, AnchoredObservationWrite)>,
+) -> ObservationStoreResult<Vec<Vec<(usize, AnchoredObservationWrite)>>> {
+    let empty_command = serde_json::json!({
+        "kind": "observation_batch",
+        "writes": Vec::<serde_json::Value>::new(),
+    });
+    let envelope_bytes = canonical_json_bytes(&empty_command)
+        .map_err(|error| {
+            runtime_storage_error("derive observation runtime identity", error.to_string())
+        })?
+        .len();
+    let max_bytes = usize::try_from(BACKGROUND_BATCH_MAX_BYTES).unwrap_or(usize::MAX);
+    let max_operations = BACKGROUND_BATCH_MAX_OPERATIONS as usize;
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = envelope_bytes;
+    for write in writes {
+        let command_bytes = canonical_json_bytes(&runtime_observation_command(&write.1))
+            .map_err(|error| {
+                runtime_storage_error("derive observation runtime identity", error.to_string())
+            })?
+            .len();
+        let separator_bytes = usize::from(!batch.is_empty());
+        let added_bytes = command_bytes.saturating_add(separator_bytes);
+        if envelope_bytes.saturating_add(command_bytes) > max_bytes {
+            return Err(runtime_storage_error(
+                "submit observation batch",
+                format!(
+                    "one observation runtime command requires {} bytes, above the {}-byte background admission limit",
+                    envelope_bytes.saturating_add(command_bytes),
+                    max_bytes
+                ),
+            ));
+        }
+        if !batch.is_empty()
+            && (batch.len() == max_operations
+                || batch_bytes.saturating_add(added_bytes) > max_bytes)
+        {
+            batches.push(std::mem::take(&mut batch));
+            batch_bytes = envelope_bytes;
+        }
+        batch_bytes = batch_bytes
+            .saturating_add(command_bytes)
+            .saturating_add(usize::from(!batch.is_empty()));
+        batch.push(write);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+async fn submit_observation_write_batch(
+    database: &Database,
+    runtime: &DatabaseRuntimeClientV1,
+    writes: Vec<(usize, AnchoredObservationWrite)>,
+    deferred_exact_duplicates: Vec<(usize, AnchoredObservationWrite)>,
+) -> ObservationStoreResult<Vec<(usize, ObservationBatchPersistOutcome)>> {
     let admitted_at = now_micros();
-    let priority = if writes.len() == 1 {
-        OperationPriorityV1::Foreground
-    } else {
-        OperationPriorityV1::Background
-    };
     let command = serde_json::json!({
         "kind": "observation_batch",
         "writes": writes
@@ -1861,6 +1931,13 @@ async fn submit_observation_writes(
         canonical_json_bytes_and_sha256(&command).map_err(|error| {
             runtime_storage_error("derive observation runtime identity", error.to_string())
         })?;
+    let priority = if writes.len() == 1
+        && u64::try_from(command_bytes.len()).unwrap_or(u64::MAX) <= FOREGROUND_BATCH_MAX_BYTES
+    {
+        OperationPriorityV1::Foreground
+    } else {
+        OperationPriorityV1::Background
+    };
     let digest_suffix = runtime_digest_suffix(&command_digest)?;
     let metadata = observation_submit_metadata(
         runtime,
@@ -1898,6 +1975,20 @@ async fn submit_observation_writes(
         "submit observation batch",
     )
     .await?;
+    if !matches!(
+        outcome,
+        RuntimeSubmitOutcomeV1::Committed { .. }
+            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            | RuntimeSubmitOutcomeV1::ExactReplay { .. }
+    ) {
+        return Err(runtime_storage_error(
+            "submit anchored observation",
+            format!(
+                "runtime rejected {}-byte observation batch: {outcome:?}",
+                command_bytes.len()
+            ),
+        ));
+    }
     const READBACK_OPERATION: &str = "read committed observation batch";
     let observation_ids = writes
         .iter()

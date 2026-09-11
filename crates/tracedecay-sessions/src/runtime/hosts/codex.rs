@@ -102,6 +102,7 @@ use crate::runtime::source::{
 pub(crate) use meta::session_meta_read_count_for_test;
 pub use meta::{CodexMeta, session_meta_from_record, turn_context_from_record};
 pub use observation::codex_observation_source_v2;
+pub(crate) use observation::try_admit_codex_jsonl_observations_for_project_window;
 pub use observation::{
     CODEX_HOOK_MAX_NEW_BYTES, CodexJsonlAdmissionProgress,
     try_admit_codex_jsonl_observations_for_profile,

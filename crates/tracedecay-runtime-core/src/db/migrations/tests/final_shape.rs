@@ -114,6 +114,9 @@ async fn assert_reset_required_without_repair(path: &Path, mutation: &str) {
 #[tokio::test]
 async fn current_final_store_is_admitted_without_mutation() {
     let (_directory, path) = fresh_current_store().await;
+    // Diagnostics install this same DDL when publishing their first result.
+    // That ordinary operation must not make the store fail its next open.
+    tamper(&path, tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL);
     let before = store_snapshot(&path);
     assert_eq!(before.user_version, i64::from(SCHEMA_VERSION));
 

@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use thiserror::Error;
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId,
@@ -82,11 +83,30 @@ impl GenerationChunkManifestV1 {
             .validate()
             .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
 
+        // Per-file validation is independent work and dominates a
+        // corpus-sized aggregate, so it fans out over the indexing pool
+        // instead of running as one serial loop; the first failure in file
+        // order is still the one reported. Each file holds one background
+        // CPU unit for its whole validation so the nested per-chunk admission
+        // inside `validate` reuses it inline instead of taking the process
+        // budget lock once per chunk.
+        let validated = crate::parallelism::install(|| {
+            files
+                .par_iter()
+                .map(|file| {
+                    crate::parallelism::with_background_cpu_permit(|| {
+                        file.validate().map_err(map_chunking_error)
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
+        validated.into_iter().collect::<Result<(), _>>()?;
+
         let capacity = files.iter().map(|file| file.chunks.len()).sum();
         let mut chunks = Vec::with_capacity(capacity);
         let mut file_occurrences = BTreeSet::new();
         for file in files {
-            file.validate().map_err(map_chunking_error)?;
             if file.document.generation_id != generation_id {
                 return Err(ChunkIncrementErrorV1::MixedGeneration);
             }
@@ -97,7 +117,10 @@ impl GenerationChunkManifestV1 {
             }
             chunks.extend(file.chunks);
         }
-        chunks.sort_by(|left, right| left.id.cmp(&right.id));
+        // Typed identities are unique (checked below), so the parallel sort
+        // yields exactly the order the serial sort did.
+        crate::parallelism::install(|| chunks.par_sort_by(|left, right| left.id.cmp(&right.id)))
+            .map_err(|error| ChunkIncrementErrorV1::NonCanonical(error.to_string()))?;
         if let Some(duplicate) = chunks
             .windows(2)
             .find(|pair| pair[0].id == pair[1].id)
@@ -307,31 +330,30 @@ pub fn plan_chunk_increment(
         return Err(ChunkIncrementErrorV1::SameGeneration);
     }
 
-    let prior_by_id: BTreeMap<CodeSearchChunkId, &CodeSearchChunkV1> = prior
+    // Manifests already enforce sorted, unique chunk IDs. Merge those rows
+    // directly instead of allocating and ordering a second copy of both keys.
+    let mut previous = prior
         .into_iter()
-        .flat_map(|manifest| manifest.chunks.iter())
-        .map(|chunk| (chunk.id.clone(), chunk.as_ref()))
-        .collect();
-    let current_by_id: BTreeMap<CodeSearchChunkId, &CodeSearchChunkV1> = current
-        .chunks
-        .iter()
-        .map(|chunk| (chunk.id.clone(), chunk.as_ref()))
-        .collect();
-
+        .flat_map(|manifest| &manifest.chunks)
+        .peekable();
     let mut added_or_changed = Vec::new();
     let mut reused = Vec::new();
-    for (chunk_id, chunk) in &current_by_id {
-        let change = match prior_by_id.get(chunk_id) {
-            None => ChangedCodeChunkV1 {
-                chunk_id: chunk_id.clone(),
-                prior_digest: None,
-                current_digest: Some(chunk.content_digest.clone()),
-            },
-            Some(prior_chunk) => ChangedCodeChunkV1 {
-                chunk_id: chunk_id.clone(),
-                prior_digest: Some(prior_chunk.content_digest.clone()),
-                current_digest: Some(chunk.content_digest.clone()),
-            },
+    let mut deleted = Vec::new();
+    for chunk in &current.chunks {
+        while let Some(removed) = previous.next_if(|prior| prior.id < chunk.id) {
+            deleted.push(ChangedCodeChunkV1 {
+                chunk_id: removed.id.clone(),
+                prior_digest: Some(removed.content_digest.clone()),
+                current_digest: None,
+            });
+        }
+        let prior_digest = previous
+            .next_if(|prior| prior.id == chunk.id)
+            .map(|prior| prior.content_digest.clone());
+        let change = ChangedCodeChunkV1 {
+            chunk_id: chunk.id.clone(),
+            prior_digest,
+            current_digest: Some(chunk.content_digest.clone()),
         };
         if change.prior_digest == change.current_digest {
             reused.push(change);
@@ -339,17 +361,11 @@ pub fn plan_chunk_increment(
             added_or_changed.push(change);
         }
     }
-
-    let mut deleted = Vec::new();
-    for (chunk_id, chunk) in prior_by_id {
-        if !current_by_id.contains_key(&chunk_id) {
-            deleted.push(ChangedCodeChunkV1 {
-                chunk_id,
-                prior_digest: Some(chunk.content_digest.clone()),
-                current_digest: None,
-            });
-        }
-    }
+    deleted.extend(previous.map(|removed| ChangedCodeChunkV1 {
+        chunk_id: removed.id.clone(),
+        prior_digest: Some(removed.content_digest.clone()),
+        current_digest: None,
+    }));
 
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: prior.map(|manifest| manifest.generation_id.clone()),

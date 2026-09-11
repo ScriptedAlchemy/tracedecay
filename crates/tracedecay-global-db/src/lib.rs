@@ -68,6 +68,7 @@ pub use observation_projection::{project_observation_with_engine, rebuild_projec
 pub use tracedecay_domain::CoverageStateV1;
 pub use workflow_adapter::GlobalDbWorkflowStore;
 mod observation_store;
+pub mod profile_registry_maintenance;
 mod project_registry;
 mod registered;
 mod registered_accounting;
@@ -83,6 +84,7 @@ mod remote_deletion;
 pub mod schema_contract;
 pub mod schema_stages;
 mod stack_delivery;
+mod store_registration;
 pub use schema_stages::ensure_registered_schema;
 pub use stack_delivery::{
     GitHubStackDeliveryKeyV1, GitHubStackDeliveryRecordV1, GitHubStackDeliveryStateV1,
@@ -128,6 +130,7 @@ pub use project_registry::{
     EPHEMERAL_PROJECT_ROOT_REASON_CODE, GIT_COMMON_DIR_ALIAS_PREFIX, PROJECT_REGISTRY_AUTHORITY,
     ProjectStoreResolutionError, ReapEntryKind, RegistryReapEntry, RegistryReapPlan,
     RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection, is_ephemeral_path,
+    registered_enrollment_roots,
 };
 pub use registered::{
     DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,
@@ -144,6 +147,7 @@ pub use remote_deletion::{
     RemoteDeletionTarget, RemoteDeletionTombstone, RemoteDeletionTombstoneRecordOutcome,
     RemoteDeletionTombstoneTransitionOutcome,
 };
+pub use store_registration::register_project_store;
 pub use tracedecay_runtime_core::shard_runtime::{
     VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1,
 };
@@ -157,7 +161,7 @@ pub use api_types::{
     RegisteredProjectRootInventoryV1, SavingsDay, SavingsTotal, SessionActivityRow,
     SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
-    TranscriptBatch,
+    TranscriptBatch, registry_context_candidate_roots,
 };
 pub use support::{
     AccountingMode, env_flag, env_value_truthy, global_accounting_enabled, global_accounting_mode,

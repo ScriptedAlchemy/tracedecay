@@ -549,11 +549,6 @@ pub(super) fn validate_direct_control_mutation(
             {
                 return Err(ConfigurationError::PolicyWideningForbidden);
             }
-            if matches!(value.as_ref(), ConfigurationValueV1::CredentialReference(_)) {
-                return Err(ConfigurationError::validation_message(
-                    "credential references require the write-only credential operation",
-                ));
-            }
             value.validate().map_err(ConfigurationError::validation)
         }
         DirectConfigurationMutation::Unset { key, .. } => {

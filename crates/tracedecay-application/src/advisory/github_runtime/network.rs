@@ -1296,6 +1296,29 @@ pub struct GitHubCiReadOnlyClientV1 {
     response_cache: Arc<super::ci_cache::CiResponseCacheV1>,
 }
 
+#[cfg(test)]
+pub(crate) fn ci_fixture_client(address: std::net::SocketAddr) -> GitHubCiReadOnlyClientV1 {
+    GitHubCiReadOnlyClientV1 {
+        agent: ureq::Agent::config_builder()
+            .https_only(false)
+            .http_status_as_error(false)
+            .build()
+            .into(),
+        target: GitHubCiRepositoryTargetV1 {
+            owner: "ScriptedAlchemy".to_owned(),
+            repository: "tracedecay".to_owned(),
+        },
+        credential: GitHubReadOnlyCredentialV1::anonymous(),
+        config: GitHubHttpReadConfigV1 {
+            rest_base_uri: format!("http://{address}"),
+            graphql_uri: format!("http://{address}/graphql"),
+            ..GitHubHttpReadConfigV1::default()
+        },
+        rate_limits: Arc::new(super::rate_gate::GitHubRateLimitTrackerV1::default()),
+        response_cache: Arc::new(super::ci_cache::CiResponseCacheV1::default()),
+    }
+}
+
 impl GitHubCiReadOnlyClientV1 {
     fn new(
         target: GitHubCiRepositoryTargetV1,
@@ -2730,28 +2753,6 @@ mod tests {
                 next_cursor: None,
                 rate_limit: None,
             },
-        }
-    }
-
-    fn ci_fixture_client(address: std::net::SocketAddr) -> GitHubCiReadOnlyClientV1 {
-        GitHubCiReadOnlyClientV1 {
-            agent: ureq::Agent::config_builder()
-                .https_only(false)
-                .http_status_as_error(false)
-                .build()
-                .into(),
-            target: GitHubCiRepositoryTargetV1 {
-                owner: "ScriptedAlchemy".to_owned(),
-                repository: "tracedecay".to_owned(),
-            },
-            credential: GitHubReadOnlyCredentialV1::anonymous(),
-            config: GitHubHttpReadConfigV1 {
-                rest_base_uri: format!("http://{address}"),
-                graphql_uri: format!("http://{address}/graphql"),
-                ..GitHubHttpReadConfigV1::default()
-            },
-            rate_limits: Arc::new(super::super::rate_gate::GitHubRateLimitTrackerV1::default()),
-            response_cache: Arc::new(super::super::ci_cache::CiResponseCacheV1::default()),
         }
     }
 

@@ -26,6 +26,7 @@
 //!   TRACEDECAY_BENCH_REPOS       optional — comma-separated repo subset
 //!   TRACEDECAY_BENCH_SKIP_CLONE  optional — fail rather than clone
 
+#![allow(clippy::too_many_lines)]
 mod queries;
 mod repos;
 

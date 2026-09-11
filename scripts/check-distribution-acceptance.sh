@@ -108,7 +108,7 @@ assert_fastembed_fixture() {
 }
 
 # The FastEmbed distribution-acquisition regression suite is doubly conditional:
-# its module is `#[cfg(all(test, feature = "semantic-fastembed"))]` and its
+# its module is `#[cfg(all(test, feature = "semantic-fastembed", not(windows)))]` and its
 # tests are `#[ignore]`d because they need this gate's isolated profile and
 # verified Jina fixture. That means it runs in exactly one place — the semantic
 # leg below, under `--features semantic-fastembed --run-ignored all`. If either
@@ -137,14 +137,14 @@ if not suite.is_file():
 
 declaration_text = declaration.read_text(encoding="utf-8")
 if not re.search(
-    r'#\[cfg\(all\(test,\s*feature\s*=\s*"semantic-fastembed"\)\)\]\s*\n'
+    r'#\[cfg\(all\(test,\s*feature\s*=\s*"semantic-fastembed",\s*not\(windows\)\)\)\]\s*\n'
     r'#\[path = "model_lifecycle/distribution_acquisition_acceptance\.rs"\]\s*\n'
     r"mod distribution_acquisition_acceptance;",
     declaration_text,
 ):
     raise SystemExit(
         "distribution acceptance: the acquisition suite is no longer declared under "
-        f'#[cfg(all(test, feature = "semantic-fastembed"))] in {declaration}'
+        f'#[cfg(all(test, feature = "semantic-fastembed", not(windows)))] in {declaration}'
     )
 
 suite_text = suite.read_text(encoding="utf-8")
@@ -363,6 +363,11 @@ release_cli_cargo_args=(
 
 fastembed_fixture_source="$repo/tests/distribution/fastembed"
 fastembed_fixture="$work/fastembed"
+fastembed_supported=true
+if [[ $host_target == *-windows-* ]]; then
+  fastembed_supported=false
+fi
+if $fastembed_supported; then
 echo "distribution acceptance: acquiring immutable Jina FastEmbed fixture"
 python3 \
   "$fastembed_fixture_source/prepare_fixture.py" \
@@ -372,6 +377,7 @@ fixture_metadata=$(assert_fastembed_fixture \
   "$fastembed_fixture" \
   "$fastembed_fixture_source/validate_fixture.py")
 IFS=$'\t' read -r fastembed_dimensions fastembed_max_length <<<"$fixture_metadata"
+fi
 
 echo "distribution acceptance: release-building the production feature set"
 cargo build \
@@ -655,6 +661,7 @@ code_extraction_package=${package_dirs[tracedecay-code-extraction]}
 query_package=${package_dirs[tracedecay-query]}
 semantic_package=${package_dirs[tracedecay-semantic]}
 catalog_package=${package_dirs[tracedecay-tool-catalog]}
+contracts_package=${package_dirs[tracedecay-contracts]}
 
 assert_required_assets "$root_package" "$cli_package"
 [[ ! -e "$package_root/.git" && ! -L "$package_root/.git" ]] ||
@@ -744,6 +751,7 @@ cargo check \
   --lib \
   --config "$patch_config"
 
+if $fastembed_supported; then
 ort_lib_path=${ORT_LIB_PATH:-$(python3 - <<'PY'
 import os
 from pathlib import Path
@@ -765,6 +773,7 @@ PY
 [[ -n $ort_lib_path ]] ||
   die "cached ONNX Runtime library is unavailable for the offline semantic tests"
 export ORT_LIB_PATH="$ort_lib_path"
+fi
 
 echo "distribution acceptance: checking extracted query semantic fallback behavior"
 CARGO_NET_OFFLINE=true cargo nextest run \
@@ -805,6 +814,7 @@ TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   --config "$patch_config" \
   --no-tests=fail
 
+if $fastembed_supported; then
 echo "distribution acceptance: checking packaged semantic lifecycle and Jina acquisition"
 TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
   TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT="$work/semantic-model-profile" \
@@ -848,6 +858,7 @@ TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   --run-ignored all \
   -E 'test(=semantic_activation_test::shipped_cli_activates_a_published_profile_for_strict_semantic_search)' \
   --no-tests=fail
+fi
 
 install_root="$work/install"
 echo "distribution acceptance: installing packaged CLI with release facilities"
@@ -860,6 +871,7 @@ TRACEDECAY_RELEASE_GIT_SHA="$source_git_sha" cargo install \
 consumer="$work/library-consumer"
 mkdir -p -- "$consumer/src"
 python3 - "$root_package/Cargo.toml" "$root_package" "$catalog_package" "$agent_hosts_package" \
+  "$contracts_package" \
   >"$consumer/Cargo.toml" <<'PY'
 import json
 import sys
@@ -891,11 +903,16 @@ print(
     + json.dumps(sys.argv[4])
     + " }"
 )
+print(
+    "tracedecay-contracts = { path = "
+    + json.dumps(sys.argv[5])
+    + " }"
+)
 PY
 cat >"$consumer/src/main.rs" <<'RS'
 use std::collections::BTreeSet;
 
-use tracedecay::catalog_composition::build_application_catalog_snapshot;
+use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_agent_hosts::agents::host_bundle_registry::{
     RECEIPT_BACKED_HOST_KINDS, default_components, verified_embedded_default_host_component_set,
     verified_embedded_host_bundle,
@@ -997,6 +1014,7 @@ grep -Eq "no function or associated item named .*has_project_session_retrieval_s
   "$test_api_stderr" ||
   die "test API probe failed for an unexpected reason"
 
+if $fastembed_supported; then
 mkdir -p -- "$root_package/examples"
 cp -- \
   "$repo/tests/distribution/fastembed/acceptance.rs" \
@@ -1047,6 +1065,7 @@ CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 "$fastembed_binary" \
   "$fastembed_fixture" \
   "$fastembed_dimensions" \
   "$fastembed_max_length"
+fi
 
 binary=$(python3 "$repo/scripts/resolve-installed-binary.py" \
   "$install_root" \

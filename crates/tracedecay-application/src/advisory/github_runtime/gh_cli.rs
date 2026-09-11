@@ -367,7 +367,7 @@ pub(super) fn mount_gh_cli_github_read_only_credential_v1(
 ///
 /// Precedence: an already-registered real credential that permits `Contents`,
 /// then the local `gh` login, then anonymous.
-pub(super) fn public_repository_read_credential_v1(
+pub fn public_repository_read_credential_v1(
     repository_owner: &str,
     repository_name: &str,
 ) -> GitHubReadOnlyCredentialV1 {

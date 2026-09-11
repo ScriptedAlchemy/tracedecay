@@ -12,8 +12,8 @@ use super::super::{
 use super::{
     DaemonInvocationState, ProjectOpenDependentOwnerState, register_production_advisory_owner,
     register_production_feedback_and_advisory, register_production_feedback_cycle,
+    selected_feedback_generation,
 };
-use crate::daemon::log_daemon_event;
 use tracedecay_contracts::doctor::{
     SemanticOwnerDegradedReasonV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
 };
@@ -21,6 +21,7 @@ use tracedecay_contracts::now_micros;
 use tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// The deferred advisory owner is a detached background task: when it gives up
 /// (or never sees a publication) nothing in the request path reports it, and a
@@ -58,6 +59,10 @@ fn cancelled_semantic_owner_state(detail: &'static str) -> SemanticOwnerStateV1 
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Deferred semantic registration is one background bind that must stay ordered with mount."
+)]
 pub(in crate::daemon) async fn spawn_semantic_owner_registration(
     invocation: DaemonInvocationState,
     project_root: PathBuf,
@@ -208,10 +213,18 @@ pub(super) fn spawn(
     // Nothing user-facing may wait on a layer this route disables by contract.
     // With no code index there is no generation to defer to, so the wait below
     // has no terminal state of its own: name it here instead.
-    if super::super::code_index_disabled_for_scope(&invocation, &state.scope) {
+    if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
+        &invocation.code_index_schedulers,
+        &state.scope,
+    ) {
         log_deferred_attempt(&project_root, "code_index_disabled", "terminal");
         return false;
     }
+    // Project-open schedules this owner before code-index activation. Capture
+    // the registry-wide seat cursor now so a retained generation seated before
+    // the background task's first poll remains observable. The exact project
+    // and scope are still revalidated by `try_mount` after every wake.
+    let mut serving_seats = invocation.code_index_schedulers.subscribe_serving_seats();
     owner.spawn_background_task(hotpath::future!(
         async move {
             let mut publications = invocation
@@ -228,6 +241,12 @@ pub(super) fn spawn(
                         .code_index_schedulers
                         .subscribe_serving_generation_changes(&project_root)
                         .await;
+                    if serving_changes.is_some() {
+                        let _ = invocation
+                            .code_index_schedulers
+                            .request_complete_generation(&project_root)
+                            .await;
+                    }
                 }
                 match try_mount(&invocation, &project_root, &mut state).await {
                     Attempt::Terminal => return,
@@ -250,6 +269,7 @@ pub(super) fn spawn(
                     &project_root,
                     &mut publications,
                     &mut serving_changes,
+                    &mut serving_seats,
                 )
                 .await
                 {
@@ -266,6 +286,7 @@ async fn wait_for_generation_change(
     project_root: &Path,
     publications: &mut broadcast::Receiver<CodeIndexGenerationPublishedV1>,
     serving_changes: &mut Option<watch::Receiver<()>>,
+    serving_seats: &mut watch::Receiver<u64>,
 ) -> bool {
     loop {
         tokio::select! {
@@ -281,6 +302,7 @@ async fn wait_for_generation_change(
                     None => std::future::pending().await,
                 }
             } => return serving.is_ok(),
+            seat = serving_seats.changed() => return seat.is_ok(),
         }
     }
 }
@@ -293,17 +315,27 @@ enum Attempt {
 }
 
 #[hotpath::measure(label = "daemon.project.owners.advisory_retry", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Deferred semantic mount is one generation-ready attach of the query authority."
+)]
 async fn try_mount(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &mut ProjectOpenDependentOwnerState,
 ) -> Attempt {
-    if let Some(lsp_session_factory) = state.lsp_session_factory.as_ref() {
+    if let Some(lsp_session_factory) = state.lsp_session_factory.clone() {
+        let Some(indexed_generation) =
+            selected_feedback_generation(invocation, project_root, &state.scope).await
+        else {
+            return Attempt::AwaitNextPublication;
+        };
         return match register_production_feedback_and_advisory(
             invocation,
             project_root,
             state,
-            Arc::clone(lsp_session_factory),
+            lsp_session_factory,
+            indexed_generation,
         )
         .await
         {
@@ -311,42 +343,19 @@ async fn try_mount(
             Err(_) => classify_failure(invocation, project_root, state).await,
         };
     }
-    // Two lookups, in this order, because passive waiting alone deadlocks a
-    // fresh project. The decoded-for-root-scope probe is the cheap arm: it
+    // The shared selection ladder prevents passive waiting from deadlocking a
+    // fresh project. Its decoded-for-root-scope probe is the cheap arm: it
     // reads an already-seated complete generation and asks the scheduler for
     // nothing. When nothing is seated it answers `None` and demands nothing,
     // so a deferred owner that only ever took this arm waited for a
     // publication that only demand produces — the project then served
     // indefinitely with the typed-unavailable feedback cycle.
-    // `latest_complete_ready_for_scope` is the authenticated demand boundary
-    // every other first-generation consumer resolves through, so take it
-    // before giving up and going back to sleep.
-    let indexed = match invocation
+    // Its demand and recovered-text arms both require current source evidence
+    // before this owner may admit their generation.
+    let indexed = invocation
         .code_index_schedulers
-        .latest_complete_ready_decoded_for_root_scope(project_root, &state.scope)
-        .await
-    {
-        Some(generation) => Some(generation.text_generation_handle()),
-        None => match invocation
-            .code_index_schedulers
-            .latest_complete_ready_for_scope(&state.scope)
-            .await
-        {
-            Some(generation) => Some(generation.text_generation_handle()),
-            // A clean restart that recovered its retained revision-7 graph
-            // head serves through the text projection and never seats the
-            // sealed slot, so no publication edge follows for a quiet
-            // checkout. Feedback, session and LSP availability must not wait
-            // on full code-index publication: take that recovered level,
-            // which carries the same sealed snapshot this owner reads.
-            None => {
-                invocation
-                    .code_index_schedulers
-                    .latest_text_serving_for_scope(&state.scope)
-                    .await
-            }
-        },
-    };
+        .latest_feedback_generation_for_scope(project_root, &state.scope)
+        .await;
     // Deliberately unlogged: the poll in `spawn` re-enters here once a second
     // while a cold project indexes, and one event per second per warming
     // project is noise, not evidence. `spawn` records the wait once instead.
@@ -376,7 +385,9 @@ async fn try_mount(
     // go. The cycle depends only on the sealed generation this attempt already
     // holds, not on the session factory — only the advisory owner needs that.
     let (feedback_cycle, feedback_scope) =
-        match register_production_feedback_cycle(invocation, project_root, state).await {
+        match register_production_feedback_cycle(invocation, project_root, state, indexed.clone())
+            .await
+        {
             Ok(mounted) => mounted,
             Err(error) => {
                 tracing::warn!(
@@ -539,6 +550,7 @@ mod tests {
         let (publication_sender, mut publications) = broadcast::channel(4);
         let (serving_sender, serving_receiver) = watch::channel(());
         let mut serving_changes = Some(serving_receiver);
+        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
         let publication = CodeIndexGenerationPublishedV1 {
             project_root: root.path().to_path_buf(),
             repository_id: RepositoryId::new("repository.deferred").expect("repository"),
@@ -551,13 +563,20 @@ mod tests {
             .send(publication.clone())
             .expect("sealed publication");
         assert!(
-            wait_for_generation_change(root.path(), &mut publications, &mut serving_changes).await
+            wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut serving_changes,
+                &mut serving_seats,
+            )
+            .await
         );
 
         let mut waiting = Box::pin(wait_for_generation_change(
             root.path(),
             &mut publications,
             &mut serving_changes,
+            &mut serving_seats,
         ));
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
@@ -577,15 +596,51 @@ mod tests {
         drop(waiting);
         drop(serving_sender);
         assert!(
-            !wait_for_generation_change(root.path(), &mut publications, &mut serving_changes).await
+            !wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut serving_changes,
+                &mut serving_seats,
+            )
+            .await
         );
+    }
+
+    #[tokio::test]
+    async fn retained_seat_wakes_after_subscription_precedes_scheduler_enrollment() {
+        let root = tempfile::tempdir().expect("project root");
+        let (publication_sender, mut publications) = broadcast::channel(1);
+        let (seat_sender, mut serving_seats) = watch::channel(0_u64);
+
+        // The deferred owner subscribes while no per-project scheduler exists.
+        // A retained generation then seats without a new-generation broadcast.
+        seat_sender.send_modify(|seats| *seats += 1);
+        assert!(
+            wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut None,
+                &mut serving_seats,
+            )
+            .await
+        );
+        drop(publication_sender);
     }
 
     #[tokio::test]
     async fn publication_channel_closure_stops_a_wait_before_scheduler_mount() {
         let root = tempfile::tempdir().expect("project root");
         let (sender, mut publications) = broadcast::channel(1);
+        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
         drop(sender);
-        assert!(!wait_for_generation_change(root.path(), &mut publications, &mut None).await);
+        assert!(
+            !wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut None,
+                &mut serving_seats,
+            )
+            .await
+        );
     }
 }

@@ -25,7 +25,8 @@ mod extraction;
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// A malformed edit stream cannot make range reporting itself unbounded.
 pub const DEFAULT_MAX_CHANGED_RANGES: usize = 256;
-/// Parsing is synchronous, but every invocation has a cooperative deadline.
+/// Default synchronous parse quantum. An admitted enclosing operation may resume
+/// an expired quantum; standalone parsing stops at its cooperative deadline.
 /// Cooperative means tree-sitter polls it between parse actions; a grammar
 /// scanner that never returns from one call is outside its reach (#1104).
 pub const DEFAULT_MAX_PARSE_TIME: Duration = Duration::from_millis(250);
@@ -306,7 +307,15 @@ impl RetainedParseDocument {
         let language_id = language_id.into();
         let source = source.into();
         let grammar_key = grammar_key(&language_id, identity.logical_path()).to_owned();
-        Self::open_normalized(identity, language_id, grammar_key, source, None, limits)
+        Self::open_normalized(
+            identity,
+            language_id,
+            grammar_key,
+            source,
+            None,
+            limits,
+            None,
+        )
     }
 
     pub fn open_prepared(
@@ -317,6 +326,28 @@ impl RetainedParseDocument {
         parsed_source: impl Into<String>,
         limits: ParseLimits,
     ) -> Result<(Self, ParseReport), ParseError> {
+        Self::open_prepared_with_control(
+            identity,
+            language_id,
+            grammar_key,
+            source,
+            parsed_source,
+            limits,
+            None,
+        )
+    }
+
+    /// Resume expired parse quanta while the enclosing operation remains admitted.
+    /// The control is checked by Tree-sitter between parse actions and is never retained.
+    pub fn open_prepared_with_control(
+        identity: ParseDocumentIdentity,
+        language_id: impl Into<String>,
+        grammar_key: impl Into<String>,
+        source: impl Into<String>,
+        parsed_source: impl Into<String>,
+        limits: ParseLimits,
+        control: Option<&dyn Fn() -> bool>,
+    ) -> Result<(Self, ParseReport), ParseError> {
         let source = source.into();
         let parsed_source = normalize_parsed_source(&source, parsed_source.into());
         Self::open_normalized(
@@ -326,6 +357,7 @@ impl RetainedParseDocument {
             source,
             parsed_source,
             limits,
+            control,
         )
     }
 
@@ -336,6 +368,7 @@ impl RetainedParseDocument {
         source: String,
         parsed_source: Option<String>,
         limits: ParseLimits,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<(Self, ParseReport), ParseError> {
         ensure_source_bound(&source, limits)?;
         if let Some(parsed) = parsed_source.as_deref() {
@@ -360,7 +393,7 @@ impl RetainedParseDocument {
         })?;
         let parse_text = parsed_source.as_deref().unwrap_or(&source);
         let (tree, elapsed) =
-            parse_with_deadline(&language_id, &mut parser, parse_text, None, limits)?;
+            parse_with_deadline(&language_id, &mut parser, parse_text, None, limits, control)?;
         let changed_ranges = if source.is_empty() {
             Vec::new()
         } else {
@@ -427,7 +460,7 @@ impl RetainedParseDocument {
         edits: &[ParseInputEdit],
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        self.apply_edits_normalized(next_identity, edits, new_source.into(), None, None)
+        self.apply_edits_normalized(next_identity, edits, new_source.into(), None, None, None)
     }
 
     pub fn apply_edits_prepared(
@@ -439,7 +472,14 @@ impl RetainedParseDocument {
     ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
         let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
-        self.apply_edits_normalized(next_identity, edits, new_source, new_parsed_source, None)
+        self.apply_edits_normalized(
+            next_identity,
+            edits,
+            new_source,
+            new_parsed_source,
+            None,
+            None,
+        )
     }
 
     fn apply_edits_normalized(
@@ -449,6 +489,7 @@ impl RetainedParseDocument {
         new_source: String,
         new_parsed_source: Option<String>,
         source_edit: Option<ParseInputEdit>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
             crate::hotpath_observe::record_retained_parse_abstention(
@@ -510,6 +551,7 @@ impl RetainedParseDocument {
             parse_text,
             Some(&edited_tree),
             self.limits,
+            control,
         )?;
         let (changed_ranges, extraction_ranges) =
             crate::hotpath_observe::measure_change_ranges(|| {
@@ -554,7 +596,7 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        self.reparse_normalized(next_identity, new_source.into(), None)
+        self.reparse_normalized(next_identity, new_source.into(), None, None)
     }
 
     pub fn reparse_prepared(
@@ -563,9 +605,19 @@ impl RetainedParseDocument {
         new_source: impl Into<String>,
         new_parsed_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
+        self.reparse_prepared_with_control(next_identity, new_source, new_parsed_source, None)
+    }
+
+    pub fn reparse_prepared_with_control(
+        &mut self,
+        next_identity: ParseDocumentIdentity,
+        new_source: impl Into<String>,
+        new_parsed_source: impl Into<String>,
+        control: Option<&dyn Fn() -> bool>,
+    ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
         let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
-        self.reparse_normalized(next_identity, new_source, new_parsed_source)
+        self.reparse_normalized(next_identity, new_source, new_parsed_source, control)
     }
 
     fn reparse_normalized(
@@ -573,10 +625,16 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: String,
         new_parsed_source: Option<String>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         if self.source == new_source {
             if self.parsed_source != new_parsed_source {
-                return self.replace_normalized(next_identity, new_source, new_parsed_source);
+                return self.replace_normalized(
+                    next_identity,
+                    new_source,
+                    new_parsed_source,
+                    control,
+                );
             }
             return self.apply_edits_normalized(
                 next_identity,
@@ -584,6 +642,7 @@ impl RetainedParseDocument {
                 new_source,
                 new_parsed_source,
                 None,
+                control,
             );
         }
         let edit = minimal_edit(&self.source, &new_source);
@@ -593,6 +652,7 @@ impl RetainedParseDocument {
             new_source,
             new_parsed_source,
             Some(edit),
+            control,
         )
     }
 
@@ -602,7 +662,7 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
-        self.replace_normalized(next_identity, new_source.into(), None)
+        self.replace_normalized(next_identity, new_source.into(), None, None)
     }
 
     pub fn replace_prepared(
@@ -613,7 +673,7 @@ impl RetainedParseDocument {
     ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
         let new_parsed_source = normalize_parsed_source(&new_source, new_parsed_source.into());
-        self.replace_normalized(next_identity, new_source, new_parsed_source)
+        self.replace_normalized(next_identity, new_source, new_parsed_source, None)
     }
 
     fn replace_normalized(
@@ -621,6 +681,7 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: String,
         new_parsed_source: Option<String>,
+        control: Option<&dyn Fn() -> bool>,
     ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
             crate::hotpath_observe::record_retained_parse_abstention(
@@ -639,6 +700,7 @@ impl RetainedParseDocument {
             parse_text,
             None,
             self.limits,
+            control,
         )?;
         let ranges = if new_source.is_empty() {
             Vec::new()
@@ -708,11 +770,12 @@ fn parse_with_deadline(
     source: &str,
     old_tree: Option<&Tree>,
     limits: ParseLimits,
+    control: Option<&dyn Fn() -> bool>,
 ) -> Result<(Tree, Duration), ParseError> {
     crate::hotpath_observe::measure_parse_file(
         language_id,
         source.len(),
-        || parse_with_deadline_unmeasured(parser, source, old_tree, limits),
+        || parse_with_deadline_unmeasured(parser, source, old_tree, limits, control),
         |result| match result {
             Ok((tree, _)) => {
                 crate::hotpath_observe::ParseFileOutcome::from_parsed_root(tree.root_node())
@@ -728,6 +791,7 @@ fn parse_with_deadline_unmeasured(
     source: &str,
     old_tree: Option<&Tree>,
     limits: ParseLimits,
+    control: Option<&dyn Fn() -> bool>,
 ) -> Result<(Tree, Duration), ParseError> {
     if limits.max_parse_time.is_zero() {
         return Err(ParseError::TimedOut {
@@ -735,38 +799,49 @@ fn parse_with_deadline_unmeasured(
         });
     }
     let started = Instant::now();
-    let mut timed_out = false;
-    let mut progress = |_: &tree_sitter::ParseState| {
-        if started.elapsed() >= limits.max_parse_time {
-            timed_out = true;
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    };
-    let options = ParseOptions::new().progress_callback(&mut progress);
     let bytes = source.as_bytes();
-    let tree = parser.parse_with_options(
-        &mut |offset, _| match bytes.get(offset..) {
-            Some(remaining) => remaining,
-            None => &[],
-        },
-        old_tree,
-        Some(options),
-    );
-    let elapsed = started.elapsed();
-    match tree {
-        Some(tree) => Ok((tree, elapsed)),
-        None if timed_out || elapsed >= limits.max_parse_time => {
+    loop {
+        if control.is_some_and(|admitted| !admitted()) {
             parser.reset();
+            return Err(ParseError::TimedOut {
+                limit: limits.max_parse_time,
+            });
+        }
+        let quantum_started = Instant::now();
+        let mut timed_out = false;
+        let mut interrupted = false;
+        let mut progress = |_: &tree_sitter::ParseState| {
+            interrupted = control.is_some_and(|admitted| !admitted());
+            timed_out = quantum_started.elapsed() >= limits.max_parse_time;
+            if interrupted || timed_out {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        let options = ParseOptions::new().progress_callback(&mut progress);
+        let tree = parser.parse_with_options(
+            &mut |offset, _| bytes.get(offset..).unwrap_or(&[]),
+            old_tree,
+            Some(options),
+        );
+        if let Some(tree) = tree {
+            return Ok((tree, started.elapsed()));
+        }
+        if timed_out && !interrupted && control.is_some_and(|admitted| admitted()) {
+            // Tree-sitter resumes its suspended parse with the same input and old
+            // tree. Reset only on terminal failure, not between admitted quanta.
+            std::thread::yield_now();
+            continue;
+        }
+        parser.reset();
+        return if timed_out || interrupted {
             Err(ParseError::TimedOut {
                 limit: limits.max_parse_time,
             })
-        }
-        None => {
-            parser.reset();
+        } else {
             Err(ParseError::ParseFailed)
-        }
+        };
     }
 }
 

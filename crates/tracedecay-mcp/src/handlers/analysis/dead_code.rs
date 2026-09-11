@@ -67,7 +67,7 @@ pub async fn handle_dead_code(
                 "name": metadata.simple_name,
                 "kind": metadata.kind,
                 "file": file,
-                "line": metadata.start_line,
+                "line": user_line(metadata.start_line),
                 "signature": metadata.signature,
             }));
         }

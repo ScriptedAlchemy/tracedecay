@@ -57,7 +57,7 @@ use tracedecay_lsp::{
 };
 
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
-use tracedecay_runtime_core::path_safety::canonicalize_existing_prefix;
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 use url::Url;
 
 use crate::feedback::concrete::{ConcreteFeedbackOwner, FeedbackRuntime, ProjectFeedbackStore};
@@ -379,6 +379,11 @@ pub struct RegisteredProjectLspAuthority {
     feedback: Arc<FeedbackRuntime>,
     publications: ProjectFeedbackStore,
     project_root: PathBuf,
+    /// The admitted root's canonical identity, resolved once here rather than
+    /// on every document request: `project_root` is already canonicalized at
+    /// construction, so the only work left is the spelling normalization, and
+    /// that answer cannot change for the authority's lifetime.
+    root_identity: PathBuf,
     project_dir: Arc<Dir>,
     root_uri: Url,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
@@ -412,10 +417,12 @@ impl RegisteredProjectLspAuthority {
             ));
         }
         let publications = feedback.publication_store();
+        let root_identity = canonical_root_identity(&project_root);
         Ok(Self {
             feedback,
             publications,
             project_root,
+            root_identity,
             project_dir: Arc::new(project_dir),
             root_uri,
             code_index,
@@ -442,6 +449,7 @@ impl RegisteredProjectLspAuthority {
     fn document_path(&self, document_uri: &str) -> Result<(PathBuf, String), LspRuntimeFailure> {
         let document = validated_document_path(
             &self.project_root,
+            &self.root_identity,
             &self.root_uri,
             &self.project_dir,
             document_uri,
@@ -3045,6 +3053,7 @@ struct ValidatedDocumentPath {
 #[hotpath::measure(label = "usecases.lsp.document.validate_path")]
 fn validated_document_path(
     project_root: &Path,
+    root_identity: &Path,
     root_uri: &Url,
     project_dir: &Dir,
     document_uri: &str,
@@ -3058,12 +3067,15 @@ fn validated_document_path(
         .to_file_path()
         .map_err(|()| LspRuntimeFailure::new("document-uri-invalid"))?;
     // Client URIs may address the admitted root through an OS or worktree
-    // alias. Resolve that spelling, then retain the directory capability for
-    // normalization and every subsequent file open.
-    let path = canonicalize_existing_prefix(&path)
-        .ok_or_else(|| LspRuntimeFailure::new("document-outside-registered-root"))?;
+    // alias, and the admitted root itself is whatever spelling the daemon
+    // registered. Both sides go through the same identity authority so a
+    // `/var` alias, a `\\?\` verbatim root, or an overlay whose suffix does
+    // not exist yet still resolves beneath the root it belongs to; the
+    // directory capability is retained for normalization and every
+    // subsequent file open.
+    let path = canonical_root_identity(&path);
     let relative = path
-        .strip_prefix(project_root)
+        .strip_prefix(root_identity)
         .map_err(|_| LspRuntimeFailure::new("document-outside-registered-root"))?;
     validate_relative_path(relative)?;
     let relative = normalize_overlay_relative(project_dir, relative)?;
@@ -3161,7 +3173,7 @@ mod path_tests {
     // The symlink-escape test that exercises open_project_file is unix-only.
     #[cfg(unix)]
     use super::open_project_file;
-    use super::validated_document_path;
+    use super::{canonical_root_identity, validated_document_path};
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
@@ -3188,7 +3200,14 @@ mod path_tests {
         ] {
             let uri = format!("{}{suffix}", root_url.as_str());
             assert!(
-                validated_document_path(&root, &root_url, &root_dir, &uri).is_err(),
+                validated_document_path(
+                    &root,
+                    &canonical_root_identity(&root),
+                    &root_url,
+                    &root_dir,
+                    &uri
+                )
+                .is_err(),
                 "accepted noncanonical URI path {uri}"
             );
         }
@@ -3205,7 +3224,14 @@ mod path_tests {
         ] {
             let uri = format!("{}{suffix}", root_url.as_str());
             assert!(
-                validated_document_path(&root, &root_url, &root_dir, &uri).is_err(),
+                validated_document_path(
+                    &root,
+                    &canonical_root_identity(&root),
+                    &root_url,
+                    &root_dir,
+                    &uri
+                )
+                .is_err(),
                 "accepted encoded separator or NUL in {uri}"
             );
         }
@@ -3217,7 +3243,14 @@ mod path_tests {
         let sibling = temp.path().join("root-sibling").join("src").join("lib.rs");
         let sibling_uri = Url::from_file_path(sibling).expect("sibling file URI");
         assert!(
-            validated_document_path(&root, &root_url, &root_dir, sibling_uri.as_str()).is_err()
+            validated_document_path(
+                &root,
+                &canonical_root_identity(&root),
+                &root_url,
+                &root_dir,
+                sibling_uri.as_str()
+            )
+            .is_err()
         );
     }
 
@@ -3225,8 +3258,14 @@ mod path_tests {
     fn unsaved_overlay_keeps_a_normal_relative_path_without_existing() {
         let (_temp, root, root_url, root_dir) = admitted_root();
         let uri = root_url.join("new/nested/overlay.rs").expect("overlay URI");
-        let document =
-            validated_document_path(&root, &root_url, &root_dir, uri.as_str()).expect("overlay");
+        let document = validated_document_path(
+            &root,
+            &canonical_root_identity(&root),
+            &root_url,
+            &root_dir,
+            uri.as_str(),
+        )
+        .expect("overlay");
 
         assert_eq!(document.absolute, root.join("new/nested/overlay.rs"));
         assert_eq!(document.relative, Path::new("new/nested/overlay.rs"));
@@ -3235,6 +3274,55 @@ mod path_tests {
                 .relative
                 .components()
                 .all(|component| matches!(component, Component::Normal(_)))
+        );
+    }
+
+    /// The mirror of `root_alias_documents_...`: there the *client* spelled
+    /// the root through an alias, here the *daemon* did. `admitted_root`
+    /// canonicalizes its root, so on Linux nothing else in this module
+    /// exercises the spelling macOS (`/var` vs `/private/var`) and Windows
+    /// (native vs `\\?\` verbatim) actually register. An unsaved overlay is
+    /// the strict case: its suffix cannot be canonicalized at all, so it has
+    /// to be validated lexically beneath the root's identity.
+    #[cfg(unix)]
+    #[test]
+    fn unsaved_overlay_resolves_under_an_alias_spelled_admitted_root() {
+        let temp = TempDir::new().expect("temporary directory");
+        let real = temp.path().join("private").join("root");
+        std::fs::create_dir_all(&real).expect("create real root");
+        symlink(temp.path().join("private"), temp.path().join("var")).expect("host alias");
+        let admitted = temp.path().join("var").join("root");
+        let root_url = Url::from_directory_path(&admitted).expect("alias root URI");
+        let root_dir = Dir::open_ambient_dir(&admitted, ambient_authority())
+            .expect("open admitted root through its alias");
+        let uri = Url::from_directory_path(real.canonicalize().expect("canonical root"))
+            .expect("canonical root URI")
+            .join("new/nested/overlay.rs")
+            .expect("overlay URI");
+
+        let document = validated_document_path(
+            &admitted,
+            &canonical_root_identity(&admitted),
+            &root_url,
+            &root_dir,
+            uri.as_str(),
+        )
+        .expect("an overlay beneath an alias-spelled admitted root");
+        assert_eq!(document.relative, Path::new("new/nested/overlay.rs"));
+
+        let sibling = temp.path().join("private").join("root-other");
+        std::fs::create_dir(&sibling).expect("create sibling root");
+        let outside = Url::from_file_path(sibling.join("lib.rs")).expect("sibling document URI");
+        assert!(
+            validated_document_path(
+                &admitted,
+                &canonical_root_identity(&admitted),
+                &root_url,
+                &root_dir,
+                outside.as_str()
+            )
+            .is_err(),
+            "a sibling of the admitted root must still refuse"
         );
     }
 
@@ -3247,8 +3335,14 @@ mod path_tests {
         std::fs::create_dir(root.join("src")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "pub fn inside() {}\n").unwrap();
         let uri = Url::from_file_path(alias.join("src/lib.rs")).unwrap();
-        let saved_document = validated_document_path(&root, &root_url, &root_dir, uri.as_str())
-            .expect("client alias resolves to the admitted directory");
+        let saved_document = validated_document_path(
+            &root,
+            &canonical_root_identity(&root),
+            &root_url,
+            &root_dir,
+            uri.as_str(),
+        )
+        .expect("client alias resolves to the admitted directory");
         assert_eq!(saved_document.absolute, root.join("src/lib.rs"));
         assert_eq!(saved_document.relative, Path::new("src/lib.rs"));
         let (_, mut file) = open_project_file(&root_dir, &saved_document.relative).unwrap();
@@ -3257,8 +3351,14 @@ mod path_tests {
         assert_eq!(source, "pub fn inside() {}\n");
 
         let unsaved = Url::from_file_path(alias.join("src/new/unsaved.rs")).unwrap();
-        let document = validated_document_path(&root, &root_url, &root_dir, unsaved.as_str())
-            .expect("unsaved alias buffer resolves through its parent");
+        let document = validated_document_path(
+            &root,
+            &canonical_root_identity(&root),
+            &root_url,
+            &root_dir,
+            unsaved.as_str(),
+        )
+        .expect("unsaved alias buffer resolves through its parent");
         assert_eq!(document.relative, Path::new("src/new/unsaved.rs"));
 
         let outside = temp.path().join("outside");
@@ -3266,7 +3366,16 @@ mod path_tests {
         std::fs::write(outside.join("lib.rs"), "outside evidence").unwrap();
         symlink(&outside, root.join("escape")).unwrap();
         let escaped = Url::from_file_path(alias.join("escape/lib.rs")).unwrap();
-        assert!(validated_document_path(&root, &root_url, &root_dir, escaped.as_str()).is_err());
+        assert!(
+            validated_document_path(
+                &root,
+                &canonical_root_identity(&root),
+                &root_url,
+                &root_dir,
+                escaped.as_str()
+            )
+            .is_err()
+        );
 
         // A successful resolution does not grant an ambient-path read. The
         // retained directory capability still refuses a replacement escape.

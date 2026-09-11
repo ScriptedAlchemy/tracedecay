@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tracedecay_domain::ManifestDigest;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::{canonicalize_existing_prefix, same_canonical_path};
 use url::Url;
 
@@ -814,9 +815,9 @@ impl FeedbackCyclePort for FeedbackCycleAdapter {
         let _task = self.runtime.spawn(Box::pin(async move {
             let _permit = permit;
             if let Err(error) = authority.execute(request).await {
-                eprintln!(
-                    "[tracedecay] event=lsp_feedback_cycle_failed failure_class={}",
-                    error.class()
+                log_daemon_event(
+                    "lsp_feedback_cycle_failed",
+                    &[("failure_class", error.class().to_owned())],
                 );
             }
         }));

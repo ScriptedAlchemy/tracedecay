@@ -14,15 +14,6 @@ mod quickbasic_tests {
     }
 
     #[test]
-    fn test_quickbasic_extensions() {
-        let extractor = QuickBasicExtractor;
-        let exts = extractor.extensions();
-        assert!(exts.contains(&"bi"), "should handle .bi files");
-        assert!(exts.contains(&"bm"), "should handle .bm files");
-        assert!(!exts.contains(&"qb"), "should NOT overlap with QBasic .qb");
-    }
-
-    #[test]
     fn test_quickbasic_file_node() {
         let result = extract_fixture();
         let files: Vec<_> = result

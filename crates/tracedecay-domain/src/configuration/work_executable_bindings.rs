@@ -6,8 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DomainError, WorkExecutableReference, WorkProviderBackendV1, WorkProviderProtocol,
-    canonical_text,
+    DomainError, ProviderId, WorkExecutableReference, WorkProviderBackendV1, WorkProviderProtocol,
+    WorkRouteCandidateV1, canonical_text,
 };
 
 /// One executable capability admitted by a configured artifact binding.
@@ -47,6 +47,22 @@ impl WorkExecutableCapabilityV1 {
             )
         )
     }
+
+    pub const fn backend(self) -> WorkProviderBackendV1 {
+        match self {
+            Self::ClaudeCodeStreamJson => WorkProviderBackendV1::ClaudeCodeCli,
+            Self::CodexAppServerJsonRpc => WorkProviderBackendV1::CodexAppServer,
+            Self::CodexCliExecJson => WorkProviderBackendV1::CodexCli,
+        }
+    }
+
+    pub const fn protocol(self) -> WorkProviderProtocol {
+        self.backend().protocol()
+    }
+
+    pub fn provider_id(self) -> &'static ProviderId {
+        self.backend().provider_id()
+    }
 }
 
 /// Exact on-disk executable selected for one opaque executable identity.
@@ -60,6 +76,7 @@ pub struct WorkExecutableBindingV1 {
     executable: WorkExecutableReference,
     canonical_path: PathBuf,
     capabilities: Vec<WorkExecutableCapabilityV1>,
+    routes: Vec<WorkRouteCandidateV1>,
 }
 
 impl WorkExecutableBindingV1 {
@@ -67,11 +84,13 @@ impl WorkExecutableBindingV1 {
         executable: WorkExecutableReference,
         canonical_path: PathBuf,
         capabilities: Vec<WorkExecutableCapabilityV1>,
+        routes: Vec<WorkRouteCandidateV1>,
     ) -> Result<Self, DomainError> {
         let binding = Self {
             executable,
             canonical_path,
             capabilities,
+            routes,
         };
         binding.validate()?;
         Ok(binding)
@@ -87,6 +106,10 @@ impl WorkExecutableBindingV1 {
 
     pub fn capabilities(&self) -> &[WorkExecutableCapabilityV1] {
         &self.capabilities
+    }
+
+    pub fn routes(&self) -> &[WorkRouteCandidateV1] {
+        &self.routes
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -109,6 +132,27 @@ impl WorkExecutableBindingV1 {
                 field: "work executable capabilities",
             });
         }
+        if self
+            .routes
+            .windows(2)
+            .any(|pair| pair[0].route_id >= pair[1].route_id)
+        {
+            return Err(DomainError::NonCanonical {
+                field: "work executable routes",
+            });
+        }
+        for route in &self.routes {
+            route.validate()?;
+            if !self
+                .capabilities
+                .iter()
+                .any(|capability| capability.provider_id().as_str() == route.provider_capability_id)
+            {
+                return Err(DomainError::NonCanonical {
+                    field: "work executable route provider",
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -128,13 +172,23 @@ pub(crate) fn validate_work_executable_bindings(
     for binding in bindings {
         binding.validate()?;
     }
+    let mut route_ids = std::collections::BTreeSet::new();
+    if bindings
+        .iter()
+        .flat_map(WorkExecutableBindingV1::routes)
+        .any(|route| !route_ids.insert(route.route_id.as_str()))
+    {
+        return Err(DomainError::NonCanonical {
+            field: "work executable route identities",
+        });
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ManifestDigest;
+    use crate::{ManifestDigest, WorkContentLocationClassV1, WorkEffortClassV1, WorkOrdinalBandV1};
 
     fn reference(id: &str, byte: char) -> WorkExecutableReference {
         WorkExecutableReference::new(
@@ -148,6 +202,23 @@ mod tests {
         std::env::current_dir().unwrap().join(name)
     }
 
+    fn route(route_id: &str, provider_id: &str) -> WorkRouteCandidateV1 {
+        WorkRouteCandidateV1 {
+            route_id: route_id.to_owned(),
+            provider_capability_id: provider_id.to_owned(),
+            model_id: "model.work-route".to_owned(),
+            effort: WorkEffortClassV1::Standard,
+            declared_budget_ceiling: 1,
+            content_location: WorkContentLocationClassV1::Local,
+            correctness: WorkOrdinalBandV1::High,
+            sensitive_data_fitness: WorkOrdinalBandV1::High,
+            latency: WorkOrdinalBandV1::Moderate,
+            cost: WorkOrdinalBandV1::Moderate,
+            autonomy: WorkOrdinalBandV1::High,
+            evidence_quality: WorkOrdinalBandV1::High,
+        }
+    }
+
     #[test]
     fn executable_binding_requires_absolute_clean_path_and_sorted_capabilities() {
         assert!(
@@ -155,6 +226,7 @@ mod tests {
                 reference("codex", '1'),
                 PathBuf::from("bin/codex"),
                 vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+                Vec::new(),
             )
             .is_err()
         );
@@ -163,6 +235,7 @@ mod tests {
                 reference("codex", '1'),
                 absolute("opt").join("..").join("bin").join("codex"),
                 vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+                Vec::new(),
             )
             .is_err()
         );
@@ -174,6 +247,7 @@ mod tests {
                     WorkExecutableCapabilityV1::CodexCliExecJson,
                     WorkExecutableCapabilityV1::CodexAppServerJsonRpc,
                 ],
+                Vec::new(),
             )
             .is_err()
         );
@@ -185,12 +259,53 @@ mod tests {
             reference("codex", '1'),
             absolute("codex-one"),
             vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+            Vec::new(),
         )
         .unwrap();
         let second = WorkExecutableBindingV1::new(
             reference("codex", '2'),
             absolute("codex-two"),
             vec![WorkExecutableCapabilityV1::CodexCliExecJson],
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert!(validate_work_executable_bindings(&[first, second]).is_err());
+    }
+
+    #[test]
+    fn executable_routes_require_matching_capabilities_and_unique_identities() {
+        assert!(
+            WorkExecutableBindingV1::new(
+                reference("codex", '1'),
+                absolute("codex"),
+                vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+                vec![route(
+                    "route.work.codex-mismatch",
+                    "provider.work.claude-code-cli",
+                )],
+            )
+            .is_err()
+        );
+
+        let first = WorkExecutableBindingV1::new(
+            reference("codex-one", '1'),
+            absolute("codex-one"),
+            vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+            vec![route(
+                "route.work.duplicate",
+                "provider.work.codex-app-server",
+            )],
+        )
+        .unwrap();
+        let second = WorkExecutableBindingV1::new(
+            reference("codex-two", '2'),
+            absolute("codex-two"),
+            vec![WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+            vec![route(
+                "route.work.duplicate",
+                "provider.work.codex-app-server",
+            )],
         )
         .unwrap();
 

@@ -1,14 +1,18 @@
 use rusqlite::Connection;
 use serde_json::json;
 use tracedecay_domain::{
-    CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
-    CanonicalObservationRelationsV1, ComponentVersion, FactOwnerV1, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId,
-    ProviderUsageContractDimensionV1, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros,
+    AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
+    ComponentVersion, CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass, FactOwnerV1,
+    GenerationBoundRepositoryProvenanceV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, ProjectId,
+    ProjectionGenerationId, ProviderId, ProviderUsageContractDimensionV1, RefId,
+    RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1,
+    RetentionClass, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
     AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
@@ -143,6 +147,102 @@ fn semantic_anchor_replay_ignores_local_ingest_clock() {
             .unwrap(),
         1
     );
+}
+
+fn repository_write(
+    clock: i64,
+    branch: &str,
+    evidence_class: EvidenceClass,
+) -> AnchoredObservationWrite {
+    let write = anchored_at(
+        observation_write("repository replay", "receipt.repository-replay"),
+        UtcMicros(clock),
+    );
+    let capture = RepositoryProvenanceV1::new(
+        RepositoryId::new("repository.fixture").unwrap(),
+        Some(ProjectId::new("project.fixture").unwrap()),
+        None,
+        PrivacyDomainBoundLocatorDigest::new(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap(),
+        RepositoryEvidenceV1::new(
+            EvidenceAvailabilityV1::Known(RefId::new(branch).unwrap()),
+            EvidenceAvailabilityV1::Unborn,
+            EvidenceAvailabilityV1::Unavailable,
+            EvidenceAvailabilityV1::Unknown,
+            RepositoryRemoteIdentityV1::Unknown,
+            EvidenceAvailabilityV1::Unknown,
+        )
+        .unwrap(),
+        UtcMicros(clock),
+    )
+    .unwrap();
+    let binding = GenerationBoundRepositoryProvenanceV1::new(
+        write.projection_generation().clone(),
+        capture,
+        Some(write.observation().observation_id().clone()),
+    )
+    .unwrap();
+    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::RepositoryCapture {
+            repository_id: binding.capture().repository_id().clone(),
+            capture_id: binding.capture_id().clone(),
+            receipt: write.observation().receipt().receipt().clone(),
+        },
+        owner: write.observation().scope().clone(),
+        aliases: vec![],
+        occurred_at: None,
+        ingested_at: UtcMicros(clock),
+        evidence_class,
+        source_generation: AnchorSourceGenerationV2::RepositoryCapture(
+            binding.capture_id().clone(),
+        ),
+        projection_generation: write.projection_generation().clone(),
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![write.observation().observation_id().clone()],
+        source_anchors: vec![],
+        authorization: write.retrieval_anchor().authorization().clone(),
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: write.observation().retention_class().clone(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    })
+    .unwrap();
+    write
+        .with_repository_provenance_attachment(EvidenceAvailabilityV1::Known(binding), Some(anchor))
+        .unwrap()
+}
+
+#[test]
+fn repository_capture_replay_preserves_first_receipt_and_refuses_changed_evidence() {
+    let mut connection = connection();
+    let first = repository_write(1, "refs/heads/main", EvidenceClass::Observed);
+    let replay = repository_write(2, "refs/heads/main", EvidenceClass::Observed);
+    assert_eq!(first.observation(), replay.observation());
+    assert_ne!(
+        first.repository_provenance_attachment(),
+        replay.repository_provenance_attachment()
+    );
+    execute(&mut connection, &first).unwrap();
+    let request = ObservationReadOperationV1::Observation {
+        observation_id: first.observation().observation_id().clone(),
+    };
+    let retained = read(&mut connection, &request).unwrap();
+    execute(&mut connection, &replay).expect("same evidence with a new capture clock must replay");
+    assert_eq!(read(&mut connection, &request).unwrap(), retained);
+    let changed = repository_write(3, "refs/heads/other", EvidenceClass::Observed);
+    assert!(
+        execute(&mut connection, &changed).is_err(),
+        "different repository evidence must remain a conflict"
+    );
+    assert_eq!(read(&mut connection, &request).unwrap(), retained);
+    let changed_authority = repository_write(4, "refs/heads/main", EvidenceClass::Inferred);
+    assert!(
+        execute(&mut connection, &changed_authority).is_err(),
+        "same repository evidence with changed anchor authority must remain a conflict"
+    );
+    assert_eq!(read(&mut connection, &request).unwrap(), retained);
 }
 
 fn connection() -> Connection {

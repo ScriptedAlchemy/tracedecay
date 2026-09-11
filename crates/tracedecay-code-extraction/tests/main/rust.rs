@@ -1,5 +1,4 @@
-use tracedecay_code_extraction::LanguageExtractor;
-use tracedecay_code_extraction::RustExtractor;
+use tracedecay_code_extraction::{ImportModuleKindV1, LanguageExtractor, RustExtractor};
 use tracedecay_domain::*;
 use tree_sitter::Parser;
 
@@ -88,6 +87,31 @@ fn helper() {}
         .find(|f| f.name == "helper")
         .expect("helper not found");
     assert_eq!(helper.visibility, Visibility::Private);
+}
+
+#[test]
+fn test_rust_enum_variant_docstrings() {
+    let source = r#"
+pub enum Mode {
+    /// Uses the safe behavior.
+    Safe,
+    Fast,
+}
+"#;
+    let result = RustExtractor.extract("mode.rs", source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let safe = result
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::EnumVariant && node.name == "Safe")
+        .expect("Safe variant");
+    let fast = result
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::EnumVariant && node.name == "Fast")
+        .expect("Fast variant");
+    assert_eq!(safe.docstring.as_deref(), Some("Uses the safe behavior."));
+    assert_eq!(fast.docstring, None);
 }
 
 #[test]
@@ -256,11 +280,16 @@ impl Rect {
 #[test]
 fn test_rust_use_declarations() {
     let source = r#"
+mod read;
+use crate::target::{helper, nested::{other as alias}};
+use crate::OrderLine;
+pub use read::{self, Item, nested::{Detail as PublicDetail}};
 use std::collections::HashMap;
 use std::io::{self, Read};
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("imports.rs", source);
+    let artifact = extractor.extract_artifact("imports.rs", source);
+    let result = artifact.result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -269,10 +298,44 @@ use std::io::{self, Read};
         .collect();
     assert_eq!(
         uses.len(),
-        2,
-        "expected 2 use decls, got: {:?}",
+        5,
+        "expected 5 use decls, got: {:?}",
         uses.iter().map(|n| &n.name).collect::<Vec<_>>()
     );
+    assert_eq!(artifact.imports.len(), 9);
+    let import = artifact
+        .imports
+        .iter()
+        .find(|import| import.imported_name.as_deref() == Some("helper"))
+        .unwrap();
+    assert_eq!(import.module_specifier, "crate::target");
+    assert_eq!(import.imported_name.as_deref(), Some("helper"));
+    assert_eq!(import.local_name.as_deref(), Some("helper"));
+    assert!(!import.is_public);
+    assert_eq!(import.module_kind, ImportModuleKindV1::ProjectRelative);
+    let root_import = artifact
+        .imports
+        .iter()
+        .find(|import| import.imported_name.as_deref() == Some("OrderLine"))
+        .unwrap();
+    assert_eq!(root_import.module_specifier, "crate");
+    assert_eq!(root_import.module_kind, ImportModuleKindV1::ProjectRelative);
+    let alias = artifact
+        .imports
+        .iter()
+        .find(|import| import.local_name.as_deref() == Some("alias"))
+        .unwrap();
+    assert_eq!(alias.module_specifier, "crate::target::nested");
+    assert_eq!(alias.imported_name.as_deref(), Some("other"));
+    let sibling = artifact
+        .imports
+        .iter()
+        .find(|import| import.local_name.as_deref() == Some("PublicDetail"))
+        .unwrap();
+    assert_eq!(sibling.module_specifier, "self::read::nested");
+    assert_eq!(sibling.imported_name.as_deref(), Some("Detail"));
+    assert!(sibling.is_public);
+    assert_eq!(sibling.module_kind, ImportModuleKindV1::ProjectRelative);
 }
 
 #[test]
@@ -850,4 +913,22 @@ fn use_foo() {
         ref_names.contains(&"bar"),
         "expected 'bar' method-name ref from f.bar(), got: {ref_names:?}"
     );
+}
+
+#[test]
+fn wildcard_imports_retain_unresolved_dependencies_alongside_named_bindings() {
+    let result = RustExtractor.extract(
+        "src/lib.rs",
+        "use crate::one::*;\nuse crate::two::{Item, *};",
+    );
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let uses: Vec<_> = result
+        .unresolved_refs
+        .iter()
+        .filter(|reference| reference.reference_kind == EdgeKind::Uses)
+        .map(|reference| reference.reference_name.as_str())
+        .collect();
+    assert!(uses.contains(&"crate::one::*"), "{uses:?}");
+    assert!(uses.contains(&"crate::two::{Item, *}"), "{uses:?}");
+    assert!(uses.contains(&"Item"), "{uses:?}");
 }

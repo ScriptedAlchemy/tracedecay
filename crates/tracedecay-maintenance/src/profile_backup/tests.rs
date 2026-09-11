@@ -11,37 +11,32 @@ const FIXTURE_BRAIN_ID: &str = "brain.release-fixture";
 const FIXTURE_PROFILE_ID: &str = "profile.release-fixture";
 
 fn write_profile_identity(root: &Path) {
-    let path = root.join("profile-identity.json");
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
+    publish_profile_identity(
+        &root.join("profile-identity.json"),
+        &serde_json::to_vec_pretty(&serde_json::json!({
             "schema_version": 1,
             "brain_id": FIXTURE_BRAIN_ID,
             "profile_id": FIXTURE_PROFILE_ID,
         }))
         .unwrap(),
+    );
+}
+
+/// Publishes an identity record through the same private record authority the
+/// daemon mints with, so the fixture file carries the exact owner-private
+/// mode (Unix) or protected single-ACE DACL (Windows) the backup reader
+/// admits. A plain `fs::write` under a temporary directory inherits that
+/// directory's ACEs and is refused at admission, before the contract under
+/// test is reached.
+fn publish_profile_identity(path: &Path, body: &[u8]) {
+    tracedecay_runtime_core::db::DatabaseAuthority::publish_record_atomically(
+        &path.with_extension("json.tmp"),
+        path,
+        body,
+        tracedecay_runtime_core::storage::PROFILE_IDENTITY_RECORD_NAME,
     )
     .unwrap();
-    restrict_file(&path);
 }
-
-#[cfg(unix)]
-fn restrict_file(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-/// Windows analogue of the mode above. Profile backup refuses an identity
-/// record whose DACL is not the protected single-ACE current-user one, and a
-/// file just created under a temporary directory inherits that directory's
-/// ACEs.
-#[cfg(windows)]
-fn restrict_file(path: &Path) {
-    drop(tracedecay_private_fs::windows::make_private_file(path).unwrap());
-}
-
-#[cfg(not(any(unix, windows)))]
-fn restrict_file(_path: &Path) {}
 
 fn released_profile(root: &Path) {
     for name in [
@@ -125,6 +120,33 @@ fn complete_backup_rehearses_from_restored_isolated_copy() {
         assert_eq!(record.brain_id.as_str(), FIXTURE_BRAIN_ID);
         assert_eq!(record.profile_id.as_str(), FIXTURE_PROFILE_ID);
     }
+}
+
+/// A backup copy creates its destination; it never adopts one that is already
+/// there. On Windows the discarded alternative — copy, then rewrite owner and
+/// DACL — would silently take ownership of whatever object occupied the path.
+/// The exclusive create refuses instead, on every host.
+#[test]
+fn copying_a_backup_artifact_refuses_an_existing_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let destination = temp.path().join("destination");
+    fs::write(&source, b"replacement bytes").unwrap();
+    fs::write(&destination, b"foreign bytes").unwrap();
+
+    let error = super::copy_private_file(&source, &destination).unwrap_err();
+
+    assert!(
+        matches!(&error, ProfileBackupError::Unavailable { message }
+            if message.contains("create private backup file")),
+        "unexpected error: {error}"
+    );
+    assert_eq!(fs::read(&destination).unwrap(), b"foreign bytes");
+
+    fs::remove_file(&destination).unwrap();
+    super::copy_private_file(&source, &destination).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), b"replacement bytes");
+    tracedecay_private_fs::validate_private_file(&destination).unwrap();
 }
 
 fn released_store_manifest(
@@ -237,12 +259,10 @@ fn rehearsal_rejects_identity_tampered_backup_material() {
     let backup =
         create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease).unwrap();
     let tampered = backup.join("profile-identity.json");
-    fs::write(
+    publish_profile_identity(
         &tampered,
         br#"{"schema_version":1,"brain_id":"brain.foreign","profile_id":"profile.foreign"}"#,
-    )
-    .unwrap();
-    restrict_file(&tampered);
+    );
 
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
 

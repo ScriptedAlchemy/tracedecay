@@ -1,16 +1,26 @@
-//! Portable MCP handler adapters that depend only on application, protocol,
-//! and catalog crates.
+//! MCP handler adapters: transport-request decoding, business-owner calls,
+//! and response shaping.
+//!
+//! Handlers depend on application, query, protocol, and catalog crates, and
+//! on [`crate::McpToolContext`] for anything the daemon admitted for the
+//! call. None of them constructs a project route, opens a store, or mints an
+//! authorization.
 
 pub mod analysis;
 pub mod ast_grep;
 mod bounded_search;
+pub mod dependency_hints;
+pub mod git;
 pub mod graph;
 pub mod grep;
 pub mod health;
 pub mod info;
 mod multi_root;
+pub mod redundancy;
 mod retained_response;
 pub mod support;
+pub mod work;
+pub mod workflow_family;
 
 pub use bounded_search::run_bounded_search;
 pub use multi_root::handle_multi_root;
@@ -23,3 +33,5 @@ pub use support::{
     take_internal_context_memory_analytics, text_tool_result, tool_json, tool_json_with_md,
     unique_file_paths,
 };
+pub use work::handle_work;
+pub use workflow_family::handle_workflow;

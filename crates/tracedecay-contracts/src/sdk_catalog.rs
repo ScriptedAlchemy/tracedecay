@@ -149,7 +149,6 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::SourceBody
         | ApplicationSurfaceOperation::SourceOutline
         | ApplicationSurfaceOperation::ModuleApi
-        | ApplicationSurfaceOperation::FileMetadata
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
@@ -157,12 +156,10 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
             format!("/primitives/{}", operation.as_str())
         }
         operation @ (ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply
@@ -585,7 +582,6 @@ mod tests {
             ("source_body", "/application/primitives/source_body"),
             ("source_outline", "/application/primitives/source_outline"),
             ("module_api", "/application/primitives/module_api"),
-            ("file_metadata", "/application/primitives/file_metadata"),
             ("health_read", "/application/primitives/health_read"),
             ("health_delta", "/application/primitives/health_delta"),
             ("storage_status", "/application/primitives/storage_status"),

@@ -25,9 +25,11 @@ use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
-use tracedecay::host_admission::{HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1};
-#[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
+#[cfg(feature = "test-transport")]
+use tracedecay::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
+};
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::errors::TraceDecayError;
@@ -85,13 +87,14 @@ const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
 #[cfg(feature = "test-transport")]
 #[derive(Default)]
 pub(crate) struct CaptureTransport {
+    incoming: Option<String>,
     pub(crate) output: String,
 }
 
 #[cfg(feature = "test-transport")]
 impl McpTransport for CaptureTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        Ok(None)
+        Ok(self.incoming.take())
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -217,11 +220,14 @@ pub(crate) async fn handle_real_server_tool_call_raw(
             "arguments": arguments,
         }
     });
-    let mut transport = CaptureTransport::default();
+    let mut transport = CaptureTransport {
+        incoming: Some(request.to_string()),
+        output: String::new(),
+    };
     // Heap-allocate the server dispatch future so every awaiting test keeps a
     // bounded resident frame (perf-profile layouts overflow the test stack
     // when these mega-futures compose inline).
-    Box::pin(server.handle_and_write(&request.to_string(), &mut transport))
+    Box::pin(server.run_connection(&mut transport))
         .await
         .expect("real MCP server tool call");
     serde_json::from_str(transport.output.trim()).expect("JSON-RPC response")
@@ -238,35 +244,61 @@ pub(crate) fn extract_real_server_text(result: &Value) -> &str {
 /// generation is bound and its native code graph is serving.
 ///
 /// Search generation publication and native graph publication are distinct
-/// boundaries; graph-facing fixtures require both.
+/// boundaries; graph-facing fixtures require both. Status must become
+/// current before search lane coverage is judged, or a warming fusion
+/// answer can look terminal against a generation that has not sealed.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn warm_code_index_search(server: &McpServer, query: &str) {
-    wait_for_code_index_generation(server, query).await;
     wait_for_current_graph(server).await;
+    wait_for_code_index_generation(server, query).await;
 }
 
-/// Poll `tracedecay_search` until it binds a `code_generation`. Authority
-/// activation (`warm_code_index_search`) can return on a warming lexical
-/// lane; ranked `search_matches` are not stable until a generation seats.
+/// Poll `tracedecay_status` and `tracedecay_search` until the current
+/// worktree generation is sealed and the exact, lexical, and graph lanes
+/// report complete coverage — the same terminal signal daemon journeys
+/// wait on. Ranked matches are not stable while a required lane is still
+/// warming or the search generation has not caught the sealed worktree.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &str) {
-    let mut last = Value::Null;
+    let mut last_search = Value::Null;
+    let mut last_status = Value::Null;
     for _ in 0..60 {
+        let status = handle_real_server_tool_call(
+            server,
+            "tracedecay_status",
+            json!({
+                "include_branch_diagnostics": false,
+                "include_storage_health": false,
+                "include_session_ingest": false,
+                "include_staleness": false,
+            }),
+        )
+        .await;
+        last_status = serde_json::from_str(extract_real_server_text(&status))
+            .expect("typed project status JSON");
+        let freshness = &last_status["code_index_freshness"];
+        let status_generation = freshness["worktree"]["latest_generation_id"].as_str();
+
         let result =
             handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query }))
                 .await;
-        last =
+        last_search =
             serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
-        if last["reason"].as_str() == Some("authority_unavailable") {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            continue;
-        }
-        if last["code_generation"].as_str().is_some() {
+        let incomplete = common::incomplete_code_index_query_lanes(&last_search);
+        if freshness["status"] == "current"
+            && last_search["reason"].as_str() != Some("authority_unavailable")
+            && last_search["code_generation"].as_str() == status_generation
+            && status_generation.is_some()
+            && incomplete.is_empty()
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    panic!("code-index search did not bind a generation within the polling budget: {last}");
+    let incomplete = common::incomplete_code_index_query_lanes(&last_search);
+    panic!(
+        "code-index search did not complete lane coverage within the polling budget: incomplete lanes={incomplete:?}; status={last_status}; search={last_search}"
+    );
 }
 
 /// Poll `tracedecay_status` until the exact generation is current and its

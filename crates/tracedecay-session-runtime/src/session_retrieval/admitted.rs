@@ -1,9 +1,13 @@
 //! Application-admitted retrieval over one exact mounted session root.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::work::{
+    WorkTaskSessionAdmittedRetrievalFutureV1, WorkTaskSessionAdmittedRetrievalPortV1,
+};
 use tracedecay_contracts::{CancellationSignal, RequestContext, ResolvedScope};
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
@@ -71,6 +75,17 @@ impl DaemonSessionRetrievalService {
 
 pub type SessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = SessionRetrievalServiceOutcome> + Send + 'a>>;
+pub type LcmRawStoreIdsFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    BTreeMap<(String, String), i64>,
+                    tracedecay_domain::errors::TraceDecayError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
 
 pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = TaskSessionRetrievalOutcomeV1> + Send + 'a>>;
@@ -154,6 +169,13 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
                 SessionRetrievalUnavailable::service_not_configured(),
             )
         })
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        _identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        Box::pin(async { Ok(BTreeMap::new()) })
     }
 
     /// The refresh worker's serving state for this root — current, still
@@ -366,6 +388,23 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                 }
                 outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
             }
+        })
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        Box::pin(async move {
+            let snapshot = self.database.read_snapshot().await?;
+            tracedecay_lcm::raw::load_raw_message_store_ids_by_identity(&snapshot, &identities)
+                .await
+                .map_err(
+                    |error| tracedecay_domain::errors::TraceDecayError::Database {
+                        message: error.to_string(),
+                        operation: "resolve LCM raw-message store ids".to_owned(),
+                    },
+                )
         })
     }
 }
@@ -599,6 +638,62 @@ const fn temporal_store_unavailable_value() -> SessionRetrievalUnavailable {
     SessionRetrievalUnavailable::without_worker(
         SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
     )
+}
+
+impl WorkTaskSessionAdmittedRetrievalPortV1 for DaemonSessionRetrievalService {
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> WorkTaskSessionAdmittedRetrievalFutureV1<'a> {
+        SessionApplicationRetrievalPortV1::retrieve_task_session_admitted(
+            self,
+            context,
+            temporal_query,
+            task_binding,
+            retrieval_request,
+            query,
+            retriever_revision,
+            score_domain,
+            policy_revision,
+            selector,
+        )
+    }
+}
+
+impl WorkTaskSessionAdmittedRetrievalPortV1 for dyn SessionApplicationRetrievalPortV1 {
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> WorkTaskSessionAdmittedRetrievalFutureV1<'a> {
+        SessionApplicationRetrievalPortV1::retrieve_task_session_admitted(
+            self,
+            context,
+            temporal_query,
+            task_binding,
+            retrieval_request,
+            query,
+            retriever_revision,
+            score_domain,
+            policy_revision,
+            selector,
+        )
+    }
 }
 
 #[cfg(test)]

@@ -37,8 +37,7 @@ use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
     SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCompositionExecutionAuthorityV1,
     SemanticCompositionExecutionOutcomeV1, SemanticExecutionControl, SemanticQueryModeV1,
-    SemanticQueryServiceError, SemanticRerankExecutionPortV1, SemanticRerankReadinessV1,
-    SemanticRetrievalRequestV1,
+    SemanticQueryServiceError, SemanticRetrievalRequestV1, apply_bounded_rerank_outcome,
 };
 
 #[derive(Clone)]
@@ -582,38 +581,11 @@ impl CodeIndexSchedulerRegistryV1 {
             label = "daemon.query.semantic.vector_and_lane"
         )
         .await?;
-        let mut rerank_executor = authority
-            .rerank
-            .as_ref()
-            .and_then(|configured| {
-                configured
-                    .mounted
-                    .as_ref()
-                    .filter(|rerank| rerank.compatibility() == &configured.pins)
-            })
-            .map(|rerank| SemanticRerankExecutorV1 {
-                rerank,
-                code_generation,
-                query_view,
-                control,
-            });
-        let rerank_readiness = if authority.execution.rerank_policy().is_none() {
-            None
-        } else {
-            Some(match rerank_executor.as_mut() {
-                Some(executor) => SemanticRerankReadinessV1::Ready(executor),
-                None => SemanticRerankReadinessV1::Unavailable(
-                    tracedecay_domain::SanitizedStageFailure::AuthorityUnavailable,
-                ),
-            })
-        };
         let outcome = hotpath::measure_block!("daemon.query.semantic.compose", {
             authority.execution.execute(
-                base,
                 authorized_query,
                 outcome,
                 semantic_abstention_disposition(mode),
-                rerank_readiness,
             )
         })?;
         match outcome {
@@ -624,7 +596,22 @@ impl CodeIndexSchedulerRegistryV1 {
                 abstention,
                 fallback,
             }),
-            SemanticCompositionExecutionOutcomeV1::Augmented(executed) => {
+            SemanticCompositionExecutionOutcomeV1::Augmented(mut executed) => {
+                if authorized_query
+                    .request_cursor
+                    .as_ref()
+                    .and_then(|cursor| cursor.semantic.as_ref())
+                    .is_none()
+                {
+                    executed.rerank = apply_configured_semantic_rerank(
+                        &authority,
+                        code_generation,
+                        query_view,
+                        base,
+                        &mut executed.composition,
+                        control,
+                    );
+                }
                 let mut composition = executed.composition;
                 let Some(query_authority) = hotpath::future!(
                     self.query_authority_for_scope(scope),
@@ -704,33 +691,45 @@ where
     }
 }
 
-struct SemanticRerankExecutorV1<'a, C: ?Sized> {
-    rerank: &'a ProductionCodeRerankAuthorityV1,
-    code_generation: &'a CodeIndexPublishedGenerationV1,
-    query_view: &'a EphemeralSanitizedQueryViewV1,
-    control: &'a C,
+fn mounted_compatible_rerank(
+    configured: Option<&ConfiguredRerankAuthorityV1>,
+) -> Option<&ProductionCodeRerankAuthorityV1> {
+    configured.and_then(|configured| {
+        configured
+            .mounted
+            .as_ref()
+            .filter(|rerank| rerank.compatibility() == &configured.pins)
+    })
 }
 
-impl<C> SemanticRerankExecutionPortV1 for SemanticRerankExecutorV1<'_, C>
+fn apply_configured_semantic_rerank<C>(
+    authority: &SemanticQueryAuthorityV1,
+    code_generation: &CodeIndexPublishedGenerationV1,
+    query_view: &EphemeralSanitizedQueryViewV1,
+    request: &RetrievalRequest,
+    composition: &mut CompositionOutputV1,
+    control: &C,
+) -> OptionalStagePublicStatus
 where
     C: SemanticExecutionControl + ?Sized,
 {
-    fn execute_rerank(
-        &mut self,
-        request: &RetrievalRequest,
-        policy: &tracedecay_domain::RerankPolicy,
-        pre_rerank: &[tracedecay_domain::RankedCandidate],
-    ) -> tracedecay_query::retrieval::rerank::BoundedRerankOutcomeV1 {
-        let rerank_control = SemanticRerankControlV1(self.control);
-        self.rerank.execute(
-            self.code_generation,
-            self.query_view,
-            request,
-            policy,
-            pre_rerank,
-            &rerank_control,
-        )
-    }
+    let Some(policy) = authority.execution.rerank_policy() else {
+        return OptionalStagePublicStatus::NotRequested;
+    };
+    let Some(rerank) = mounted_compatible_rerank(authority.rerank.as_ref()) else {
+        return OptionalStagePublicStatus::Unavailable(
+            tracedecay_domain::SanitizedStageFailure::AuthorityUnavailable,
+        );
+    };
+    let outcome = rerank.execute(
+        code_generation,
+        query_view,
+        request,
+        policy,
+        &composition.ranked_candidates,
+        &SemanticRerankControlV1(control),
+    );
+    apply_bounded_rerank_outcome(composition, outcome)
 }
 
 fn paginate_semantic_composition(
@@ -900,6 +899,11 @@ mod tests {
 
     use super::*;
     use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+    use tracedecay_query::retrieval::rerank::{
+        AdmittedNativeRerankExecutorV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
+        LocalRerankInputV1, LocalRerankPermitV1,
+    };
+    use tracedecay_semantic_contracts::RerankCompatibilityPinsV1;
 
     fn id<T>(value: &str) -> T
     where
@@ -1753,5 +1757,84 @@ mod tests {
                 abstention: SemanticAbstentionV1::CalibrationUnavailable,
             } if selected == generation
         ));
+    }
+
+    struct IdentityRerankExecutorV1 {
+        digest: ManifestDigest,
+    }
+
+    impl DeterministicLocalRerankExecutorV1 for IdentityRerankExecutorV1 {
+        fn planned_model_invocations(
+            &self,
+            _candidate_count: u32,
+        ) -> Result<u32, LocalRerankFailureV1> {
+            Ok(1)
+        }
+
+        fn rerank(
+            &self,
+            _policy: &tracedecay_domain::RerankPolicy,
+            inputs: &[LocalRerankInputV1<'_>],
+            _permit: LocalRerankPermitV1,
+        ) -> Result<Vec<RetrievalAnchorId>, LocalRerankFailureV1> {
+            Ok(inputs
+                .iter()
+                .map(|input| input.candidate.candidate.anchor_id.clone())
+                .collect())
+        }
+    }
+
+    impl AdmittedNativeRerankExecutorV1 for IdentityRerankExecutorV1 {
+        fn artifact_manifest_digest(&self) -> &ManifestDigest {
+            &self.digest
+        }
+    }
+
+    fn rerank_pins(byte: char) -> RerankCompatibilityPinsV1 {
+        RerankCompatibilityPinsV1 {
+            implementation_revision: id("rerank.fastembed.production.v1"),
+            artifact_manifest_digest: digest(byte),
+            runtime_compatibility_digest: digest(byte),
+        }
+    }
+
+    #[test]
+    fn configured_rerank_is_unavailable_when_unmounted_or_pins_diverge() {
+        let pins = rerank_pins('a');
+        let unmounted = ConfiguredRerankAuthorityV1 {
+            pins: pins.clone(),
+            mounted: None,
+        };
+        assert!(mounted_compatible_rerank(Some(&unmounted)).is_none());
+        assert!(mounted_compatible_rerank(None).is_none());
+
+        let mounted = ProductionCodeRerankAuthorityV1::from_executor_for_test(
+            rerank_pins('b'),
+            Arc::new(IdentityRerankExecutorV1 {
+                digest: digest('b'),
+            }),
+        );
+        let mismatched = ConfiguredRerankAuthorityV1 {
+            pins,
+            mounted: Some(mounted),
+        };
+        assert!(mounted_compatible_rerank(Some(&mismatched)).is_none());
+    }
+
+    #[test]
+    fn configured_rerank_selects_the_mounted_authority_with_exact_pins() {
+        let pins = rerank_pins('c');
+        let mounted = ProductionCodeRerankAuthorityV1::from_executor_for_test(
+            pins.clone(),
+            Arc::new(IdentityRerankExecutorV1 {
+                digest: digest('c'),
+            }),
+        );
+        let configured = ConfiguredRerankAuthorityV1 {
+            pins: pins.clone(),
+            mounted: Some(mounted),
+        };
+        let selected = mounted_compatible_rerank(Some(&configured)).expect("compatible mount");
+        assert_eq!(selected.compatibility(), &pins);
     }
 }

@@ -284,6 +284,7 @@ describe('the rerun census', () => {
       attemptId: 'b-1',
       state: 'recovery_required',
       recovery: {
+        observed_at: 1_700_000_000_000_000,
         reason: 'provider_unavailable',
         source_attempt_id: null,
         state: 'recovery_required',

@@ -6,9 +6,10 @@ use tracedecay_maintenance::profile_backup::{
     ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
     set_rehearsal_publication_fault_for_test,
 };
+use tracedecay_runtime_core::db::DatabaseAuthority;
 use tracedecay_runtime_core::storage::{
-    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
-    read_store_manifest, write_store_manifest_to_path,
+    PROFILE_IDENTITY_RECORD_NAME, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
+    StorageMode, StoreKind, StoreManifest, read_store_manifest, write_store_manifest_to_path,
 };
 
 struct ReleasedProfileFixture {
@@ -18,30 +19,25 @@ struct ReleasedProfileFixture {
     source_store: PathBuf,
 }
 
-fn write_profile_identity(profile: &Path, brain_id: &str, profile_id: &str) {
+/// Publishes the identity record through the same private record authority
+/// the daemon mints with, so the fixture file carries the exact owner-private
+/// mode (Unix) or protected single-ACE DACL (Windows) profile backup admits.
+/// A plain write under a temporary directory inherits that directory's ACEs
+/// and is refused at admission, before the rehearsal contract is reached.
+pub(crate) fn write_profile_identity(profile: &Path, brain_id: &str, profile_id: &str) {
     let path = profile.join("profile-identity.json");
-    fs::write(
+    DatabaseAuthority::publish_record_atomically(
+        &path.with_extension("json.tmp"),
         &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
+        &serde_json::to_vec_pretty(&serde_json::json!({
             "schema_version": 1,
             "brain_id": brain_id,
             "profile_id": profile_id,
         }))
         .unwrap(),
+        PROFILE_IDENTITY_RECORD_NAME,
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    // Windows analogue of the mode above. Profile backup refuses an identity
-    // record whose DACL is not the protected single-ACE current-user one, and
-    // a file just created under a temporary directory inherits that
-    // directory's ACEs.
-    #[cfg(windows)]
-    drop(tracedecay_private_fs::windows::make_private_file(&path).unwrap());
 }
 
 fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {

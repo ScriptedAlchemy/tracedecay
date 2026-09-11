@@ -305,9 +305,13 @@ fn canonicalize_workspace_root(path: &Path) -> tracedecay_domain::errors::Result
             path.display()
         ))
     })?;
+    // The bridge replaces the client's `rootUri` with this path, and the
+    // daemon publishes the root's identity, so the two must spell it the same
+    // way: `canonicalize` yields the `\\?\` verbatim form on Windows, which
+    // is not what the daemon advertises.
     canonical
         .is_dir()
-        .then_some(canonical)
+        .then(|| tracedecay_runtime_core::path_safety::canonical_root_identity(&canonical))
         .ok_or_else(|| bridge_config_error("LSP workspace root must be a directory"))
 }
 

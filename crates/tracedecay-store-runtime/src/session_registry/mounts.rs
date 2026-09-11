@@ -1387,6 +1387,106 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
+    /// Issues a lease for a project-memory store that is already mounted.
+    ///
+    /// Retained project memory never discovers or initializes a store; the root
+    /// assembler selected this runtime because the project is already Ready.
+    /// Read access and read-only graphs take a read-only lease. A write
+    /// request against a read-only owner is refused rather than silently
+    /// narrowed.
+    pub fn mounted_project_memory(
+        &self,
+        project_id: &ProjectId,
+        access: DatabaseAccessMode,
+    ) -> Result<Database> {
+        let mounted = self
+            .project_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match mounted.get(project_id) {
+            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
+                let owner = owners.memory.as_ref().ok_or_else(|| {
+                    session_registry_error(
+                        "issue mounted project memory database client",
+                        "project memory owner is not mounted".to_string(),
+                    )
+                })?;
+                issue_mounted_memory_lease(owner, access, true)
+            }
+            Some(ProjectRuntimeOwnerStateV1::Opening(_)) => Err(TraceDecayError::project_route(
+                "project_runtime_opening",
+                true,
+                "Project runtime is already opening",
+            )),
+            Some(
+                ProjectRuntimeOwnerStateV1::Retiring(_)
+                | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                | ProjectRuntimeOwnerStateV1::Recovering(_)
+                | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                | ProjectRuntimeOwnerStateV1::Faulted(_),
+            ) => Err(TraceDecayError::project_route(
+                "project_runtime_retiring",
+                true,
+                "Project runtime is unavailable while retirement is terminal or in progress",
+            )),
+            None => Err(session_registry_error(
+                "issue mounted project memory database client",
+                "project memory owner is not mounted".to_string(),
+            )),
+        }
+    }
+
+    /// Issues a retrieval-recording lease: write when the owner is writable,
+    /// otherwise a read-only lease so search can still serve evidence.
+    pub fn mounted_project_memory_recording(
+        &self,
+        project_id: &ProjectId,
+        graph_read_only: bool,
+    ) -> Result<Database> {
+        if graph_read_only {
+            return self.mounted_project_memory(project_id, DatabaseAccessMode::ReadOnly);
+        }
+        let mounted = self
+            .project_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match mounted.get(project_id) {
+            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
+                let owner = owners.memory.as_ref().ok_or_else(|| {
+                    session_registry_error(
+                        "issue mounted project memory database client",
+                        "project memory owner is not mounted".to_string(),
+                    )
+                })?;
+                match issue_mounted_memory_lease(owner, DatabaseAccessMode::ReadWrite, false) {
+                    Ok(database) if database.is_writable() => Ok(database),
+                    Ok(_) => issue_mounted_memory_lease(owner, DatabaseAccessMode::ReadOnly, false),
+                    Err(error) => Err(error),
+                }
+            }
+            Some(ProjectRuntimeOwnerStateV1::Opening(_)) => Err(TraceDecayError::project_route(
+                "project_runtime_opening",
+                true,
+                "Project runtime is already opening",
+            )),
+            Some(
+                ProjectRuntimeOwnerStateV1::Retiring(_)
+                | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                | ProjectRuntimeOwnerStateV1::Recovering(_)
+                | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                | ProjectRuntimeOwnerStateV1::Faulted(_),
+            ) => Err(TraceDecayError::project_route(
+                "project_runtime_retiring",
+                true,
+                "Project runtime is unavailable while retirement is terminal or in progress",
+            )),
+            None => Err(session_registry_error(
+                "issue mounted project memory database client",
+                "project memory owner is not mounted".to_string(),
+            )),
+        }
+    }
+
     /// Mounts one project graph/memory database through the retained registry.
     ///
     /// The typed project id and enrollment roots authorize the resolver; the
@@ -1608,4 +1708,109 @@ impl DaemonSessionRuntimeRegistryV1 {
                 )
             })
     }
+
+    /// Test-only: occupy a registry slot with a read-only memory owner so
+    /// recording-lease degradation can be exercised without teaching the
+    /// production read-only open to publish.
+    #[cfg(test)]
+    pub async fn publish_read_only_memory_owner_for_test(
+        &self,
+        project_id: ProjectId,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Database> {
+        self.resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                enrollment_roots,
+            ))
+            .map_err(|error| {
+                session_registry_error("register project memory authority", format!("{error:?}"))
+            })?;
+        let shard_id = StoreShardIdV1::project(
+            self.identity.brain_id().clone(),
+            self.identity.profile_id().clone(),
+            project_id.clone(),
+        );
+        let pin = self
+            .profile_authority_pin("publish read-only project memory owner for test")
+            .await?;
+        let runtime = match self
+            .registry
+            .open(StoreRuntimeOpenRequest::new_read_only(
+                shard_id.clone(),
+                self.incarnation,
+                Some(pin),
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(runtime) => runtime,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                return Err(registry_open_error(
+                    "publish read-only project memory owner for test",
+                    failure,
+                ));
+            }
+        };
+        let owner = Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await?;
+        let database = owner.issue_read_only_lease().map_err(|error| {
+            session_registry_error(
+                "issue project memory read-only database client",
+                format!("{error:?}"),
+            )
+        })?;
+        let mut admission = match self.admit_project_runtime_owner(&project_id)? {
+            ProjectRuntimeOwnerAdmissionV1::Opening(admission) => admission,
+            ProjectRuntimeOwnerAdmissionV1::Existing => return Ok(database),
+        };
+        admission.publish_memory(MemoryStoreOwnerV1 {
+            database: owner.weak_lease_issuer(),
+            graph: Arc::new(std::sync::Mutex::new(
+                MemoryGraphAttachmentStateV1::Detached {
+                    database: owner,
+                    error: "test read-only memory owner does not attach a writer graph".to_owned(),
+                },
+            )),
+            graph_open_task_key: format!("{shard_id:?}"),
+        })?;
+        Ok(database)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project_has_ready_memory_owner(&self, project_id: &ProjectId) -> bool {
+        let mounted = self
+            .project_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            mounted.get(project_id),
+            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) if owners.memory.is_some()
+        )
+    }
+}
+
+fn issue_mounted_memory_lease(
+    owner: &MemoryStoreOwnerV1,
+    access: DatabaseAccessMode,
+    refuse_nonwritable_write: bool,
+) -> Result<Database> {
+    let database = match access {
+        DatabaseAccessMode::ReadOnly => owner.issue_database_read_only_lease(),
+        DatabaseAccessMode::ReadWrite => owner.issue_database_lease(),
+    }
+    .map_err(|error| {
+        session_registry_error(
+            "issue mounted project memory database client",
+            error.to_string(),
+        )
+    })?;
+    if refuse_nonwritable_write
+        && matches!(access, DatabaseAccessMode::ReadWrite)
+        && !database.is_writable()
+    {
+        return Err(session_registry_error(
+            "issue mounted project memory database client",
+            "project memory owner is read-only".to_string(),
+        ));
+    }
+    Ok(database)
 }

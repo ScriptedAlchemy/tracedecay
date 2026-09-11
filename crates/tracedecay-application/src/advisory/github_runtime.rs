@@ -6,6 +6,7 @@
 mod access;
 mod anchors;
 mod ci_cache;
+mod credential_lifecycle;
 mod decoder;
 mod discovery;
 mod dto;
@@ -48,6 +49,10 @@ pub use anchors::{
     ProjectGitHubAnchorAuthorityV1, ProjectGitHubRegistrarAuthoritiesV1,
     github_anchor_authorities_arc_v1, github_anchor_authorities_v1,
 };
+pub use credential_lifecycle::{
+    GitHubReadOnlyCredentialLifecycleV1, GitHubReadOnlyCredentialPermissionVerifierV1,
+    GitHubSecretReadErrorV1, GitHubSecretReadPortV1,
+};
 pub use decoder::{
     GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,
     GitHubOfficialResponseDecoderV1, GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
@@ -65,6 +70,9 @@ pub use dto::{
 };
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) use dto::{GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1, RestReviewV1};
+pub use gh_cli::public_repository_read_credential_v1;
+#[cfg(test)]
+pub(crate) use network::ci_fixture_client;
 pub use network::{
     GITHUB_REVIEW_THREADS_QUERY_V1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
     GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubReadOnlyClientV1,

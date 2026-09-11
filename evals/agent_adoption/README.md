@@ -146,21 +146,10 @@ enriches the copied fixture at setup so more scenario tiers are gradable:
   you add multi-branch indexing; `commit_context` does surface the full commit
   log and the merge.
 * **Audit-tier plants (`src/audit.rs`).** A module kept **out** of the order
-  flow (so exploration/impact ground truth is untouched) plants three ship-risk
-  markers: a genuine unused import (`use std::collections::BTreeMap;`), a `TODO`
-  marker, and a needless `unsafe { }` block.
+  flow (so exploration/impact ground truth is untouched) plants a `TODO`
+  marker and a needless `unsafe { }` block.
   * The `TODO` is reliably surfaced by `tracedecay_todos` (two matches).
-  * All three plants now have working tool coverage:
-    * `tracedecay_unused_imports` flags the planted `BTreeMap` at
-      `src/audit.rs` (whole-crate run: `unused_import_count` 1). This was
-      previously an empty-result gap: the resolver drops `Uses` edges for
-      std/foreign-crate imports, so the tool falls back to a text scan of the
-      file — but it counted the import identifier appearing in the **comment
-      directly above the `use`** as a real reference, so the crate-unique
-      import was read as "used" and never surfaced. Fixed by masking comments
-      and string/char literals (`mask_rust_noise` in
-      `src/mcp/tools/handlers/analysis.rs`) before the scan, plus a dedicated
-      `unused_imports_md` renderer. Anchored by `analysis_unused_import_hunt`.
+  * Both plants have working tool coverage:
     * `tracedecay_unsafe_patterns` surfaces the needless `unsafe { }` block
       (dedicated `risky_patterns_md` renderer). Anchored by
       `analysis_unsafe_panic_audit`.

@@ -33,6 +33,10 @@ fn recovery_deadline() -> Deadline {
     Deadline::new(UtcMicros(i64::MAX)).expect("LSP deadline")
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture varies profile, project, request identity and disconnect independently to test lifecycle isolation."
+)]
 async fn open_detached_session(
     service: &DaemonInvocationService,
     registry: &Arc<Mutex<LspSessionRegistry>>,

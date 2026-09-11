@@ -2,8 +2,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use super::{ObservationRefusalCensusV1, ObservationRefusalCountV1};
+use super::{
+    ObservationRefusalCensusV1, ObservationRefusalCountV1, ingest_refusal_read_from_censuses,
+};
 use crate::tests::harness::RegisteredGlobalDbTestRuntime;
+use tracedecay_contracts::doctor::{IngestRefusalCensusReadV1, IngestRefusalCountV1};
 use tracedecay_store::ObservationCoverageReason;
 
 async fn insert_advance(
@@ -156,4 +159,65 @@ async fn refusal_census_labels_identity_collisions_without_a_generic_admission_b
             }],
         }
     );
+}
+
+#[test]
+fn refusal_censuses_merge_by_provider_and_reason() {
+    let merged = ingest_refusal_read_from_censuses(&[
+        ObservationRefusalCensusV1::Observed {
+            refusals: vec![ObservationRefusalCountV1 {
+                provider: "cursor".to_owned(),
+                reason: "admission_refused".to_owned(),
+                count: 100,
+            }],
+        },
+        ObservationRefusalCensusV1::Observed {
+            refusals: vec![
+                ObservationRefusalCountV1 {
+                    provider: "cursor".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 60,
+                },
+                ObservationRefusalCountV1 {
+                    provider: "codex".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 27,
+                },
+            ],
+        },
+    ]);
+
+    assert_eq!(
+        merged,
+        IngestRefusalCensusReadV1::Observed {
+            refusals: vec![
+                IngestRefusalCountV1 {
+                    provider: "codex".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 27,
+                },
+                IngestRefusalCountV1 {
+                    provider: "cursor".to_owned(),
+                    reason: "admission_refused".to_owned(),
+                    count: 160,
+                },
+            ],
+        }
+    );
+}
+
+#[test]
+fn one_unavailable_refusal_census_makes_the_merged_read_unknown() {
+    let merged = ingest_refusal_read_from_censuses(&[
+        ObservationRefusalCensusV1::Observed {
+            refusals: vec![ObservationRefusalCountV1 {
+                provider: "cursor".to_owned(),
+                reason: "admission_refused".to_owned(),
+                count: 1,
+            }],
+        },
+        ObservationRefusalCensusV1::Unavailable,
+    ]);
+
+    assert_eq!(merged, IngestRefusalCensusReadV1::Unknown);
 }

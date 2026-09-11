@@ -13,11 +13,7 @@ mod sources;
 mod types;
 
 pub use adapters::{
-    AdvisoryFeedbackDoctorAdapterV1, CodeIndexMountDoctorAdapterV1,
-    ConfigurationAuthorityDoctorAdapterV1, DaemonRuntimeHealthSignalV1, DoctorKernelInputsV1,
-    HostIntegrationDoctorAdapterV1, LanguageServerDoctorAdapterV1, ObservabilityDoctorAdapterV1,
-    OperationalAuditDoctorAdapterV1, RuntimeHealthDoctorAdapterV1, SemanticOwnerDoctorAdapterV1,
-    StorageDoctorAdapterV1, advisory_feedback_read_from_publication, compose_doctor_report,
+    DaemonRuntimeHealthSignalV1, DoctorKernelInputsV1, advisory_feedback_read_from_publication,
     merge_storage_reads, runtime_health_read, storage_family_read,
 };
 pub use report::{

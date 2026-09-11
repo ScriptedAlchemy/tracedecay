@@ -198,6 +198,19 @@ impl StaticLanguageRegistry {
             for alias in extra_aliases(&language) {
                 aliases.insert(alias.to_owned());
             }
+            // The latest revision binds persisted symbol content digests to the
+            // exact source span published by chunk projection. Rust v4 added
+            // parser-backed import visibility for re-export resolution;
+            // TypeScript v3 added variable type-relation evidence; protobuf and
+            // SQL v3 retained canonical schema evidence. Pinning these behaviors
+            // forces older file artifacts to be re-extracted.
+            let extractor_revision = if language == "rust" {
+                5
+            } else if matches!(language.as_str(), "typescript" | "protobuf" | "sql") {
+                4
+            } else {
+                3
+            };
             let descriptor = LanguageDescriptorV1 {
                 language: LanguageId::new(language.clone())
                     .expect("canonical language identity is valid"),
@@ -209,8 +222,10 @@ impl StaticLanguageRegistry {
                     "grammar.tree-sitter.{language}.v1"
                 ))
                 .expect("grammar revision is canonical"),
-                extractor_revision: ExtractorRevision::new(format!("extractor.{language}.v2"))
-                    .expect("extractor revision is canonical"),
+                extractor_revision: ExtractorRevision::new(format!(
+                    "extractor.{language}.v{extractor_revision}"
+                ))
+                .expect("extractor revision is canonical"),
                 aliases: aliases.into_iter().collect(),
                 extensions: extensions.into_iter().collect(),
                 root_markers: root_markers(&language),
@@ -380,6 +395,57 @@ mod tests {
 
     fn language(value: &str) -> LanguageId {
         LanguageId::new(value).expect("valid language id")
+    }
+
+    #[test]
+    fn descriptor_lookups_are_canonical_and_deterministic() {
+        let registry = StaticLanguageRegistry::new();
+        let again = StaticLanguageRegistry::new();
+        assert_eq!(registry.registry_revision(), again.registry_revision());
+
+        let rust = registry
+            .descriptor(&language("rust"))
+            .expect("rust descriptor");
+        assert_eq!(rust.extensions, vec!["rs".to_owned()]);
+        assert!(rust.stable_member_spans);
+        assert!(rust.capabilities.extraction);
+        assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v5");
+
+        assert_eq!(
+            registry
+                .descriptor_for_extension("rs")
+                .map(|d| d.language.as_str()),
+            Some("rust")
+        );
+        assert_eq!(
+            registry
+                .descriptor_for_alias("rust")
+                .map(|d| d.language.as_str()),
+            Some("rust")
+        );
+        assert_eq!(
+            registry
+                .descriptor_for_alias("javascript")
+                .map(|d| d.language.as_str()),
+            Some("typescript")
+        );
+        assert!(registry.descriptor(&language("cobol-nope")).is_none());
+        assert!(registry.descriptor_for_extension("nope").is_none());
+        assert_eq!(
+            registry.descriptor_revision(&language("rust")),
+            Some(rust.descriptor_revision.clone())
+        );
+
+        // Canonical language-identity order.
+        let ids: Vec<&str> = registry
+            .descriptors()
+            .iter()
+            .map(|d| d.language.as_str())
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
     }
 
     #[test]

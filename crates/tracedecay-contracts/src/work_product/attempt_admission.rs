@@ -3,12 +3,12 @@
 use thiserror::Error;
 use tracedecay_domain::{
     WorkAttemptV1, WorkAuthority, WorkGraphChangeV1, WorkProductAuthorizedRelationScopeV1,
-    WorkProductEventPayloadV1, configuration::TopologyConcurrencyPolicyV1,
+    WorkProductEventPayloadV1, WorkflowRunEventKind, configuration::TopologyConcurrencyPolicyV1,
 };
 
 use crate::{
     WorkRetryAttemptOutcomeV1, WorkRetryWriteV1, WorkSynthesisAdmissionRecordV1,
-    WorkSynthesisInsertOutcome,
+    WorkSynthesisInsertOutcome, WorkflowRunAppendRequest,
 };
 
 use super::{WorkProductEventCommitV1, WorkProductEventDraftV1, WorkProductPortContextV1};
@@ -92,6 +92,7 @@ pub enum WorkProductAttemptAdmissionOutcomeV1 {
 pub struct WorkProductRetryAdmissionV1 {
     pub admission: WorkProductAttemptAdmissionV1,
     pub retry: WorkRetryWriteV1,
+    pub workflow_rebind: Option<WorkflowRunAppendRequest>,
 }
 
 impl WorkProductRetryAdmissionV1 {
@@ -99,6 +100,19 @@ impl WorkProductRetryAdmissionV1 {
         self.admission.validate()?;
         if self.retry.attempt != self.admission.attempt
             || self.admission.product_draft.command_id != self.retry.receipt.command.command_id
+            || self.workflow_rebind.as_ref().is_some_and(|request| {
+                !matches!(
+                    request.event.event(),
+                    WorkflowRunEventKind::FanOutChildRetryRebound {
+                        prior_attempt,
+                        replacement_attempt,
+                        retry_receipt_digest,
+                        ..
+                    } if prior_attempt == &self.retry.receipt.command.original_attempt
+                        && replacement_attempt == &self.retry.receipt.new_attempt
+                        && retry_receipt_digest == &self.retry.receipt.owner_receipt_digest
+                )
+            })
         {
             return Err(WorkProductAttemptAdmissionErrorV1::InvalidAdmission);
         }

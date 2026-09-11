@@ -26,7 +26,6 @@ use tracedecay_domain::{
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::LcmScope;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -768,13 +767,9 @@ pub async fn registered_project_automation_retrieval(
     Ok(registered_automation_retrieval_for_identity(database, identity).await)
 }
 
-pub(super) async fn production_project_automation_retrieval(
-    _cg: &TraceDecay,
+pub(super) fn unavailable_automation_retrieval(
+    reason: &'static str,
 ) -> Box<dyn AutomationSessionRetrieval> {
-    unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
-}
-
-fn unavailable_automation_retrieval(reason: &'static str) -> Box<dyn AutomationSessionRetrieval> {
     // The static fallback session id is a fixed, valid identifier.
     #[allow(clippy::expect_used)]
     Box::new(UnavailableAutomationSessionRetrieval {

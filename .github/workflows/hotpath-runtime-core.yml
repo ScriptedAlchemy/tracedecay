@@ -31,6 +31,10 @@ on:
       - Cargo.toml
       - Cargo.lock
       - .github/workflows/hotpath-runtime-core.yml
+      - scripts/check-rust-cache-lineage.py
+      - scripts/drop-prefix-restored-rust-artifacts.sh
+      - scripts/rust_cache_lineage.py
+      - scripts/test-rust-cache-lineage.py
   workflow_dispatch:
 
 concurrency:
@@ -62,11 +66,24 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
-      - name: Cache Rust build outputs
+      - name: Check rust-cache restore lineage
+        run: |
+          python3 scripts/test-rust-cache-lineage.py
+          python3 scripts/check-rust-cache-lineage.py
+
+      # v1-rust invalidates the v0-rust blobs this lane restored, whose
+      # rustc-readonly .rmeta files the feature-on rebuild could not write.
+      - name: Cache Rust dependency artifacts
+        id: rust-cache
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust
           shared-key: hotpath-runtime-core
+          cache-workspace-crates: "false"
           cache-on-failure: true
+
+      - name: Discard prefix-restored compiler artifacts
+        run: scripts/drop-prefix-restored-rust-artifacts.sh "${{ steps.rust-cache.outputs.cache-hit }}"
 
       # The default dependency graph must resolve the hotpath crate with the
       # profiler compiled out (macros-only: expected activated feature set is

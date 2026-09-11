@@ -71,9 +71,9 @@ pub struct CatalogContributionInputV1 {
 
 /// A reviewed, application-owned set of inert catalog records.
 ///
-/// Contributions carry metadata only. The root composition layer validates and
-/// folds them into a snapshot; neither contributions nor this crate dispatch
-/// to a handler.
+/// Contributions carry metadata only. `tracedecay-contracts` validates them
+/// against its handler descriptors and folds them into a snapshot; neither
+/// contributions nor this crate dispatch to a handler.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CatalogContributionV1 {
     contribution_id: ContributionId,

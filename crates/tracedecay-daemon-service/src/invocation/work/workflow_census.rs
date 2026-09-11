@@ -80,12 +80,13 @@ fn try_persist_workflow_fan_out_census(
         .values()
         .flat_map(|plan| &plan.children)
     {
+        let identity = projection.active_fan_out_attempt(&child.attempt_identity);
         match work.attempts().status(
             context,
             &tracedecay_contracts::WorkAttemptStatusRequestV1 {
-                task_id: child.task_id.clone(),
-                run_id: child.attempt_identity.run_id().clone(),
-                attempt_id: child.attempt_identity.attempt_id().clone(),
+                task_id: identity.task_id().clone(),
+                run_id: identity.run_id().clone(),
+                attempt_id: identity.attempt_id().clone(),
             },
         ) {
             Ok(attempt) => attempts.push(attempt),
@@ -297,7 +298,8 @@ fn census_readiness(
                     !projection
                         .settled_fan_out_attempts()
                         .contains(&child.attempt_identity)
-                        && !existing.contains(&child.attempt_identity)
+                        && !existing
+                            .contains(projection.active_fan_out_attempt(&child.attempt_identity))
                 })
                 .map(move |child| (plan, child))
         })

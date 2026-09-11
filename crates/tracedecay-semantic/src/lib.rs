@@ -53,7 +53,7 @@ mod embedding_backend;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use embedding_backend::EmbeddingRuntimeFamilyV1;
 pub mod embedding_parallelism;
-#[cfg(feature = "semantic-fastembed")]
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
 mod execution_provider;
 mod fastembed_adapter;
 pub use fastembed_adapter::{SemanticExecutionAuthority, SemanticExecutionInterruptionV1};
@@ -158,7 +158,11 @@ impl<'a> LoadableLifecycleArtifactV1<'a> {
     fn resolve(
         lifecycle: &'a SemanticModelLifecycleOwnerV1,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1> {
-        Self::from_state(lifecycle.status().state, lifecycle.catalog())
+        let artifact = Self::from_state(lifecycle.status().state, lifecycle.catalog())?;
+        if !artifact.model.backend.runtime_family().is_compiled() {
+            return Err(SemanticRuntimeScheduleFailureV1::Runtime);
+        }
+        Ok(artifact)
     }
 
     fn from_state(
@@ -776,7 +780,11 @@ impl DaemonSemanticRuntimeHandleV1 {
     /// Requires `semantic-fastembed`: the handle's query runtime is concretely
     /// the FastEmbed runtime, and without that feature the compiled-out stub
     /// fails compatibility verification by design, so no binding can exist.
-    #[cfg(all(any(test, feature = "test-helpers"), feature = "semantic-fastembed"))]
+    #[cfg(all(
+        any(test, feature = "test-helpers"),
+        feature = "semantic-fastembed",
+        not(windows)
+    ))]
     pub fn bind_query_runtime_for_current(
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
@@ -1553,6 +1561,9 @@ mod document_composition_tests {
             line_span: 1,
             start_line: 0,
             signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: FileIdentityDigest::new(digest('f')).expect("file identity fixture"),
             content_digest: ContentDigest::new(digest('d')).expect("content fixture"),
@@ -1705,34 +1716,28 @@ mod scheduling_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::sync::oneshot;
-    #[cfg(feature = "semantic-fastembed")]
     use tracedecay_code_index::embedding_document::{
         EmbeddingDocumentComposerV1, EmbeddingSymbolContextIndexV1,
     };
-    #[cfg(feature = "semantic-fastembed")]
     use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
-    #[cfg(feature = "semantic-fastembed")]
     use tracedecay_domain::{
-        ChangedCodeChunkSetV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
+        ChangedCodeChunkSetV1, CodeGenerationId, ManifestDigest, ProjectionBatchRequestV1,
+        ProjectionKeyV1, ProjectionReplayReasonV1, VectorGenerationIdV1,
     };
-    use tracedecay_domain::{CodeGenerationId, ManifestDigest, VectorGenerationIdV1};
 
-    #[cfg(feature = "semantic-fastembed")]
-    use super::SemanticProjectionResumeOutcomeV1;
     use super::fastembed_adapter::EmbedError;
     use super::fastembed_adapter::lifecycle_test_support::digest_mismatched_lifecycle_authority;
     use super::session_pool::SessionAcquireError;
     use super::{
-        SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1,
-        SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
-        warm_failure,
+        SemanticFallbackReasonV1, SemanticGenerationPointerV1, SemanticProjectionResumeOutcomeV1,
+        SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1,
+        SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1, warm_failure,
     };
 
     fn source_generation(value: char) -> CodeGenerationId {
         CodeGenerationId::new(format!("code-generation.{value}")).expect("source generation")
     }
 
-    #[cfg(feature = "semantic-fastembed")]
     fn documents(value: char) -> Arc<EmbeddingDocumentComposerV1> {
         let index = GenerationSymbolIndexV1::new(source_generation(value), Vec::new())
             .expect("empty symbol index");
@@ -1757,7 +1762,6 @@ mod scheduling_tests {
         }
     }
 
-    #[cfg(feature = "semantic-fastembed")]
     fn projection_request_with_key(
         source: char,
         target_projection_key: ProjectionKeyV1,
@@ -1957,7 +1961,7 @@ mod scheduling_tests {
     /// Falsifiable in `semantic-fastembed` builds: without the pre-install
     /// warm, the structural-only authority would stage and publish Current
     /// over digest-mismatched bytes.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[tokio::test]
     async fn already_published_resume_with_digest_mismatched_model_never_becomes_current() {
         let mismatched = digest_mismatched_lifecycle_authority();
@@ -2075,7 +2079,7 @@ mod scheduling_tests {
         );
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn exact_unbind_clears_pointer_and_factory_but_preserves_newer_generation() {
         let handle =

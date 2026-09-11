@@ -183,6 +183,22 @@ impl InstalledCodeIndexWorkerRuntimeV1 {
             background_cpu: Arc::clone(&self.background_cpu),
         }
     }
+
+    /// Run a fan-out on the pool, yielding this thread's permits while it
+    /// waits so admitted units inside the fan-out can use them.
+    fn install<R, F>(&self, operation: F) -> R
+    where
+        F: FnOnce() -> R + Send,
+        R: Send,
+    {
+        self.background_cpu
+            .with_yielded_permits(|| self.pool.install(operation))
+    }
+
+    /// Run one admitted work unit of `requested_units` on the calling thread.
+    fn with_permits<R>(&self, requested_units: usize, operation: impl FnOnce() -> R) -> R {
+        self.background_cpu.with_permits(requested_units, operation)
+    }
 }
 
 /// Receipt of [`install_worker_plan`]: the configuration status projection
@@ -481,15 +497,6 @@ pub fn installed_worker_status() -> Option<CodeIndexWorkerStatusV1> {
     WORKER_RUNTIME.get().map(|runtime| runtime.plan.status())
 }
 
-/// The installed worker runtime's background CPU authority, or `None` for a
-/// standalone process that never installed a plan. Crate-private on purpose:
-/// this crate's leaf fan-outs meter against the pool they run on, while every
-/// other consumer receives the authority from the composition root's
-/// [`InstalledCodeIndexWorkerPlanV1`].
-pub(crate) fn installed_background_cpu() -> Option<&'static Arc<ProcessBackgroundCpuV1>> {
-    WORKER_RUNTIME.get().map(|runtime| &runtime.background_cpu)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CodeIndexParallelismErrorV1 {
     PoolBuild {
@@ -574,25 +581,14 @@ pub fn clear_forced_indexing_workers_for_test() {
     FORCED_WORKERS.store(0, Ordering::Relaxed);
 }
 
-/// Run a weighted work unit under `authority` when one is present. A caller
-/// without an authority — a standalone process that never installed a worker
-/// plan — runs directly.
-pub(crate) fn with_permits_on<R>(
-    authority: Option<&Arc<ProcessBackgroundCpuV1>>,
-    requested_units: usize,
-    operation: impl FnOnce() -> R,
-) -> R {
-    match authority {
-        Some(authority) => authority.with_permits(requested_units, operation),
-        None => operation(),
-    }
-}
-
 /// Run one active work unit under the installed worker runtime's background
 /// CPU authority. Standalone callers without an installed daemon plan run
 /// directly.
 pub fn with_background_cpu_permits<R>(requested_units: usize, operation: impl FnOnce() -> R) -> R {
-    with_permits_on(installed_background_cpu(), requested_units, operation)
+    match WORKER_RUNTIME.get() {
+        Some(runtime) => runtime.with_permits(requested_units, operation),
+        None => operation(),
+    }
 }
 
 /// One-unit convenience for ordinary index/session preparation work.
@@ -617,9 +613,7 @@ where
 {
     hotpath::gauge!("code_index_worker_count").set(indexing_workers());
     if let Some(runtime) = WORKER_RUNTIME.get() {
-        return Ok(runtime
-            .background_cpu
-            .with_yielded_permits(|| runtime.pool.install(operation)));
+        return Ok(runtime.install(operation));
     }
     let pool = standalone_pool()?;
     Ok(pool.install(operation))

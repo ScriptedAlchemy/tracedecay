@@ -7,7 +7,7 @@ use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 
-use super::verified::{all_symbols, info_graph_error, required_symbol_parts};
+use super::verified::{all_symbols, required_symbol_parts};
 
 /// Substring search across the cached `signature` column on every
 /// Function/Method node.
@@ -40,13 +40,6 @@ pub async fn handle_signature_search(
                 .to_string(),
         });
     }
-    if want_async.is_some() {
-        return Err(info_graph_error(
-            "verified-signature-async-state-unavailable",
-            "the verified code generation does not publish async-state metadata",
-        ));
-    }
-
     let (payload, touched) = hotpath::measure_block!("mcp.info.signature_search.scan", {
         let mut entries: Vec<Value> = Vec::new();
         let mut touched: Vec<String> = Vec::new();
@@ -67,6 +60,10 @@ pub async fn handle_signature_search(
             let Some(sig) = metadata.signature.as_deref() else {
                 continue;
             };
+
+            if want_async.is_some_and(|want_async| metadata.is_async != want_async) {
+                continue;
+            }
 
             if let Some(ret_pat) = returns
                 && !returns_substring(sig).contains(ret_pat)
@@ -92,7 +89,8 @@ pub async fn handle_signature_search(
                 "file": file_path,
                 "line": metadata.start_line.saturating_add(1),
                 "signature": sig,
-                "unavailable_fields": ["is_async"],
+                "is_async": metadata.is_async,
+                "unavailable_fields": [],
             }));
             if entries.len() >= limit {
                 break;

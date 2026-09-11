@@ -978,6 +978,10 @@ impl SemanticConfigurationTransitionV1 {
     fn validate_fields(&self) -> Result<(), SemanticRuntimeContractErrorV1> {
         self.base_configuration.validate()?;
         self.result_configuration.validate()?;
+        self.expected_cas
+            .expected_configuration_revision
+            .validate()
+            .map_err(|_| SemanticRuntimeContractErrorV1::InvalidTransition)?;
         self.prior_active_profile_id
             .validate()
             .map_err(|_| SemanticRuntimeContractErrorV1::InvalidTransition)?;
@@ -998,8 +1002,6 @@ impl SemanticConfigurationTransitionV1 {
         validate_optional_semantic_pins(self.prior_rollback_semantic.as_ref())?;
         validate_optional_semantic_pins(self.result_rollback_semantic.as_ref())?;
         if self.base_configuration.revision_id == self.result_configuration.revision_id
-            || self.base_configuration.revision_id
-                != self.expected_cas.expected_configuration_revision
             || self.prior_active_profile_digest != self.expected_cas.expected_active_digest
             || self.result_rollback_semantic != self.prior_active_semantic
         {
@@ -1544,7 +1546,8 @@ fn validate_audit_link(
         || audit.prior_active_digest != transition.prior_active_profile_digest
         || audit.resulting_active_digest != transition.result_active_profile_digest
         || audit.evaluation_anchor != transition.evaluation_anchor
-        || audit.base_revision != transition.base_configuration.revision_id
+        // Audit chains follow this scope; configuration commits may occur between them.
+        || audit.base_revision != transition.expected_cas.expected_configuration_revision
         || audit.result_revision != transition.result_configuration.revision_id
         || audit.occurred_at != transition.transition_at
         || audit.event_id != expected_event_id

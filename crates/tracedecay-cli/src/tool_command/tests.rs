@@ -1,13 +1,13 @@
 use super::*;
 use serde_json::{Value, json};
-use tracedecay::application_surface::retained::decode_request as decode_retained_request;
-use tracedecay::application_surface::{
-    parse_http_application_surface_request, resolve_application_surface_dispatch_with_controls,
-    resolve_catalog_tool_binding,
-};
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, OpaqueCursor, PageRequest, RequestId,
     ResultContractRef, SafeDiagnostic,
+};
+use tracedecay_daemon_service::application_surface::retained::decode_request as decode_retained_request;
+use tracedecay_daemon_service::application_surface::{
+    parse_http_application_surface_request, resolve_application_surface_dispatch_with_controls,
+    resolve_catalog_tool_binding,
 };
 use tracedecay_tool_catalog::{BindingId, BindingSurface, SchemaId};
 
@@ -61,6 +61,59 @@ fn canonicalizes_alias_and_strip_prefix() {
         "tracedecay_search"
     );
     assert_eq!(canonical_tool_name("dead-code"), "tracedecay_dead_code");
+}
+
+#[test]
+fn application_operations_resolve_by_identity_and_by_cli_spelling() {
+    for operation in ApplicationSurfaceOperation::ALL {
+        assert_eq!(
+            cli_application_operation(&canonical_tool_name(operation.as_str())),
+            Some(operation),
+            "{} must resolve by its canonical identity",
+            operation.as_str()
+        );
+        assert_eq!(
+            cli_application_operation(&canonical_tool_name(operation.mcp_operation_name())),
+            Some(operation),
+            "{} must resolve by its CLI binding spelling",
+            operation.as_str()
+        );
+    }
+    for spelling in ["diagnostics_read", "diagnostics", "tracedecay_diagnostics"] {
+        assert_eq!(
+            cli_application_operation(&canonical_tool_name(spelling)),
+            Some(ApplicationSurfaceOperation::DiagnosticsRead),
+            "{spelling}"
+        );
+    }
+    assert_eq!(
+        cli_application_operation(&canonical_tool_name("totally-fake-tool")),
+        None
+    );
+}
+
+#[test]
+fn retryable_surface_refusals_stop_at_the_attempt_and_deadline_bounds() {
+    let delay = Duration::from_millis(10);
+    let roomy_deadline = Instant::now() + Duration::from_secs(1);
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 1, roomy_deadline),
+        Some(delay)
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 2, roomy_deadline),
+        Some(delay)
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 3, roomy_deadline),
+        None,
+        "the third typed refusal is surfaced instead of retried"
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 1, Instant::now() + delay),
+        None,
+        "a retry that cannot complete inside the request deadline is refused"
+    );
 }
 
 #[test]
@@ -239,7 +292,7 @@ fn reserved_flags_extracted() {
 
 #[test]
 fn array_value_collected_via_repetition() {
-    let d = def("file_metadata");
+    let d = def("affected");
     let parsed = parse_invocation(
         &d,
         &[
@@ -260,7 +313,7 @@ fn array_value_collected_via_repetition() {
 
 #[test]
 fn finalize_arrays_splits_csv() {
-    let d = def("file_metadata");
+    let d = def("affected");
     let mut map = Map::new();
     map.insert("files".to_string(), json!("src/a.rs,src/b.rs,src/c.rs"));
     finalize_arrays(&d, &mut map);
@@ -324,7 +377,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
         );
         assert_eq!(
             project_scoped.project_path,
-            Some(tracedecay::config::resolve_path(Some(
+            Some(tracedecay_configuration::resolve_path(Some(
                 "/explicit/project".to_owned()
             ))),
             "{tool_name}"
@@ -339,7 +392,7 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
     );
     assert_eq!(
         dispatch.project_path,
-        Some(tracedecay::config::resolve_path(Some(
+        Some(tracedecay_configuration::resolve_path(Some(
             "/explicit/project".to_owned()
         )))
     );
@@ -712,6 +765,28 @@ fn join_content_text_joins_warning_and_payload() {
 }
 
 #[test]
+fn join_content_text_routes_the_daemon_metrics_footer_to_stderr() {
+    // `--format json` payloads are parsed from stdout as one document; the
+    // daemon appends its token accounting as a separate block, which must not
+    // trail the payload (run 34296614024: "Extra data: line 4 column 1").
+    let value = json!({
+        "content": [
+            { "type": "text", "text": r#"{"code":[],"coverage":{"exact":"complete"}}"# },
+            { "type": "text", "text": "\ntracedecay_metrics: before=151600 after=3721" }
+        ]
+    });
+    assert_eq!(
+        join_content_text(&value),
+        r#"{"code":[],"coverage":{"exact":"complete"}}"#
+    );
+    assert_eq!(
+        token_accounting_footers(&value),
+        vec!["tracedecay_metrics: before=151600 after=3721".to_owned()]
+    );
+    assert!(token_accounting_footers(&json!({ "content": [] })).is_empty());
+}
+
+#[test]
 fn join_content_text_skips_empty_blocks() {
     let value = json!({
         "content": [
@@ -955,16 +1030,15 @@ fn application_problem_makes_the_tool_command_fail() {
 fn documented_json_invocations() -> Vec<(&'static str, Value)> {
     vec![
         ("tracedecay_storage_status", json!({})),
+        // `health_read` takes no parameters at all, so the documented
+        // invocation is the empty object on every transport.
+        ("tracedecay_health_read", json!({})),
         ("tracedecay_git_status", json!({})),
         ("tracedecay_git_diff", json!({})),
         ("tracedecay_git_history", json!({"count": 3})),
         (
             "tracedecay_source_outline",
             json!({"file": "src/update_cmd.rs"}),
-        ),
-        (
-            "tracedecay_file_metadata",
-            json!({"files": ["src/update_cmd.rs"]}),
         ),
     ]
 }

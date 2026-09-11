@@ -10,6 +10,7 @@ import {
 import { kindColor } from './kindColor.ts';
 import { isManaged } from './managed.ts';
 import { createNodeHoverDrawer } from './nodeHover.ts';
+import { GlowProgram } from './glowProgram.ts';
 import { palette, rgb, rgba, type ThemeBox } from './palette.ts';
 import type { FieldFrame } from './layout.ts';
 
@@ -53,6 +54,9 @@ export interface FieldRendererOptions {
   selectedId: () => string | null | undefined;
   onNodeClick: (node: string) => void;
   onStageClick: () => void;
+  /** Pointer focus leaves the canvas through this bridge; DOM focus enters
+   * through {@link FieldRenderer.focusNode}. Neither path is activity. */
+  onInspect: (node: string | null) => void;
   /** The hover state just changed; the overlay has an easing to run. */
   onFocusChange: () => void;
 }
@@ -60,6 +64,10 @@ export interface FieldRendererOptions {
 export interface FieldRenderer {
   refresh(): void;
   resize(): void;
+  focusNode(node: string | null): void;
+  zoomIn(reduced: boolean): void;
+  zoomOut(reduced: boolean): void;
+  fit(reduced: boolean): void;
   /** Re-sample the theme tokens and re-derive anything baked from them. */
   retheme(): void;
   /**
@@ -93,6 +101,7 @@ export function createFieldRenderer({
   selectedId,
   onNodeClick,
   onStageClick,
+  onInspect,
   onFocusChange,
 }: FieldRendererOptions): FieldRenderer {
   const roomyDenseField = denseField && roominess >= 0.8;
@@ -119,6 +128,7 @@ export function createFieldRenderer({
   };
 
   const sigma = new Sigma(graph, container, {
+    nodeProgramClasses: { glow: GlowProgram },
     // Sigma's default hover pass paints an opaque white shadowed disc over
     // the hovered body; ours stays in the field's palette. See nodeHover.ts.
     defaultDrawNodeHover: createNodeHoverDrawer(theme),
@@ -150,8 +160,25 @@ export function createFieldRenderer({
     // bloom, then halo, then the body on top, then anything hot.
     zIndex: true,
     nodeReducer: (node, data) => {
-      if (isManaged(node)) return data;
       const colors = theme.colors;
+      if (isManaged(node)) {
+        const owner = data['owner'];
+        const glowRgb = data['glowRgb'];
+        const glowAlpha = data['glowAlpha'];
+        if (typeof owner !== 'string' || !Array.isArray(glowRgb) || typeof glowAlpha !== 'number') {
+          return data;
+        }
+        const dim =
+          focus.node != null && neighborhoodOf(focus.node)?.has(owner) !== true ? focus.t : 0;
+        if (dim === 0) return data;
+        return {
+          ...data,
+          color: rgba(
+            lerpRgbTuple(glowRgb as [number, number, number], colors.dim, dim),
+            glowAlpha * (1 - 0.92 * dim),
+          ),
+        };
+      }
       const hovered = focus.node;
       const isSelected = node === selectedId();
       const isHovered = node === hovered;
@@ -224,10 +251,12 @@ export function createFieldRenderer({
     focus.node = node;
     focus.target = 1;
     onFocusChange();
+    onInspect(node);
   });
   sigma.on('leaveNode', () => {
     focus.target = 0;
     onFocusChange();
+    onInspect(null);
   });
   sigma.on('clickNode', ({ node }) => {
     if (isManaged(node)) return;
@@ -246,6 +275,33 @@ export function createFieldRenderer({
     },
     resize: () => {
       sigma.resize();
+      // Sigma clears its WebGL buffers while resizing. The resting field has
+      // no animation loop to repaint them, so a resize must restore one frame.
+      sigma.refresh();
+    },
+    focusNode: (node) => {
+      const next = node != null && graph.hasNode(node) && !isManaged(node) ? node : null;
+      if (next == null) focus.target = 0;
+      else {
+        focus.node = next;
+        focus.target = 1;
+      }
+      onFocusChange();
+    },
+    zoomIn: (reduced) => {
+      const camera = sigma.getCamera();
+      if (reduced) camera.setState({ ratio: camera.getBoundedRatio(camera.ratio / 1.5) });
+      else void camera.animatedZoom({ factor: 1.5, duration: 180 });
+    },
+    zoomOut: (reduced) => {
+      const camera = sigma.getCamera();
+      if (reduced) camera.setState({ ratio: camera.getBoundedRatio(camera.ratio * 1.5) });
+      else void camera.animatedUnzoom({ factor: 1.5, duration: 180 });
+    },
+    fit: (reduced) => {
+      const camera = sigma.getCamera();
+      if (reduced) camera.setState({ x: 0.5, y: 0.5, ratio: 1, angle: 0 });
+      else void camera.animatedReset({ duration: 180 });
     },
     retheme: () => {
       const wasLight = theme.colors.light;

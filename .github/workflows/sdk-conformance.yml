@@ -7,6 +7,7 @@ on:
       - ".github/release-targets.json"
       - "crates/tracedecay-api/**"
       - "crates/tracedecay-contracts/**"
+      - "crates/tracedecay-daemon-service/**"
       - "crates/tracedecay-domain/**"
       - "crates/tracedecay-sdk/**"
       - "crates/tracedecay-tool-catalog/**"
@@ -21,7 +22,6 @@ on:
       - "scripts/plan-release-recovery.py"
       - "scripts/test-plan-release-recovery.py"
       - "tests/release_safety_test.sh"
-      - "crates/tracedecay/src/application_surface.rs"
   push:
     branches: [master]
 

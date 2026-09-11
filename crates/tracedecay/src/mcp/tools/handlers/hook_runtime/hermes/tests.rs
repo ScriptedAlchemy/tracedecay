@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::host_admission::HostAdmissionTestRuntimeV1;
+use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::structured_hook_error_data;
 use tracedecay_sessions::admission::{HostAdmissionScope, HostAdmissionStatus};
 
@@ -206,6 +206,52 @@ async fn malformed_profile_payload_is_quarantined_across_reopen() {
     assert_eq!(reopen.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(recovered.pending_count().await, 0);
     assert_eq!(recovered.quarantine_count().await, 1);
+}
+
+#[tokio::test]
+async fn inline_replay_reports_worker_committed_target_and_rejects_never_committed_seq() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let profile_root = temp.path().join("tracedecay-profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let fixture = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
+    let broker = fixture
+        .host_admission_broker_for_test(HostAdmissionScope::Profile)
+        .unwrap();
+    let payload = valid_hermes_terminal_receipt_payload("session-race", "wm-race-1");
+    let admitted = broker.admit("hermes:race-source", &payload).await.unwrap();
+
+    // The daemon worker drains with no target seq. Winning the replay lock
+    // commits `admitted.seq` and empties the spool before the inline path runs.
+    let worker_outcome = replay_projectless_hermes_host_admission(&broker, &profile_root).await;
+    assert!(
+        matches!(
+            worker_outcome.status,
+            HostAdmissionStatus::Committed | HostAdmissionStatus::AcceptedForReplay
+        ),
+        "worker drain must settle the admitted receipt, got {worker_outcome:?}"
+    );
+    assert_eq!(broker.pending_count().await, 0);
+
+    let raced = replay_projectless_hermes_receipts(&broker, &profile_root, Some(admitted.seq))
+        .await
+        .expect("inline replay must finish with a typed disposition");
+    assert_eq!(
+        raced.status,
+        HostAdmissionStatus::Committed,
+        "a worker-committed target seq must be reported as settled, got {raced:?}"
+    );
+
+    let missing_seq = admitted.seq.saturating_add(1);
+    let missing = replay_projectless_hermes_receipts(&broker, &profile_root, Some(missing_seq))
+        .await
+        .expect("absent target must finish with a typed disposition");
+    assert_eq!(
+        missing,
+        tracedecay_sessions::admission::HostAdmissionOutcome::spool_ack_conflict(),
+        "a seq the worker never committed must stay a typed failure, got {missing:?}"
+    );
 }
 
 #[tokio::test]

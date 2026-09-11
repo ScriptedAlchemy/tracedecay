@@ -16,7 +16,7 @@ pub use definitions::{
     context_warming_description, explore_call_budget, format_capable_tool_names,
     get_maximal_tool_definitions, get_maximal_tool_definitions_with_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    internal_daemon_tool_definition, project_catalog_discovery_scope,
+    internal_daemon_tool_definition, mcp_input_schema, project_catalog_discovery_scope,
     retain_host_available_tool_definitions, tool_defaults_to_markdown,
 };
 

@@ -15,7 +15,7 @@ pub use authorization::{
 pub use operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 pub use ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationCurrentStateV1,
-    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture, CredentialWritePort,
+    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
     CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 pub use profile_workers::{
@@ -27,9 +27,8 @@ pub use types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationPlanContext,
-    ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1, CredentialWriteHandleV1,
-    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
-    configuration_layer_scope_digest,
+    ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1, DirectConfigurationMutation,
+    ResolvedSetting, SettingSummary, configuration_layer_scope_digest,
 };
 pub use user_settings::{
     ProductionUserSettingsDaemonClient, UserSettingsAuthorityError, UserSettingsDaemonClient,

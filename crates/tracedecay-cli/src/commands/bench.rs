@@ -8,7 +8,7 @@ pub(crate) async fn handle_bench(
     max_nodes: usize,
 ) -> tracedecay_domain::errors::Result<()> {
     let resolved =
-        super::scope::resolve_project_scope(tracedecay::config::resolve_path(path)).await?;
+        super::scope::resolve_project_scope(tracedecay_configuration::resolve_path(path)).await?;
     let queries_toml = queries
         .map(std::fs::read_to_string)
         .transpose()

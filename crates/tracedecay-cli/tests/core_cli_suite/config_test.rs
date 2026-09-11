@@ -1,5 +1,7 @@
 use tempfile::TempDir;
-use tracedecay::config::*;
+use tracedecay_configuration::{
+    TraceDecayConfig, get_config_path, is_excluded, is_excluded_dir, is_in_gitignore, load_config,
+};
 
 #[test]
 fn legacy_config_fixture_load_does_not_rewrite_input() {

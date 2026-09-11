@@ -16,12 +16,15 @@ use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::surface_contracts::{
+    CodeCalleesSurfaceRequest, CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest,
+    CodeNavigationSurfaceRequest, CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest,
+};
 
 use super::callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,
-    CodeFacetRecord, CodeFacetRequest, CodeNavigationRequest, CodeQueryPage, CodeRelationRequest,
-    CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
-    LexicalOccurrenceRecord, PhraseSearchSurfaceRequest,
+    CodeFacetRecord, CodeQueryPage, CodeTimelineRecord, ExactOccurrenceRecord,
+    LexicalOccurrenceRecord,
 };
 use super::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use super::symbol_graph::{SymbolPrimitiveRecord, SymbolRelationRecord};
@@ -78,7 +81,7 @@ pub fn callable_code_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     CallableCodeOperationKind::ALL
         .into_iter()
-        .filter(|kind| canonical_surface_equivalent(*kind).is_none())
+        .filter(|kind| !is_internal_only(*kind) && canonical_surface_equivalent(*kind).is_none())
         .map(|kind| {
             let surface_operation = reachable_surface_operation(kind).ok_or(
                 ApplicationContractError::Inconsistent {
@@ -105,7 +108,7 @@ pub fn callable_code_catalog_contribution()
     let mut bindings = Vec::with_capacity(27);
     for kind in CallableCodeOperationKind::ALL
         .into_iter()
-        .filter(|kind| canonical_surface_equivalent(*kind).is_none())
+        .filter(|kind| !is_internal_only(*kind) && canonical_surface_equivalent(*kind).is_none())
     {
         let operation =
             reachable_surface_operation(kind).ok_or(ApplicationContractError::Inconsistent {
@@ -143,10 +146,6 @@ pub fn callable_code_catalog_contribution()
         }
         capabilities.push(code_query_capability(kind, binding_ids)?);
     }
-    debug_assert_eq!(
-        capabilities.len() + CANONICAL_SURFACE_EQUIVALENT_COUNT,
-        CALLABLE_CODE_OPERATION_COUNT
-    );
     let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.callable-code-query")?,
         depends_on: Vec::new(),
@@ -161,12 +160,9 @@ pub fn callable_code_catalog_contribution()
 /// Rust-owned request/result schema bodies for every advertised callable-code
 /// query.
 ///
-/// The pairs mirror `CallableCodeQueryService` exactly: each service method
-/// names the request type it validates and the `CodeQueryPage` item type it
-/// returns, so the generated SDKs cannot describe a shape the service does not
-/// produce. Only `code_phrase_search` differs, because its service request
-/// holds a non-serializable sanitized query view and its admitted wire form is
-/// [`PhraseSearchSurfaceRequest`].
+/// Requests use the DTOs consumed by the transport adapter. The application
+/// adds temporal and page controls after parsing; advertising its internal
+/// request instead makes valid catalog-generated calls fail deserialization.
 fn callable_code_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -179,7 +175,7 @@ fn callable_code_executable_schemas(
             >(
                 contribution,
                 CallableCodeOperationKind::$kind,
-                concat!("tracedecay_contracts::retrieval::", stringify!($request)),
+                concat!("tracedecay_contracts::surface_contracts::", stringify!($request)),
                 concat!(
                     "tracedecay_contracts::retrieval::CodeQueryPage<tracedecay_contracts::retrieval::",
                     stringify!($item),
@@ -190,21 +186,37 @@ fn callable_code_executable_schemas(
     }
     add!(
         ExactOccurrence,
-        ExactOccurrenceRequest,
+        CodeExactOccurrenceSurfaceRequest,
         ExactOccurrenceRecord
     );
     add!(
         PhraseSearch,
-        PhraseSearchSurfaceRequest,
+        CodePhraseSearchSurfaceRequest,
         LexicalOccurrenceRecord
     );
-    add!(Callees, CodeRelationRequest, SymbolRelationRecord);
-    add!(Facets, CodeFacetRequest, CodeFacetRecord);
-    add!(Timeline, CodeTimelineRequest, CodeTimelineRecord);
-    add!(Declaration, CodeNavigationRequest, SymbolPrimitiveRecord);
-    add!(Definition, CodeNavigationRequest, SymbolPrimitiveRecord);
-    add!(TypeDefinition, CodeNavigationRequest, SymbolPrimitiveRecord);
-    add!(References, CodeNavigationRequest, SymbolRelationRecord);
+    add!(Callees, CodeCalleesSurfaceRequest, SymbolRelationRecord);
+    add!(Facets, CodeFacetSurfaceRequest, CodeFacetRecord);
+    add!(Timeline, CodeTimelineSurfaceRequest, CodeTimelineRecord);
+    add!(
+        Declaration,
+        CodeNavigationSurfaceRequest,
+        SymbolPrimitiveRecord
+    );
+    add!(
+        Definition,
+        CodeNavigationSurfaceRequest,
+        SymbolPrimitiveRecord
+    );
+    add!(
+        TypeDefinition,
+        CodeNavigationSurfaceRequest,
+        SymbolPrimitiveRecord
+    );
+    add!(
+        References,
+        CodeNavigationSurfaceRequest,
+        SymbolRelationRecord
+    );
     Ok(schemas)
 }
 
@@ -234,8 +246,6 @@ where
     )?)
 }
 
-const CANONICAL_SURFACE_EQUIVALENT_COUNT: usize = 9;
-
 /// Existing canonical application surfaces own these semantics. Keeping the
 /// mapping here prevents the callable-code catalog from advertising a second
 /// capability, kernel, or transport operation for the same query.
@@ -249,7 +259,6 @@ fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'sta
         CallableCodeOperationKind::Callers => Some("code_callers"),
         CallableCodeOperationKind::Impact => Some("feedback_impact"),
         CallableCodeOperationKind::ModuleApi => Some("module_api"),
-        CallableCodeOperationKind::SourceMetadata => Some("file_metadata"),
         CallableCodeOperationKind::ExactOccurrence
         | CallableCodeOperationKind::PhraseSearch
         | CallableCodeOperationKind::Callees
@@ -258,8 +267,13 @@ fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'sta
         | CallableCodeOperationKind::Declaration
         | CallableCodeOperationKind::Definition
         | CallableCodeOperationKind::TypeDefinition
-        | CallableCodeOperationKind::References => None,
+        | CallableCodeOperationKind::References
+        | CallableCodeOperationKind::SourceMetadata => None,
     }
+}
+
+fn is_internal_only(kind: CallableCodeOperationKind) -> bool {
+    kind == CallableCodeOperationKind::SourceMetadata
 }
 
 fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'static str> {

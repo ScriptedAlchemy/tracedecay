@@ -103,7 +103,7 @@ impl HostCliOutcomeV1 {
 /// plugin lifecycle"), so the operator learns both what is missing and what it
 /// was needed for.
 pub(crate) fn require_host_cli(program: &str, lifecycle: &str) -> Result<PathBuf> {
-    let path_var = std::env::var_os("PATH");
+    let path_var = tracedecay_runtime_core::config::host_program_search_path();
     require_host_cli_from(program, lifecycle, path_var.as_deref())
 }
 
@@ -440,13 +440,15 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
         if interpreter.starts_with('-') || interpreter.contains('=') {
             return Ok((program.to_path_buf(), Vec::new()));
         }
-        let interpreter_path = resolve_on_path(interpreter, std::env::var_os("PATH").as_deref())?
-            .ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
-                program.display()
-            ),
-        })?;
+        let search_path = tracedecay_runtime_core::config::host_program_search_path();
+        let interpreter_path = resolve_on_path(interpreter, search_path.as_deref())?.ok_or_else(
+            || TraceDecayError::Config {
+                message: format!(
+                    "could not resolve env-shebang interpreter `{interpreter}` for `{}` on PATH",
+                    program.display()
+                ),
+            },
+        )?;
         // Preserve the admitted executable spelling. Multicall launchers such
         // as Volta dispatch from argv[0] (`node`); canonicalizing the final
         // symlink to `volta-shim` invokes a private target that correctly
@@ -736,7 +738,7 @@ exit 0
         std::fs::set_permissions(&launcher, launcher_permissions).unwrap();
 
         let path = std::env::join_paths([node_dir.path(), attacker_dir.path()]).unwrap();
-        let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(&path);
+        let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["mcp", "add"], home.path())
             .expect("env-shebang launchers must run after interpreter admission");
 
@@ -799,7 +801,7 @@ printf '%s' "$*" > "$HOME/node-args"
         std::fs::set_permissions(&launcher, permissions).unwrap();
 
         let path = std::env::join_paths([bin_dir.path()]).unwrap();
-        let _path = tracedecay_runtime_core::config::AmbientPathGuard::set(&path);
+        let _path = tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(&path);
         let outcome = run_host_cli(&launcher, &["plugin", "add"], home.path())
             .expect("the admitted multicall interpreter must launch");
 

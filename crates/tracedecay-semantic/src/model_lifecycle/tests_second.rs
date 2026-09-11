@@ -113,7 +113,7 @@
     // capability absence without the bundled runtime. Workspace builds unify
     // `semantic-fastembed` on via the root crate's `production` default; the
     // gate keeps scoped `-p tracedecay-semantic` runs truthful.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn restart_re_admits_explicit_import_without_legacy_acquisition() {
         let fixture = tempfile::tempdir().unwrap();
@@ -573,7 +573,7 @@
         }
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn pinned_reranker_fixture_catalog(fixture: &Path) -> (FastEmbedModelCatalogV1, String) {
         let mut members = BTreeMap::new();
         for (role, name) in [
@@ -615,7 +615,7 @@
                         .to_owned(),
             },
             expected_dimensions: 1,
-            max_length: 512,
+            max_length: 4096,
             members,
         };
         let mut catalog = FastEmbedModelCatalogV1::production();
@@ -623,7 +623,7 @@
         (catalog, model.model_id)
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     #[ignore = "requires TRACEDECAY_FASTEMBED_FIXTURE_DIR with a pinned local reranker"]
     fn pinned_reranker_cold_first_and_warm_queries_reuse_one_session() {
@@ -659,7 +659,7 @@
             package_bytes.saturating_sub(manifest.payload.model_member.byte_length);
         manifest.payload.resource_ceiling.max_resident_bytes = package_bytes.saturating_mul(4);
         manifest.payload.resource_ceiling.max_batch_size = 8;
-        manifest.payload.resource_ceiling.max_sequence_length = 512;
+        manifest.payload.resource_ceiling.max_sequence_length = 4096;
         let pins = reranker_pins(&manifest);
         owner
             .import_local_reranker_artifact(pins.clone(), &manifest, &fixture, 10)
@@ -803,7 +803,7 @@
 
     // Reranker publication admits the artifact for runtime against
     // `detect_fastembed_process()` evidence; see the gate rationale above.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn independent_reranker_import_rotates_active_and_rollback_leases() {
         let fixture = tempfile::tempdir().unwrap();
@@ -865,13 +865,13 @@
         ));
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     struct FixtureRerankerHttpsTransport {
         members: BTreeMap<String, Vec<u8>>,
         revision: String,
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     impl ExplicitHttpsArtifactTransportV1 for FixtureRerankerHttpsTransport {
         fn fetch_range(
             &self,
@@ -900,7 +900,7 @@
     }
 
     // Same runtime-evidence gate as the local reranker import above.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn configured_https_reranker_acquisition_uses_immutable_member_pins() {
         let fixture = tempfile::tempdir().unwrap();
@@ -997,6 +997,65 @@
     }
 
     #[test]
+    fn reranker_import_rejects_unsupported_identity_before_transport() {
+        struct CountingTransport {
+            calls: AtomicUsize,
+        }
+
+        impl ExplicitHttpsArtifactTransportV1 for CountingTransport {
+            fn fetch_range(
+                &self,
+                _request: &super::super::artifact_store::HttpsArtifactRangeRequestV1,
+            ) -> Result<
+                super::super::artifact_store::HttpsArtifactRangeResponseV1,
+                ArtifactImportErrorV1,
+            > {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(ArtifactImportErrorV1::MemberMismatch)
+            }
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            scoped_hub_source(root.path()),
+        )
+        .unwrap();
+        let manifest = reranker_manifest(&model, "unsupported/reranker");
+        let pins = reranker_pins(&manifest);
+        let source = ConfiguredHttpsArtifactSourceV1::new(
+            "https://models.example.test/reranker",
+            "immutable-reranker-revision",
+        )
+        .unwrap();
+        let transport = CountingTransport {
+            calls: AtomicUsize::new(0),
+        };
+
+        assert_eq!(
+            crate::rerank_adapter::validate_reranker_manifest_pins(&manifest, &pins),
+            Err(crate::rerank_adapter::RerankArtifactAdmissionErrorV1::IncompatibleArtifact)
+        );
+        assert_eq!(
+            owner
+                .import_configured_https_reranker_artifact(
+                    pins, &manifest, &source, &transport, None, 30,
+                )
+                .unwrap_err(),
+            ModelLifecycleErrorV1::VerificationFailed
+        );
+        assert_eq!(
+            transport.calls.load(Ordering::SeqCst),
+            0,
+            "unsupported reranker identity must be rejected before transport"
+        );
+    }
+
+    #[test]
     fn settings_change_schedules_acquire_to_installed_without_blocking_semantics_flag() {
         let fixture = tempfile::tempdir().unwrap();
         let (catalog, model_id) = tiny_catalog(fixture.path());
@@ -1025,7 +1084,10 @@
             ready.state,
             Some(SemanticModelLifecycleStateV1::Ready { .. })
         ));
-        assert!(!ready.semantics_omitted);
+        assert_eq!(
+            ready.semantics_omitted,
+            !crate::embedding_backend::EmbeddingRuntimeFamilyV1::FastEmbedOrt.is_compiled()
+        );
     }
 
     #[test]
@@ -1122,6 +1184,127 @@
         assert!(status.state.is_none());
         assert!(status.semantics_omitted);
         assert!(status.auto_download);
+    }
+
+    #[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
+    #[test]
+    fn unavailable_runtime_preserves_ready_selection_and_rollback_leases() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(FixtureSource {
+            root: fixture.path().to_path_buf(),
+            calls: AtomicUsize::new(0),
+        });
+        let owner =
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog.clone(), source.clone())
+                .unwrap();
+        let first_manifest = tiny_manifest(model);
+        owner
+            .import_local_artifact(&model_id, &first_manifest, fixture.path(), 10)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let previous = owner.status().state;
+        let mut second_manifest = first_manifest.clone();
+        second_manifest.payload.resource_ceiling.max_resident_bytes += 1;
+        owner
+            .import_local_artifact(&model_id, &second_manifest, fixture.path(), 20)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let ready = owner.status().state;
+        let before = fs::read(root.path().join("lifecycle.json")).unwrap();
+        drop(owner);
+
+        let reopened =
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source.clone()).unwrap();
+        assert_eq!(
+            fs::read(root.path().join("lifecycle.json")).unwrap(),
+            before
+        );
+        assert_eq!(reopened.status().state, ready);
+        assert!(reopened.status().semantics_omitted);
+        assert!(reopened.status().remediation.rollback);
+        assert!(matches!(
+            crate::LoadableLifecycleArtifactV1::resolve(&reopened),
+            Err(crate::SemanticRuntimeScheduleFailureV1::Runtime)
+        ));
+        let projection = crate::session_pool::test_support::authority()
+            .projection()
+            .clone();
+        assert!(matches!(
+            crate::LoadedSemanticArtifactV1::from_lifecycle_projection(
+                &reopened,
+                &projection,
+                SemanticResourceCeilings::default(),
+            ),
+            Err(crate::SemanticRuntimeScheduleFailureV1::Runtime)
+        ));
+        // Re-selecting on an incapable binary must verify bytes without runtime admission.
+        assert_eq!(
+            reopened.select_model(Some(&model_id), true).unwrap().state,
+            ready
+        );
+        for (slot, kind, expected) in [
+            (
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                second_manifest.artifact_identity_digest(),
+            ),
+            (
+                EMBEDDING_ROLLBACK_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Rollback,
+                first_manifest.artifact_identity_digest(),
+            ),
+        ] {
+            assert_eq!(
+                reopened
+                    .artifact_store
+                    .artifact_digest_for_lease(slot, kind, 40)
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        assert_eq!(reopened.rollback_to_previous().unwrap().state, previous);
+        assert!(reopened.status().semantics_omitted);
+        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "semantic-model2vec")]
+    #[test]
+    fn model2vec_selection_remains_available_without_fastembed() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (mut catalog, model_id) = tiny_catalog(fixture.path());
+        catalog
+            .models
+            .iter_mut()
+            .find(|model| model.model_id == model_id)
+            .unwrap()
+            .backend = CatalogedEmbeddingBackendV1::Model2VecStatic {
+            table_precision: EmbeddingPrecisionV1::Fp32,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(FixtureSource {
+                root: fixture.path().to_path_buf(),
+                calls: AtomicUsize::new(0),
+            }),
+        )
+        .unwrap();
+
+        let selected = owner.select_model(Some(&model_id), true).unwrap();
+        assert!(matches!(
+            selected.state,
+            Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
+        ));
+        assert!(
+            RuntimeEnvironmentV1::detect_embedding_process(
+                crate::embedding_backend::EmbeddingRuntimeFamilyV1::Model2VecStatic,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1439,7 +1622,7 @@
     /// its own active lease without fetching again. Re-admission verifies the
     /// manifest against the bundled runtime, so the gate matches
     /// `restart_re_admits_explicit_import_without_legacy_acquisition`.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn scoped_acquisition_re_admits_after_restart_under_catalog_identity() {
         let temp = tempfile::tempdir().unwrap();

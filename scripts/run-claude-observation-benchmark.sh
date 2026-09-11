@@ -135,8 +135,8 @@ chmod u+rwx "$build_root/target"
 
 (
   cd "$build_root"
-  cargo test --quiet --release --lib \
-    claude_observation_benchmark::production_observation_pipeline_baseline -- \
+  cargo test --quiet --release -p tracedecay --features test-helpers \
+    --test claude_observation_benchmark production_observation_pipeline_baseline -- \
     --ignored --exact --nocapture --test-threads=1
 ) 2>&1 | tee "$capture"
 
@@ -157,8 +157,8 @@ sed "s/\"current_acceptance\": null/\"current_acceptance\": \"$result_name\"/" \
   cd "$build_root"
   TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE=1 \
   TRACEDECAY_BENCHMARK_EVIDENCE_DIR="$repo_root/benchmark_data/claude-observation" \
-    cargo test --quiet --release --lib \
-      claude_observation_benchmark::evidence_directory_matches_index_contract -- \
+    cargo test --quiet --release -p tracedecay --features test-helpers \
+      --test claude_observation_benchmark evidence_directory_matches_index_contract -- \
       --exact --test-threads=1
 )
 

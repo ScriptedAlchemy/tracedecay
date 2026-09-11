@@ -5,12 +5,11 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay_contracts::{
     ApplicationResult, CancellationSignal, ConfigurationBatchRequestV1,
-    ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1,
-    ConfigurationWriteCredentialRequestV1, Deadline, PageRequest,
+    ConfigurationDirectMutationRequestV1, ConfigurationSetRequestV1, Deadline, PageRequest,
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationValueV1, CredentialKindV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
+    ConfigurationValueV1, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
     USER_UPLOAD_ENABLED_SETTING_KEY, UserProfileId,
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
@@ -84,8 +83,8 @@ async fn cli_configuration_set(
         tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
@@ -108,11 +107,11 @@ async fn cli_configuration_set(
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .expect("CLI cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             tracedecay_tool_catalog::BindingSurface::Cli,
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Set(request),
             ),
             PageRequest::first(10).expect("CLI page"),
@@ -121,10 +120,14 @@ async fn cli_configuration_set(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("CLI configuration dispatch");
-    crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
-        .await
-        .expect("CLI application invocation")
-        .result
+    tracedecay_daemon_service::application_surface::execute_application_surface(
+        operation,
+        dispatched,
+        Some(&executor),
+    )
+    .await
+    .expect("CLI application invocation")
+    .result
 }
 
 async fn current_profile_id(
@@ -174,8 +177,8 @@ async fn configuration_batch_via_surface(
         tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
@@ -203,10 +206,10 @@ async fn configuration_batch_via_surface(
         tracedecay_contracts::request_identity::mint_global_request_id(request_surface)
             .expect("surface request id");
     if surface == tracedecay_tool_catalog::BindingSurface::Dashboard {
-        return crate::application_surface::resolve_dashboard_application_surface(
+        return tracedecay_daemon_service::application_surface::resolve_dashboard_application_surface(
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
@@ -220,11 +223,11 @@ async fn configuration_batch_via_surface(
         CancellationSignal::active(format!("cancellation.surface.{}", request_id.as_str()))
             .expect("surface cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             surface,
             operation,
             request_id,
-            crate::application_surface::ApplicationSurfaceRequest::Configuration(
+            tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
                 tracedecay_contracts::ConfigurationWireRequestV1::Batch(request),
             ),
             PageRequest::first(10).expect("surface page"),
@@ -233,10 +236,14 @@ async fn configuration_batch_via_surface(
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
-    crate::application_surface::execute_application_surface(operation, dispatched, Some(&executor))
-        .await
-        .expect("configuration batch application invocation")
-        .result
+    tracedecay_daemon_service::application_surface::execute_application_surface(
+        operation,
+        dispatched,
+        Some(&executor),
+    )
+    .await
+    .expect("configuration batch application invocation")
+    .result
 }
 
 async fn configuration_http_sdk(
@@ -265,12 +272,13 @@ async fn configuration_http_sdk(
         project_root,
         scope,
     ));
-    let router = crate::application_surface::http_application_router_with_executor(
-        executor,
-        daemon_operation_event_authority(),
-        target.project_id.clone(),
-    )
-    .expect("canonical HTTP application router");
+    let router =
+        tracedecay_daemon_service::application_surface::http_application_router_with_executor(
+            executor,
+            daemon_operation_event_authority(),
+            target.project_id.clone(),
+        )
+        .expect("canonical HTTP application router");
     let registry = crate::daemon::http_application::DaemonHttpApplicationRegistry::default();
     registry
         .mount(target.project_id.as_str(), router)
@@ -590,58 +598,6 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
         current_revision(&harness, &project).await,
         committed_revision,
         "idempotency conflict must not advance configuration"
-    );
-    harness.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn credential_effect_uses_the_durable_request_operation_digest() {
-    let isolation = TempDir::new().expect("journey isolation");
-    let project = isolation.path().join("project");
-    initialize_project(&project);
-
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
-        .await
-        .expect("production composition");
-    let request = ConfigurationWriteCredentialRequestV1 {
-        expected_reference_id: None,
-        kind: CredentialKindV1::ApiToken,
-        write_handle: "credential-write-handle.production-journey".to_owned(),
-        expected_revision: current_revision(&harness, &project).await,
-        idempotency_key: ConfigurationIdempotencyKey::new(
-            "configuration.idempotency.credential-digest",
-        )
-        .expect("idempotency key"),
-    };
-    // Application-surface tools render markdown unless the caller asks for
-    // JSON; `format` is a transport key the surface strips before the reviewed
-    // request schema sees it. This journey asserts on the typed effect record,
-    // so it requests the machine-readable presentation explicitly.
-    let mut arguments = serde_json::to_value(&request).expect("credential request");
-    arguments["format"] = serde_json::json!("json");
-    let response = harness
-        .call_tool(
-            &project,
-            "tracedecay_configuration_write_credential",
-            arguments,
-        )
-        .await
-        .expect("credential effect");
-    let envelope = tool_payload(&response);
-    let effect = &envelope["outcome"]["value"];
-    let operation_digest = &effect["payload"]["operation_digest"];
-    assert_eq!(
-        &effect["receipt"]["input_digest"], operation_digest,
-        "the effect must carry the canonical digest accepted by the credential store"
-    );
-    assert_ne!(
-        operation_digest, &effect["payload"]["reference_digest"],
-        "the durable request digest must not be replaced by the metadata digest"
-    );
-    assert_eq!(
-        effect["execution"]["effective_deadline"]["expires_at"],
-        effect["payload"]["effective_deadline_at"],
-        "effect execution must replay the accepted credential deadline"
     );
     harness.shutdown().await;
 }

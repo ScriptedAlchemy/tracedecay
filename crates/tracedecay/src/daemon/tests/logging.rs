@@ -1,3 +1,5 @@
+use tracedecay_runtime_core::logging::format_daemon_log_line;
+
 #[cfg(unix)]
 #[test]
 fn scheduler_application_problem_log_excludes_hostile_payload() {
@@ -48,7 +50,7 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
         tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
         &problem,
     );
-    let line = super::super::format_daemon_log_line("scheduler_task_application_problem", &fields);
+    let line = format_daemon_log_line("scheduler_task_application_problem", &fields);
 
     assert!(!line.contains(SECRET));
     assert!(!line.contains("hostile automatic fact content"));
@@ -60,7 +62,7 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
 }
 #[test]
 fn daemon_log_line_escapes_quotes_and_backslashes() {
-    let line = super::super::format_daemon_log_line(
+    let line = format_daemon_log_line(
         "client_error",
         &[("error", r#"failed at "step" \ retry"#.to_string())],
     );
@@ -73,7 +75,7 @@ fn daemon_log_line_escapes_quotes_and_backslashes() {
 
 #[test]
 fn daemon_log_line_escapes_control_characters() {
-    let line = super::super::format_daemon_log_line(
+    let line = format_daemon_log_line(
         "client_error",
         &[("error", "first\nsecond\rthird\tfourth".to_string())],
     );
@@ -81,5 +83,20 @@ fn daemon_log_line_escapes_control_characters() {
     assert_eq!(
         line,
         r#"[tracedecay] event=client_error error="first\nsecond\rthird\tfourth""#
+    );
+}
+
+#[test]
+fn retention_degraded_log_formats_the_pass_and_failure() {
+    let fields = [
+        ("pass", "semantic_vector_generations".to_string()),
+        (
+            "failure",
+            "unavailable:semantic retrieval is not calibrated".to_string(),
+        ),
+    ];
+    assert_eq!(
+        format_daemon_log_line("retention_degraded", &fields),
+        "[tracedecay] event=retention_degraded pass=semantic_vector_generations failure=\"unavailable:semantic retrieval is not calibrated\""
     );
 }

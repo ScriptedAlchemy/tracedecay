@@ -935,9 +935,14 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     common::initialize_tracedecay_cli_project(environment.home(), &project);
     let daemon_log = environment.home().join("advisory-daemon.log");
     let _daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
-        command.stderr(Stdio::from(
-            std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
-        ));
+        // `.cargo/config.toml` sets TRACEDECAY_DISABLE_GLOBAL_DB=1 so cargo
+        // children never touch the operator ledger. This journey depends on
+        // the registered profile accounting owner for hint-outcome settlement.
+        command
+            .env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+            .stderr(Stdio::from(
+                std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
+            ));
     });
     let transcript = project.join("cursor-proximity.jsonl");
     std::fs::write(
@@ -1090,7 +1095,11 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     );
 
     let advisory_args = json!({
-        "document_uri": format!("file://{}", project.join("src/lib.rs").display()),
+        // Serialized as a file URL rather than concatenated: a Windows native
+        // path pasted after `file://` is not a file URI at all.
+        "document_uri": url::Url::from_file_path(project.join("src/lib.rs"))
+            .expect("advisory document URI")
+            .to_string(),
     })
     .to_string();
     // Feedback/advisory registration is a deferred background upgrade keyed
@@ -1186,8 +1195,8 @@ fn assert_four_pillar_terminal_cycle(advisory: &Value) {
         .unwrap_or_else(|| panic!("cycle published is not a boolean: {cycle}"));
     if termination == FeedbackCycleTerminationV1::IncompleteCoverage {
         assert!(
-            !published,
-            "an incomplete-coverage cycle is not publishable: {cycle}"
+            published,
+            "current incomplete-coverage evidence must remain inspectable: {cycle}"
         );
     }
 }
@@ -1210,7 +1219,7 @@ fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
         "cycle": {
             "termination": "incomplete_coverage",
             "provider_states": ["unavailable", "unavailable", "supported_completed_complete"],
-            "published": false,
+            "published": true,
         },
         "producer_contributions": contributions.clone(),
     })));
@@ -1237,14 +1246,6 @@ fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
             json!({"cycle": {
                 "termination": "clean",
                 "provider_states": ["supported_completed_complete"],
-                "published": true,
-            }}),
-        ),
-        (
-            "an incomplete-coverage cycle claiming publication",
-            json!({"cycle": {
-                "termination": "incomplete_coverage",
-                "provider_states": ["unavailable"],
                 "published": true,
             }}),
         ),

@@ -24,7 +24,7 @@ async fn activate(
     project: Option<String>,
     json: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_root = tracedecay::config::resolve_path_with_discovery(project);
+    let project_root = tracedecay_configuration::resolve_path_with_discovery(project);
     let handshake = tracedecay::daemon::handshake_for_current_client(
         Some(project_root.clone()),
         None,

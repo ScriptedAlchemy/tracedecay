@@ -4,16 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::config::{
-    db_filename, install_usecase_runtime_configuration_authority,
+    install_usecase_runtime_configuration_authority,
     open_runtime_configuration_for_registered_database_read_only,
 };
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::branch;
+use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, registered_enrollment_roots};
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::DatabaseAccessMode;
-use tracedecay_runtime_core::storage::StoreLayout;
+use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
@@ -32,49 +31,10 @@ impl TraceDecay {
         tracedecay_dir: &Path,
         branch: Option<&str>,
     ) -> (PathBuf, Option<String>, Option<String>) {
-        let default_db = tracedecay_dir.join(db_filename(tracedecay_dir));
-
-        let Some(meta) = branch_meta::load_branch_meta(tracedecay_dir) else {
-            // No branch metadata — single-DB mode (backward compat)
-            return (default_db, None, None);
-        };
-
-        let Some(branch) = branch else {
-            // Detached HEAD — serve the default branch's provenance
-            return (
-                default_db,
-                Some(meta.default_branch.clone()),
-                Some("detached HEAD — using default branch index".to_string()),
-            );
-        };
-
-        // Exact match: branch is tracked
-        if meta.is_tracked(branch) {
-            return (default_db, Some(branch.to_string()), None);
-        }
-
-        // Fallback: find nearest tracked ancestor
-        if let Some(ancestor) = branch::find_nearest_tracked_ancestor(project_root, branch, &meta) {
-            return (
-                default_db,
-                Some(ancestor.clone()),
-                Some(format!(
-                    "branch '{branch}' is not tracked — serving from '{ancestor}'. \
-                             Run `tracedecay branch add {branch}` to track it."
-                )),
-            );
-        }
-
-        // Last resort: default branch provenance
-        let serving = meta.default_branch.clone();
-        (
-            default_db,
-            Some(serving),
-            Some(format!(
-                "branch '{branch}' is not tracked — serving from '{}'. \
-                 Run `tracedecay branch add {branch}` to track it.",
-                meta.default_branch
-            )),
+        tracedecay_application::tracedecay::resolve_db_for_branch(
+            project_root,
+            tracedecay_dir,
+            branch,
         )
     }
 
@@ -147,12 +107,12 @@ impl TraceDecay {
             profile_database.as_ref(),
         )
         .await?;
-        let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
+        let project_id = storage::registered_project_id(&store_layout)?;
+        let enrollment_roots = registered_enrollment_roots(
+            profile_database.as_ref(),
             project_root,
             &store_layout,
             &project_id,
-            profile_database.as_ref(),
         )
         .await?;
         let configuration_database = runtime_registry
@@ -196,6 +156,10 @@ impl TraceDecay {
     }
 
     #[hotpath::skip]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Branch opening keeps configuration and profile leases distinct from graph access mode and read-only policy."
+    )]
     async fn open_branch_with_registered_configuration_access(
         project_root: &Path,
         branch_name: &str,
@@ -218,6 +182,13 @@ impl TraceDecay {
         if !meta.is_tracked(branch_name) {
             return Err(TraceDecayError::Config {
                 message: format!("branch '{branch_name}' is not tracked"),
+            });
+        }
+        if !meta.is_query_eligible(branch_name) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "branch '{branch_name}' is still indexing; exact provenance has not been published"
+                ),
             });
         }
         let db_path = store_layout.graph_db_path.clone();
@@ -253,7 +224,7 @@ impl TraceDecay {
             tracedecay_runtime_core::worktree::detached_worktree_graph_scope(project_root)
                 .as_deref()
                 == Some(branch_name);
-        Ok(Self {
+        let graph = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -267,11 +238,27 @@ impl TraceDecay {
             fallback_warning: None,
             read_only,
             db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::new(Vec::new()),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
-        })
+        };
+        if let Some(project_id) =
+            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&graph.store_layout)
+        {
+            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+                graph.db.clone(),
+                project_id,
+                tracedecay_domain::UtcMicros(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(1, |duration| {
+                            duration.as_micros().min(i64::MAX as u128) as i64
+                        }),
+                ),
+                None,
+            )
+            .await;
+        }
+        Ok(graph)
     }
 }

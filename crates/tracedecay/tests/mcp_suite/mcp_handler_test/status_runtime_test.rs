@@ -117,7 +117,9 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
         None,
         tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
             runtime.mcp_session_authorities(),
-        ),
+        )
+        .admit_opened_project(&cg)
+        .unwrap(),
     )
     .await
     .unwrap();
@@ -179,7 +181,9 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
         None,
         tracedecay::mcp::tools::ToolCallRegistryOptions::with_session_authorities(
             runtime.mcp_session_authorities(),
-        ),
+        )
+        .admit_opened_project(&cg)
+        .unwrap(),
     )
     .await
     .unwrap();
@@ -211,9 +215,10 @@ async fn status_without_retained_session_authority_fails_closed() {
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
 
     assert_eq!(payload["session_ingest"]["status"], "unavailable");
+    assert_eq!(payload["session_ingest"]["reason"], "session_store_denied");
     assert_eq!(
         payload["session_ingest"]["message"],
-        "daemon project session authority is unavailable"
+        "this request is not authorized to read the admitted project session store"
     );
     assert!(payload.get("cursor_session_ingest").is_none());
 }

@@ -6,9 +6,13 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::PoisonError;
+#[cfg(test)]
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tracedecay_contracts::RequestContext;
+#[cfg(test)]
+use tracedecay_contracts::SessionTemporalRefreshWakeFuture;
+use tracedecay_contracts::{RequestContext, SessionTemporalRefreshWakePort};
 use tracedecay_domain::ProjectId;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -17,9 +21,9 @@ use tracedecay_session_memory::session::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshConfiguration,
     SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshHandle,
     SessionRefreshOutcome, SessionRefreshProgressView, SessionRefreshReceiptView,
-    SessionRefreshSchedulerError, SessionRefreshSchedulerPort, SessionRefreshService,
-    SessionRefreshServiceOutcome, SessionRefreshServicePort, SessionRequestBinding,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, utc_micros_value,
+    SessionRefreshSchedulerError, SessionRefreshService, SessionRefreshServiceOutcome,
+    SessionRefreshServicePort, SessionRequestBinding, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, utc_micros_value,
 };
 use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
 
@@ -51,23 +55,9 @@ impl SessionScopeAuthorizer for DaemonSessionRefreshAuthorizer<'_> {
     }
 }
 
-#[derive(Clone)]
-struct DaemonSessionRefreshWake(
-    std::sync::Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>,
-);
-
-impl SessionRefreshSchedulerPort for DaemonSessionRefreshWake {
-    fn wake(&self) -> std::result::Result<(), SessionRefreshSchedulerError> {
-        self.0
-            .wake()
-            .then_some(())
-            .ok_or(SessionRefreshSchedulerError)
-    }
-}
-
 pub(crate) struct DaemonSessionRefreshService {
     database: RegisteredGlobalDbLeaseV1,
-    wake: DaemonSessionRefreshWake,
+    wake: std::sync::Arc<dyn SessionTemporalRefreshWakePort>,
     expected_project_id: Option<String>,
     handles: std::sync::Mutex<HashMap<String, SessionRefreshHandle>>,
 }
@@ -81,38 +71,15 @@ enum SessionRefreshHandleLookup {
 impl DaemonSessionRefreshService {
     pub(crate) fn new(
         database: RegisteredGlobalDbLeaseV1,
-        wake: std::sync::Arc<dyn tracedecay_contracts::SessionTemporalRefreshWakePort>,
+        wake: std::sync::Arc<dyn SessionTemporalRefreshWakePort>,
         expected_project_id: Option<String>,
     ) -> Self {
         Self {
             database,
-            wake: DaemonSessionRefreshWake(wake),
+            wake,
             expected_project_id,
             handles: std::sync::Mutex::new(HashMap::new()),
         }
-    }
-
-    fn service(
-        &self,
-    ) -> Option<
-        SessionRefreshService<
-            DaemonSessionRefreshAuthorizer<'_>,
-            GlobalDbSessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
-            &DaemonSessionRefreshWake,
-        >,
-    > {
-        Some(SessionRefreshService::new(
-            DaemonSessionRefreshAuthorizer {
-                expected_project_id: self.expected_project_id.as_deref(),
-            },
-            GlobalDbSessionTemporalStore::new(self.database.as_ref()),
-            &self.wake,
-            SessionRefreshConfiguration::new(
-                SESSION_REFRESH_PROJECTOR_VERSION,
-                SESSION_REFRESH_CONFIG_VERSION,
-            )
-            .ok()?,
-        ))
     }
 
     fn handle(&self, token: &str) -> SessionRefreshHandleLookup {
@@ -154,9 +121,20 @@ impl DaemonSessionRefreshService {
         &self,
         command: SessionRefreshCommand,
     ) -> SessionRefreshServiceOutcome {
-        let Some(service) = self.service() else {
+        let Ok(configuration) = SessionRefreshConfiguration::new(
+            SESSION_REFRESH_PROJECTOR_VERSION,
+            SESSION_REFRESH_CONFIG_VERSION,
+        ) else {
             return SessionRefreshServiceOutcome::Unavailable;
         };
+        let service = SessionRefreshService::new(
+            DaemonSessionRefreshAuthorizer {
+                expected_project_id: self.expected_project_id.as_deref(),
+            },
+            GlobalDbSessionTemporalStore::new(self.database.as_ref()),
+            || wake_session_refresh_scheduler(self.wake.as_ref()),
+            configuration,
+        );
         let outcome = match command.action {
             SessionRefreshAction::Begin => {
                 service
@@ -260,6 +238,14 @@ impl DaemonSessionRefreshService {
     }
 }
 
+fn wake_session_refresh_scheduler(
+    wake: &dyn SessionTemporalRefreshWakePort,
+) -> std::result::Result<(), SessionRefreshSchedulerError> {
+    wake.wake()
+        .then_some(())
+        .ok_or(SessionRefreshSchedulerError)
+}
+
 fn is_session_refresh_handle_token(token: &str) -> bool {
     token.strip_prefix("srh_").is_some_and(|digest| {
         digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -272,6 +258,44 @@ fn missing_session_refresh_handle_lookup(token: &str) -> SessionRefreshHandleLoo
     } else {
         SessionRefreshHandleLookup::NotFound
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct FixedSessionTemporalRefreshWake(bool);
+
+#[cfg(test)]
+impl SessionTemporalRefreshWakePort for FixedSessionTemporalRefreshWake {
+    fn wake(&self) -> bool {
+        self.0
+    }
+
+    fn is_unavailable(&self) -> bool {
+        !self.0
+    }
+
+    fn wake_and_wait_until_idle(&self, _timeout: Duration) -> SessionTemporalRefreshWakeFuture<'_> {
+        let accepted = self.0;
+        Box::pin(async move { accepted })
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn accepted_session_refresh_wake_maps_to_typed_success() {
+    assert_eq!(
+        wake_session_refresh_scheduler(&FixedSessionTemporalRefreshWake(true)),
+        Ok(())
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn refused_session_refresh_wake_maps_to_scheduler_error() {
+    assert_eq!(
+        wake_session_refresh_scheduler(&FixedSessionTemporalRefreshWake(false)),
+        Err(SessionRefreshSchedulerError)
+    );
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-import { render, waitFor } from '@testing-library/react';
+import { fireEvent, render, waitFor } from '@testing-library/react';
 import type Graph from 'graphology';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphCanvas } from './GraphCanvas.tsx';
@@ -10,9 +10,13 @@ const sigmaState = vi.hoisted(() => ({
   graph: undefined as Graph | undefined,
   nodeReducer: undefined as NodeReducer | undefined,
   drawNodeHover: undefined as unknown,
+  refreshCount: 0,
   constructCount: 0,
   killCount: 0,
   resizeCount: 0,
+  strikeListeners: new Set<() => void>(),
+  handlers: new Map<string, (event?: { node: string }) => void>(),
+  cameraActions: [] as string[],
 }));
 
 vi.mock('./activation.ts', () => ({
@@ -41,11 +45,8 @@ vi.mock('./activation.ts', () => ({
   settled: () => true,
 }));
 
-vi.mock('graphology-layout-forceatlas2', () => ({
-  default: {
-    inferSettings: () => ({ gravity: 1 }),
-    assign: () => undefined,
-  },
+vi.mock('./emergentLayout.ts', () => ({
+  settleEmergentOffThread: async () => true,
 }));
 
 /** Mirrors the one behaviour of the real renderer this file is about: Sigma
@@ -96,9 +97,31 @@ vi.mock('sigma', () => ({
       sigmaState.resizeCount += 1;
       return this;
     }
-    on() {}
+    getCamera() {
+      return {
+        ratio: 1,
+        getBoundedRatio: (ratio: number) => ratio,
+        setState: () => sigmaState.cameraActions.push('set'),
+        animatedZoom: () => {
+          sigmaState.cameraActions.push('in');
+          return Promise.resolve();
+        },
+        animatedUnzoom: () => {
+          sigmaState.cameraActions.push('out');
+          return Promise.resolve();
+        },
+        animatedReset: () => {
+          sigmaState.cameraActions.push('fit');
+          return Promise.resolve();
+        },
+      };
+    }
+    on(name: string, handler: (event?: { node: string }) => void) {
+      sigmaState.handlers.set(name, handler);
+    }
     refresh() {
       this.measure();
+      sigmaState.refreshCount += 1;
     }
     setSetting() {}
     kill() {
@@ -138,9 +161,13 @@ describe('GraphCanvas', () => {
     sigmaState.graph = undefined;
     sigmaState.nodeReducer = undefined;
     sigmaState.drawNodeHover = undefined;
+    sigmaState.refreshCount = 0;
     sigmaState.constructCount = 0;
     sigmaState.killCount = 0;
     sigmaState.resizeCount = 0;
+    sigmaState.strikeListeners.clear();
+    sigmaState.handlers.clear();
+    sigmaState.cameraActions.length = 0;
     box.width = 640;
     box.height = 320;
     observerCallbacks.clear();
@@ -255,6 +282,7 @@ describe('GraphCanvas', () => {
     it('resizes the live renderer instead of rebuilding it', async () => {
       render(<GraphCanvas nodes={NODES} edges={[]} />);
       await waitFor(() => expect(sigmaState.constructCount).toBe(1));
+      const refreshesBeforeResize = sigmaState.refreshCount;
 
       box.width = 900;
       box.height = 500;
@@ -264,9 +292,49 @@ describe('GraphCanvas', () => {
       deliverMeasurement();
 
       await waitFor(() => expect(sigmaState.resizeCount).toBeGreaterThan(0));
+      expect(sigmaState.refreshCount).toBeGreaterThan(refreshesBeforeResize);
       expect(sigmaState.constructCount).toBe(1);
       expect(sigmaState.killCount).toBe(0);
     });
+  });
+
+  it('shares focus with the accessible list and exposes text camera controls', async () => {
+    const nodes = [{ id: 'node', label: 'Node', kind: 'project', degree: 1 }];
+    const onInspect = vi.fn();
+    const view = render(
+      <GraphCanvas
+        nodes={nodes}
+        edges={[]}
+        inspectedId={null}
+        onInspect={onInspect}
+        cameraControls
+      />,
+    );
+    await waitFor(() => expect(sigmaState.constructCount).toBe(1));
+
+    sigmaState.handlers.get('enterNode')?.({ node: 'node' });
+    expect(onInspect).toHaveBeenLastCalledWith('node');
+    sigmaState.handlers.get('leaveNode')?.();
+    expect(onInspect).toHaveBeenLastCalledWith(null);
+
+    view.rerender(
+      <GraphCanvas
+        nodes={nodes}
+        edges={[]}
+        inspectedId="node"
+        onInspect={onInspect}
+        cameraControls
+      />,
+    );
+    await waitFor(() => {
+      const attrs = sigmaState.graph!.getNodeAttributes('node');
+      expect(sigmaState.nodeReducer?.('node', attrs)['zIndex']).toBe(3);
+    });
+
+    fireEvent.click(view.getByRole('button', { name: 'Zoom in graph' }));
+    fireEvent.click(view.getByRole('button', { name: 'Zoom out graph' }));
+    fireEvent.click(view.getByRole('button', { name: 'Fit' }));
+    expect(sigmaState.cameraActions).toEqual(['in', 'out', 'fit']);
   });
 
   it('states the missing WebGL context and the caller-supplied text alternative', async () => {

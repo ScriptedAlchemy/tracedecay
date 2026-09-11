@@ -4,13 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 use tracedecay_automation_runtime::automation::automatic_facts::record_session_automatic_facts;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, read_run_artifact_payload,
 };
-use tracedecay_automation_runtime::ports::project_runtime::ProjectRuntime;
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_global_db::ParseOffset;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -72,10 +71,11 @@ pub(crate) async fn seed_project_session_activity_at(cg: &TraceDecay, timestamp:
     let FactOwnerV1::Project { project_id } = project_memory_owner(cg) else {
         panic!("combined-review fixtures require an authoritative project owner");
     };
-    let sessions = cg
-        .project_sessions(project_id, vec![cg.project_root().to_path_buf()])
-        .await
-        .expect("project sessions mount");
+    let context = cg
+        .automation_project_context()
+        .expect("automation project context");
+    assert_eq!(context.project_id, project_id);
+    let sessions = &context.project_sessions;
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: format!("combined-activity-{timestamp}"),

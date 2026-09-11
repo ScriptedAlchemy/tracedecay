@@ -17,17 +17,19 @@ use tracedecay_code_index::git_projection::{
 use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
     CancellationSignal, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    NativeIntegrationPortError, NativeIntegrationSelectionBindingV1,
+    NativeIntegrationPortError, NativeIntegrationSealedStackSnapshotV1,
+    NativeIntegrationSelectionBindingV1, NativeIntegrationSelectionDeclarationV1,
     NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
-    NativeIntegrationStackResolutionRequestV1, RegisteredRootLocatorV1, RequestContext, RequestId,
+    NativeIntegrationStackResolutionRequestV1, NativeIntegrationStackSnapshotSurfaceRequest,
+    NativeIntegrationSurfaceResultV1, RegisteredRootLocatorV1, RequestContext, RequestId,
     ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_domain::{
     ActorId, BrainId, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
-    BranchStackRevisionV1, BranchStackSourceV1, CommitId, LocatorDigest, ManifestDigest,
-    NativeIntegrationDirectionV1, NativeIntegrationSelectionV1, ProjectId, RefId, RepositoryId,
-    ScopeSetId, ScopeSetRevision, StackNodeId, UserProfileId, UtcMicros, WorktreeId,
-    WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    BranchStackRevisionV1, CommitId, LocatorDigest, ManifestDigest, NativeIntegrationDirectionV1,
+    NativeIntegrationSelectionV1, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
+    StackNodeId, UserProfileId, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
+    WorktreeInventorySnapshotId,
 };
 use tracedecay_global_db::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{
@@ -299,6 +301,7 @@ struct DeclaredStackRequest {
     inventory_snapshot_id: WorktreeInventorySnapshotId,
     inventory_epoch: WorktreeInventoryEpoch,
     revision: BranchStackRevisionV1,
+    sealed_snapshot: NativeIntegrationSealedStackSnapshotV1,
     request: NativeIntegrationStackResolutionRequestV1,
 }
 
@@ -316,6 +319,24 @@ fn declared_stack_request_for_scope(
     revision_id: &str,
     scope_set_revision: ScopeSetRevision,
     stack_id: &str,
+) -> DeclaredStackRequest {
+    declared_stack_request_with_source_node_ref(
+        fixture,
+        revision_id,
+        scope_set_revision,
+        stack_id,
+        "refs/heads/feature",
+        true,
+    )
+}
+
+fn declared_stack_request_with_source_node_ref(
+    fixture: &NativeGitFixture,
+    revision_id: &str,
+    scope_set_revision: ScopeSetRevision,
+    stack_id: &str,
+    source_node_ref: &str,
+    expect_valid: bool,
 ) -> DeclaredStackRequest {
     let project = ProjectId::new("project.native-declared-topology").expect("project");
     let repository = RepositoryId::new("repository.native-declared-topology").expect("repository");
@@ -351,13 +372,10 @@ fn declared_stack_request_for_scope(
     let inventory_epoch = WorktreeInventoryEpoch::new(7).expect("inventory epoch");
     let main_node = StackNodeId::new("stack-node.native.main").expect("main node");
     let feature_node = StackNodeId::new("stack-node.native.feature").expect("feature node");
-    let revision = BranchStackRevisionV1::new(
-        BranchStackId::new(stack_id).expect("stack"),
-        BranchStackRevisionId::new(revision_id).expect("revision"),
-        inventory_snapshot_id.clone(),
-        inventory_epoch,
-        BranchStackSourceV1::ExplicitDeclaration,
-        vec![
+    let selection = NativeIntegrationSelectionDeclarationV1::DeclaredStackEdge {
+        stack_id: BranchStackId::new(stack_id).expect("stack"),
+        revision_id: BranchStackRevisionId::new(revision_id).expect("revision"),
+        nodes: vec![
             BranchStackNodeV1 {
                 node_id: main_node.clone(),
                 project_id: project.clone(),
@@ -370,37 +388,51 @@ fn declared_stack_request_for_scope(
                 node_id: feature_node.clone(),
                 project_id: project.clone(),
                 repository_id: repository.clone(),
-                reference: feature_ref,
+                reference: RefId::new(source_node_ref).expect("declared source ref"),
                 tip: fixture.tip(fixture.linked_root(), "refs/heads/feature"),
                 worktree_id: Some(feature_worktree),
             },
         ],
-        vec![BranchStackEdgeV1 {
+        edges: vec![BranchStackEdgeV1 {
             dependency: main_node.clone(),
             dependent: feature_node.clone(),
         }],
-    )
-    .expect("declared stack revision");
-    let request = NativeIntegrationStackResolutionRequestV1 {
+        source_node_id: feature_node,
+        destination_node_id: main_node,
+        direction: NativeIntegrationDirectionV1::LandDependentIntoDependency,
+    };
+    let surface_request = NativeIntegrationStackSnapshotSurfaceRequest {
         source: source.clone(),
         destination: destination.clone(),
-        authorized_scope_set,
+        authorized_scope_set_id: scope_set_id.clone(),
+        authorized_scope_set_revision: scope_set_revision,
+        authorized_scope_set_digest: authorized_scope_set.digest().clone(),
         inventory_snapshot_id: inventory_snapshot_id.clone(),
         inventory_epoch,
-        selection: NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
-            stack_id: revision.stack_id.clone(),
-            revision_id: revision.revision_id.clone(),
-            revision_digest: revision.digest.clone(),
-            declared_revision: Box::new(revision.clone()),
-            source_node_id: feature_node,
-            destination_node_id: main_node,
-            direction: NativeIntegrationDirectionV1::LandDependentIntoDependency,
-        },
+        selection,
         grant_digest: digest('a'),
         policy_digest: digest('b'),
-        observed_at: UtcMicros(10),
     };
-    request.validate().expect("exact declared-stack request");
+    let public_json = serde_json::to_value(surface_request).expect("public stack declaration");
+    let surface_request: NativeIntegrationStackSnapshotSurfaceRequest =
+        serde_json::from_value(public_json).expect("public stack declaration request");
+    let sealed_snapshot = surface_request
+        .seal()
+        .expect("seal public stack declaration");
+    let request = sealed_snapshot
+        .clone()
+        .into_resolution_request(authorized_scope_set, UtcMicros(10))
+        .expect("bind sealed stack declaration");
+    if expect_valid {
+        request.validate().expect("exact declared-stack request");
+    }
+    let NativeIntegrationSelectionBindingV1::DeclaredStackEdge {
+        declared_revision, ..
+    } = &request.selection
+    else {
+        panic!("public declaration must seal a declared stack")
+    };
+    let revision = declared_revision.as_ref().clone();
     DeclaredStackRequest {
         project,
         repository,
@@ -411,6 +443,7 @@ fn declared_stack_request_for_scope(
         inventory_snapshot_id,
         inventory_epoch,
         revision,
+        sealed_snapshot,
         request,
     }
 }
@@ -822,12 +855,23 @@ fn declared_stack_projection_conforms_to_native_linked_worktree_state() {
     let cancellation = CancellationSignal::active("cancel.native-declared-topology.resolve")
         .expect("cancellation");
 
-    expect_declared_stack(
-        resolver
-            .resolve(&first.request, &cancellation)
-            .expect("native declared-stack resolution"),
-        &first.revision,
-    );
+    let outcome = resolver
+        .resolve(&first.request, &cancellation)
+        .expect("native declared-stack resolution");
+    let public_result = NativeIntegrationSurfaceResultV1::from_stack_resolution(
+        &outcome,
+        first.sealed_snapshot.clone(),
+    )
+    .expect("public sealed stack snapshot");
+    let public_result: NativeIntegrationSurfaceResultV1 = serde_json::from_value(
+        serde_json::to_value(public_result).expect("serialize public stack snapshot"),
+    )
+    .expect("decode public stack snapshot");
+    let NativeIntegrationSurfaceResultV1::StackSnapshot(public_snapshot) = public_result else {
+        panic!("expected public stack snapshot")
+    };
+    assert_eq!(public_snapshot.sealed_snapshot, first.sealed_snapshot);
+    expect_declared_stack(outcome, &first.revision);
     let first_store = projection_store(&runtime, &first.repository);
     assert_eq!(first_store.repository(), &first.repository);
     assert_eq!(
@@ -879,6 +923,22 @@ fn declared_stack_projection_conforms_to_native_linked_worktree_state() {
             )
             .expect("main occupancy"),
         vec![first.destination.worktree_id.clone()]
+    );
+
+    let bad_ref = declared_stack_request_with_source_node_ref(
+        &fixture,
+        "branch-stack-revision.native.bad-ref",
+        ScopeSetRevision::new(5).expect("scope revision"),
+        "branch-stack.native.bad-ref",
+        "refs/heads/other",
+        false,
+    );
+    assert!(bad_ref.request.validate().is_err());
+    assert_eq!(
+        resolver
+            .resolve(&bad_ref.request, &cancellation)
+            .expect("typed bad-ref refusal"),
+        NativeIntegrationStackResolutionOutcomeV1::Unavailable
     );
 
     fixture.advance_feature("second feature revision\n");

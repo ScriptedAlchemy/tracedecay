@@ -130,6 +130,15 @@ describe('composeRegistryField', () => {
     expect(hub.y).toBeCloseTo((kids[0]!.y + kids[1]!.y) / 2, 6);
   });
 
+  it('does not turn a group label into an exact repository relationship', () => {
+    const unknown = group('unregistered', [project('one', 0, SINGLE), project('two', 1, SINGLE)]);
+    unknown.git_common_dir = null;
+    const field = composeRegistryField([unknown], NOW);
+    expect(field.nodes.map((node) => node.id).sort()).toEqual(['one', 'two']);
+    expect(field.edges).toEqual([]);
+    expect(field.sharedRepoCount).toBe(0);
+  });
+
   it('places a project in the column its last contact actually falls in', () => {
     const field = composeRegistryField(
       [

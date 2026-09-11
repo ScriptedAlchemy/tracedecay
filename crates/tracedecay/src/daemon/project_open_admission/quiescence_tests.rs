@@ -21,12 +21,10 @@ async fn recovery_quiescence_fences_only_the_exact_project_open_identity() {
     let route_b = route("/profiles/a", "/projects/b");
 
     assert!(matches!(
-        tasks
-            .start_cancellable(route_a.clone(), |cancelled| async move {
-                cancelled.cancelled().await;
-                Ok(())
-            })
-            .await,
+        tasks.start_cancellable(route_a.clone(), |cancelled| async move {
+            cancelled.cancelled().await;
+            Ok(())
+        }),
         ProjectOpenTaskClaim::InFlight(_)
     ));
     let guard = tasks
@@ -35,18 +33,18 @@ async fn recovery_quiescence_fences_only_the_exact_project_open_identity() {
         .expect("exact project open quiescence");
 
     assert!(matches!(
-        tasks.start(route_a.clone(), async { Ok(()) }).await,
+        tasks.start(route_a.clone(), async { Ok(()) }),
         ProjectOpenTaskClaim::Failed(ref failure)
             if failure.message.contains("temporarily unavailable during remote recovery")
     ));
     assert!(matches!(
-        tasks.start(route_b, async { Ok(()) }).await,
+        tasks.start(route_b, async { Ok(()) }),
         ProjectOpenTaskClaim::InFlight(_)
     ));
 
     drop(guard);
     assert!(matches!(
-        tasks.start(route_a, async { Ok(()) }).await,
+        tasks.start(route_a, async { Ok(()) }),
         ProjectOpenTaskClaim::InFlight(_)
     ));
 }

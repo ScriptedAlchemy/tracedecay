@@ -5,6 +5,9 @@
 //! integer built into `SQLite`; a store carrying any other value was written by
 //! an incompatible binary and is refused at open with a fresh-start remedy.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::db::connection::DatabaseEngineWriteConnection;
 use crate::db::engine::{Connection, Executor, QueryExecutor, params};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -42,6 +45,13 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// content. A current-stamped store containing a retired projection fails
 /// closed before interpretation.
 pub const SCHEMA_VERSION: u32 = 35;
+
+/// Verifies that a rusqlite connection sees the final relational shape this
+/// binary admits, including the one shipped-v35 trigger shape it repairs on a
+/// writer open. This is query-only and shares the daemon's schema authority.
+pub fn verify_admissible_final_shape_rusqlite(conn: &rusqlite::Connection) -> Result<()> {
+    final_shape::require_admissible_final_shape_rusqlite(conn)
+}
 
 /// The one prior shape this binary steps forward in place: v34 is v35 minus
 /// the persisted payload-digest objects (#834). Every other stamp is still
@@ -183,6 +193,12 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
     super::memory_v2::create_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
+    conn.execute_batch(tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create generation diagnostics schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
     conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -306,10 +322,18 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
 ///
 /// This binary has no upgrade ladder: a store stamped with any other version is
 /// refused with the fresh-start remedy rather than stepped forward.
+///
+/// The schema ladder is awaited through a `dyn Future` so its concrete future
+/// type stops at this phase boundary: with the `hotpath` wrappers compiled in,
+/// the un-erased chain (retrieval-anchor schema -> memory baseline -> this
+/// ladder -> store mount -> lifecycle -> project open) overflows rustc's
+/// `Send` query depth in the root crate's lib test.
 pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()> {
     let writer = database.writer_connection("ensure schema current").await?;
     let connection = writer.engine_connection();
-    ensure_schema_current_engine_connection(&connection).await
+    let ladder: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+        Box::pin(ensure_schema_current_engine_connection(&connection));
+    ladder.await
 }
 
 /// Applies either sanctioned writer-side repair before read-only admission:

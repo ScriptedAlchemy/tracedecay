@@ -40,6 +40,8 @@ scripts/check-distribution-acceptance.sh
 ```
 
 This release-builds and packages every feature, installs the packaged CLI,
-verifies the packaged `semantic-fastembed`/bundled-ORT feature path, performs
-one bounded local-byte inference, rejects invalid model bytes, and checks the
-typed fallback and strict-unavailable semantic policy.
+and checks the typed fallback and strict-unavailable semantic policy on every
+supported platform. On Linux and macOS it also verifies the packaged
+`semantic-fastembed`/bundled-ORT feature path, performs one bounded local-byte
+inference, and rejects invalid model bytes. Windows skips only those unsupported
+FastEmbed/ORT legs.

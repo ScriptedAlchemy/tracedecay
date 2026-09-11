@@ -1,4 +1,4 @@
-#![cfg(feature = "semantic-fastembed")]
+#![cfg(all(feature = "semantic-fastembed", not(windows)))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -141,6 +141,16 @@ pub(super) fn installed_selection_material(
             install_path,
             ..
         }
+        | SemanticModelLifecycleStateV1::Loading {
+            artifact_digest,
+            install_path,
+            ..
+        }
+        | SemanticModelLifecycleStateV1::Indexing {
+            artifact_digest,
+            install_path,
+            ..
+        }
         | SemanticModelLifecycleStateV1::Ready {
             artifact_digest,
             install_path,
@@ -148,6 +158,32 @@ pub(super) fn installed_selection_material(
         } => (artifact_digest, install_path),
         state => panic!("expected installed production model, got {state:?}"),
     }
+}
+
+#[test]
+#[ignore = "requires the verified TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE"]
+fn installed_selection_survives_background_projection_progress() {
+    let fixture = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
+        .map(PathBuf::from)
+        .expect("verified distribution fixture");
+    let root = tempfile::tempdir().expect("isolated lifecycle");
+    let owner = tracedecay_semantic::SemanticModelLifecycleOwnerV1::open_default(root.path())
+        .expect("lifecycle owner");
+    seed_distribution_fixture(root.path(), &fixture, &owner);
+    owner
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
+        .expect("select model");
+    owner
+        .acquire_blocking_for_tests()
+        .expect("verified installation");
+    let installed = installed_selection_material(&owner);
+    owner.mark_loading().expect("background load");
+    assert_eq!(installed_selection_material(&owner), installed);
+    owner.mark_indexing(0, 3).expect("background projection");
+    assert_eq!(installed_selection_material(&owner), installed);
+    owner.mark_indexing(3, 3).expect("projection complete");
+    owner.mark_ready().expect("published projection");
+    assert_eq!(installed_selection_material(&owner), installed);
 }
 
 pub(super) async fn wait_for_semantic_generation(

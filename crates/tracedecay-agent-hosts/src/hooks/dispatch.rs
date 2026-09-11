@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::context_scout::{
-    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
+    ContextScoutAddressV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
 #[cfg(test)]
@@ -102,10 +102,11 @@ pub fn publish_daemon_bindings(
             message: format!("cannot validate Hook project identity: {error}"),
         }
     })?;
-    let scope = runtime
-        .resolve_hook_scope(&layout.project_root, &typed_project_id)
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!("cannot resolve Hook repository/worktree scope: {error}"),
+    let scope =
+        (runtime.scope_resolver)(&layout.project_root, &typed_project_id).map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("cannot resolve Hook repository/worktree scope: {error}"),
+            }
         })?;
     let now = now_utc();
     let revision = now.0.max(1) as u64;
@@ -426,8 +427,7 @@ pub(crate) async fn dispatch(
         }
         Err(_) => return unavailable(),
     };
-    let Some(prepared) = prepare_bound_hook(host, event_json, project_root, decoded, started)
-    else {
+    let Some(prepared) = prepare_bound_hook(host, event_json, project_root, decoded) else {
         return unavailable();
     };
     let native_session_id = prepared.native_session_id.clone();
@@ -556,13 +556,9 @@ pub(crate) async fn dispatch_opencode_tool_after(
         }
         Err(_) => return unavailable(),
     };
-    let Some(prepared) = prepare_bound_hook(
-        HookHostV1::OpenCode,
-        event_json,
-        project_root,
-        decoded,
-        started,
-    ) else {
+    let Some(prepared) =
+        prepare_bound_hook(HookHostV1::OpenCode, event_json, project_root, decoded)
+    else {
         return unavailable();
     };
     let native_session_id = prepared.native_session_id.clone();
@@ -625,7 +621,6 @@ fn prepare_bound_hook(
     event_json: &str,
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
-    started: Instant,
 ) -> Option<PreparedBoundHook> {
     let layout = super::store_layout::layout(project_root)?;
     let config_path = tracedecay_hooks::hook_configuration_path(&layout.data_root, host);
@@ -642,8 +637,7 @@ fn prepare_bound_hook(
     let native_lifecycle = native_context_scout_lifecycle(host, &native_fields, material.event_id);
     let envelope = decoded.into_envelope(binding, material).ok()?;
     let envelope =
-        match replay_envelope_if_pending(&layout.data_root, host, binding, &envelope, now, started)
-        {
+        match replay_envelope_if_pending(&layout.data_root, host, binding, &envelope, now) {
             PendingEnvelopeV1::Missing => envelope,
             PendingEnvelopeV1::Exact(queued) => queued,
             PendingEnvelopeV1::Unavailable => return None,
@@ -704,7 +698,6 @@ async fn dispatch_decoded(
             &envelope,
             binding,
             prepared_at,
-            started,
         )),
     };
     let guidance_envelope_id = match &immediate {
@@ -724,6 +717,9 @@ async fn dispatch_decoded(
         now_utc(),
         elapsed_us(started),
     );
+    let Ok(context_scout_address) = admission.take_context_scout_address() else {
+        return unavailable();
+    };
     let feedback_notice = admission.take_feedback_notice();
     let github_stack_signal_available = admission.take_github_stack_signal_available();
     match completed {
@@ -773,12 +769,17 @@ async fn dispatch_decoded(
                 feedback: None,
                 outcome: None,
             });
+            let guidance = match render_host_delivery(
+                result.rendered_guidance,
+                context_scout_address.as_ref(),
+                delivered.feedback.as_ref(),
+                github_stack_signal_available,
+            ) {
+                Ok(guidance) => guidance,
+                Err(_) => return unavailable(),
+            };
             HookDispatch::Handled {
-                guidance: render_host_delivery(
-                    result.rendered_guidance,
-                    delivered.feedback.as_ref(),
-                    github_stack_signal_available,
-                ),
+                guidance,
                 disposition: result.receipt.disposition,
             }
         }
@@ -788,41 +789,57 @@ async fn dispatch_decoded(
 
 fn render_host_delivery(
     guidance: Option<String>,
+    context_scout_address: Option<&ContextScoutAddressV1>,
     feedback_notice: Option<&tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     github_stack_signal_available: bool,
-) -> Option<String> {
+) -> Result<Option<String>, serde_json::Error> {
+    let scout_address = context_scout_address
+        .map(serde_json::to_string)
+        .transpose()?
+        .map(|address| {
+            format!("TraceDecay Context Scout address for authorized operations: {address}")
+        });
     let notice = feedback_notice
-        .and_then(|notice| serde_json::to_string(notice).ok())
+        .map(serde_json::to_string)
+        .transpose()?
         .map(|notice| format!("TraceDecay feedback ready for authorized lookup: {notice}"));
     let stack_wakeup = github_stack_signal_available
         .then_some("TraceDecay GitHub stack update available for authenticated expansion.");
-    [guidance, notice, stack_wakeup.map(str::to_owned)]
-        .into_iter()
-        .flatten()
-        .reduce(|mut rendered, next| {
-            rendered.push_str("\n\n");
-            rendered.push_str(&next);
-            rendered
-        })
+    Ok([
+        guidance,
+        scout_address,
+        notice,
+        stack_wakeup.map(str::to_owned),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|mut rendered, next| {
+        rendered.push_str("\n\n");
+        rendered.push_str(&next);
+        rendered
+    }))
 }
 
+/// Spool writer admission waits one synchronous budget measured from the lock
+/// attempt, not from hook start. The response lane spends its budget before it
+/// reaches the spool (analytics rows, layout resolution, the daemon admission
+/// window), so a deadline anchored at hook start was already expired on a
+/// loaded runner and refused an uncontended lock: the hook answered `{}` with
+/// exit 0 and the event was never spooled.
 fn append_for_replay(
     data_root: &Path,
     host: HookHostV1,
     envelope: &HookEventEnvelopeV2,
     binding: &HookScopeBindingV1,
     now: UtcMicros,
-    started: Instant,
 ) -> SpoolAppendOutcomeV1 {
     let root = data_root.join("hook-v2-spool").join(host.hook_key());
-    let Some(deadline) = started.checked_add(Duration::from_micros(
-        HookSynchronousDeadlineV1::start().remaining_micros(),
-    )) else {
-        return SpoolAppendOutcomeV1::Unavailable;
-    };
-    let Ok((mut spool, _)) =
-        HookSpoolV1::open_until(root, HookSpoolConfigV1::stock(host), now, deadline)
-    else {
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(
+        root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+    ) else {
         return SpoolAppendOutcomeV1::Unavailable;
     };
     match spool.append(envelope.clone(), binding, now) {
@@ -848,17 +865,14 @@ fn replay_envelope_if_pending(
     binding: &HookScopeBindingV1,
     retry: &HookEventEnvelopeV2,
     now: UtcMicros,
-    started: Instant,
 ) -> PendingEnvelopeV1 {
     let root = data_root.join("hook-v2-spool").join(host.hook_key());
-    let Some(deadline) = started.checked_add(Duration::from_micros(
-        HookSynchronousDeadlineV1::start().remaining_micros(),
-    )) else {
-        return PendingEnvelopeV1::Unavailable;
-    };
-    let Ok((mut spool, _)) =
-        HookSpoolV1::open_until(root, HookSpoolConfigV1::stock(host), now, deadline)
-    else {
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(
+        root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+    ) else {
         return PendingEnvelopeV1::Unavailable;
     };
     let queued = match spool.pending_envelope(retry.event_id) {

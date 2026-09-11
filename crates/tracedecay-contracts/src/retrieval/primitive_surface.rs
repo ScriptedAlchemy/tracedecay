@@ -381,6 +381,9 @@ pub struct NodeDetailsV1 {
     pub start_line: u32,
     pub end_line: u32,
     pub signature: Option<String>,
+    pub docstring: Option<String>,
+    pub is_async: bool,
+    pub derives: Vec<String>,
     pub visibility: String,
     /// Exact counters; `None`, and listed in `unavailable_fields`, when
     /// `complexity_analysis` reports the bounded walk did not cover the body.
@@ -405,7 +408,7 @@ pub struct PrimitiveNotFoundV1 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum NodeResultV1 {
-    Found(NodeDetailsV1),
+    Found(Box<NodeDetailsV1>),
     NotFound(PrimitiveNotFoundV1),
 }
 

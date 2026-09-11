@@ -236,25 +236,6 @@ impl PhraseSearchRequest {
     }
 }
 
-/// Public wire form of [`PhraseSearchRequest`].
-///
-/// [`PhraseSearchRequest::query`] holds a receipt-bound
-/// [`EphemeralSanitizedQueryViewV1`], which is deliberately non-serializable so
-/// a sanitized view can never be reconstructed from a transport payload. The
-/// admitted wire request therefore carries the raw query text and the daemon
-/// sanitizes it; every other field is the same bounded value the service
-/// validates.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PhraseSearchSurfaceRequest {
-    pub query: String,
-    pub phrases: Vec<String>,
-    pub field_filters: Vec<CodeLexicalFieldFilter>,
-    pub fuzzy_budget: u32,
-    pub scope: CodeQueryScope,
-    pub meta: RetrievalRequestMeta,
-}
-
 /// Typed code fields accepted by the generation-owned lexical authority.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,

@@ -508,6 +508,30 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
         );
         tracedecay_runtime_core::branch_meta::save_branch_meta(&shard_root, &branch_meta).unwrap();
     }
+    // `open_branch` refuses a tracked branch whose exact provenance is not
+    // published (it is "still indexing" and serves its published ancestor), so
+    // publish the feature branch's graph source before opening it directly.
+    let published = tracedecay_runtime_core::branch_meta::publish_graph_source(
+        &shard_root,
+        "feature/profile",
+        None,
+        tracedecay_runtime_core::branch_meta::BranchGraphSourceDraftV1 {
+            project_id: "proj_branch".to_owned(),
+            repository_id: "repository.proj_branch".to_owned(),
+            worktree_id: "worktree.proj_branch".to_owned(),
+            worktree_root: project.to_string_lossy().into_owned(),
+            reference: "refs/heads/feature/profile".to_owned(),
+            source_oid: "b".repeat(40),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            published,
+            tracedecay_runtime_core::branch_meta::BranchGraphSourcePublishOutcomeV1::Published(_)
+        ),
+        "the feature branch must be query-eligible before it is opened"
+    );
 
     let cg = open_branch_with_maintenance(
         &project,

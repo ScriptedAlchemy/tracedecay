@@ -277,21 +277,23 @@ fails snapshot validation. `Cancelled`, `TimedOut`, `Failed`, `EffectUnknown`,
 
 The catalog crate owns inert capability, binding, profile, retrieval, snapshot,
 and validation records. The application crate and each vertical feature own
-their callable handlers and contribute metadata beside those handlers. Root
-composition assembles and validates one immutable snapshot; Plan 21 owns
-adapter bindings and rendering. Plans 05/13/23 own query, anchor, and temporal
-kernels; Plan 24 owns task graph and fan-out intent; Plan 32 owns execution,
-leases, attempts, cancellation, effects, and runtime receipts; and Plan 09
-retains operation-specific edit and Git transaction authority.
+their callable handlers and contribute metadata beside those handlers. The
+contracts crate assembles and validates one immutable snapshot, the
+daemon-service crate binds the canonical dispatcher onto it, and root
+composition injects and mounts the result; Plan 21 owns adapter bindings and
+rendering. Plans 05/13/23 own query, anchor, and temporal kernels; Plan 24
+owns task graph and fan-out intent; Plan 32 owns execution, leases,
+attempts, cancellation, effects, and runtime receipts; and Plan 09 retains
+operation-specific edit and Git transaction authority.
 
 The dependency direction remains acyclic: catalog records cannot execute;
-application contributions cannot reach root composition; and ordinary typed
-application methods are the sole execution path. Current modules such as the
-root catalog composition and feature-local catalog contributions are canonical
-implementation evidence, not a required file layout or parallel handler
-registry. Tests must prove the dependency and callable-handler properties
-directly; their filenames and historical contract-spine organization are not
-normative.
+application contributions cannot reach composition or dispatch; and ordinary
+typed application methods are the sole execution path. Current modules such as
+the contracts-owned catalog composition and feature-local catalog
+contributions are canonical implementation evidence, not a required file
+layout or parallel handler registry. Tests must prove the dependency and
+callable-handler properties directly; their filenames and historical
+contract-spine organization are not normative.
 
 The facade budget remains explicit: `lib.rs` only re-exports reviewed records
 and lookup entry points; it contains no assembly, execution, rendering, policy,

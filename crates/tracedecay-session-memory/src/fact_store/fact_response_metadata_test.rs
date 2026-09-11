@@ -129,6 +129,7 @@ async fn runtime_branch_metadata_is_the_direct_branch_measurement() {
     let path = temp.path().join("fact-response-metadata.db");
     let authority =
         DatabaseAuthority::acquire_test(&path, "fact response metadata authority test").unwrap();
+    tracedecay_global_db::register_test_schema_installer();
     let (db, _) =
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await

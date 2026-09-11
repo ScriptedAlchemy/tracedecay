@@ -272,6 +272,7 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
     let selection = repository_selection(fixture);
     let dashboard = DashboardProcess::start(fixture);
     dashboard.wait_until_serving(agent, "the graded pass");
+    assert_both_attempt_reads_project_the_committed_attempt(agent, fixture, &dashboard, &identity);
     assert_both_mounts(
         agent,
         fixture,
@@ -443,6 +444,96 @@ fn assert_no_git_selection_reads_its_covered_slice(
         ),
         "the widened selection must carry the scoped relation the slice omitted: {whole}"
     );
+}
+
+/// Initial attempt admission commits its product-graph relation and attempt
+/// row atomically. Both reads must therefore expose the attempt under the same
+/// generation without requiring a later task-session association.
+fn assert_both_attempt_reads_project_the_committed_attempt(
+    agent: &ureq::Agent,
+    fixture: &ProductionDaemon,
+    dashboard: &DashboardProcess,
+    identity: &Value,
+) {
+    let first_page = json!({ "page_size": 25, "cursor": Value::Null });
+    let hydrated = attempt_read(agent, fixture, dashboard, "hydrate-artifacts", &first_page);
+    assert_eq!(
+        hydrated["state"], "hydrated",
+        "hydration must read the product graph this journey committed to: {hydrated}"
+    );
+    assert!(
+        hydrated["attempts"]
+            .as_array()
+            .is_some_and(|attempts| attempts
+                .iter()
+                .any(|attempt| attempt["identity"] == *identity)),
+        "hydration must carry the settled attempt: {hydrated}"
+    );
+    let generation = hydrated["topology"]["generation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hydration must name its topology generation: {hydrated}"))
+        .to_owned();
+    assert!(
+        !generation.is_empty(),
+        "the product topology generation must be a real identity: {hydrated}"
+    );
+
+    let listed = attempt_read(agent, fixture, dashboard, "list-attempts", &first_page);
+    assert_eq!(listed["state"], "listed", "{listed}");
+    assert_eq!(listed["topology"]["generation"], generation, "{listed}");
+    assert!(
+        listed["attempts"]
+            .as_array()
+            .is_some_and(|attempts| attempts
+                .iter()
+                .any(|attempt| attempt["identity"] == *identity)),
+        "attempt listing must carry the settled attempt: {listed}"
+    );
+
+    let history = attempt_read(agent, fixture, dashboard, "execution-history", &first_page);
+    assert_eq!(history["state"], "listed", "{history}");
+    assert!(
+        history["spans"]
+            .as_array()
+            .is_some_and(|spans| spans.iter().any(|span| span["identity"] == *identity)),
+        "execution history must carry the settled attempt span: {history}"
+    );
+}
+
+/// Posts one attempt-scoped Work read to both mounts and returns the payload
+/// they must agree on.
+fn attempt_read(
+    agent: &ureq::Agent,
+    fixture: &ProductionDaemon,
+    dashboard: &DashboardProcess,
+    operation: &str,
+    request: &Value,
+) -> Value {
+    let daemon_label = format!("daemon work/{operation}");
+    let (status, body) = super::poll_past_warming(&daemon_label, &mut || {
+        post_envelope(
+            agent,
+            &fixture.external_url(&format!("/application/work/{operation}")),
+            fixture,
+            request,
+        )
+    });
+    assert_canonical_envelope(&daemon_label, status, &body);
+    let daemon_payload = body["value"]["outcome"]["value"]["payload"].clone();
+
+    let dashboard_label = format!("dashboard api/work/{operation}");
+    let (status, body) = post_dashboard_envelope(
+        agent,
+        &format!("{}/api/work/{operation}", dashboard.base_url),
+        request,
+    );
+    assert_canonical_envelope(&dashboard_label, status, &body);
+    let dashboard_payload = body["value"]["outcome"]["value"]["payload"].clone();
+    assert_eq!(
+        daemon_payload, dashboard_payload,
+        "both published mounts must answer the same {operation} payload"
+    );
+    daemon_payload
 }
 
 /// One graded pass over both mounts and all four temporal modes.
@@ -756,6 +847,7 @@ fn pin_executable_binding(
                     },
                     "canonical_path": executable_path,
                     "capabilities": ["claude_code_stream_json"],
+                    "routes": [],
                 }],
             },
             "expected_revision": base_revision,

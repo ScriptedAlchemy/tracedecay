@@ -14,7 +14,7 @@ pub(crate) async fn run(
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.workflow.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;
-    let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
+    let project_root = tracedecay_configuration::resolve_path_with_discovery(invocation.project);
     let operation = invocation.operation;
     let outcome =
         crate::workflow_cli::invoke_workflow_cli(project_root.clone(), operation, body).await?;
