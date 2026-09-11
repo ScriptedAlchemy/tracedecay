@@ -30,9 +30,9 @@ use tracedecay_code_extraction::redundancy::{
     Fingerprint, RedundancyMatchScore, body_token_count, body_token_window, compute_fingerprint,
     parse_file, redundancy_match_score, round4,
 };
-use tracedecay_domain::SourceSpan;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::source_path_policy::is_generated_dir_segment;
+use tracedecay_domain::{ContentDigest, SourceSpan};
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 use crate::VerifiedGraphQuery;
@@ -126,6 +126,7 @@ struct RedundancyCandidate {
     start_line: u32,
     end_line: u32,
     source_span: SourceSpan,
+    content_digest: ContentDigest,
 }
 
 struct RedundantPair<'a> {
@@ -1033,6 +1034,7 @@ fn redundancy_node(
         start_line: metadata.start_line,
         end_line,
         source_span,
+        content_digest: metadata.content_digest,
     }))
 }
 
@@ -1209,6 +1211,16 @@ fn compute_selected_fingerprints(
                     source.len()
                 )));
             }
+            let observed_digest = ContentDigest::of_bytes(&source.as_bytes()[start_byte..end_byte]);
+            if observed_digest != node.content_digest {
+                return Err(redundancy_graph_problem(&format!(
+                    "verified redundancy source span is stale against indexed symbol `{}` in \
+                     `{file_path}`: expected {}, observed {}",
+                    node.qualified_name,
+                    node.content_digest.as_str(),
+                    observed_digest.as_str(),
+                )));
+            }
             let Some(ts_node) = tree
                 .root_node()
                 .descendant_for_byte_range(start_byte, end_byte)
@@ -1324,7 +1336,7 @@ mod tests {
         semantic_pairs,
     };
     use tracedecay_code_extraction::redundancy::{Fingerprint, RedundancyMatchScore};
-    use tracedecay_domain::SourceSpan;
+    use tracedecay_domain::{ContentDigest, NodeKind, SourceSpan};
 
     #[test]
     fn generated_paths_are_excluded_from_candidates_by_default() {
@@ -1382,6 +1394,7 @@ mod tests {
                 start_byte: 0,
                 end_byte: 1,
             },
+            content_digest: ContentDigest::of_bytes(b"x"),
         }
     }
 
@@ -1909,6 +1922,12 @@ mod tests {
         node
     }
 
+    fn attest_candidate_source(node: &mut RedundancyCandidate, source: &str) {
+        let start = node.source_span.start_byte as usize;
+        let end = node.source_span.end_byte as usize;
+        node.content_digest = ContentDigest::of_bytes(&source.as_bytes()[start..end]);
+    }
+
     #[test]
     fn fresh_fingerprint_scan_parses_each_file_once() {
         if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
@@ -1927,6 +1946,8 @@ mod tests {
         ];
         nodes[0].source_span.end_byte = alpha.trim_end().len() as u64;
         nodes[1].source_span.end_byte = beta.trim_end().len() as u64;
+        attest_candidate_source(&mut nodes[0], alpha);
+        attest_candidate_source(&mut nodes[1], beta);
 
         let load = compute_fingerprints(temp.path(), &nodes).unwrap();
         assert_eq!(load.parsed_files, 2);
@@ -1955,6 +1976,7 @@ mod tests {
             std::fs::write(temp.path().join(&path), source).unwrap();
             let mut node = candidate_node(id, id, &path, source.lines().count() as u32);
             node.source_span.end_byte = source.trim_end().len() as u64;
+            attest_candidate_source(&mut node, source);
             nodes.push(node);
         }
         let targets = HashSet::from(["anchor".to_owned()]);
@@ -2015,6 +2037,90 @@ mod tests {
         }
     }
 
+    fn indexed_rust_candidates(source: &str, file_path: &str) -> Vec<RedundancyCandidate> {
+        let registry = tracedecay_code_extraction::LanguageRegistry::new();
+        let extractor = registry
+            .extractor_for_file(file_path)
+            .expect("rust extractor");
+        extractor
+            .extract(file_path, source)
+            .nodes
+            .into_iter()
+            .filter(|node| matches!(node.kind, NodeKind::Function | NodeKind::Method))
+            .map(|node| {
+                let source_span = indexer_source_span(source, &node);
+                let start = source_span.start_byte as usize;
+                let end = source_span.end_byte as usize;
+                RedundancyCandidate {
+                    id: node.id,
+                    name: node.name,
+                    qualified_name: node.qualified_name,
+                    file_path: file_path.to_owned(),
+                    start_line: node.start_line,
+                    end_line: node.end_line,
+                    source_span,
+                    content_digest: ContentDigest::of_bytes(&source.as_bytes()[start..end]),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_byte_post_index_edit_refuses_full_and_targeted_fingerprints() {
+        let indexed = r#"fn stable() -> i32 {
+    1
+}
+
+fn execute_source_edit() -> i32 {
+    three();
+    2
+}
+
+fn unrelated() -> i32 {
+    3
+}
+"#;
+        let live = indexed.replacen("three();", "one();", 1);
+        assert_eq!(indexed.len() - live.len(), 2);
+
+        let nodes = indexed_rust_candidates(indexed, "src/source_edit.rs");
+        let target = nodes
+            .iter()
+            .find(|node| node.name == "execute_source_edit")
+            .expect("indexed target")
+            .id
+            .clone();
+        let targets = HashSet::from([target]);
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("source_edit.rs"), indexed).unwrap();
+
+        assert_eq!(
+            compute_fingerprints(temp.path(), &nodes)
+                .unwrap()
+                .fingerprints
+                .len(),
+            3
+        );
+        assert!(
+            compute_selected_fingerprints(temp.path(), &nodes, Some(&targets))
+                .unwrap()
+                .fingerprints
+                .contains_key(targets.iter().next().unwrap())
+        );
+
+        std::fs::write(src.join("source_edit.rs"), live).unwrap();
+        for error in [
+            compute_fingerprints(temp.path(), &nodes).unwrap_err(),
+            compute_selected_fingerprints(temp.path(), &nodes, Some(&targets)).unwrap_err(),
+        ] {
+            let (code, _, detail) = error.project_route_context().expect("typed unavailable");
+            assert_eq!(code, "verified-redundancy-evidence-unavailable");
+            assert!(detail.contains("stale against indexed symbol"), "{detail}");
+        }
+    }
+
     fn after_secret_body() -> &'static str {
         "fn after_secret(input: i32) -> i32 {\n    let mut total = input;\n    for value in 0..4 {\n        if value % 2 == 0 {\n            total += value;\n        }\n    }\n    total\n}\n"
     }
@@ -2029,6 +2135,7 @@ mod tests {
             start_byte: 0,
             end_byte: source.len() as u64,
         };
+        attest_candidate_source(&mut node, source);
         let load = compute_fingerprints(temp.path(), &[node]).unwrap();
         assert!(load.fingerprints.contains_key("heading"));
     }
@@ -2082,6 +2189,7 @@ mod tests {
         std::fs::write(src_dir.join("token.rs"), raw.as_bytes()).unwrap();
         let mut node = candidate_node("after-secret-id", "after_secret", "src/token.rs", 8);
         node.source_span = span;
+        attest_candidate_source(&mut node, sanitized_text);
 
         let load = compute_fingerprints(temp.path(), &[node]).expect(
             "a frozen raw file must accept the span the indexer recorded on sanitized bytes",
