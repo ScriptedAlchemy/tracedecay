@@ -5593,10 +5593,17 @@ impl SourceFreshnessFenceV1 {
 
     /// Whether the last completed proof still admits the seat without probing
     /// the worktree: a proof exists, no source change has been observed since
-    /// it completed, and its bounded window has not elapsed. This is the
-    /// probe-free half of [`Self::serves_recently_verified_source`], so a
-    /// status projection gated on it cannot claim currency in a window where
-    /// the retrieval lanes serve the retained generation stale.
+    /// it completed, and its bounded window has not elapsed.
+    ///
+    /// This is the probe-free half of
+    /// [`Self::serves_recently_verified_source`], which also compares live Git
+    /// metadata against the proof. A status projection gated here therefore
+    /// agrees with the retrieval lanes on every term but that one: a Git move
+    /// nothing has observed yet leaves this true while the lanes already report
+    /// the seat stale. That residual is deliberate, not an oversight — closing
+    /// it would make a status read walk the worktree, which
+    /// `dashboard_freshness_does_not_reconcile_an_out_of_band_change` forbids —
+    /// and it lasts only until the next worker dequeue observes the move.
     fn proof_still_admits_seat(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.verified_against_source

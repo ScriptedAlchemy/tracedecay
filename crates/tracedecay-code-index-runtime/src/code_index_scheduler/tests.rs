@@ -10300,6 +10300,66 @@ async fn a_fresh_seat_declines_query_admission_during_source_verification() {
     registry.shutdown().await;
 }
 
+/// The state a restart restore leaves behind: a complete generation seated from
+/// the durable store, nothing proving it against the live worktree, and no pass
+/// or pending wake standing in for that proof. Coverage must name the unproven
+/// restore. A `verifying` predicate that asked only whether a source change had
+/// been *observed* shadowed this arm outright — across a restart nothing can be
+/// observed, so an unproven seat claimed complete coverage for as long as a pass
+/// was in flight, which at startup is always.
+#[tokio::test]
+async fn an_unproven_restored_seat_reports_partial_unverified_restore() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+
+    // Withdraw the proof the way a restart does: the fence carries no
+    // verification of the restored seat and the serving witness is unarmed.
+    *registry
+        .serving_source_witness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree witness")
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source freshness fence");
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.verified_against_source = false;
+        state.freshness_unknown = true;
+        state.source_witness = None;
+    }
+
+    let restored = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness over an unproven restore");
+    assert!(
+        restored.latest_generation_id.is_some(),
+        "the restore seats a complete generation that still serves reads"
+    );
+    assert!(
+        !restored.rebuild_in_flight,
+        "no pass or pending wake may stand in for the missing proof"
+    );
+    assert_eq!(
+        restored.coverage, "partial_unverified_restore",
+        "an unproven restored seat must name its missing proof, never claim complete coverage"
+    );
+    assert_eq!(restored.staleness_state.as_deref(), Some("stale"));
+
+    drop(admission);
+    registry.shutdown().await;
+}
+
 /// A dashboard status view reports the last execution-owned scheduler state; it
 /// must not run the freshness ladder, wake a worker, or publish an out-of-band
 /// source change merely because an operator opened the view.

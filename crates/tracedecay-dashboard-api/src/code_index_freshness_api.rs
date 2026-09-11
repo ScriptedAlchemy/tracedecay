@@ -310,12 +310,19 @@ pub async fn freshness(
 
 /// Wrap one scheduler freshness read in the dashboard envelope.
 ///
-/// The envelope may not contradict the payload it carries: the `Partial` arm's
-/// reason asserts the scheduler's coverage is incomplete, so `Ready` must claim
-/// every state whose payload reports `coverage: "complete"`. That is `fresh`
-/// and `verifying` — the scheduler reports `verifying` only while renewing a
-/// proof that still admits the seat, so the retrieval lanes serve that
-/// generation complete for the whole window.
+/// `Ready` is an allow-list of staleness states, not a function of the
+/// payload's coverage: `fresh` and `verifying` over a seated generation with
+/// complete coverage. `verifying` belongs there because the scheduler reports it
+/// only while renewing a proof that still admits the seat, so the retrieval
+/// lanes serve that generation complete for the whole window.
+///
+/// `stale` also carries `coverage: "complete"` — a ready seat with pending hook
+/// hints is complete over the source it sealed — and is still excluded: the
+/// scheduler has already observed edits that generation does not contain, so
+/// presenting it as `Ready` would show known-unapplied work as current. Every
+/// state outside the allow-list falls to `Partial`, whose omission names the
+/// state it observed instead of asserting an incompleteness the payload can
+/// contradict.
 async fn project_code_index_freshness(
     state: &DashboardState,
 ) -> DashboardEnvelopeV1<CodeIndexFreshnessPayloadV1> {
@@ -380,18 +387,23 @@ async fn project_code_index_freshness(
             DashboardFreshnessV1::unknown(),
             payload,
         ),
-        Some(_) => DashboardEnvelopeV1::new(
-            scope_from_state(state),
-            DashboardDomainStateV1::Partial,
-            DashboardCoverageV1::partial(
-                1,
-                0,
-                "mounted_worktree",
-                vec!["scheduler freshness coverage is incomplete".to_owned()],
-            ),
-            DashboardFreshnessV1::unknown(),
-            payload,
-        ),
+        Some(worktree) => {
+            let staleness = worktree.staleness_state.as_deref().unwrap_or("unreported");
+            DashboardEnvelopeV1::new(
+                scope_from_state(state),
+                DashboardDomainStateV1::Partial,
+                DashboardCoverageV1::partial(
+                    1,
+                    0,
+                    "mounted_worktree",
+                    vec![format!(
+                        "scheduler freshness state is {staleness}; only fresh or verifying serves as current"
+                    )],
+                ),
+                DashboardFreshnessV1::unknown(),
+                payload,
+            )
+        }
         None if authority_attached => DashboardEnvelopeV1::new(
             scope_from_state(state),
             DashboardDomainStateV1::Unknown,
@@ -654,5 +666,73 @@ mod tests {
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
         assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Absent);
+    }
+
+    /// `verifying` renews a proof that still admits the seated generation, so
+    /// the retrieval lanes serve it complete for the whole window. Presenting it
+    /// as anything but `Ready` made every polling client wait out a renewal that
+    /// changed nothing.
+    #[tokio::test]
+    async fn a_verifying_worktree_with_complete_coverage_is_ready() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(|root| {
+            Box::pin(async move {
+                Some(CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: root.display().to_string(),
+                    latest_generation_id: Some("generation.fixture".to_owned()),
+                    staleness_state: Some("verifying".to_owned()),
+                    coverage: "complete".to_owned(),
+                    hook_hint_count: Some(0),
+                    ..Default::default()
+                })
+            })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
+        assert!(envelope.coverage.is_complete());
+    }
+
+    /// A ready seat holding hook hints reports complete coverage over the source
+    /// it sealed and `stale` over the edits it does not carry. Complete coverage
+    /// alone must not promote it — `Ready` would present known-unapplied work as
+    /// current — and the omission names that state instead of asserting an
+    /// incompleteness the payload denies.
+    #[tokio::test]
+    async fn a_stale_worktree_with_complete_coverage_is_partial_named_by_its_state() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        state.code_index_freshness_reader = Some(Arc::new(|root| {
+            Box::pin(async move {
+                Some(CodeIndexWorktreeFreshnessV1 {
+                    worktree_root: root.display().to_string(),
+                    latest_generation_id: Some("generation.fixture".to_owned()),
+                    staleness_state: Some("stale".to_owned()),
+                    coverage: "complete".to_owned(),
+                    hook_hint_count: Some(3),
+                    ..Default::default()
+                })
+            })
+        }));
+
+        let Json(envelope) = freshness(State(state)).await;
+
+        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Partial);
+        assert_eq!(envelope.payload.worktrees[0].coverage, "complete");
+        let reason = envelope
+            .coverage
+            .omission_reasons
+            .first()
+            .expect("the partial envelope names why it omitted the worktree");
+        assert!(
+            reason.contains("stale"),
+            "the omission must name the observed staleness state: {reason}"
+        );
+        assert!(
+            !reason.contains("incomplete"),
+            "the omission must not assert incompleteness the payload denies: {reason}"
+        );
     }
 }
