@@ -20,9 +20,10 @@ use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
     RetrievalProfileCasV1, RetrievalRuntimeCompatibilityV1, SemanticResourceRequirementV1,
 };
-use tracedecay_configuration::{
+use tracedecay_configuration::ProjectConfigurationRuntime;
+use tracedecay_global_db::configuration::contracts::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    DirectConfigurationMutation, ProjectConfigurationRuntime,
+    DirectConfigurationMutation,
 };
 use tracedecay_query::search_quality::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,

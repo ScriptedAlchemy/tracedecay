@@ -16,7 +16,7 @@ use crate::config::retrieval::{
     RetrievalProfileCasV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
     SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
 };
-use tracedecay_configuration::{
+use tracedecay_global_db::configuration::contracts::{
     ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
 };
 

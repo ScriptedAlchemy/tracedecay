@@ -265,10 +265,10 @@ mod runtime_configuration_cutover {
         install_pinned_runtime_configuration, runtime_configuration_for_layout,
     };
     use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
+    use tracedecay_configuration::ProjectConfigurationRuntime;
     use tracedecay_configuration::TraceDecayConfig;
-    use tracedecay_configuration::{
+    use tracedecay_global_db::configuration::contracts::{
         ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
-        ProjectConfigurationRuntime,
     };
 
     fn project_id(value: &str) -> ProjectId {

@@ -12,7 +12,7 @@ use super::{
     SemanticRuntimeBackendV1, SemanticRuntimeFuture, SemanticRuntimeOwnerV1,
     SemanticRuntimeRouteV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
-use tracedecay_configuration::{
+use tracedecay_global_db::configuration::contracts::{
     ConfigurationCurrentStateV1, ConfigurationError, ConfigurationOperationFuture,
 };
 

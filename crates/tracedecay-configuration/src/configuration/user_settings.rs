@@ -16,7 +16,9 @@ use tracedecay_domain::configuration::{
     USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
 };
 
-use super::{DirectConfigurationMutation, ProductionConfigurationDaemonClient};
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
+
+use super::ProductionConfigurationDaemonClient;
 use tracedecay_session_memory::user_config::UserConfig;
 
 pub type UserSettingsFuture<'a, T> =
