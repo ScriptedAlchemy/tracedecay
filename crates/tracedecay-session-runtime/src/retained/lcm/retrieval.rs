@@ -632,8 +632,13 @@ fn retrieval_query(
         context_budget,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
-    .with_retrieval_scope(retrieval_scope)
-    .with_execution_limits(crate::session_retrieval::admitted_execution_limits(limit));
+    .with_retrieval_scope(retrieval_scope);
+    let execution_limits = if query_text.is_empty() {
+        crate::session_retrieval::admitted_browse_execution_limits(limit)
+    } else {
+        crate::session_retrieval::admitted_execution_limits(limit)
+    };
+    let query = query.with_execution_limits(execution_limits);
     Ok(SessionRetrievalCommand::new(
         query,
         SessionRetrievalFilters {
