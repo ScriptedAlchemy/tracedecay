@@ -38,7 +38,7 @@ pub use self::interactive::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
     CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolSummaryV1, INTERACTIVE_CATALOG_ARTIFACT_NAME,
+    CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1, INTERACTIVE_CATALOG_ARTIFACT_NAME,
     write_interactive_catalog_artifact,
 };
 use self::schema::{
