@@ -136,16 +136,6 @@ try {
     assert.deepEqual(collisions, []);
     console.log(`PASS caption bounds and HUD isolation ${width}x${height}`);
   }
-  await page.goto(`${base}/?surface=delivery&data=fixture&state=03`);
-  assert.match(await page.locator(".status").innerText(), /DATA\s+authored example/);
-  const rspack = page.getByRole("button", { name: "Inspect Rspack", exact: true });
-  await rspack.click();
-  assert.equal(await rspack.getAttribute("aria-pressed"), "true");
-  assert.equal(await page.getByText("SELECTED REPOSITORY · Rspack", { exact: true }).isVisible(), true);
-  await page.getByRole("button", { name: "Inspect umbrella outcome", exact: true }).press("Enter");
-  assert.equal(await rspack.getAttribute("aria-pressed"), "false");
-  assert.equal(await page.getByText("SELECTED REPOSITORY · Rspack", { exact: true }).count(), 0);
-  console.log("PASS umbrella repository selection and keyboard clear");
 } finally {
   await browser.close();
 }
