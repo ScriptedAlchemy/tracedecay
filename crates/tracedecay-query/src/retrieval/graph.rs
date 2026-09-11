@@ -19,6 +19,7 @@ use tracedecay_domain::{
     RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan, SymbolOccurrenceId,
 };
 
+pub use super::ports::RetrievalExecutionControl;
 use super::ports::{
     CodeCandidateBindingV1, GraphEvidenceReadPort, LaneBoundEvidence, LaneEvidenceRejections,
     RetrievalPortError, checkpoint_digest, contract_error, lane_bound_evidence, lane_candidate_cap,
@@ -27,29 +28,6 @@ use super::ports::{
 mod projection;
 
 pub use self::projection::production_code_index_freshness;
-
-/// Live request authority consulted throughout one graph traversal and, via
-/// [`super::lexical::LexicalLaneRequest::control`], between the bounded row
-/// visits of one lexical scan.
-pub trait GraphExecutionControl: Send + Sync {
-    fn is_cancelled(&self) -> bool;
-    /// Monotonic elapsed time in the request-relative domain used by
-    /// [`RetrievalBudget::deadline_micros`].
-    fn elapsed_micros(&self) -> u64;
-}
-
-impl<T> GraphExecutionControl for T
-where
-    T: super::semantic::SemanticExecutionControl + Send + Sync + ?Sized,
-{
-    fn is_cancelled(&self) -> bool {
-        super::semantic::SemanticExecutionControl::is_cancelled(self)
-    }
-
-    fn elapsed_micros(&self) -> u64 {
-        super::semantic::SemanticExecutionControl::elapsed_micros(self)
-    }
-}
 
 /// Wording the graph lane uses when a port-emitted batch fails the shared
 /// candidate/evidence binding checks.
@@ -258,7 +236,7 @@ pub trait GraphLaneRetriever {
     fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
-        control: Arc<dyn GraphExecutionControl>,
+        control: Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
 }
 
@@ -285,7 +263,7 @@ where
         &self,
         request: &GraphLaneRequest,
         batch: &RetrieverBatch<GraphLaneEvidence>,
-        control: &dyn GraphExecutionControl,
+        control: &dyn RetrievalExecutionControl,
     ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
         if batch.coverage.eligible < batch.candidates.len() as u64 {
             return Err(RetrievalPortError::Contract(
@@ -363,7 +341,7 @@ where
     fn retrieve_graph(
         &self,
         request: &GraphLaneRequest,
-        control: Arc<dyn GraphExecutionControl>,
+        control: Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
         let outcome = match self
@@ -425,7 +403,7 @@ fn compare_graph_candidates(
 
 fn check_graph_control(
     request: &GraphLaneRequest,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> Result<(), RetrievalPortError> {
     if control.is_cancelled() {
         return Err(RetrievalPortError::Cancelled);
@@ -444,7 +422,7 @@ fn graph_checkpoint_digest(
     request: &GraphLaneRequest,
     candidates: &[CompactCandidate],
     evidence_by_occurrence: &BTreeMap<SourceOccurrenceId, GraphLaneEvidence>,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> Result<CursorPayloadDigest, RetrievalPortError> {
     let mut prefix = Vec::with_capacity(candidates.len());
     for candidate in candidates {

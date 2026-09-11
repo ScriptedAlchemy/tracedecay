@@ -8,7 +8,7 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::ports::RetrievalPortError;
 use tracedecay_query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, SemanticExecutionControl, SemanticQueryEmbeddingPort,
+    EphemeralQueryEmbeddingV1, RetrievalExecutionControl, SemanticQueryEmbeddingPort,
     SemanticQueryEmbeddingRequestV1,
 };
 use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
@@ -1186,7 +1186,7 @@ impl SemanticEvaluationQueryFactoryV1 {
         deadline_micros: Option<u64>,
     ) -> SemanticEvaluationQueryEmbedderV1<'a>
     where
-        C: SemanticExecutionControl + Sync,
+        C: RetrievalExecutionControl + Sync,
     {
         let cancellation = Arc::new(QueryExecutionAuthorityV1 {
             control,
@@ -1218,7 +1218,7 @@ struct QueryExecutionAuthorityV1<'a, C> {
 
 impl<C> SemanticExecutionAuthority for QueryExecutionAuthorityV1<'_, C>
 where
-    C: SemanticExecutionControl + Sync,
+    C: RetrievalExecutionControl + Sync,
 {
     fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
         if self.control.is_cancelled() {

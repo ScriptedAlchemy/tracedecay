@@ -20,6 +20,7 @@ use tracedecay_hooks::{
     HookScopedFeedbackV1, deliver_feedback_with_rollback, envelope_identity_hash16,
 };
 use tracedecay_lsp::DaemonLspProviderBundle;
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationControlStore;
 
 use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::observations::FeedbackObservationEmitterV1;
@@ -366,7 +367,7 @@ where
     CS: super::CiReadOnlyProviderArchiveV1 + Sync,
     CE: super::CiExactEvidenceAuthorityV1<CS::Record> + Sync,
     PE: super::CanonicalProximityEvidenceAuthorityV1 + Sync,
-    PC: tracedecay_configuration::ConfigurationControlStore + Clone + Send + 'static,
+    PC: ConfigurationControlStore + Clone + Send + 'static,
 {
     pub fn runtime(&self) -> &super::AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
         &self.advisory.advisory
@@ -670,7 +671,7 @@ where
     CS: super::CiReadOnlyProviderArchiveV1 + Sync,
     CE: super::CiExactEvidenceAuthorityV1<CS::Record> + Sync,
     PE: super::CanonicalProximityEvidenceAuthorityV1 + Sync,
-    PC: tracedecay_configuration::ConfigurationControlStore + Clone + Send + 'static,
+    PC: ConfigurationControlStore + Clone + Send + 'static,
 {
     let scope = input.resolved_scope.clone();
     let advisory = open_advisory_daemon_registration(input, providers)?;

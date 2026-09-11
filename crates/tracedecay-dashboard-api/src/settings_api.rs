@@ -34,7 +34,7 @@ use crate::application::settings_control::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
-use tracedecay_configuration::config::TraceDecayConfig;
+use tracedecay_configuration::TraceDecayConfig;
 use tracedecay_configuration::{
     DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
     parse_duration_millis, plan_user_settings_mutation,

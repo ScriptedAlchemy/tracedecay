@@ -4,6 +4,8 @@ use super::*;
 use tracedecay_application::feedback::ProductionFeedbackCyclePartsV1;
 use tracedecay_contracts::AnalyzerAdmittedDiagnosticProviderV1;
 use tracedecay_contracts::diagnostics::FeedbackDiagnosticProviderAdmissionV1;
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationOperationFuture;
+use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
 
 mod lsp;
 pub use lsp::DaemonLspOwnerRegistrar;
@@ -225,14 +227,14 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         change: &'a tracedecay_domain::configuration::ProtectedChange,
-    ) -> tracedecay_configuration::ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
+    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
     {
         let allowed = actor.actor_id == self.actor && change.validate().is_ok();
         let evidence = self.evidence.clone();
         Box::pin(async move {
             allowed
                 .then_some(evidence)
-                .ok_or(tracedecay_configuration::ConfigurationError::TargetUnavailable)
+                .ok_or(ConfigurationError::TargetUnavailable)
         })
     }
 
@@ -240,14 +242,14 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
         &'a self,
         actor: &'a AuthorizedActor,
         plan: &'a tracedecay_domain::configuration::ProtectedChangePlan,
-    ) -> tracedecay_configuration::ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
+    ) -> ConfigurationOperationFuture<'a, ScopeRevalidationEvidenceV1>
     {
         let allowed = actor.actor_id == self.actor && plan.validate().is_ok();
         let evidence = self.evidence.clone();
         Box::pin(async move {
             allowed
                 .then_some(evidence)
-                .ok_or(tracedecay_configuration::ConfigurationError::TargetUnavailable)
+                .ok_or(ConfigurationError::TargetUnavailable)
         })
     }
 }

@@ -6,7 +6,7 @@ struct CancelDuringTraversal {
     checks: AtomicUsize,
 }
 
-impl GraphExecutionControl for CancelDuringTraversal {
+impl RetrievalExecutionControl for CancelDuringTraversal {
     fn is_cancelled(&self) -> bool {
         self.checks.fetch_add(1, Ordering::SeqCst) >= 2
     }
@@ -21,7 +21,7 @@ struct CancelAfterChecks {
     cancel_at: usize,
 }
 
-impl GraphExecutionControl for CancelAfterChecks {
+impl RetrievalExecutionControl for CancelAfterChecks {
     fn is_cancelled(&self) -> bool {
         self.checks.fetch_add(1, Ordering::SeqCst) >= self.cancel_at
     }
@@ -35,7 +35,7 @@ struct DeadlineDuringTraversal {
     elapsed: AtomicU64,
 }
 
-impl GraphExecutionControl for DeadlineDuringTraversal {
+impl RetrievalExecutionControl for DeadlineDuringTraversal {
     fn is_cancelled(&self) -> bool {
         false
     }
@@ -50,7 +50,7 @@ struct CancelLifecycleDuringTraversal {
     lifecycle: CancellationSignal,
 }
 
-impl GraphExecutionControl for CancelLifecycleDuringTraversal {
+impl RetrievalExecutionControl for CancelLifecycleDuringTraversal {
     fn is_cancelled(&self) -> bool {
         if self.checks.fetch_add(1, Ordering::SeqCst) >= 2 {
             self.lifecycle.cancel(UtcMicros(1));
@@ -109,7 +109,7 @@ fn graph_traversal_observes_request_cancellation() {
 
     let result = reader.read_graph_evidence(
         &request,
-        Arc::new(TestGraphExecutionControl {
+        Arc::new(TestRetrievalExecutionControl {
             cancelled: true,
             elapsed_micros: 0,
         }),
@@ -126,7 +126,7 @@ fn graph_traversal_observes_request_deadline() {
 
     let result = reader.read_graph_evidence(
         &request,
-        Arc::new(TestGraphExecutionControl {
+        Arc::new(TestRetrievalExecutionControl {
             cancelled: false,
             elapsed_micros: 5,
         }),

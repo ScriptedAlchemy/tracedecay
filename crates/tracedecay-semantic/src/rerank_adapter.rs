@@ -20,7 +20,7 @@ use tracedecay_domain::{
 use tracedecay_query::retrieval::rerank::{
     AdmittedNativeRerankExecutorV1, BoundedRerankOutcomeV1, BoundedRerankRuntimeV1,
     DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1, LocalRerankFailureV1,
-    LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1, RerankViewOutcomeV1,
+    LocalRerankInputV1, LocalRerankPermitV1, RetrievalExecutionControl, RerankViewOutcomeV1,
     RerankViewPermitV1,
 };
 use tracedecay_semantic_contracts::{
@@ -566,7 +566,7 @@ impl ProductionCodeRerankAuthorityV1 {
         request: &RetrievalRequest,
         policy: &RerankPolicy,
         pre_rerank: &[RankedCandidate],
-        control: &dyn RerankExecutionControlV1,
+        control: &dyn RetrievalExecutionControl,
     ) -> BoundedRerankOutcomeV1 {
         let mut views = GenerationBoundCodeRerankViewsV1::new(generation, query);
         BoundedRerankRuntimeV1::new(&mut views, self.executor.as_ref())

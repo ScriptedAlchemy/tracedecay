@@ -66,7 +66,7 @@ use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever,
 };
-use tracedecay_query::retrieval::graph::GraphExecutionControl;
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
@@ -473,7 +473,7 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
     }
 }
 
-impl GraphExecutionControl for ActiveControl {
+impl RetrievalExecutionControl for ActiveControl {
     fn is_cancelled(&self) -> bool {
         false
     }

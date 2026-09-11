@@ -29,14 +29,15 @@ use tracedecay_query::retrieval::lexical::{
     CodeLexicalProjectionAdapterV1, LexicalLane, LexicalLaneRetriever,
 };
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalExecutionControl,
+    RetrievalPortError,
 };
 use tracedecay_query::retrieval::{
     QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
 };
 
 use crate::candidate_producers::{
-    FixtureGraphExecutionControl, base_request, budget, chunk, complete, id, lexical_request,
+    FixtureRetrievalExecutionControl, base_request, budget, chunk, complete, id, lexical_request,
     projection_metadata,
 };
 
@@ -64,7 +65,7 @@ impl GraphEvidenceReadPort for FixtureGraphPort {
     fn read_graph_evidence(
         &self,
         _request: &GraphLaneRequest,
-        _control: std::sync::Arc<dyn tracedecay_query::retrieval::graph::GraphExecutionControl>,
+        _control: std::sync::Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         match &self.reply {
             GraphPortReply::Outcome(outcome) => Ok(outcome.clone()),
@@ -354,7 +355,7 @@ fn fixture(disposition: GraphDisposition) -> SingleRootFixture {
         }
     };
     let graph_outcome = GraphLane::new(FixtureGraphPort { reply })
-        .retrieve_graph(&graph_request, Arc::new(FixtureGraphExecutionControl))
+        .retrieve_graph(&graph_request, Arc::new(FixtureRetrievalExecutionControl))
         .expect("graph lane reports a typed outcome");
 
     SingleRootFixture {

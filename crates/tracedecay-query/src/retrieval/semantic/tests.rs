@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use tracedecay_domain::{
@@ -275,8 +275,8 @@ struct FakeVectorReadPort {
     ann_windows: RefCell<Vec<SemanticAnnCandidateWindowV1>>,
     ann: Option<FakeAnnBehavior>,
     summary: Option<SemanticVectorScanSummaryV1>,
-    after_scan_cancel: Option<Rc<Cell<bool>>>,
-    after_scan_elapsed: Option<(Rc<Cell<u64>>, u64)>,
+    after_scan_cancel: Option<Arc<AtomicBool>>,
+    after_scan_elapsed: Option<(Arc<AtomicU64>, u64)>,
     vector_generation: VectorGenerationIdV1,
     projection_key: ProjectionKeyV1,
     search_index_key: SemanticSearchIndexKeyV1,
@@ -326,10 +326,10 @@ impl SemanticVectorReadPort for FakeVectorReadPort {
             visit(row)?;
         }
         if let Some(cancelled) = &self.after_scan_cancel {
-            cancelled.set(true);
+            cancelled.store(true, Ordering::Relaxed);
         }
         if let Some((elapsed, value)) = &self.after_scan_elapsed {
-            elapsed.set(*value);
+            elapsed.store(*value, Ordering::Relaxed);
         }
         Ok(self.summary.unwrap_or(SemanticVectorScanSummaryV1 {
             examined: self.rows.len() as u64,
@@ -404,37 +404,35 @@ impl SemanticVectorReadPort for FakeVectorReadPort {
 
 #[derive(Clone, Default)]
 struct FixedExecutionControl {
-    cancelled: Rc<Cell<bool>>,
-    elapsed_micros: Rc<Cell<u64>>,
-    cancellation_checks: Rc<Cell<u32>>,
+    cancelled: Arc<AtomicBool>,
+    elapsed_micros: Arc<AtomicU64>,
+    cancellation_checks: Arc<AtomicU32>,
     cancel_after_checks: Option<u32>,
-    elapsed_checks: Rc<Cell<u32>>,
+    elapsed_checks: Arc<AtomicU32>,
     expire_after_elapsed_checks: Option<u32>,
 }
 
-impl SemanticExecutionControl for FixedExecutionControl {
+impl RetrievalExecutionControl for FixedExecutionControl {
     fn is_cancelled(&self) -> bool {
-        let checks = self.cancellation_checks.get() + 1;
-        self.cancellation_checks.set(checks);
+        let checks = self.cancellation_checks.fetch_add(1, Ordering::Relaxed) + 1;
         if self
             .cancel_after_checks
             .is_some_and(|allowed| checks > allowed)
         {
             return true;
         }
-        self.cancelled.get()
+        self.cancelled.load(Ordering::Relaxed)
     }
 
     fn elapsed_micros(&self) -> u64 {
-        let checks = self.elapsed_checks.get() + 1;
-        self.elapsed_checks.set(checks);
+        let checks = self.elapsed_checks.fetch_add(1, Ordering::Relaxed) + 1;
         if self
             .expire_after_elapsed_checks
             .is_some_and(|allowed| checks > allowed)
         {
             return u64::MAX;
         }
-        self.elapsed_micros.get()
+        self.elapsed_micros.load(Ordering::Relaxed)
     }
 }
 
@@ -666,8 +664,8 @@ fn cancellation_invokes_no_embedding_or_vector_authority() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        cancelled: Rc::new(Cell::new(true)),
-        elapsed_micros: Rc::new(Cell::new(0)),
+        cancelled: Arc::new(AtomicBool::new(true)),
+        elapsed_micros: Arc::new(AtomicU64::new(0)),
         ..FixedExecutionControl::default()
     };
     let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
@@ -947,7 +945,7 @@ fn elapsed_deadline_before_scan_invokes_no_authority() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(5)),
+        elapsed_micros: Arc::new(AtomicU64::new(5)),
         ..FixedExecutionControl::default()
     };
 
@@ -971,7 +969,7 @@ fn omitted_request_deadline_uses_crate_exact_flat_default() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
+        elapsed_micros: Arc::new(AtomicU64::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
         ..FixedExecutionControl::default()
     };
 
@@ -994,7 +992,7 @@ fn request_deadline_overrides_crate_exact_flat_default() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(1)),
+        elapsed_micros: Arc::new(AtomicU64::new(1)),
         ..FixedExecutionControl::default()
     };
     let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)
@@ -1011,7 +1009,7 @@ fn request_deadline_overrides_crate_exact_flat_default() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
+        elapsed_micros: Arc::new(AtomicU64::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
         ..FixedExecutionControl::default()
     };
     let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)
@@ -1034,7 +1032,7 @@ fn set_deadline_zero_is_immediate_expire_not_crate_fallback() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(0)),
+        elapsed_micros: Arc::new(AtomicU64::new(0)),
         ..FixedExecutionControl::default()
     };
     assert!(
@@ -1060,7 +1058,7 @@ fn tighter_of_lane_and_base_deadline_is_used() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(1)),
+        elapsed_micros: Arc::new(AtomicU64::new(1)),
         ..FixedExecutionControl::default()
     };
     assert!(
@@ -1165,7 +1163,7 @@ fn cancellation_and_deadline_are_checked_after_empty_excluded_scan() {
         excluded: 1,
         unknown: 0,
     });
-    cancelled_vectors.after_scan_cancel = Some(Rc::clone(&cancelled_control.cancelled));
+    cancelled_vectors.after_scan_cancel = Some(Arc::clone(&cancelled_control.cancelled));
     assert_eq!(
         SemanticCodeRetriever::new(&cancelled_embedder, &cancelled_vectors, &cancelled_control,)
             .retrieve_semantic(&request)
@@ -1182,7 +1180,7 @@ fn cancellation_and_deadline_are_checked_after_empty_excluded_scan() {
         excluded: 1,
         unknown: 0,
     });
-    expired_vectors.after_scan_elapsed = Some((Rc::clone(&expired_control.elapsed_micros), 5));
+    expired_vectors.after_scan_elapsed = Some((Arc::clone(&expired_control.elapsed_micros), 5));
     assert!(matches!(
         SemanticCodeRetriever::new(&expired_embedder, &expired_vectors, &expired_control)
             .retrieve_semantic(&request)

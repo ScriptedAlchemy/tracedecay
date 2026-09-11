@@ -35,6 +35,7 @@ use super::ports::{
     CodeCandidateBindingV1, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
     contract_error, lane_candidate_cap,
 };
+pub use super::ports::RetrievalExecutionControl;
 
 /// Fallback exact-flat scan deadline when both request budgets omit
 /// `deadline_micros`. Retention is heap-capped; the visit is still a full
@@ -454,14 +455,6 @@ pub trait SemanticVectorReadPort {
     }
 }
 
-/// Request-scoped cancellation and monotonic deadline authority.
-pub trait SemanticExecutionControl {
-    fn is_cancelled(&self) -> bool;
-    /// Monotonic elapsed time in the same request-relative domain as
-    /// `RetrievalBudget::deadline_micros`.
-    fn elapsed_micros(&self) -> u64;
-}
-
 /// Independently inspectable semantic-lane port.
 pub trait SemanticLaneRetriever {
     fn retrieve_semantic(
@@ -493,7 +486,7 @@ impl<E, V, C> SemanticCodeRetriever<'_, E, V, C>
 where
     E: SemanticQueryEmbeddingPort,
     V: SemanticVectorReadPort,
-    C: SemanticExecutionControl,
+    C: RetrievalExecutionControl,
 {
     fn score_record(
         request: &SemanticRetrievalRequestV1<'_>,
@@ -1022,7 +1015,7 @@ impl<E, V, C> SemanticLaneRetriever for SemanticCodeRetriever<'_, E, V, C>
 where
     E: SemanticQueryEmbeddingPort,
     V: SemanticVectorReadPort,
-    C: SemanticExecutionControl,
+    C: RetrievalExecutionControl,
 {
     #[hotpath::measure(label = "query.lane.semantic")]
     fn retrieve_semantic(
@@ -1329,14 +1322,14 @@ fn effective_deadline_micros(request: &SemanticRetrievalRequestV1<'_>) -> u64 {
     }
 }
 
-fn deadline_exhausted<C: SemanticExecutionControl>(
+fn deadline_exhausted<C: RetrievalExecutionControl>(
     request: &SemanticRetrievalRequestV1<'_>,
     control: &C,
 ) -> bool {
     elapsed_micros(request, control) >= effective_deadline_micros(request)
 }
 
-fn elapsed_micros<C: SemanticExecutionControl>(
+fn elapsed_micros<C: RetrievalExecutionControl>(
     _request: &SemanticRetrievalRequestV1<'_>,
     control: &C,
 ) -> u64 {
@@ -1448,7 +1441,7 @@ impl PartialEq for SemanticRankedEntryV1 {
 
 impl Eq for SemanticRankedEntryV1 {}
 
-fn budget_usage<C: SemanticExecutionControl>(
+fn budget_usage<C: RetrievalExecutionControl>(
     request: &SemanticRetrievalRequestV1<'_>,
     candidates_examined: u64,
     candidates_returned: u64,

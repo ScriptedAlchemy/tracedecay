@@ -189,7 +189,7 @@ fn configured_model_pin_with_timeout(
     )
     .expect("configuration snapshot");
     ContextScoutConfigurationPinV1::from_current(
-        &tracedecay_configuration::ConfigurationCurrentStateV1 {
+        &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1 {
             revision_id: revision,
             snapshot,
         },
@@ -593,7 +593,7 @@ async fn stock_disabled_configuration_produces_nothing() {
     )
     .expect("configuration snapshot");
     let pin = ContextScoutConfigurationPinV1::from_current(
-        &tracedecay_configuration::ConfigurationCurrentStateV1 {
+        &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1 {
             revision_id: revision,
             snapshot,
         },

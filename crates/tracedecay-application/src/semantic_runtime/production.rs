@@ -58,12 +58,12 @@ use tracedecay_query::retrieval::graph::production_code_index_freshness;
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
 };
-use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
     SemanticAbstentionDispositionV1, SemanticAnnCandidateWindowV1, SemanticAnnCandidatesV1,
     SemanticAnnIndexStateV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
-    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
+    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
     SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
     SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
     SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
@@ -2274,7 +2274,7 @@ impl ProductionSemanticRuntimeV1 {
         fallback: Arc<QueryFallbackSubpayload>,
     ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
     where
-        C: SemanticExecutionControl + Sync,
+        C: RetrievalExecutionControl + Sync,
     {
         if request.code_generation == code_generation.manifest().generation_id
             && request.capability_manifest_digest == code_generation.capability().manifest_digest
@@ -2658,7 +2658,7 @@ struct SemanticEvaluationExecutionControlV1 {
     cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
 }
 
-impl SemanticExecutionControl for SemanticEvaluationExecutionControlV1 {
+impl RetrievalExecutionControl for SemanticEvaluationExecutionControlV1 {
     fn is_cancelled(&self) -> bool {
         self.cancellation.interruption().is_some()
     }
@@ -2668,7 +2668,7 @@ impl SemanticExecutionControl for SemanticEvaluationExecutionControlV1 {
     }
 }
 
-impl RerankExecutionControlV1 for SemanticEvaluationExecutionControlV1 {
+impl RetrievalExecutionControl for SemanticEvaluationExecutionControlV1 {
     fn elapsed_micros(&self) -> u64 {
         self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
     }
@@ -3944,7 +3944,7 @@ pub fn compose_application_semantic_search<'a, V, C>(
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
     V: SemanticVectorReadPort,
-    C: SemanticExecutionControl + Sync,
+    C: RetrievalExecutionControl + Sync,
 {
     let ApplicationSemanticSearchParametersV1 {
         handle,
@@ -4010,7 +4010,7 @@ pub async fn compose_project_application_semantic_search<C>(
     fallback: Arc<QueryFallbackSubpayload>,
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
-    C: SemanticExecutionControl + Sync,
+    C: RetrievalExecutionControl + Sync,
 {
     let Some(runtime) = project_semantic_production_runtime(project_root) else {
         return execute_calibrated_semantic_query(
@@ -4058,7 +4058,7 @@ impl ProductionProjectSemanticSearchBridgeV1 {
         parameters: AuthorizedProjectSemanticSearchParametersV1<'a, C>,
     ) -> SemanticRuntimeFuture<'a, Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>>
     where
-        C: SemanticExecutionControl + Sync + 'a,
+        C: RetrievalExecutionControl + Sync + 'a,
     {
         let AuthorizedProjectSemanticSearchParametersV1 {
             project_root,
@@ -5006,8 +5006,8 @@ mod tests {
             cancellation: Arc::new(DeadlineCancellation),
         };
 
-        assert!(SemanticExecutionControl::is_cancelled(&control));
-        assert!(RerankExecutionControlV1::is_cancelled(&control));
+        assert!(RetrievalExecutionControl::is_cancelled(&control));
+        assert!(RetrievalExecutionControl::is_cancelled(&control));
     }
 
     #[test]
@@ -5600,7 +5600,7 @@ mod tests {
             checks: AtomicUsize,
         }
 
-        impl SemanticExecutionControl for CancelAtRuntimeBoundary {
+        impl RetrievalExecutionControl for CancelAtRuntimeBoundary {
             fn is_cancelled(&self) -> bool {
                 self.checks.fetch_add(1, Ordering::SeqCst) != 0
             }
@@ -5881,7 +5881,7 @@ mod tests {
             }
         }
         struct IdleControl;
-        impl SemanticExecutionControl for IdleControl {
+        impl RetrievalExecutionControl for IdleControl {
             fn is_cancelled(&self) -> bool {
                 false
             }
