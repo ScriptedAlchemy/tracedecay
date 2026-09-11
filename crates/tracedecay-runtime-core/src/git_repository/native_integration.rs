@@ -46,6 +46,7 @@ pub struct GitNativePreflight {
     pub source_tree: GitOidV1,
     pub destination_tree: GitOidV1,
     pub merge_base: GitOidV1,
+    pub merge_base_tree: GitOidV1,
     pub ordered_commits: Vec<GitOidV1>,
     pub candidate_tree: Option<GitOidV1>,
 }
@@ -57,10 +58,86 @@ pub struct GitNativeApplyOutcome {
     pub final_tree: GitOidV1,
 }
 
+/// Read-only access to one preflight candidate while its object-memory Git
+/// database is still alive. Blob bytes are lent to the visitor one at a time;
+/// callers cannot retain or mutate the temporary object database.
+pub struct GitNativeCandidateTreeV1<'repository> {
+    repository: &'repository gix::Repository,
+    tree: gix::ObjectId,
+    cancellation: &'repository CancellationToken,
+}
+
+impl GitNativeCandidateTreeV1<'_> {
+    pub fn tree(&self) -> Result<GitOidV1, GitRepositoryError> {
+        oid(self.tree)
+    }
+
+    /// Visit every non-tree, non-submodule entry in stable path order.
+    pub fn visit_blobs<E>(
+        &self,
+        mut visitor: impl FnMut(&str, &[u8]) -> Result<(), E>,
+    ) -> Result<(), GitNativeCandidateTreeVisitError<E>> {
+        let tree = self
+            .repository
+            .find_tree(self.tree)
+            .map_err(|error| repository_visit_error("native candidate tree", error))?;
+        let mut entries =
+            tree.traverse().breadthfirst.files().map_err(|error| {
+                repository_visit_error("native candidate tree traversal", error)
+            })?;
+        entries.sort_by(|left, right| left.filepath.cmp(&right.filepath));
+        for entry in entries {
+            if self.cancellation.is_cancelled() {
+                return Err(GitNativeCandidateTreeVisitError::Repository(
+                    GitRepositoryError::Operation {
+                        operation: "native candidate tree traversal",
+                        detail: "cancelled".to_owned(),
+                    },
+                ));
+            }
+            if entry.mode.is_tree() || entry.mode.is_commit() {
+                continue;
+            }
+            let logical_path = entry.filepath.to_str_lossy();
+            let blob = self
+                .repository
+                .find_blob(entry.oid)
+                .map_err(|error| repository_visit_error("native candidate blob", error))?;
+            visitor(&logical_path, &blob.data)
+                .map_err(GitNativeCandidateTreeVisitError::Visitor)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum GitNativeCandidateTreeVisitError<E> {
+    Repository(GitRepositoryError),
+    Visitor(E),
+}
+
+#[derive(Debug)]
+pub enum GitNativePreflightCaptureError<E> {
+    Repository(GitRepositoryError),
+    Capture(E),
+}
+
+impl<E> From<GitRepositoryError> for GitNativePreflightCaptureError<E> {
+    fn from(error: GitRepositoryError) -> Self {
+        Self::Repository(error)
+    }
+}
+
+fn repository_visit_error<E>(
+    operation_name: &'static str,
+    error: impl std::fmt::Display,
+) -> GitNativeCandidateTreeVisitError<E> {
+    GitNativeCandidateTreeVisitError::Repository(operation(operation_name, error))
+}
+
 impl GitRepositoryAuthority {
     /// Preflight one exact pair without changing refs, index, worktree, or the
     /// real object database.
-    #[hotpath::measure(label = "runtime_core.git.native_preflight")]
     pub fn preflight_native_integration(
         &self,
         source_ref: &str,
@@ -70,6 +147,34 @@ impl GitRepositoryAuthority {
         mode: GitNativeIntegrationMode,
         cancellation: &CancellationToken,
     ) -> Result<GitNativePreflight, GitRepositoryError> {
+        match self.preflight_native_integration_with_candidate(
+            source_ref,
+            destination_ref,
+            expected_source_tip,
+            expected_destination_tip,
+            mode,
+            cancellation,
+            |_, _| Ok::<(), std::convert::Infallible>(()),
+        ) {
+            Ok((preflight, _)) => Ok(preflight),
+            Err(GitNativePreflightCaptureError::Repository(error)) => Err(error),
+            Err(GitNativePreflightCaptureError::Capture(never)) => match never {},
+        }
+    }
+
+    /// Preflight one exact pair and let a caller consume the eligible
+    /// candidate before the temporary object-memory database is dropped.
+    #[hotpath::measure(label = "runtime_core.git.native_preflight")]
+    pub fn preflight_native_integration_with_candidate<T, E>(
+        &self,
+        source_ref: &str,
+        destination_ref: &str,
+        expected_source_tip: &GitOidV1,
+        expected_destination_tip: &GitOidV1,
+        mode: GitNativeIntegrationMode,
+        cancellation: &CancellationToken,
+        capture: impl FnOnce(&GitNativePreflight, &GitNativeCandidateTreeV1<'_>) -> Result<T, E>,
+    ) -> Result<(GitNativePreflight, Option<T>), GitNativePreflightCaptureError<E>> {
         validate_ref_pair(source_ref, destination_ref)?;
         let repository = self.repository.to_thread_local().with_object_memory();
         let source_tip =
@@ -84,7 +189,8 @@ impl GitRepositoryAuthority {
             return Err(GitRepositoryError::Operation {
                 operation: "native integration preflight",
                 detail: "cancelled".to_owned(),
-            });
+            }
+            .into());
         }
         let source_commit = repository
             .find_commit(source_tip)
@@ -103,6 +209,12 @@ impl GitRepositoryAuthority {
         let merge_base = repository
             .merge_base(source_tip, destination_tip)
             .map_err(|error| operation("native integration merge base", error))?
+            .detach();
+        let merge_base_tree = repository
+            .find_commit(merge_base)
+            .map_err(|error| operation("native integration merge-base commit", error))?
+            .tree_id()
+            .map_err(|error| operation("native integration merge-base tree", error))?
             .detach();
         let ordered_commits =
             linear_commit_closure(&repository, source_tip, merge_base, cancellation)?;
@@ -135,7 +247,8 @@ impl GitRepositoryAuthority {
                 )?,
             }
         };
-        Ok(GitNativePreflight {
+        let eligible = disposition == GitNativePreflightDisposition::Eligible;
+        let preflight = GitNativePreflight {
             disposition,
             mode,
             source_tip: oid(source_tip)?,
@@ -143,12 +256,35 @@ impl GitRepositoryAuthority {
             source_tree: oid(source_tree)?,
             destination_tree: oid(destination_tree)?,
             merge_base: oid(merge_base)?,
+            merge_base_tree: oid(merge_base_tree)?,
             ordered_commits: ordered_commits
                 .into_iter()
                 .map(oid)
                 .collect::<Result<_, _>>()?,
             candidate_tree: candidate_tree.map(oid).transpose()?,
-        })
+        };
+        let captured = if eligible {
+            let tree = candidate_tree.ok_or_else(|| {
+                GitNativePreflightCaptureError::Repository(GitRepositoryError::Operation {
+                    operation: "native integration preflight",
+                    detail: "eligible candidate has no tree".to_owned(),
+                })
+            })?;
+            Some(
+                capture(
+                    &preflight,
+                    &GitNativeCandidateTreeV1 {
+                        repository: &repository,
+                        tree,
+                        cancellation,
+                    },
+                )
+                .map_err(GitNativePreflightCaptureError::Capture)?,
+            )
+        } else {
+            None
+        };
+        Ok((preflight, captured))
     }
 
     /// Recreate and commit an exact eligible preflight with one destination

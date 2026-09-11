@@ -1705,6 +1705,7 @@ impl TypeScriptExtractor {
                 duration_ms: start.elapsed().as_millis() as u64,
             },
             imports: state.imports,
+            schema_evidence: None,
         }
     }
 }

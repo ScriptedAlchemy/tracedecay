@@ -8788,6 +8788,40 @@ fn file_occurrence_id(
     ))
 }
 
+fn omitted_file_occurrence_id(
+    repository: &RepositoryId,
+    worktree: &WorktreeId,
+    logical_path: &str,
+    digest: &ContentDigest,
+    disposition: SnapshotFileDispositionV1,
+) -> Result<FileOccurrenceId, CodeIndexSchedulerErrorV1> {
+    let disposition = match disposition {
+        SnapshotFileDispositionV1::Ignored => "ignored",
+        SnapshotFileDispositionV1::Binary => "binary",
+        SnapshotFileDispositionV1::Generated => "generated",
+        SnapshotFileDispositionV1::UnsupportedLanguage => "unsupported_language",
+        SnapshotFileDispositionV1::Present
+        | SnapshotFileDispositionV1::Deleted
+        | SnapshotFileDispositionV1::Renamed => {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "omitted file occurrence requires an omitted disposition".to_owned(),
+            ));
+        }
+    };
+    id(&format!(
+        "file.daemon.omitted.{}",
+        sha256_hex(
+            format!(
+                "{}\0{}\0{logical_path}\0{}\0{disposition}",
+                repository.as_str(),
+                worktree.as_str(),
+                digest.as_str(),
+            )
+            .as_bytes()
+        )
+    ))
+}
+
 /// The one central exact-admission authority every serving owner installs.
 fn exact_serving_authority() -> Result<CentralExactAdmissionAuthorityV1, RetrievalPortError> {
     Ok(CentralExactAdmissionAuthorityV1::new(
@@ -8984,6 +9018,10 @@ mod cadence;
 mod classification;
 mod freshness_witness;
 mod git_tree_capture;
+pub use git_tree_capture::{
+    ExactGitTreeSourceV1, NativeCandidateGenerationBindingsV1, NativeCandidateGenerationIdentityV1,
+    NativeCandidateGenerationSourcesV1,
+};
 mod graph_activation;
 pub mod identity;
 pub mod ignored_dependencies;
