@@ -1597,6 +1597,9 @@ mod read_only_project_open_journey_test;
 mod semantic_activation_journey_test;
 
 #[cfg(test)]
+mod semantic_availability_fallback_digest;
+
+#[cfg(test)]
 mod semantic_availability_journey_test;
 
 #[cfg(test)]
