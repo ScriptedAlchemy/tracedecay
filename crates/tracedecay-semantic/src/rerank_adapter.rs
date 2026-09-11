@@ -20,9 +20,9 @@ use tracedecay_domain::{
 use tracedecay_query::retrieval::rerank::{
     AdmittedNativeRerankExecutorV1, BoundedRerankOutcomeV1, BoundedRerankRuntimeV1,
     DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1, LocalRerankFailureV1,
-    LocalRerankInputV1, LocalRerankPermitV1, RetrievalExecutionControl, RerankViewOutcomeV1,
-    RerankViewPermitV1,
+    LocalRerankInputV1, LocalRerankPermitV1, RerankViewOutcomeV1, RerankViewPermitV1,
 };
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_semantic_contracts::{
     ArtifactMemberRoleV1, ArtifactProfileKindV1, ModelArtifactManifestV1,
     RerankCompatibilityPinsV1, ResourceCeilingV1,

@@ -19,10 +19,10 @@ use tracedecay_domain::{
     RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SourceSpan, SymbolOccurrenceId,
 };
 
-pub use super::ports::RetrievalExecutionControl;
 use super::ports::{
     CodeCandidateBindingV1, GraphEvidenceReadPort, LaneBoundEvidence, LaneEvidenceRejections,
-    RetrievalPortError, checkpoint_digest, contract_error, lane_bound_evidence, lane_candidate_cap,
+    RetrievalExecutionControl, RetrievalPortError, checkpoint_digest, contract_error,
+    lane_bound_evidence, lane_candidate_cap,
 };
 
 mod projection;

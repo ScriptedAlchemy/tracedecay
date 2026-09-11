@@ -15,7 +15,7 @@ use tracedecay_domain::{
     SourceOccurrenceId,
 };
 
-pub use super::ports::RetrievalExecutionControl;
+use super::ports::RetrievalExecutionControl;
 
 /// Hydration denial removes the anchor and is indistinguishable from absence
 /// in public results (Plan 15).

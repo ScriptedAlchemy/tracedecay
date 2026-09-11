@@ -32,10 +32,9 @@ use tracedecay_domain::{
 use tracedecay_graph_db::MAX_VECTOR_SEARCH_LIMIT;
 
 use super::ports::{
-    CodeCandidateBindingV1, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
-    contract_error, lane_candidate_cap,
+    CodeCandidateBindingV1, RetrievalExecutionControl, RetrievalPortError,
+    candidate_checkpoint_prefix, checkpoint_digest, contract_error, lane_candidate_cap,
 };
-pub use super::ports::RetrievalExecutionControl;
 
 /// Fallback exact-flat scan deadline when both request budgets omit
 /// `deadline_micros`. Retention is heap-capped; the visit is still a full

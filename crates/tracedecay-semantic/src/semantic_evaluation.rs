@@ -6,10 +6,9 @@ use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeSearchChunkV1, EmbeddingProjectionKeyV1,
     ProjectionBatchRequestV1,
 };
-use tracedecay_query::retrieval::ports::RetrievalPortError;
+use tracedecay_query::retrieval::ports::{RetrievalExecutionControl, RetrievalPortError};
 use tracedecay_query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, RetrievalExecutionControl, SemanticQueryEmbeddingPort,
-    SemanticQueryEmbeddingRequestV1,
+    EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
 };
 use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
