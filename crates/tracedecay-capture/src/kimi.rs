@@ -9,7 +9,7 @@ use tracedecay_domain::{
     ProviderUsageContractDimensionV1, SessionId,
 };
 
-use crate::ObservationRecordParseErrorV1;
+use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_string};
 use crate::content::content_is_empty;
 use crate::timestamp::timestamp_secs;
 
@@ -226,15 +226,7 @@ fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
 fn usage_u64(usage: &Value, aliases: &[&str]) -> Option<u64> {
     aliases
         .iter()
-        .find_map(|key| canonical_u64(usage.get(*key)))
-}
-
-fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-    })
+        .find_map(|key| canonical_u64_string(usage.get(*key)))
 }
 
 fn append_tool_calls(

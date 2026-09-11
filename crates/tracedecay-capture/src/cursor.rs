@@ -10,7 +10,10 @@ use tracedecay_domain::{
 };
 use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
-use crate::{ObservationRecordParseErrorV1, parse_cursor_human_timestamp};
+use crate::{
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64,
+    parse_cursor_human_timestamp,
+};
 
 pub fn normalize_cursor_observation(
     native: &Value,
@@ -593,14 +596,6 @@ fn canonical_native_observation_id(
     native_id
         .and_then(|id| ObservationId::new(id).ok())
         .unwrap_or_else(|| fallback.clone())
-}
-
-fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
 }
 
 fn cursor_record_message_model(record: &Value, message: &Value) -> Option<String> {
