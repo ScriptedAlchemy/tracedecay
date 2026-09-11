@@ -11427,9 +11427,9 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
 
 /// Replacing an undecodable active generation still compare-and-swaps. Its
 /// caller has no decoded generation id to expect, so the token is the pointer
-/// identity observed before the writer lock; a pointer that moved to a
-/// different identity in between must refuse the publication instead of
-/// clobbering whatever a concurrent writer installed.
+/// identity observed before the writer lock; a pointer that moved in any
+/// compared term in between must refuse the publication instead of clobbering
+/// whatever a concurrent writer installed.
 #[test]
 fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
@@ -11456,36 +11456,67 @@ fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
     )
     .expect("open publication store over a retired generation");
 
-    // The pointer moves to another generation identity that is equally
-    // undecodable: the same retired manifest bytes under a different
-    // generation id, which the durable index must name consistently.
+    // The pointer moves to an identity that is equally undecodable, one
+    // compared term at a time, so a compare that stopped checking that term
+    // would admit the publication instead of refusing it. A pointer identity
+    // is not derived from a single field: the generation file name and the
+    // state digest both encode sha256 of the whole file, so a pointer
+    // carrying one of them without the other is what a torn swap leaves
+    // behind and is exactly what this publication must not overwrite.
     let pointer_path = store.path().join("active-code-generation-v1.json");
-    let mut moved = observed.clone();
-    let moved_generation = "generation.v1.moved-under-the-writer".to_owned();
-    for entry in &mut moved.generation_index {
-        if entry.generation_id == moved.generation_id {
-            entry.generation_id = moved_generation.clone();
-        }
-    }
-    moved.generation_id = moved_generation;
-    write_repaired_pointer(&pointer_path, &mut moved);
+    type PointerMutation = fn(&mut super::DurablePublicationPointerV1);
+    let mutations: [(&str, PointerMutation); 3] = [
+        ("generation id", |pointer| {
+            let moved = "generation.v1.moved-under-the-writer".to_owned();
+            for entry in &mut pointer.generation_index {
+                if entry.generation_id == pointer.generation_id {
+                    entry.generation_id = moved.clone();
+                }
+            }
+            pointer.generation_id = moved;
+        }),
+        ("state digest", |pointer| {
+            let moved = format!("sha256:{}", "5".repeat(64));
+            for entry in &mut pointer.generation_index {
+                if entry.state_digest == pointer.state_digest {
+                    entry.state_digest = moved.clone();
+                }
+            }
+            pointer.state_digest = moved;
+        }),
+        ("generation file", |pointer| {
+            let moved = format!("generation-{}.json", "6".repeat(64));
+            for entry in &mut pointer.generation_index {
+                if entry.generation_file == pointer.generation_file {
+                    entry.generation_file = moved.clone();
+                }
+            }
+            pointer.generation_file = moved;
+        }),
+    ];
+    for (term, mutate) in mutations {
+        let mut moved = observed.clone();
+        mutate(&mut moved);
+        assert_ne!(moved, observed, "the {term} mutation must move the pointer");
+        write_repaired_pointer(&pointer_path, &mut moved);
 
-    let mut refusing = publication.for_undecoded_active_rebuild(&observed);
-    let error = refusing
-        .publish_atomically(&scope, None, Arc::clone(&seeded))
-        .expect_err("a pointer that moved under the writer must refuse the publication");
-    assert!(
-        matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
-        "a moved pointer reached the wrong refusal: {error}"
-    );
-    assert_eq!(
-        serde_json::from_slice::<super::DurablePublicationPointerV1>(
-            &std::fs::read(&pointer_path).expect("read active pointer")
-        )
-        .expect("decode active pointer"),
-        moved,
-        "a refused publication must leave the pointer it did not expect untouched"
-    );
+        let mut refusing = publication.for_undecoded_active_rebuild(&observed);
+        let error = refusing
+            .publish_atomically(&scope, None, Arc::clone(&seeded))
+            .expect_err("a pointer that moved under the writer must refuse the publication");
+        assert!(
+            matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
+            "a moved {term} reached the wrong refusal: {error}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<super::DurablePublicationPointerV1>(
+                &std::fs::read(&pointer_path).expect("read active pointer")
+            )
+            .expect("decode active pointer"),
+            moved,
+            "a refused publication must leave the {term} it did not expect untouched"
+        );
+    }
 
     // The same publication succeeds against the identity it observed, so the
     // refusal above is the compare-and-swap and not an unrelated denial.
