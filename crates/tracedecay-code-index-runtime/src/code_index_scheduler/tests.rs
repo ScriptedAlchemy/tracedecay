@@ -426,6 +426,101 @@ fn remove_historical_pointer_entries(store_root: &Path) {
     .expect("write legacy publication pointer");
 }
 
+fn rewrite_active_rust_extractor_revision(store_root: &Path, revision: &str) {
+    use tracedecay_code_index::{
+        capabilities::expected_seal_digest,
+        languages::{LanguageRegistry, StaticLanguageRegistry},
+    };
+    use tracedecay_code_index_retention::code_index_generations::{
+        DurablePublicationPointerV1, durable_generation_index_digest,
+    };
+    use tracedecay_domain::{CodeGenerationManifestV1, ExtractorRevision, LanguageId};
+
+    let pointer_path = store_root.join("active-code-generation-v1.json");
+    let mut pointer: DurablePublicationPointerV1 =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
+            .expect("decode publication pointer");
+    let generation_path = store_root
+        .join("code-generations-v1")
+        .join(&pointer.generation_file);
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&generation_path).expect("read generation manifest"))
+            .expect("decode generation envelope");
+    let mut manifest: CodeGenerationManifestV1 =
+        serde_json::from_value(envelope["generation"]["manifest"].clone())
+            .expect("decode generation identity manifest");
+    let rust = LanguageId::new("rust").expect("Rust language id");
+    let mut descriptor = StaticLanguageRegistry::new()
+        .descriptor(&rust)
+        .expect("compiled Rust descriptor")
+        .clone();
+    descriptor.extractor_revision =
+        ExtractorRevision::new(revision).expect("historical extractor revision");
+    let historical_registry = StaticLanguageRegistry::try_from_descriptors(vec![descriptor])
+        .expect("historical snapshot registry");
+    manifest.registry_revision = historical_registry.registry_revision();
+    manifest.extractor_revisions = historical_registry
+        .descriptors()
+        .iter()
+        .map(|descriptor| {
+            (
+                descriptor.language.clone(),
+                descriptor.extractor_revision.clone(),
+            )
+        })
+        .collect();
+    manifest.seal.expected_digest =
+        expected_seal_digest(&manifest).expect("reseal historical manifest identity");
+    envelope["generation"]["manifest"] =
+        serde_json::to_value(manifest).expect("encode historical manifest identity");
+
+    let generation_bytes =
+        serde_json::to_vec(&envelope["generation"]).expect("encode generation payload");
+    envelope["state_digest"] = serde_json::Value::String(format!(
+        "sha256:{}",
+        Sha256::digest(&generation_bytes).iter().fold(
+            String::with_capacity(64),
+            |mut encoded, byte| {
+                write!(&mut encoded, "{byte:02x}").expect("encode generation digest");
+                encoded
+            }
+        )
+    ));
+    let envelope_bytes = serde_json::to_vec(&envelope).expect("encode generation envelope");
+    std::fs::write(&generation_path, &envelope_bytes).expect("write historical generation");
+    let state_digest = format!(
+        "sha256:{}",
+        Sha256::digest(&envelope_bytes).iter().fold(
+            String::with_capacity(64),
+            |mut encoded, byte| {
+                write!(&mut encoded, "{byte:02x}").expect("encode envelope digest");
+                encoded
+            }
+        )
+    );
+    pointer.state_digest = state_digest.clone();
+    let active = pointer
+        .generation_index
+        .iter_mut()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .expect("active generation index entry");
+    active.state_digest = state_digest;
+    active.size_bytes = envelope_bytes.len() as u64;
+    active.text_artifact = None;
+    pointer.generation_index_digest = Some(
+        durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("digest rewritten generation index"),
+    );
+    std::fs::write(
+        pointer_path,
+        serde_json::to_vec(&pointer).expect("encode publication pointer"),
+    )
+    .expect("write publication pointer");
+}
+
 #[test]
 fn one_file_increment_captures_only_edited_bytes_with_one_thousand_unchanged_files() {
     let mut owned_sources = (0..1_000)
@@ -2704,6 +2799,13 @@ fn query_meta() -> RetrievalRequestMeta {
 }
 
 fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
+    query_authority_with_candidate_cap(privacy_domain, 32)
+}
+
+fn query_authority_with_candidate_cap(
+    privacy_domain: PrivacyDomainId,
+    max_candidates_per_lane: u32,
+) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {
         profile_id: id("profile.code-index.fixture")
@@ -2773,7 +2875,7 @@ fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
             .expect("diversity id"),
         rerank_policy_id: None,
         retrieval_budget: RetrievalBudget {
-            max_candidates_per_lane: 32,
+            max_candidates_per_lane,
             max_fused_candidates: 32,
             max_hydrated_results: 32,
             max_hydration_bytes: 32 * 65_536,
@@ -3078,6 +3180,49 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
         "the retained restore stays silent; the first broadcast is the rebuilt generation"
     );
     restarted.shutdown().await;
+}
+
+#[test]
+fn retained_v2_rust_extractor_generation_is_refused_and_rebuilt_by_v3() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut seed = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let stale = published(seed.reconcile_now().expect("publish retained generation"));
+    drop(seed);
+
+    rewrite_active_rust_extractor_revision(store.path(), "extractor.rust.v2");
+    let mut restarted = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert!(
+        restarted.servable_retained_text_generation().is_none(),
+        "a retained v2 Rust extraction must not enter a v3 serving slot"
+    );
+
+    let rebuilt = published(
+        restarted
+            .reconcile_now()
+            .expect("rebuild generation under the current extractor"),
+    );
+    assert_ne!(rebuilt.generation_id, stale.generation_id);
+    assert_eq!(
+        restarted
+            .latest_complete()
+            .expect("rebuilt generation")
+            .generation
+            .manifest()
+            .extractor_revisions
+            .iter()
+            .find(|(language, _)| language.as_str() == "rust")
+            .map(|(_, revision)| revision.as_str()),
+        Some("extractor.rust.v3")
+    );
 }
 
 /// A restart over a dirty checkout must seat the retained complete generation
@@ -9944,6 +10089,40 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn active_source_verification_does_not_queue_a_second_query_pass() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+
+    let pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted reconcile owner");
+    assert!(
+        !registry.request_query_background_reconcile(&scope).await,
+        "the active source proof already supplies the query's remedy"
+    );
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "query admission must not queue a duplicate pass after worker dequeue"
+    );
+
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness");
+    assert_eq!(projected.staleness_state.as_deref(), Some("verifying"));
+    assert_eq!(projected.coverage, "partial_source_verification");
+    assert!(!projected.rebuild_in_flight);
+
+    drop(pass);
+    registry.shutdown().await;
+}
+
 /// A dashboard status view reports the last execution-owned scheduler state; it
 /// must not run the freshness ladder, wake a worker, or publish an out-of-band
 /// source change merely because an operator opened the view.
@@ -12344,7 +12523,16 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
 async fn callable_application_operations_consume_exact_lexical_and_graph_owners() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
-        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+        "pub trait Processor { fn process(&self, input: u32) -> u32; }\n\
+         pub struct Doubler;\n\
+         impl Processor for Doubler {\n\
+             fn process(&self, input: u32) -> u32 { input * 2 }\n\
+         }\n\
+         pub fn via_trait(processor: &Doubler, input: u32) -> u32 {\n\
+             Processor::process(processor, input)\n\
+         }\n\
+         pub fn caller() { callee(); }\n\
+         pub fn callee() {}\n",
     )]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -12478,7 +12666,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         node_id: caller,
         maximum_depth: 2,
         resolve_trait_dispatch: false,
-        scope,
+        scope: scope.clone(),
         meta: query_meta(),
     };
     let graph = registry
@@ -12499,13 +12687,197 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             assert_eq!(callee.edge_kind, "calls");
             assert_eq!(callee.symbol.name, "callee");
             assert_eq!(callee.symbol.file, "src/lib.rs");
-            assert_eq!(callee.symbol.start_line_zero_based, 1);
-            assert_eq!(callee.symbol.end_line_zero_based, 1);
-            assert_eq!(callee.symbol.line, 2);
-            assert_eq!(callee.symbol.end_line, 2);
+            assert_eq!(callee.symbol.start_line_zero_based, 9);
+            assert_eq!(callee.symbol.end_line_zero_based, 9);
+            assert_eq!(callee.symbol.line, 10);
+            assert_eq!(callee.symbol.end_line, 10);
         }
         outcome => panic!("expected completed graph operation, got {outcome:?}"),
     }
+
+    let via_trait = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("via_trait"))
+        .expect("trait caller symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let trait_method = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| {
+            record.simple_name == "process"
+                && record.qualified_name.contains("Processor")
+                && record.kind == "method"
+        })
+        .expect("trait method symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let implementation_method = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| {
+            record.simple_name == "process"
+                && record.qualified_name.contains("Doubler")
+                && record.kind == "method"
+        })
+        .expect("implementation method symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let direct_dispatch_request = CodeRelationRequest {
+        node_id: via_trait.clone(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope: scope.clone(),
+        meta: query_meta(),
+    };
+    let direct_dispatch = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &direct_dispatch_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Completed(direct_dispatch) = direct_dispatch else {
+        panic!("expected completed direct trait call");
+    };
+    let direct_dispatch = direct_dispatch.payload.expect("direct trait call page");
+    assert!(
+        direct_dispatch
+            .items
+            .iter()
+            .any(|record| record.symbol.node_id == trait_method)
+    );
+    assert!(
+        direct_dispatch
+            .items
+            .iter()
+            .all(|record| record.symbol.node_id != implementation_method)
+    );
+
+    let mut resolved_meta = query_meta();
+    resolved_meta.page = PageRequest::first(1).expect("dispatch page size");
+    let resolved_dispatch_request = CodeRelationRequest {
+        node_id: via_trait.clone(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: true,
+        scope: scope.clone(),
+        meta: resolved_meta,
+    };
+    let resolved_dispatch = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &resolved_dispatch_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Completed(resolved_dispatch) = resolved_dispatch else {
+        panic!("expected completed resolved trait call");
+    };
+    let resolved_dispatch = resolved_dispatch.payload.expect("resolved trait call page");
+    assert_eq!(resolved_dispatch.total, Some(2));
+    assert_eq!(resolved_dispatch.items.len(), 1);
+    assert_eq!(resolved_dispatch.items[0].symbol.node_id, trait_method);
+    assert!(!resolved_dispatch.items[0].dispatch_via_trait);
+    let cursor = resolved_dispatch
+        .next_cursor
+        .expect("resolved dispatch continuation");
+    let mut continuation_meta = query_meta();
+    continuation_meta.page = PageRequest::new(1, Some(cursor)).expect("dispatch continuation");
+    let continuation_request = CodeRelationRequest {
+        node_id: via_trait,
+        maximum_depth: 1,
+        resolve_trait_dispatch: true,
+        scope: scope.clone(),
+        meta: continuation_meta,
+    };
+    let continuation = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &continuation_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Completed(continuation) = continuation else {
+        panic!("expected completed resolved trait continuation");
+    };
+    let continuation = continuation
+        .payload
+        .expect("resolved trait continuation page");
+    assert_eq!(continuation.items.len(), 1);
+    let implementation = &continuation.items[0];
+    assert_eq!(implementation.symbol.node_id, implementation_method);
+    assert!(implementation.dispatch_via_trait);
+    assert_eq!(
+        implementation.dispatch_from.as_deref(),
+        Some(trait_method.as_str())
+    );
+    assert_eq!(implementation.depth, Some(1));
+    assert!(continuation.next_cursor.is_none());
+
+    registry
+        .mount_query_authority(
+            fixture.path(),
+            graph_context.scope(),
+            query_authority_with_candidate_cap(
+                latest.generation.manifest().privacy_domain.clone(),
+                1,
+            ),
+        )
+        .await
+        .expect("mount candidate-capped query authority");
+    let capped_dispatch_request = CodeRelationRequest {
+        node_id: continuation_request.node_id.clone(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: true,
+        scope: scope.clone(),
+        meta: query_meta(),
+    };
+    let capped_dispatch = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &capped_dispatch_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Partial(capped_dispatch) = capped_dispatch else {
+        panic!("candidate-capped trait dispatch must report partial coverage");
+    };
+    let capped_page = capped_dispatch
+        .payload
+        .expect("candidate-capped trait dispatch page");
+    assert_eq!(capped_page.items.len(), 1);
+    assert_eq!(capped_page.items[0].symbol.node_id, trait_method);
+    assert!(
+        capped_dispatch
+            .omissions
+            .iter()
+            .any(|omission| omission.reason == OmissionReason::Budget)
+    );
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &graph_context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
 
     let qualified_name = latest
         .generation
