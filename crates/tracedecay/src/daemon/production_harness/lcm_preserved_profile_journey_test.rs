@@ -4,21 +4,28 @@
 //! opens an isolated production composition, lets ordinary background
 //! convergence run, and asserts the umbrella acceptance: nonzero current
 //! summary and git-correlation generations, a known worktree returns its
-//! session, a direct-user 12-hour search finishes under five seconds, and
-//! lexical / graph / ordinary retrieval stay admitted while that work runs.
-//! Query deadlines stay at the product 5s / 30s budgets.
+//! session, a 12-hour direct-user search stays under the product 5s budget
+//! on this corpus (the >30s filter-pushdown regression lives on
+//! `codex/lcm-search-filter-pushdown`), and lexical / graph / ordinary
+//! retrieval stay admitted while convergence is still in progress.
 
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use tracedecay_mcp::JsonRpcResponse;
 
 use super::journey_test_support::{git, tool_answer};
 use super::*;
 
 const PROBE_SYMBOL: &str = "lcm_preserved_profile_probe";
-const KNOWN_WORKTREE_SESSION: &str = "lcm-preserved-cursor-000";
-const SESSION_REPLAYS: usize = 12;
+const OLDEST_CLAUDE_SESSION: &str = "lcm-preserved-claude-000";
+const NATIVE_BOUNDARY_UUID: &str = "ffffffff-0000-1111-2222-333333333333";
+const NATIVE_SUMMARY_UUID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+// 40 sessions × (4 Claude + 2 Codex + 1 Cursor) = 280 native records.
+// Claude ingest stores the compact pair plus prior/assistant; Cursor adds
+// one raw row. Target is ≥ 200 raw rows after ordinary ingest.
+const SESSION_REPLAYS: usize = 40;
 const SEARCH_BUDGET: Duration = Duration::from_secs(5);
 const ADMISSION_BUDGET: Duration = Duration::from_secs(30);
 const CONVERGENCE_WAIT: Duration = Duration::from_mins(2);
@@ -57,15 +64,19 @@ async fn called(
         "{tool} must answer with a typed payload, not a transport error: {response:?}"
     );
     let (refused, payload) = tool_answer(&response);
-    if refused {
-        return payload;
-    }
+    assert!(!refused, "{tool} refused instead of answering: {payload}");
     payload
 }
 
-fn retained_payload(_tool: &str, envelope: &Value) -> Value {
+fn retained_payload(envelope: &Value) -> Value {
     if envelope["outcome"]["outcome"] == json!("evidence") {
         return envelope["outcome"]["value"]["payload"].clone();
+    }
+    if envelope["truncated"] == json!(true)
+        && let Some(preview) = envelope["preview"].as_str()
+        && let Ok(inner) = serde_json::from_str::<Value>(preview)
+    {
+        return retained_payload(&inner);
     }
     envelope.clone()
 }
@@ -81,6 +92,56 @@ fn timed_call<'a>(
         let payload = called(harness, project, tool, arguments).await;
         (started.elapsed(), payload)
     }
+}
+
+fn timed_raw<'a>(
+    harness: &'a ProductionProjectCompositionHarnessV1,
+    project: &'a Path,
+    tool: &'a str,
+    arguments: Value,
+) -> impl std::future::Future<Output = (Duration, JsonRpcResponse)> + 'a {
+    async move {
+        let started = Instant::now();
+        let response = harness
+            .call_tool(project, tool, arguments)
+            .await
+            .unwrap_or_else(|error| panic!("{tool} was blocked instead of answering: {error}"));
+        (started.elapsed(), response)
+    }
+}
+
+fn assert_code_graph_unavailable(tool: &str, response: &JsonRpcResponse) {
+    let error = response.error.as_ref().unwrap_or_else(|| {
+        panic!("{tool} must stay a typed code-graph unavailable, not a payload: {response:?}")
+    });
+    let data = error
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("{tool} unavailable error must carry data: {response:?}"));
+    assert_eq!(
+        data["reason_code"],
+        json!("code-graph-unavailable"),
+        "{tool} must name the skipped code-index wait: {response:?}"
+    );
+    assert_eq!(
+        data["retryable"],
+        json!(true),
+        "{tool} unavailable state must stay retryable: {response:?}"
+    );
+}
+
+fn assert_admitted_without_code_index(tool: &str, response: &JsonRpcResponse, payload_key: &str) {
+    if response.error.is_some() {
+        assert_code_graph_unavailable(tool, response);
+        return;
+    }
+    let (refused, payload) = tool_answer(response);
+    assert!(!refused, "{tool} refused instead of answering: {payload}");
+    let payload = retained_payload(&payload);
+    assert!(
+        payload[payload_key].is_array(),
+        "{tool} must stay admitted as a {payload_key} array: {payload}"
+    );
 }
 
 fn utc_rfc3339(unix_secs: i64) -> String {
@@ -147,14 +208,13 @@ fn seed_preserved_profile_corpus(isolation_root: &Path, project: &Path) {
         .to_string_lossy()
         .into_owned();
     let cursor_dir = cursor_slug(Path::new(&cwd));
-    let origin = now_unix() - 1_800;
+    let origin = now_unix() - 13 * 3_600;
 
     for index in 0..SESSION_REPLAYS {
-        let stamp = |offset: i64| utc_rfc3339(origin + (index as i64) * 8 + offset);
+        let session_offset = (index as i64) * 20 * 60;
+        let stamp = |offset: i64| utc_rfc3339(origin + session_offset + offset);
 
         let claude_session = format!("lcm-preserved-claude-{index:03}");
-        let boundary_uuid = format!("ffffffff-0000-4000-8000-{index:012}");
-        let summary_uuid = format!("aaaaaaaa-0000-4000-8000-{index:012}");
         let mut claude_prior = parse_fixture(CLAUDE_ASSISTANT);
         claude_prior["sessionId"] = json!(claude_session);
         claude_prior["cwd"] = json!(cwd);
@@ -164,14 +224,35 @@ fn seed_preserved_profile_corpus(isolation_root: &Path, project: &Path) {
         claude_boundary["sessionId"] = json!(claude_session);
         claude_boundary["cwd"] = json!(cwd);
         claude_boundary["timestamp"] = json!(stamp(1));
-        claude_boundary["uuid"] = json!(boundary_uuid);
-        claude_boundary["compactMetadata"]["preservedSegment"]["anchorUuid"] = json!(summary_uuid);
         let mut claude_user = parse_fixture(CLAUDE_USER);
         claude_user["sessionId"] = json!(claude_session);
         claude_user["cwd"] = json!(cwd);
         claude_user["timestamp"] = json!(stamp(2));
-        claude_user["uuid"] = json!(summary_uuid);
-        claude_user["parentUuid"] = json!(boundary_uuid);
+        if index == 0 {
+            assert_eq!(
+                claude_boundary["uuid"],
+                json!(NATIVE_BOUNDARY_UUID),
+                "first replay must keep the fixture compact-pair boundary id"
+            );
+            assert_eq!(
+                claude_user["uuid"],
+                json!(NATIVE_SUMMARY_UUID),
+                "first replay must keep the fixture compact-pair summary id"
+            );
+            assert_eq!(
+                claude_boundary["compactMetadata"]["preservedSegment"]["anchorUuid"],
+                json!(NATIVE_SUMMARY_UUID),
+                "first replay must keep the fixture pairing evidence"
+            );
+        } else {
+            let boundary_uuid = format!("ffffffff-0000-4000-8000-{index:012}");
+            let summary_uuid = format!("aaaaaaaa-0000-4000-8000-{index:012}");
+            claude_boundary["uuid"] = json!(boundary_uuid);
+            claude_user["uuid"] = json!(summary_uuid);
+            claude_user["parentUuid"] = json!(boundary_uuid);
+            claude_boundary["compactMetadata"]["preservedSegment"]["anchorUuid"] =
+                json!(summary_uuid);
+        }
         let mut claude_assistant = parse_fixture(CLAUDE_ASSISTANT);
         claude_assistant["sessionId"] = json!(claude_session);
         claude_assistant["cwd"] = json!(cwd);
@@ -275,6 +356,22 @@ fn git_generation_nonzero(payload: &Value) -> bool {
         && payload["index"]["projection_available"] == json!(true)
 }
 
+fn evidence_blob(envelope: &Value) -> String {
+    envelope["preview"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| retained_payload(envelope).to_string())
+}
+
+fn blob_has_session(blob: &str, session_id: &str) -> bool {
+    blob.contains(&format!("\"{session_id}\""))
+}
+
+fn blob_has_in_window_claude(blob: &str) -> bool {
+    (1..SESSION_REPLAYS)
+        .any(|index| blob_has_session(blob, &format!("lcm-preserved-claude-{index:03}")))
+}
+
 fn session_ids(payload: &Value) -> Vec<String> {
     payload["results"]
         .as_array()
@@ -289,47 +386,63 @@ fn session_ids(payload: &Value) -> Vec<String> {
         .collect()
 }
 
+fn grep_hits(payload: &Value) -> &[Value] {
+    payload["hits"].as_array().map(Vec::as_slice).unwrap_or(&[])
+}
+
 async fn wait_for_preserved_discovery(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     worktree: &str,
+    since: i64,
 ) -> (Value, Value, Duration) {
     let started = Instant::now();
     let mut last_status = json!(null);
     let mut last_sessions = json!(null);
+    let mut last_grep = json!(null);
     tokio::time::timeout(CONVERGENCE_WAIT, async {
         loop {
-            let status = retained_payload(
+            let status = retained_payload(&called(
+                harness,
+                project,
                 "tracedecay_lcm_status",
-                &called(
-                    harness,
-                    project,
-                    "tracedecay_lcm_status",
-                    json!({"format": "json"}),
-                )
-                .await,
-            );
-            let sessions = retained_payload(
+                json!({"format": "json"}),
+            )
+            .await);
+            let sessions = retained_payload(&called(
+                harness,
+                project,
                 "tracedecay_sessions_for",
-                &called(
-                    harness,
-                    project,
-                    "tracedecay_sessions_for",
-                    json!({
-                        "git_ref": "worktree",
-                        "value": worktree,
-                        "format": "json",
-                    }),
-                )
-                .await,
-            );
+                json!({
+                    "git_ref": "worktree",
+                    "value": worktree,
+                    "limit": 100,
+                    "format": "json",
+                }),
+            )
+            .await);
+            let grep = retained_payload(&called(
+                harness,
+                project,
+                "tracedecay_lcm_grep",
+                json!({
+                    "query": DIRECT_USER_QUERY,
+                    "message_type": "direct_user",
+                    "since": since,
+                    "limit": 5,
+                    "format": "json",
+                }),
+            )
+            .await);
             last_status = status.clone();
             last_sessions = sessions.clone();
+            last_grep = grep.clone();
             if summary_generation_nonzero(&status)
                 && git_generation_nonzero(&sessions)
                 && session_ids(&sessions)
                     .iter()
-                    .any(|id| id == KNOWN_WORKTREE_SESSION)
+                    .any(|id| id.starts_with("lcm-preserved-codex-"))
+                && !grep_hits(&grep).is_empty()
             {
                 return;
             }
@@ -339,8 +452,8 @@ async fn wait_for_preserved_discovery(
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "ordinary background convergence never published summary and git-correlation generations; \
-             status={last_status}; sessions_for={last_sessions}"
+            "ordinary background convergence never published summary, git-correlation, and 12-hour hits; \
+             status={last_status}; sessions_for={last_sessions}; lcm_grep={last_grep}"
         )
     });
     (last_status, last_sessions, started.elapsed())
@@ -358,60 +471,78 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         .to_string_lossy()
         .into_owned();
 
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
-        .await
-        .expect("production composition");
-
-    let (lexical_elapsed, lexical) = timed_call(
-        &harness,
-        &project,
-        "tracedecay_grep",
-        json!({"pattern": PROBE_SYMBOL, "format": "json"}),
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        isolation.path(),
+        [project.clone()],
     )
-    .await;
+    .await
+    .expect("production composition");
+
+    let since = now_unix() - 12 * 3_600;
+    let discovery = wait_for_preserved_discovery(&harness, &project, &worktree, since);
+    let admissions = async {
+        let status_at_admission = retained_payload(
+            &called(
+                &harness,
+                &project,
+                "tracedecay_lcm_status",
+                json!({"format": "json"}),
+            )
+            .await,
+        );
+        let lexical = timed_raw(
+            &harness,
+            &project,
+            "tracedecay_grep",
+            json!({"pattern": PROBE_SYMBOL, "format": "json"}),
+        );
+        let graph = timed_raw(
+            &harness,
+            &project,
+            "tracedecay_body",
+            json!({"symbol": PROBE_SYMBOL, "format": "json"}),
+        );
+        let session = timed_call(
+            &harness,
+            &project,
+            "tracedecay_message_search",
+            json!({"query": "billing pipeline", "limit": 5, "format": "json"}),
+        );
+        let (lexical, graph, session) = tokio::join!(lexical, graph, session);
+        (status_at_admission, lexical, graph, session)
+    };
+    let (
+        (status, sessions_for, convergence_elapsed),
+        (
+            status_at_admission,
+            (lexical_elapsed, lexical),
+            (graph_elapsed, graph),
+            (session_elapsed, session),
+        ),
+    ) = tokio::join!(discovery, admissions);
+    assert!(
+        !summary_generation_nonzero(&status_at_admission),
+        "admission must observe LCM still converging: {status_at_admission}"
+    );
     assert_under_budget("lexical admission", lexical_elapsed, ADMISSION_BUDGET);
-    assert!(
-        lexical.get("results").is_some() || lexical.get("matches").is_some(),
-        "lexical retrieval must stay admitted while LCM converges: {lexical}"
-    );
-
-    let (graph_elapsed, graph) = timed_call(
-        &harness,
-        &project,
-        "tracedecay_body",
-        json!({"symbol": PROBE_SYMBOL, "format": "json"}),
-    )
-    .await;
+    assert_admitted_without_code_index("tracedecay_grep", &lexical, "results");
     assert_under_budget("graph admission", graph_elapsed, ADMISSION_BUDGET);
-    assert!(
-        graph.get("matches").is_some()
-            || graph.get("body").is_some()
-            || graph.get("nodes").is_some()
-            || graph["outcome"]["outcome"] == json!("evidence"),
-        "graph retrieval must stay admitted while LCM converges: {graph}"
-    );
-
-    let (session_elapsed, session) = timed_call(
-        &harness,
-        &project,
-        "tracedecay_message_search",
-        json!({"query": "billing pipeline", "limit": 5, "format": "json"}),
-    )
-    .await;
+    assert_admitted_without_code_index("tracedecay_body", &graph, "matches");
     assert_under_budget(
         "ordinary session admission",
         session_elapsed,
         ADMISSION_BUDGET,
     );
-    assert!(
-        session["outcome"]["outcome"] == json!("evidence")
-            || session.get("results").is_some()
-            || session["status"] == json!("unavailable"),
-        "ordinary session retrieval must answer or report a typed unavailable state: {session}"
+    assert_eq!(
+        session["outcome"]["outcome"],
+        json!("evidence"),
+        "ordinary session retrieval must stay admitted as evidence: {session}"
     );
-
-    let (status, sessions_for, convergence_elapsed) =
-        wait_for_preserved_discovery(&harness, &project, &worktree).await;
+    assert_under_budget(
+        "background discovery wait",
+        convergence_elapsed,
+        CONVERGENCE_WAIT,
+    );
     assert!(
         summary_generation_nonzero(&status),
         "LCM status must report a nonzero current summary generation: {status}"
@@ -423,11 +554,10 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
     assert!(
         session_ids(&sessions_for)
             .iter()
-            .any(|id| id == KNOWN_WORKTREE_SESSION),
+            .any(|id| id.starts_with("lcm-preserved-codex-")),
         "known TraceDecay worktree must return its correlated session: {sessions_for}"
     );
 
-    let since = now_unix() - 12 * 3_600;
     let (search_elapsed, search) = timed_call(
         &harness,
         &project,
@@ -436,7 +566,7 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
             "query": DIRECT_USER_QUERY,
             "message_type": "direct_user",
             "since": since,
-            "limit": 20,
+            "limit": 5,
             "format": "json",
         }),
     )
@@ -446,11 +576,20 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         search_elapsed,
         SEARCH_BUDGET,
     );
-    let search_payload = retained_payload("tracedecay_message_search", &search);
+    let search_payload = retained_payload(&search);
     assert_ne!(
         search_payload["status"],
         json!("error"),
         "direct-user search must stay typed, not a transport failure: {search_payload}"
+    );
+    let search_blob = evidence_blob(&search);
+    assert!(
+        !blob_has_session(&search_blob, OLDEST_CLAUDE_SESSION),
+        "12-hour search must exclude the oldest rows: {search}"
+    );
+    assert!(
+        blob_has_in_window_claude(&search_blob),
+        "12-hour search must keep rows inside the window: {search}"
     );
 
     let (grep_elapsed, grep) = timed_call(
@@ -461,20 +600,19 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
             "query": DIRECT_USER_QUERY,
             "message_type": "direct_user",
             "since": since,
-            "limit": 20,
+            "limit": 5,
             "format": "json",
         }),
     )
     .await;
     assert_under_budget("direct-user 12-hour lcm_grep", grep_elapsed, SEARCH_BUDGET);
-    let grep_payload = retained_payload("tracedecay_lcm_grep", &grep);
-    assert!(
-        grep_payload.get("hits").is_some()
-            || grep_payload.get("results").is_some()
-            || grep_payload["status"] == json!("unavailable"),
-        "lcm_grep must answer with hits or a typed unavailable state: {grep_payload}"
-    );
+    let grep_payload = retained_payload(&grep);
+    let grep_blob = evidence_blob(&grep);
     if let Some(hits) = grep_payload["hits"].as_array() {
+        assert!(
+            !hits.is_empty(),
+            "12-hour lcm_grep must return hits: {grep_payload}"
+        );
         for hit in hits {
             let snippet = hit["snippet"].as_str().unwrap_or_default();
             assert!(
@@ -482,15 +620,28 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
                 "canonical redaction/content authority leaked an unbounded snippet: {hit}"
             );
         }
+    } else {
+        assert_eq!(
+            grep["truncated"],
+            json!(true),
+            "lcm_grep without hits must be a truncated evidence page: {grep}"
+        );
     }
+    assert!(
+        !blob_has_session(&grep_blob, OLDEST_CLAUDE_SESSION),
+        "12-hour grep must exclude the oldest rows: {grep}"
+    );
+    assert!(
+        blob_has_in_window_claude(&grep_blob),
+        "12-hour grep must keep rows inside the window: {grep}"
+    );
 
     assert!(
-        lcm_status_body(&status)["redaction"].is_object()
-            || lcm_status_body(&status).get("redaction").is_some(),
+        lcm_status_body(&status)["redaction"].is_object(),
         "LCM status must preserve the redaction authority block: {status}"
     );
 
-    let (strict_elapsed, strict) = timed_call(
+    let (strict_elapsed, strict_response) = timed_raw(
         &harness,
         &project,
         "tracedecay_search",
@@ -507,28 +658,15 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         strict_elapsed,
         ADMISSION_BUDGET,
     );
-    let unavailable = strict["semantic"]["status"] == json!("unavailable")
-        || strict["status"] == json!("unavailable")
-        || strict["outcome"]["outcome"] == json!("problem");
+    let (refused, strict) = tool_answer(&strict_response);
     assert!(
-        unavailable,
-        "strict semantic search must stay a typed unavailable state, not a transport error: {strict}"
+        refused,
+        "strict semantic search must refuse as a typed unavailable payload: {strict}"
     );
-
-    eprintln!(
-        "lcm-preserved-profile timings: \
-         lexical_admission={:?} graph_admission={:?} session_admission={:?} \
-         convergence_wait={:?} message_search={:?} lcm_grep={:?} \
-         summary_nodes={} git_generation={} raw_messages={}",
-        lexical_elapsed,
-        graph_elapsed,
-        session_elapsed,
-        convergence_elapsed,
-        search_elapsed,
-        grep_elapsed,
-        lcm_status_body(&status)["summary_node_count"],
-        sessions_for["index"]["generation"],
-        lcm_status_body(&status)["raw_message_count"]
+    assert_eq!(
+        strict["semantic"]["reason"],
+        json!("calibration_unavailable"),
+        "strict semantic search must abstain with calibration_unavailable: {strict}"
     );
 
     harness.shutdown().await;
