@@ -1215,6 +1215,54 @@ pub struct CodeIndexSchedulerRegistryV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    async fn install_test_attribution_authority(
+        &self,
+        project_root: &Path,
+        latest: &LatestCompleteCodeIndexV1,
+    ) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let Ok(authority) = latest.test_attribution_authority() else {
+            return false;
+        };
+        let serving_generation = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            Arc::clone(&worktree.serving_generation)
+        };
+        let serving = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation_id = latest.generation.manifest().generation_id.clone();
+        if serving
+            .as_ref()
+            .map(LatestCompleteCodeIndexV1::generation)
+            .map(|generation| &generation.manifest().generation_id)
+            != Some(&generation_id)
+        {
+            return false;
+        }
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, (generation_id, authority));
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn remove_test_attribution_authority(&self, project_root: &Path) {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return;
+        };
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&project_root);
+    }
+
     fn incomplete_text_slice_may_continue(pending_wake: &PendingWakeV1) -> bool {
         !pending_wake.has_pending_arrival()
     }
@@ -6059,19 +6107,8 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
         .ok()
         .flatten()?;
-        if let Ok(authority) = latest.test_attribution_authority() {
-            let mut authorities = self
-                .test_attribution_authorities
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authorities.insert(
-                authority_root,
-                (
-                    latest.generation.manifest().generation_id.clone(),
-                    authority,
-                ),
-            );
-        }
+        self.install_test_attribution_authority(&authority_root, &latest)
+            .await;
         Some(latest)
     }
 
@@ -6171,19 +6208,8 @@ impl CodeIndexSchedulerRegistryV1 {
             );
         }
         let latest = latest?;
-        if let Ok(authority) = latest.test_attribution_authority() {
-            let mut authorities = self
-                .test_attribution_authorities
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authorities.insert(
-                project_root,
-                (
-                    latest.generation.manifest().generation_id.clone(),
-                    authority,
-                ),
-            );
-        }
+        self.install_test_attribution_authority(&project_root, &latest)
+            .await;
         Some(latest)
     }
 
@@ -6405,18 +6431,22 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         );
         let scope = scope.clone();
+        let probe_root = project_root.clone();
         let probe = tokio::task::spawn_blocking(move || {
             hotpath::measure_block!(
                 "daemon.code_index.query.latest_ready_decoded.execution",
-                Self::ready_decoded_from_serving_parts(parts, &project_root, &scope)
+                Self::ready_decoded_from_serving_parts(parts, &probe_root, &scope)
             )
         });
-        hotpath::measure_block!(
+        let latest = hotpath::measure_block!(
             "daemon.code_index.query.latest_ready_decoded.offload_join",
             probe.await
         )
         .ok()
-        .flatten()
+        .flatten()?;
+        self.install_test_attribution_authority(&project_root, &latest)
+            .await;
+        Some(latest)
     }
 
     async fn latest_complete_ready_for_scope_with(
