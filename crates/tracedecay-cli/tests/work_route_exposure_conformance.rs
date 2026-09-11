@@ -961,9 +961,12 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     // Product graph state and executor topology have distinct authorities. A
     // committed task is readable through Work views, but cannot by itself mint
     // a topology generation or an authorized empty attempts page — on either
-    // operation that reads the attempt page under that generation. The
-    // positive half, a real attempt generation answering `listed` on both, is
-    // graded in `work_task_session.rs`.
+    // operation that reads the attempt page under that generation.
+    // `work_task_session.rs` grades the authority split the other way round:
+    // hydration answers a real product generation over a settled attempt, and
+    // both attempt reads refuse that generation as a stale cursor while still
+    // answering `absent` for the scope. No production path appends the
+    // executor journal, so a `listed` page has no producer to grade.
     for operation in ["list-attempts", "execution-history"] {
         let daemon_route = fixture.external_url(&format!("/application/work/{operation}"));
         let dashboard_route = format!("{}/api/work/{operation}", dashboard.base_url);
