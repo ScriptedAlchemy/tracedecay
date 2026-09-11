@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::super::client::{
     LspRefreshTimeouts, LspSemanticRequestError, StdioLspClient, decode_semantic_request,
@@ -377,7 +378,7 @@ fn analyzer_event_outcome(event: AnalyzerEvent) -> LspSemanticOperationOutcome {
 }
 
 pub(crate) fn analyzer_start_failure(error: &TraceDecayError) -> LspSemanticOperationOutcome {
-    eprintln!("[tracedecay] event=analyzer_start_failed error={error}");
+    log_daemon_event("analyzer_start_failed", &[("error", error.to_string())]);
     analyzer_event_outcome(AnalyzerEvent::StartupFailed)
 }
 
@@ -390,7 +391,10 @@ pub(crate) fn semantic_operation_outcome(
             code: Some(-32601), ..
         }) => LspSemanticOperationOutcome::Unavailable,
         Err(error) => {
-            eprintln!("[tracedecay] event=analyzer_semantic_request_failed error={error}");
+            log_daemon_event(
+                "analyzer_semantic_request_failed",
+                &[("error", error.to_string())],
+            );
             analyzer_event_outcome(error.analyzer_event())
         }
     }
