@@ -1164,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn registered_project_graph_binding_retains_only_the_database_weak_proxy() {
-        crate::register_test_schema_installer();
+        crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().expect("registered weak graph proxy directory");
         let project_id = ProjectId::new("project.registered-weak-graph")
             .expect("valid registered weak graph project identity");

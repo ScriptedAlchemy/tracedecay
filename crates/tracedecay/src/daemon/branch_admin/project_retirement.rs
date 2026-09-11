@@ -597,7 +597,7 @@ mod tests {
             "retirement must remove the process-global Context Scout owner"
         );
 
-        tracedecay_store_runtime::register_registered_schema_installer();
+        tracedecay_global_db::register_registered_schema_installer();
         let replacement_root = tempfile::TempDir::new().expect("replacement database");
         let replacement_path = replacement_root.path().join("graph.db");
         let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(

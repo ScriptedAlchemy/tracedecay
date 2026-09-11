@@ -158,7 +158,7 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
         .expect("write isolated profile payload");
 
     let hook_id = tracedecay_hooks::envelope_identity_hash16("project", "proj_remote_scout");
-    tracedecay_store_runtime::register_registered_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     // The owner binds the project's own graph database identity: deletion
     // only unregisters the owner whose database it is tearing down.
     let owner_path = layout.graph_db_path.clone();

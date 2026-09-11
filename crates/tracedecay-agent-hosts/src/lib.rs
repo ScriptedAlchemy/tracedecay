@@ -45,7 +45,7 @@
 /// directly need this call.
 #[cfg(test)]
 pub(crate) fn register_test_schema_installer() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
 }
 
 use tracedecay_automation_runtime::automation::host_io::HostIo;

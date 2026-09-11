@@ -83,7 +83,7 @@ pub fn register_process_product_runtime() {
 /// (a `test-helpers` dev-dependency). The port keeps the first registration, so
 /// calling this at every fixture entry point is safe and idempotent.
 pub fn register_test_schema_installer() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
 }
 
 pub async fn initialize_test_database(
