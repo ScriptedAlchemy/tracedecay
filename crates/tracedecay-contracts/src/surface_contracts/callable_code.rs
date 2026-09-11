@@ -150,7 +150,6 @@ pub struct CodeTypeHierarchySurfaceRequest {
 pub struct CodeCallersSurfaceRequest {
     pub node_id: String,
     pub maximum_depth: u32,
-    pub resolve_trait_dispatch: bool,
     pub scope: SymbolGraphScope,
     pub meta: CallableCodeSurfaceMeta,
 }
@@ -202,7 +201,7 @@ pub fn primitive_code_into_primitive(
             PrimitiveRequest::Callers(GraphRelationRequest {
                 node_id: request.node_id,
                 maximum_depth: request.maximum_depth,
-                resolve_trait_dispatch: request.resolve_trait_dispatch,
+                resolve_trait_dispatch: false,
                 scope: request.scope,
                 meta: request.meta.into_application(page),
             })

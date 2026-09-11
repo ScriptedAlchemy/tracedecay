@@ -1199,15 +1199,14 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
         ApplicationSurfaceOperation::CodeCallers,
         callable_symbol_graph_request_body(serde_json::json!({
             "node_id": "node.application-surface",
-            "maximum_depth": 3,
-            "resolve_trait_dispatch": true
+            "maximum_depth": 3
         })),
     )
     .expect("callers request");
     assert!(matches!(
         callers,
         ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::Callers(request))
-            if request.resolve_trait_dispatch
+            if request.node_id == "node.application-surface"
     ));
 }
 

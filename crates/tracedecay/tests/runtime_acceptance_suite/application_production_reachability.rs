@@ -1208,7 +1208,6 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                 serde_json::json!({
                     "node_id": anchors.sink,
                     "maximum_depth": 1,
-                    "resolve_trait_dispatch": false,
                     "scope": symbol_graph_scope(),
                     "meta": callable_code_meta(cursor),
                 })
