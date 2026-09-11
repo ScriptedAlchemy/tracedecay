@@ -14388,20 +14388,16 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
 /// Publication broadcast and [`CodeIndexSchedulerRegistryV1::latest_generation_id`]
 /// stay behind optional graph seating. Unpinned exact/lexical queries resolve
 /// through the text owner, so that slot is the typed receipt this wait joins.
+/// The text lane publishes the per-worktree serving-generation watch, so
+/// [`wait_until_serving_seat`] blocks on that signal rather than sampling.
 async fn wait_for_queryable_text_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCodeTextGenerationV1 {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(text) = registry.latest_text_serving_for_root(path).await {
-                break text;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry.latest_text_serving_for_root(path).await
     })
     .await
-    .expect("queryable text generation seated")
 }
 
 /// The generation id of the text-current seat.
@@ -14426,24 +14422,22 @@ async fn wait_for_queryable_text_generation_id(
 }
 
 /// Wait until the text owner seats a generation distinct from `previous`.
+///
+/// Same signal as [`wait_for_queryable_text_generation`], narrowed to a
+/// successor: the seat that replaces `previous` is itself a per-worktree
+/// serving-generation change.
 async fn wait_for_queryable_text_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
     previous: &tracedecay_domain::CodeGenerationId,
 ) -> super::LatestCodeTextGenerationV1 {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(text) = registry.latest_text_serving_for_root(path).await {
-                let generation_id = text.metadata().manifest().generation_id.clone();
-                if &generation_id != previous {
-                    break text;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry
+            .latest_text_serving_for_root(path)
+            .await
+            .filter(|text| &text.metadata().manifest().generation_id != previous)
     })
     .await
-    .expect("changed queryable text generation seated")
 }
 
 /// Wait until the mounted worktree seats a generation distinct from `previous`.
