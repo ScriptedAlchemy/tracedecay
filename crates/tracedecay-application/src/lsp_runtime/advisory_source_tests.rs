@@ -58,7 +58,9 @@ use crate::diagnostics_publication::{
 };
 use crate::feedback::concrete::open_feedback_runtime;
 use crate::feedback::cycle_runtime::compose_canonical_result;
-use crate::feedback::owner::{FeedbackReadInvocationResultV1, FeedbackReadOperationV1};
+use crate::feedback::owner::{
+    FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1, FeedbackReadOperationV1,
+};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 
 const SOURCE: &str = "fn reviewed() {}\n";
@@ -779,7 +781,7 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
     let operation = operation();
     let context = context(&resolved, &operation, observed_at);
     let mut access = source_access(&resolved, &operation, observed_at);
-    for surface in ["feedback_get", "feedback_list"] {
+    for surface in ["feedback_get", "feedback_list", "feedback_impact"] {
         access.effective_capabilities.insert(
             feedback_surface_operation(surface)
                 .expect("feedback operation catalog")
@@ -827,9 +829,12 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
         .finding_handles
         .first()
         .expect("finding read handles");
-    let read_at = UtcMicros(observed_at.0.saturating_add(2));
+    // Public readers run in later CLI processes. The durable handle must
+    // remain usable beyond one application-request deadline.
+    tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+    let read_at = now_micros();
 
-    let FeedbackReadInvocationResultV1::Diagnostics(Ok(diagnostics)) = runtime
+    let diagnostics_result = runtime
         .owner()
         .invoke(
             FeedbackReadOperationV1::Diagnostics,
@@ -837,10 +842,11 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
             read_at,
         )
         .await
-        .expect("diagnostics read")
-    else {
-        panic!("diagnostics result");
+        .expect("diagnostics read");
+    let FeedbackReadInvocationResultV1::Diagnostics(diagnostics_result) = diagnostics_result else {
+        panic!("diagnostics result variant");
     };
+    let diagnostics = diagnostics_result.expect("diagnostics result");
     let ApplicationOutcome::Evidence(diagnostics) = diagnostics.outcome else {
         panic!("diagnostics evidence");
     };
@@ -848,6 +854,23 @@ async fn incomplete_publication_remains_readable_without_consuming_completed_ded
         diagnostics.payload.expect("diagnostics payload").cycle,
         publication.result.clone()
     );
+    let impact = runtime
+        .owner()
+        .invoke_projection_with_controls(
+            FeedbackCanonicalProjectionKindV1::Impact,
+            &read_handles.diagnostics_handle,
+            read_at,
+            Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
+                .expect("impact deadline"),
+            CancellationContext::active("cancel.lsp-advisory-source.impact")
+                .expect("impact cancellation"),
+        )
+        .await
+        .expect("impact read");
+    assert!(matches!(
+        impact,
+        FeedbackReadInvocationResultV1::Impact(Ok(_))
+    ));
 
     for (operation, handle) in [
         (FeedbackReadOperationV1::Get, &finding_handles.get_handle),
