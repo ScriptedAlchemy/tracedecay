@@ -3,13 +3,13 @@
 use serde_json::{Map, Value, json};
 use tracedecay_domain::ManifestDigest;
 
+use crate::analyzer::broker::DiagnosticSeverity;
 use crate::capabilities::EffectiveCapabilities;
 use crate::diagnostics::{
-    DiagnosticSeverity, DocumentDiagnosticReport, GatewayDiagnostic, GatewayDiagnosticCoverage,
-    GatewayDiagnosticData, GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspPosition,
-    LspRange, MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,
-    TRACEDECAY_DIAGNOSTIC_DATA_REVISION, safe_code_description_uri, safe_related_uri,
-    truncate_utf8,
+    DocumentDiagnosticReport, GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData,
+    GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspPosition, LspRange,
+    MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,
+    TRACEDECAY_DIAGNOSTIC_DATA_REVISION, safe_code_description_uri, safe_related_uri, truncate_utf8,
 };
 use crate::gateway::{
     CallHierarchyItem, DocumentSymbol, GatewayResponse, Hover, IncomingCall, LspLocation,
