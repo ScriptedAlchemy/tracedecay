@@ -15,8 +15,8 @@ use tracedecay_domain::CodeGenerationId;
 
 use super::super::CodeIndexGenerationPublishedV1;
 use super::{
-    CodeIndexSchedulerRegistryV1, GitFixture, test_project_id, wait_for_generation_change,
-    wait_for_initial_generation, wait_for_live_complete_generation,
+    CodeIndexSchedulerRegistryV1, GitFixture, ResolvedScope, test_project_id,
+    wait_for_generation_change, wait_for_initial_generation, wait_for_live_complete_generation,
 };
 
 async fn published_generation_for_root(
@@ -298,7 +298,7 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
 }
 
 struct BlockingSemanticScheduleProbeV1 {
-    entered: Arc<Mutex<Receiver<CodeGenerationId>>>,
+    entered: Arc<Mutex<Receiver<Arc<CodeIndexPublishedGenerationV1>>>>,
     release: Sender<()>,
     hook: SavedCodeGenerationScheduleHookV1,
 }
@@ -310,7 +310,7 @@ impl BlockingSemanticScheduleProbeV1 {
         let release_rx = Arc::new(Mutex::new(release_rx));
         let hook = Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
             entered_tx
-                .send(generation.manifest().generation_id.clone())
+                .send(Arc::clone(&generation))
                 .expect("report scheduled semantic generation");
             release_rx
                 .lock()
@@ -326,7 +326,7 @@ impl BlockingSemanticScheduleProbeV1 {
         }
     }
 
-    async fn entered_generation(&self) -> CodeGenerationId {
+    async fn entered_generation(&self) -> Arc<CodeIndexPublishedGenerationV1> {
         let entered = Arc::clone(&self.entered);
         tokio::task::spawn_blocking(move || {
             entered
@@ -351,6 +351,7 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let mut serving_seats = registry.subscribe_serving_seats();
     let probe = BlockingSemanticScheduleProbeV1::new();
     assert!(
         registry
@@ -363,8 +364,37 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
             .await
             .expect("mount scheduler")
     );
+    let mut serving_changes = registry
+        .subscribe_serving_generation_changes(fixture.path())
+        .await
+        .expect("subscribe to advisory serving changes");
 
     let first_scheduled = probe.entered_generation().await;
+    let first_scheduled_id = first_scheduled.manifest().generation_id.clone();
+    let snapshot = first_scheduled.snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree identity"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    tokio::time::timeout(Duration::from_secs(1), serving_seats.changed())
+        .await
+        .expect("serving-seat wake while semantic handoff is blocked")
+        .expect("serving-seat authority stays open");
+    tokio::time::timeout(Duration::from_secs(1), serving_changes.changed())
+        .await
+        .expect("advisory wake while semantic handoff is blocked")
+        .expect("advisory serving authority stays open");
+    let ready_while_hook_runs = registry
+        .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        .await
+        .expect("exact ready reader advances while semantic handoff is blocked");
+    let feedback_while_hook_runs = registry
+        .latest_feedback_generation_for_scope(fixture.path(), &scope)
+        .await
+        .expect("advisory reader advances while semantic handoff is blocked");
     let first_serving_while_hook_runs = registry.latest_generation_id(fixture.path()).await;
     probe.release();
     let first_published = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -376,23 +406,40 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
             .await
     );
     let second_scheduled = probe.entered_generation().await;
+    let second_scheduled_id = second_scheduled.manifest().generation_id.clone();
+    tokio::time::timeout(Duration::from_secs(1), serving_seats.changed())
+        .await
+        .expect("edited serving-seat wake while semantic handoff is blocked")
+        .expect("serving-seat authority stays open");
+    tokio::time::timeout(Duration::from_secs(1), serving_changes.changed())
+        .await
+        .expect("edited advisory wake while semantic handoff is blocked")
+        .expect("advisory serving authority stays open");
     let second_serving_while_hook_runs = registry.latest_generation_id(fixture.path()).await;
     probe.release();
     let second_published =
         wait_for_generation_change(&registry, fixture.path(), &first_published).await;
     registry.shutdown().await;
 
-    assert_eq!(first_scheduled, first_published);
+    assert_eq!(first_scheduled_id, first_published);
+    assert_eq!(
+        ready_while_hook_runs.generation().manifest().generation_id,
+        first_scheduled_id,
+    );
+    assert_eq!(
+        feedback_while_hook_runs.metadata().manifest().generation_id,
+        first_scheduled_id,
+    );
     assert_eq!(
         first_serving_while_hook_runs,
-        Some(first_scheduled),
+        Some(first_scheduled_id),
         "cold-mount semantics must not start before its exact code generation is serving"
     );
-    assert_ne!(second_scheduled, first_published);
-    assert_eq!(second_scheduled, second_published);
+    assert_ne!(second_scheduled_id, first_published);
+    assert_eq!(second_scheduled_id, second_published);
     assert_eq!(
         second_serving_while_hook_runs,
-        Some(second_scheduled),
+        Some(second_scheduled_id),
         "edited-generation semantics must not start while the prior code generation is serving"
     );
 }

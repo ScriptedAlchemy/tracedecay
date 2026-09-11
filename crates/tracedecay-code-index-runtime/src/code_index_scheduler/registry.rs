@@ -4332,6 +4332,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     let serving_generation_epoch = Arc::clone(&worker_serving_generation_epoch);
                     let serving_source_witness = Arc::clone(&worker_serving_source_witness);
                     let text_generation = Arc::clone(&worker_text_generation);
+                    let serving_seats = Arc::clone(&worker_serving_seats);
+                    let serving_generation_changed = worker_serving_generation_changed.clone();
                     let text_latest = latest.clone();
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -4407,6 +4409,15 @@ impl CodeIndexSchedulerRegistryV1 {
                                     };
                             }
                             drop(serving);
+                            // The serving slot is now fully published, including
+                            // its exact-source witness. Wake dependent readers
+                            // before the optional semantic handoff: that hook is
+                            // independently retryable and must not hold serving
+                            // readiness hostage if it blocks or loses capacity.
+                            if outcome.installs() {
+                                Self::record_serving_seat(&serving_seats);
+                                serving_generation_changed.send_replace(());
+                            }
                             // Semantic admission is independently retryable. A
                             // prior attempt may have lost bounded queue capacity,
                             // so an unchanged reconcile must offer the already-
@@ -4420,10 +4431,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     .await;
                     match serving_swap {
                         Ok(Ok(outcome)) => {
-                            if outcome.installs() {
-                                Self::record_serving_seat(&worker_serving_seats);
-                                worker_serving_generation_changed.send_replace(());
-                            }
                             let generation_id = text_latest
                                 .generation()
                                 .manifest()
@@ -4499,11 +4506,13 @@ impl CodeIndexSchedulerRegistryV1 {
                         outcome,
                     );
                     // An unchanged-source reconcile can restore admission for
-                    // the existing seat without publishing or replacing it.
-                    // Wake retained readers only after that source proof is
-                    // current; they still validate scope and freshness on read.
+                    // retained text authority without publishing or replacing
+                    // a decoded seat. Partitioned verified-head recovery
+                    // intentionally leaves that seat empty, so the canonical
+                    // text owner and current source proof are the wake
+                    // authority. Readers still validate scope and freshness.
                     if matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_))
-                        && worker_serving_generation
+                        && worker_text_generation
                             .read()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .is_some()
