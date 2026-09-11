@@ -102,6 +102,8 @@ pub struct WorkflowDefinition {
     steps: Vec<WorkflowStep>,
     pinned_policy_digest: ManifestDigest,
     pinned_configuration_digest: ManifestDigest,
+    /// Must equal the live Work executable catalog digest. Validation and
+    /// activation report the current digest when this pin is stale.
     pinned_catalog_digest: ManifestDigest,
 }
 
