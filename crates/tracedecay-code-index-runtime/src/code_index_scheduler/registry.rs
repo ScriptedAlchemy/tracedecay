@@ -6834,11 +6834,6 @@ impl CodeIndexSchedulerRegistryV1 {
             test_control.claim_entered.notify_waiters();
             released.await;
         }
-        // A foreign producer can overwrite the pending owner while this
-        // claim is paused. That arrival already supplies the remedy.
-        if !wake_claim.still_owns() {
-            return false;
-        }
         let nothing_servable = serving_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6864,6 +6859,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .overflow();
+        }
+        // `claim` only proves the slot was free at that instant. `note_wake`
+        // coalesces a foreign arrival into a live claim — it keeps the claimed
+        // `micros` and takes the owner — so a hook hint, overflow, or watcher
+        // probe can land in the window between the claim and here. That
+        // arrival is the remedy this admission would ask for, and stamping
+        // `QueryAdmission` over it is exactly the fabricated cadence arrival
+        // the pending-wake suppression exists to prevent. The remedy above is
+        // already recorded; leave the claim unsettled so its drop releases
+        // this admission's owner without erasing the foreign marker.
+        if !wake_claim.still_owns() {
+            return false;
         }
         Self::note_wake(
             &pending_wake,
