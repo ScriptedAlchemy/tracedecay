@@ -625,6 +625,15 @@ async fn completed_session_import_immediately_searches_canonical_message() {
     .expect("session import completion deadline");
     assert_eq!(completed["termination"], "completed", "{completed}");
     assert!(
+        completed["stats"]["sessions_imported"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+            && completed["stats"]["messages_imported"]
+                .as_u64()
+                .is_some_and(|count| count > 0),
+        "{completed}"
+    );
+    assert!(
         completed["failure_codes"]
             .as_array()
             .is_some_and(Vec::is_empty),

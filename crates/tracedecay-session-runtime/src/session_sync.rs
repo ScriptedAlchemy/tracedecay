@@ -539,12 +539,7 @@ impl DaemonSessionSyncService {
         let work = match request.command() {
             SessionSyncCommandV1::ImportTranscripts(_) => {
                 hotpath::future!(
-                    context.import_transcripts(
-                        self,
-                        &key,
-                        &request,
-                        project_sessions.clone(),
-                    ),
+                    context.import_transcripts(self, &key, &request, project_sessions.clone(),),
                     label = "daemon.session_sync.import_transcripts"
                 )
                 .await
@@ -645,7 +640,10 @@ impl DaemonSessionSyncService {
         context: &SessionSyncProjectContext,
         project_sessions: &RegisteredGlobalDbLeaseV1,
         request: &SessionSyncRequestV1,
-    ) -> Result<(), Option<work::SessionSyncInterruption>> {
+    ) -> Result<
+        crate::session_temporal_refresh_scheduler::history::SessionHistoricalIngestProgress,
+        Option<work::SessionSyncInterruption>,
+    > {
         let remaining_micros = request
             .deadline()
             .expires_at
@@ -675,8 +673,7 @@ impl DaemonSessionSyncService {
                 return Err(Some(interruption));
             }
         };
-        if settled.0
-            && settled.1
+        if let (Some(project), Some(user)) = settled
             && matches!(
                 context.project_refresh.serving_status().state,
                 SessionProjectionServingState::Current
@@ -692,7 +689,12 @@ impl DaemonSessionSyncService {
                 .projection_store_is_current(&context.user_sessions, request)
                 .await?
         {
-            Ok(())
+            Ok(
+                crate::session_temporal_refresh_scheduler::history::SessionHistoricalIngestProgress {
+                    stats: project.stats.merge(user.stats),
+                    committed: project.committed || user.committed,
+                },
+            )
         } else {
             Err(None)
         }
@@ -1101,15 +1103,6 @@ pub mod test_harness {
     use std::sync::{Arc, PoisonError};
     use std::time::Duration;
 
-    use tokio::sync::Semaphore;
-    use tracedecay_contracts::session_sync::{
-        SessionSyncJournalV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncStatsV1,
-    };
-    use tracedecay_contracts::{
-        CancellationSignal, Deadline, IdempotencyKey, OperationTermination,
-    };
-    use tracedecay_domain::UtcMicros;
-
     use super::{DaemonSessionSyncService, SessionSyncTaskV1};
     use crate::session_temporal_refresh_scheduler::projector::{
         SessionTemporalRefreshPolicy, SessionTemporalRefreshProjector,
@@ -1119,6 +1112,13 @@ pub mod test_harness {
     };
     use crate::session_temporal_refresh_scheduler::wake::{
         RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
+    };
+    use tokio::sync::Semaphore;
+    use tracedecay_contracts::session_sync::{
+        SessionSyncJournalV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncStatsV1,
+    };
+    use tracedecay_contracts::{
+        CancellationSignal, Deadline, IdempotencyKey, OperationTermination,
     };
 
     pub use crate::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshPassReport;
@@ -1180,13 +1180,6 @@ pub mod test_harness {
 
     pub fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
         super::journal_prefix(scope)
-    }
-
-    pub fn completed_profile_sweep_covers(
-        sweep_started_at: Option<&UtcMicros>,
-        admitted_at: UtcMicros,
-    ) -> bool {
-        super::completed_profile_sweep_covers(sweep_started_at, admitted_at)
     }
 
     pub fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
@@ -1316,13 +1309,6 @@ fn import_scope_key(scope: &SessionSyncScopeV1) -> String {
         scope.project_id().as_str().len(),
         scope.project_id().as_str(),
     )
-}
-
-fn completed_profile_sweep_covers(
-    sweep_started_at: Option<&UtcMicros>,
-    admitted_at: UtcMicros,
-) -> bool {
-    sweep_started_at.is_some_and(|sweep_started_at| *sweep_started_at >= admitted_at)
 }
 
 fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
