@@ -53,10 +53,15 @@ const ROW_ALLOCATION_OVERHEAD: usize =
     std::mem::size_of::<ExactSqlRow>() + std::mem::size_of::<Vec<ExactSqlValue>>();
 const CELL_ALLOCATION_OVERHEAD: usize = std::mem::size_of::<ExactSqlValue>();
 
+mod column;
 mod command;
 mod guard;
 mod types;
 
+pub(crate) use column::{
+    ExactSqlColumnError, integer_at, integer_column, optional_text, optional_text_at,
+    take_optional_text, take_text, text, text_at, text_column,
+};
 pub use types::*;
 
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
