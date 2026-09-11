@@ -11792,16 +11792,46 @@ async fn distinct_cold_mounts_respect_capacity_before_opening() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
-    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
-    let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+/// Hold the background worker out of a new pass, then wait for the in-flight
+/// pass to finish, and keep the admission permit.
+///
+/// Winning the permit only proves no *new* pass can start. The worker releases
+/// it after source reconciliation but keeps its `reconcile_in_progress` guard
+/// through text seating, and re-enters that guard around each graph step, so
+/// the counter is routinely non-zero while the permit is free. A query that
+/// claims the pending wake in that window is suppressed as already covered by
+/// the running source proof and returns before it reaches the claim gate — so
+/// a test that then waits for the claim would wait on a rendezvous nothing
+/// will ever reach. With the permit held the counter is monotone to zero, so
+/// this settles once and stays settled for the rest of the test.
+async fn quiesced_background_reconcile_admission(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> tokio::sync::OwnedSemaphorePermit {
     let admission = registry
         .background_reconcile_admission()
         .acquire_owned()
         .await
         .expect("hold background worker at its dequeue point");
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while registry.reconcile_in_progress_for_test(project_root).await {
+        assert!(
+            Instant::now() <= deadline,
+            "holding the background admission permit never drained the in-flight \
+             reconcile pass for {}",
+            project_root.display()
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    admission
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
     registry.install_query_claim_gate(&scope);
 
@@ -11820,7 +11850,8 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
     registry.release_query_claim(&scope);
     assert!(
         !request.await.expect("query admission task joins"),
-        "the fresh query declines its own reconcile after the foreign wake arrives"
+        "a query whose claim lost its owner to a foreign wake must not restamp \
+         QueryAdmission over that arrival"
     );
     let stamped = registry
         .pending_wake_micros_for_scope(&scope)
@@ -11841,11 +11872,7 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
-    let admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
-        .await
-        .expect("hold background worker at its dequeue point");
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
     registry.install_query_claim_gate(&scope);
     registry.install_pending_wake_drop_gate(&scope).await;
