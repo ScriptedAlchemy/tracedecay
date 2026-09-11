@@ -5736,6 +5736,65 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
     );
 }
 
+/// A projection whose final source page fills exactly on its last file's last
+/// record is convergeable, and the durable text lane must converge it.
+///
+/// A completed source mints one terminal read that emits no record and only
+/// normalizes the exhausted file position, so its live cursor sits one file
+/// rollover past the last durably accepted page exactly when that page filled
+/// on a file boundary. Holding the builder's durable progress against that
+/// normalized cursor — instead of against the completion receipt — reports a
+/// deterministic contract violation, which parks the text projection as
+/// unconvergeable and leaves the complete serving seat permanently empty.
+#[test]
+fn page_aligned_final_source_page_converges_the_text_projection() {
+    // A whole-page multiple of symbols in one file keeps the last page filling
+    // on the file's last record for any per-symbol chunk count.
+    let source =
+        (0..super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 * 2).fold(String::new(), |mut source, index| {
+            writeln!(
+                &mut source,
+                "pub fn aligned_{index}() -> usize {{ {index} }}"
+            )
+            .expect("write page-aligned source fixture");
+            source
+        });
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let mut passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("a page-aligned projection converges")
+    {
+        passes += 1;
+        assert!(
+            passes < 10_000,
+            "page-aligned text projection did not converge"
+        );
+    }
+    assert!(latest.query_owners_are_warm());
+    let progress = build_progress_snapshot(&scheduler);
+    // Every committed page must be chunk-full: an early commit from the page
+    // byte bound or an import record would leave the final page partial, which
+    // is exactly the shape that does not trip this invariant.
+    assert_eq!(
+        progress.committed_chunks,
+        progress.committed_pages * super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64,
+        "the fixture must keep every page chunk-full so the final page ends on the last record"
+    );
+    assert_eq!(
+        progress.committed_imports, 0,
+        "an import record would commit a partial page and break the alignment"
+    );
+}
+
 #[test]
 fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
     let source = (0..256).fold(String::new(), |mut source, index| {
