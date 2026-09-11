@@ -18,6 +18,10 @@ use tracedecay_mcp::{TestRunFailure, TestRunOutput, ToolResult};
     clippy::too_many_arguments,
     reason = "Failure settlement retains the admitted emitter and deadline alongside the exact dispatched target set and observed failure"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Terminal test-failure mapping is one runner-output classify into a typed problem."
+)]
 pub(super) async fn terminal_failure(
     emitter: &OperationEmitter,
     args: &Value,

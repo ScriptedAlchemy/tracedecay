@@ -4,6 +4,7 @@
 //! separate from the subprocess parity suite so process-isolation behavior is
 //! covered independently.
 
+#![allow(clippy::too_many_lines)]
 mod runtime_test_support;
 
 mod repository_parity;

@@ -64,6 +64,10 @@ pub(super) fn hook_v2_native_context_scout_lifecycle(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_lifecycle")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Context-scout admission is one native lifecycle bind for the scout claim."
+)]
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
     background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,

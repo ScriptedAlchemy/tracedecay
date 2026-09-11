@@ -1,5 +1,6 @@
 //! Reproducible claude-observation pipeline baseline.
 
+#![allow(clippy::too_many_lines)]
 mod artifact;
 mod baseline;
 mod manifest;
