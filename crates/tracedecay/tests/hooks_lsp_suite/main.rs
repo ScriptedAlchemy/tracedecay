@@ -9,6 +9,7 @@
 //! Env-mutating tests across all modules must serialize on
 //! `common::GLOBAL_DB_ENV_LOCK` because they now share one process.
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

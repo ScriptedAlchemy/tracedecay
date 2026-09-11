@@ -312,6 +312,7 @@ use lsp_sessions::{
 };
 mod maintenance;
 pub mod pr_autotrack;
+#[cfg_attr(any(test, feature = "test-transport"), allow(clippy::too_many_lines))]
 mod production_harness;
 mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
