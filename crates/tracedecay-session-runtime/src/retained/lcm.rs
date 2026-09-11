@@ -40,8 +40,9 @@ use super::ProfileSessionDatabaseSource;
 use crate::lcm_authority::MountedLcmAuthorityPort;
 use crate::session_retrieval::{
     DaemonSessionRetrievalService, LcmDescribeServiceCommand, LcmDescribeServiceFuture,
-    LcmExpandServiceCommand, LcmExpandServiceFuture, SessionApplicationRetrievalFutureV1,
-    SessionApplicationRetrievalPortV1, SessionRetrievalStoreScope,
+    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmRawStoreIdsFutureV1,
+    SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
+    SessionRetrievalStoreScope,
 };
 use tracedecay_contracts::retained_receipts::evidence_outcome;
 use tracedecay_runtime_core::timeutil::SearchTimeBound;
@@ -160,6 +161,13 @@ impl SessionApplicationRetrievalPortV1 for ScopedRetrieval<'_> {
         );
         self.inner
             .expand_lcm_admitted(context, self.cancellation, command)
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        self.inner.lcm_raw_store_ids_admitted(identities)
     }
 }
 

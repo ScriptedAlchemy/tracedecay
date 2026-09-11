@@ -13,13 +13,12 @@ mod worktree;
 pub use catalog::{git_index_catalog_contribution, git_index_handler_descriptors};
 pub use native_integration::{
     NativeIntegrationApplyRequestV1, NativeIntegrationCancelDispositionV1,
-    NativeIntegrationCancelRequestV1, NativeIntegrationContractError,
-    NativeIntegrationEvidenceRevisionsV1, NativeIntegrationPort, NativeIntegrationPortError,
-    NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
-    NativeIntegrationRecoveryRequestV1, NativeIntegrationSelectionBindingV1,
-    NativeIntegrationService, NativeIntegrationStackResolutionOutcomeV1,
-    NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
-    NativeIntegrationStatusRequestV1,
+    NativeIntegrationCancelRequestV1, NativeIntegrationContractError, NativeIntegrationPort,
+    NativeIntegrationPortError, NativeIntegrationPreflightOutcomeV1,
+    NativeIntegrationPreflightRequestV1, NativeIntegrationRecoveryRequestV1,
+    NativeIntegrationSelectionBindingV1, NativeIntegrationService,
+    NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
+    NativeIntegrationStackResolutionRequestV1, NativeIntegrationStatusRequestV1,
 };
 pub use native_integration_surface::{
     NATIVE_INTEGRATION_APPLY_OPERATION, NATIVE_INTEGRATION_APPROVE_OPERATION,
@@ -27,14 +26,14 @@ pub use native_integration_surface::{
     NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION, NATIVE_INTEGRATION_STATUS_OPERATION,
     NativeIntegrationApplySurfaceRequest, NativeIntegrationApprovalProjectionV1,
     NativeIntegrationApproveSurfaceRequest, NativeIntegrationCancelSurfaceRequest,
-    NativeIntegrationCancellationProjectionV1, NativeIntegrationEvidenceRevisionsWireV1,
-    NativeIntegrationPreflightSurfaceRequest, NativeIntegrationPreviewProjectionV1,
-    NativeIntegrationReceiptProjectionV1, NativeIntegrationSealedStackSnapshotProjectionV1,
-    NativeIntegrationSealedStackSnapshotV1, NativeIntegrationSelectionDeclarationV1,
-    NativeIntegrationSnapshotProjectionV1, NativeIntegrationStackSnapshotService,
-    NativeIntegrationStackSnapshotSurfaceRequest, NativeIntegrationStatusProjectionV1,
-    NativeIntegrationStatusSurfaceRequest, NativeIntegrationSurfaceResultV1,
-    NativeIntegrationSurfaceUnavailableV1, native_integration_surface_catalog_contribution,
+    NativeIntegrationCancellationProjectionV1, NativeIntegrationPreflightSurfaceRequest,
+    NativeIntegrationPreviewProjectionV1, NativeIntegrationReceiptProjectionV1,
+    NativeIntegrationSealedStackSnapshotProjectionV1, NativeIntegrationSealedStackSnapshotV1,
+    NativeIntegrationSelectionDeclarationV1, NativeIntegrationSnapshotProjectionV1,
+    NativeIntegrationStackSnapshotService, NativeIntegrationStackSnapshotSurfaceRequest,
+    NativeIntegrationStatusProjectionV1, NativeIntegrationStatusSurfaceRequest,
+    NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
+    native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 pub use public_wire::{

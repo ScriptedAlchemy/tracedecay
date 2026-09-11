@@ -1,8 +1,8 @@
 use tracedecay_domain::{
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
-    NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptV1,
-    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
-    NativeIntegrationTransactionStatusV1, RepositoryId,
+    CodeGenerationId, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationPhaseV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
+    NativeIntegrationReceiptV1, NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
+    NativeIntegrationTransactionStatusV1, RepositoryId, UtcMicros,
 };
 use tracedecay_store::{
     NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStoreError,
@@ -368,6 +368,49 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
             records.push(decode_record(&row)?);
         }
         Ok(records)
+    }
+
+    /// Returns the exact analysis generations whose durable native preview or
+    /// unfinished transaction is still live at `observed_at`.
+    #[hotpath::skip]
+    pub async fn live_candidate_generation_bindings(
+        &self,
+        repository_id: &RepositoryId,
+        observed_at: UtcMicros,
+    ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>> {
+        repository_id.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT preview.preview_json
+                   FROM native_integration_previews AS preview
+                  WHERE preview.repository_id = ?1
+                    AND (preview.expires_at > ?2 OR EXISTS (
+                        SELECT 1 FROM native_integration_transactions AS txn
+                         WHERE txn.preview_id = preview.preview_id
+                           AND txn.terminal_outcome IS NULL
+                    ))
+                  ORDER BY preview.created_at, preview.preview_id",
+                params![repository_id.as_str(), observed_at.0],
+            )
+            .await
+            .map_err(unavailable)?;
+        let mut generations = Vec::new();
+        while let Some(row) = rows.next().await.map_err(unavailable)? {
+            let preview: NativeIntegrationPreviewV1 =
+                decode(&row.get::<String>(0).map_err(unavailable)?)?;
+            if let Some(analysis) = preview.analysis {
+                generations.extend([
+                    analysis.merge_base.generation_id,
+                    analysis.source.generation_id,
+                    analysis.destination.generation_id,
+                    analysis.candidate.generation_id,
+                ]);
+            }
+        }
+        generations.sort();
+        generations.dedup();
+        Ok(generations)
     }
 
     #[hotpath::skip]
