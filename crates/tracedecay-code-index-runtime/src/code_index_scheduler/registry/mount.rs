@@ -1391,7 +1391,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     tracing::info!(
                                         event = "code_index_graph_head_recovered",
                                         complete_generation_requested,
-                                        "revision-7 manifest matched the durable verified graph \
+                                        "partitioned manifest matched the durable verified graph \
                                          head; startup seated graph reads without replay"
                                     );
                                     #[cfg(any(test, feature = "test-helpers"))]
@@ -1407,7 +1407,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     tracing::warn!(
                                         event = "code_index_graph_head_recovery_degraded",
                                         error = %error,
-                                        "verified graph head did not match the revision-7 \
+                                        "verified graph head did not match the partitioned \
                                          manifest; replay the exact sealed generation to \
                                          repair its quarantined graph projection"
                                     );
@@ -1418,7 +1418,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             tracing::warn!(
                                 event = "code_index_graph_head_recovery_binding_unavailable",
                                 error = %error,
-                                "revision-7 replay binding is unavailable; graph coverage stays \
+                                "partitioned replay binding is unavailable; graph coverage stays \
                                  pending while the admitted worker repairs the generation"
                             );
                         }
@@ -1426,7 +1426,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             tracing::warn!(
                                 event = "code_index_graph_head_recovery_task_failed",
                                 error = %error,
-                                "revision-7 replay binding task failed; graph coverage stays \
+                                "partitioned replay binding task failed; graph coverage stays \
                                  pending while the admitted worker repairs the generation"
                             );
                         }
@@ -1470,7 +1470,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     tracing::debug!(
                         event = "code_index_graph_seat_skipped",
                         reason = "verified_head_already_serves",
-                        "the recovered revision-7 head already serves; the sealed generation \
+                        "the recovered partitioned head already serves; the sealed generation \
                          is not replayed to seat a second copy of it"
                     );
                 }
