@@ -205,6 +205,32 @@ impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
     }
 }
 
+/// Whether a sealed generation carries exactly the registry, grammar, and
+/// extractor revisions supplied by its snapshot-scoped language registry.
+///
+/// Callers must supply the registry narrowed to the languages present in the
+/// generation's snapshot. An unavailable current descriptor must therefore be
+/// rejected while constructing that registry rather than omitted here.
+pub fn generation_language_revisions_match<R: LanguageRegistry>(
+    generation: &CodeGenerationManifestV1,
+    registry: &R,
+) -> bool {
+    let descriptors = registry.descriptors();
+    generation.registry_revision == registry.registry_revision()
+        && generation.grammar_revisions.len() == descriptors.len()
+        && generation.extractor_revisions.len() == descriptors.len()
+        && !generation.grammar_revisions.iter().zip(&descriptors).any(
+            |((language, revision), descriptor)| {
+                language != &descriptor.language || revision != &descriptor.grammar_revision
+            },
+        )
+        && !generation.extractor_revisions.iter().zip(&descriptors).any(
+            |((language, revision), descriptor)| {
+                language != &descriptor.language || revision != &descriptor.extractor_revision
+            },
+        )
+}
+
 impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R> {
     fn emit(
         &self,
@@ -225,23 +251,10 @@ impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R
             return Err(CapabilityEmissionErrorV1::GenerationNotSealed);
         }
 
-        let descriptors = self.registry.descriptors();
-        if generation.registry_revision != self.registry.registry_revision()
-            || generation.grammar_revisions.len() != descriptors.len()
-            || generation.extractor_revisions.len() != descriptors.len()
-            || generation.grammar_revisions.iter().zip(&descriptors).any(
-                |((language, revision), descriptor)| {
-                    language != &descriptor.language || revision != &descriptor.grammar_revision
-                },
-            )
-            || generation.extractor_revisions.iter().zip(&descriptors).any(
-                |((language, revision), descriptor)| {
-                    language != &descriptor.language || revision != &descriptor.extractor_revision
-                },
-            )
-        {
+        if !generation_language_revisions_match(generation, &self.registry) {
             return Err(CapabilityEmissionErrorV1::MixedGeneration);
         }
+        let descriptors = self.registry.descriptors();
         let supported_languages: Vec<LanguageId> = descriptors
             .iter()
             .map(|descriptor| descriptor.language.clone())
