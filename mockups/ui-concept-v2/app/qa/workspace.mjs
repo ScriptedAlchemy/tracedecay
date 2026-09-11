@@ -19,6 +19,9 @@ try {
   await page.waitForURL(url => url.searchParams.get('data') === 'snapshot');
   for (const key of ['pr', 'branch', 'attention']) assert.equal(new URL(page.url()).searchParams.has(key), false);
   await page.goto(`${base}/?surface=brain&data=snapshot`);
+  // Snapshot Brain opens the recorded registry; atlas is an explicit
+  // repository-structure view, not its default knowledge geometry.
+  await page.getByRole('button', { name: 'Atlas / repository structure', exact: true }).click();
   await page.getByLabel('Measured repository atlas').waitFor();
   await attention().click();
   assert.equal(await dialog().locator('.attention-list button').filter({hasText:'follow-up candidate'}).count(), 0, 'Untracked GitHub results never enter shared attention');
