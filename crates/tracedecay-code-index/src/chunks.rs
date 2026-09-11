@@ -3171,6 +3171,70 @@ mod tests {
     }
 
     #[test]
+    fn all_whitespace_source_retains_whitespace_only_windows() {
+        let source = "   \n\n\t  \n";
+        let result = chunk_source(source);
+        result.validate().expect("valid all-whitespace chunk set");
+        assert_byte_exact_coverage(source, &result);
+        assert!(
+            !result.chunks.is_empty(),
+            "an all-whitespace file must keep its FileWindow grains"
+        );
+        assert!(
+            result.chunks.iter().all(|chunk| {
+                chunk.anchor.grain == CodeSearchChunkGrainV1::FileWindow
+                    && span_is_whitespace_only(source, chunk.anchor.source_span)
+            }),
+            "all-whitespace FileWindows must be retained when no retrievable neighbor exists"
+        );
+    }
+
+    #[test]
+    fn fold_that_exceeds_max_chunk_text_bytes_retains_the_window() {
+        let mut source = "x".repeat(MAX_CHUNK_TEXT_BYTES);
+        source.push_str("  ");
+        let max = MAX_CHUNK_TEXT_BYTES as u64;
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(0),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: max,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: max,
+                    end_byte: max + 2,
+                },
+                parent: None,
+            },
+        ];
+        attribute_whitespace_only_windows(&source, &mut pending);
+        assert_eq!(
+            pending.len(),
+            2,
+            "a fold that would exceed MAX_CHUNK_TEXT_BYTES must keep the window"
+        );
+        assert_eq!(
+            pending[0].span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: max,
+            },
+            "the retrievable target span must stay unchanged"
+        );
+        assert_eq!(pending[1].grain, CodeSearchChunkGrainV1::FileWindow);
+        assert!(span_is_whitespace_only(&source, pending[1].span));
+    }
+
+    #[test]
     fn symbol_member_chunks_include_leading_attributes() {
         let result = chunk_source(
             "pub enum DomainError {\n    #[error(\"time interval start must not be after its end\")]\n    InvalidTimeInterval,\n}\n",
