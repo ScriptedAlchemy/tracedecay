@@ -704,6 +704,37 @@ struct RemoteBrainTlsServer {
     egress: Arc<RemoteBrainTlsEgressObserver>,
 }
 
+/// The canonical remote protocol router must exist before a TLS listener binds;
+/// `publish_listener_serving` fires only after a successful bind.
+async fn bind_remote_brain_tls_server(
+    registry: &DaemonHttpApplicationRegistry,
+    config: &RemoteBrainTlsConfig,
+) -> Result<RemoteBrainTlsServer> {
+    let Some((router, credentials)) = registry.remote_protocol_router()? else {
+        return Err(TraceDecayError::Config {
+            message: "Remote Brain TLS listener requires the canonical remote protocol router"
+                .to_owned(),
+        });
+    };
+    let listener = RemoteBrainTlsListener::bind(config).await?;
+    credentials.publish_listener_serving();
+    let endpoint = listener.bound_addr()?;
+    #[cfg(test)]
+    let admission = listener.admission();
+    #[cfg(test)]
+    let egress = listener.egress_observer();
+    Ok(RemoteBrainTlsServer {
+        listener,
+        endpoint,
+        router: Router::new().nest("/remote", router),
+        #[cfg(test)]
+        admission,
+        credentials,
+        #[cfg(test)]
+        egress,
+    })
+}
+
 impl DaemonHttpApplicationService {
     #[cfg(test)]
     #[hotpath::skip]
@@ -715,40 +746,13 @@ impl DaemonHttpApplicationService {
     }
 
     #[hotpath::skip]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Remote TLS bind is one certificate-load and listener-start sequence."
-    )]
     pub(super) async fn bind_with_remote_tls(
         registry: DaemonHttpApplicationRegistry,
         auth_token: &str,
         remote_tls: Option<&RemoteBrainTlsConfig>,
     ) -> Result<Self> {
         let remote_tls_server = match remote_tls {
-            Some(config) => {
-                let Some((router, credentials)) = registry.remote_protocol_router()? else {
-                    return Err(TraceDecayError::Config {
-                        message: "Remote Brain TLS listener requires the canonical remote protocol router".to_owned(),
-                    });
-                };
-                let listener = RemoteBrainTlsListener::bind(config).await?;
-                credentials.publish_listener_serving();
-                let endpoint = listener.bound_addr()?;
-                #[cfg(test)]
-                let admission = listener.admission();
-                #[cfg(test)]
-                let egress = listener.egress_observer();
-                Some(RemoteBrainTlsServer {
-                    listener,
-                    endpoint,
-                    router: Router::new().nest("/remote", router),
-                    #[cfg(test)]
-                    admission,
-                    credentials,
-                    #[cfg(test)]
-                    egress,
-                })
-            }
+            Some(config) => Some(bind_remote_brain_tls_server(&registry, config).await?),
             None => None,
         };
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
