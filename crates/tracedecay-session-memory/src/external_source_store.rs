@@ -18,6 +18,7 @@ use tracedecay_domain::{
     SourceProviderEnvelopeV1, SourceRefetchStrategyV1, SourceRefreshCauseV1,
     SourceRefreshReceiptV1, SourceSnapshotIdV1, SourceWholeRootStageV1, UtcMicros,
     canonical_sha256, cline_task_native_observation_id, prove_cline_native_source_transition,
+    sha256_hex_suffix,
 };
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryOperationEnvelopeV1,
@@ -1110,7 +1111,7 @@ fn runtime_control(
 }
 
 fn digest_suffix(digest: &str) -> Result<&str, RuntimeExternalSourceErrorV1> {
-    digest.strip_prefix("sha256:").ok_or_else(|| {
+    sha256_hex_suffix(digest).ok_or_else(|| {
         RuntimeExternalSourceErrorV1::Invalid(
             "external source runtime digest is not canonical SHA-256".to_owned(),
         )
