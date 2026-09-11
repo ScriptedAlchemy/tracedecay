@@ -167,6 +167,14 @@ pub(crate) fn record_model_state(name: &'static str) {
 }
 
 #[inline(always)]
+pub(crate) fn record_embed_execution_provider(name: &'static str) {
+    #[cfg(feature = "hotpath")]
+    hotpath::val!("semantic_embed_execution_provider").set(&name);
+    #[cfg(not(feature = "hotpath"))]
+    let _ = name;
+}
+
+#[inline(always)]
 pub(crate) fn record_model_failure(class: &'static str) {
     #[cfg(feature = "hotpath")]
     hotpath::val!("semantic_model_failure").set(&class);
