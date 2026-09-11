@@ -38,6 +38,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{Read, Seek, Write as IoWrite};
+use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
@@ -1022,13 +1023,44 @@ enum FileSegmentPlanV1 {
 }
 
 /// One file segment's encode buffers: the serde staging payload and the
-/// canonical segment. Files encode on the indexing pool, so each file owns a
-/// fresh pair and hands its `segment` to the publish phase instead of
-/// borrowing one generation-wide buffer.
+/// canonical segment. Files encode on the indexing pool, taking a cleared
+/// pair from `SealedEncodeBufferPoolV1` and handing the `segment` to the
+/// publish phase, which returns it once the bytes are durable; the pool is
+/// bounded by the encode window, not by file count.
 #[derive(Default)]
 struct PartitionedSegmentEncoderV1 {
     payload: Vec<u8>,
     segment: Vec<u8>,
+}
+
+/// Cleared encode buffers returned by the phase that finished with them.
+///
+/// A file's staging payload and canonical segment each grow to segment size
+/// from empty, so a fresh pair per file allocates a repository-sized stream of
+/// transient buffers. The pool holds only what encoding already keeps live —
+/// one window of segments plus one payload per worker — and hands the same
+/// capacities back, so the growth is paid for the largest file rather than for
+/// every file. Buffers are cleared before reuse, so segment bytes and digests
+/// are the ones a fresh pair produced.
+#[derive(Default)]
+struct SealedEncodeBufferPoolV1(Mutex<Vec<Vec<u8>>>);
+
+impl SealedEncodeBufferPoolV1 {
+    fn take(&self) -> Vec<u8> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+            .unwrap_or_default()
+    }
+
+    fn give(&self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(buffer);
+    }
 }
 
 impl PartitionedSegmentEncoderV1 {
@@ -2655,6 +2687,7 @@ impl CodeIndexPublishedGenerationV1 {
                 .map(|file| &file.file_occurrence_id),
         )?;
         let mut file_segments = Vec::with_capacity(self.files.len());
+        let buffers = SealedEncodeBufferPoolV1::default();
         let plan_file = |file: &FileGenerationArtifactsV1| -> Result<
             FileSegmentPlanV1,
             CodeIndexProductionErrorV1,
@@ -2722,8 +2755,12 @@ impl CodeIndexPublishedGenerationV1 {
             if let Some(descriptor) = reused {
                 return Ok(FileSegmentPlanV1::Reused(descriptor));
             }
-            let mut encoder = PartitionedSegmentEncoderV1::default();
+            let mut encoder = PartitionedSegmentEncoderV1 {
+                payload: buffers.take(),
+                segment: buffers.take(),
+            };
             let descriptor = encoder.encode_file_segment(&self.manifest.generation_id, file, key)?;
+            buffers.give(std::mem::take(&mut encoder.payload));
             Ok(FileSegmentPlanV1::Encoded(descriptor, encoder.segment))
         };
         // Files are independent, so each window is one ordered fan-out on the
@@ -2751,6 +2788,7 @@ impl CodeIndexPublishedGenerationV1 {
                             digest: &descriptor.segment_digest,
                             bytes: &bytes,
                         })?;
+                        buffers.give(bytes);
                         descriptor
                     }
                 };
