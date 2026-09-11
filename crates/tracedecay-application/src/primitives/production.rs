@@ -3303,6 +3303,7 @@ mod affected_tests_tests {
                 repository: self.scope.repository_id.clone(),
                 worktree: Some(self.scope.worktree_id.clone()),
                 reference: self.scope.reference.clone(),
+                head_commit_id: self.source_revision.clone(),
                 source_revision: self.source_revision.clone(),
                 code_generation_id,
                 snapshot_digest,
