@@ -64,7 +64,8 @@ use super::{
 use crate::code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
+    DAEMON_CODE_INDEX_CHUNKER_REVISION, UninterruptibleCodeIndexControlV1,
+    VerifiedSealedLexicalPageReadV1,
 };
 use crate::semantic_code::rerank_adapter::{
     GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
@@ -3850,7 +3851,8 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
     drop(config_a);
 
     let mut config_b = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    replace_scheduler_chunker_revision(&mut config_b, "chunker.daemon.v4");
+    let foreign_revision = format!("{DAEMON_CODE_INDEX_CHUNKER_REVISION}-foreign");
+    replace_scheduler_chunker_revision(&mut config_b, &foreign_revision);
     assert_eq!(
         config_b
             .latest_complete()
@@ -3886,7 +3888,7 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
             .manifest()
             .chunker_revision
             .as_str(),
-        "chunker.daemon.v4"
+        foreign_revision.as_str()
     );
 }
 
