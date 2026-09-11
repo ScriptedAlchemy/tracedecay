@@ -14056,25 +14056,21 @@ where
 
 /// Wait until the registry-mounted worktree seats its first generation.
 ///
-/// This must not join only [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
 /// [`CodeIndexSchedulerRegistryV1::latest_generation_id`] answers from a
-/// serving or text seat, and text can seat without a serving-seat wake.
-/// Callers that need the complete serving generation must use
+/// serving or text seat. The text lane publishes
+/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_generation_changes`];
+/// the earlier note that text can seat without a wake applied only to the
+/// registry-wide [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`]
+/// counter. Callers that need the complete serving generation must use
 /// [`wait_for_live_complete_generation`].
 async fn wait_for_initial_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> tracedecay_domain::CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(path).await {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || {
+        registry.latest_generation_id(path)
     })
     .await
-    .expect("initial generation seated")
 }
 
 /// Publication now broadcasts as soon as reconcile publishes, before graph
@@ -14302,25 +14298,21 @@ async fn wait_for_queryable_text_generation_change(
 
 /// Wait until the mounted worktree seats a generation distinct from `previous`.
 ///
-/// Same seat-not-edge rule as [`wait_for_initial_generation`]: the successor
-/// may appear as a text seat without a serving-seat wake.
+/// Same signal as [`wait_for_initial_generation`]: the successor may appear as
+/// a text seat, and the text lane publishes the per-worktree serving-generation
+/// watch.
 async fn wait_for_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
     previous: &tracedecay_domain::CodeGenerationId,
 ) -> tracedecay_domain::CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(path).await
-                && &generation != previous
-            {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry
+            .latest_generation_id(path)
+            .await
+            .filter(|generation| generation != previous)
     })
     .await
-    .expect("changed generation seated")
 }
 
 #[tokio::test]
