@@ -32,7 +32,9 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 #[cfg(test)]
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
-use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
+};
 
 mod generation_scan;
 mod generation_transactions;
@@ -929,9 +931,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
             read_generation_metadata(&path, verification, is_cancelled)?;
         let expected_file = format!(
             "generation-{}.json",
-            raw_state_digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&raw_state_digest)
+            sha256_hex_suffix(&raw_state_digest).unwrap_or(&raw_state_digest)
         );
         if file_name != expected_file {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
@@ -2026,7 +2026,7 @@ fn sha256_file_component<'a>(
     digest: &'a ManifestDigest,
     resource: &str,
 ) -> Result<&'a str, CodeGenerationRetentionErrorV1> {
-    let Some(value) = digest.as_str().strip_prefix("sha256:") else {
+    let Some(value) = sha256_hex_suffix(digest.as_str()) else {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "{resource} digest is not SHA-256"
         )));

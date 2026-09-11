@@ -30,6 +30,7 @@ use tracedecay_domain::{
     RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
     RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
     SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
+    sha256_hex_suffix,
 };
 
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
@@ -1266,9 +1267,7 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
             segment_root
                 .join(format!(
                     "segment-{}.json",
-                    live_segment
-                        .strip_prefix("sha256:")
-                        .expect("tagged live segment digest")
+                    sha256_hex_suffix(live_segment).expect("tagged live segment digest")
                 ))
                 .is_file(),
             "active, retained, and parent-reused segment {live_segment} must remain marked"
@@ -1291,9 +1290,7 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     let segment_path = |digest: &str| {
         segment_root.join(format!(
             "segment-{}.json",
-            digest
-                .strip_prefix("sha256:")
-                .expect("tagged segment digest")
+            sha256_hex_suffix(digest).expect("tagged segment digest")
         ))
     };
     assert!(
@@ -1475,10 +1472,7 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
             "pages must be ranges in one pack, never separate filesystem objects"
         );
         for page in pages {
-            let page_digest = page["page_digest"]
-                .as_str()
-                .expect("page digest")
-                .strip_prefix("sha256:")
+            let page_digest = sha256_hex_suffix(page["page_digest"].as_str().expect("page digest"))
                 .expect("tagged page digest");
             assert!(
                 !segments_root
@@ -1503,11 +1497,12 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
             1,
             "all evidence pages must use one fsync/rename transaction"
         );
-        let evidence_digest = manifest["generation"]["generation_evidence"]["segment_digest"]
-            .as_str()
-            .expect("evidence pack digest")
-            .strip_prefix("sha256:")
-            .expect("tagged evidence pack digest");
+        let evidence_digest = sha256_hex_suffix(
+            manifest["generation"]["generation_evidence"]["segment_digest"]
+                .as_str()
+                .expect("evidence pack digest"),
+        )
+        .expect("tagged evidence pack digest");
         (
             generation_id,
             store
@@ -1741,11 +1736,12 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
         evidence_page_count > 1,
         "the failure fixture must append multiple pages before commit"
     );
-    let evidence_digest = evidence["segment_digest"]
-        .as_str()
-        .expect("evidence pack digest")
-        .strip_prefix("sha256:")
-        .expect("tagged evidence pack digest");
+    let evidence_digest = sha256_hex_suffix(
+        evidence["segment_digest"]
+            .as_str()
+            .expect("evidence pack digest"),
+    )
+    .expect("tagged evidence pack digest");
     let source_pack = source_store
         .path()
         .join("code-generation-segments-v1")
@@ -5152,11 +5148,8 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     let sealed_identity = artifact_store
         .sealed_identity(&generation.manifest().generation_id)
         .expect("sealed generation identity");
-    let sealed_hex = sealed_identity
-        .digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .expect("sealed SHA-256 digest");
+    let sealed_hex =
+        sha256_hex_suffix(sealed_identity.digest.as_str()).expect("sealed SHA-256 digest");
     let artifacts_root = store.path().join("code-text-artifacts-v1");
     tracedecay_private_fs::create_private_directory(&artifacts_root)
         .expect("create private artifacts root");
@@ -10942,7 +10935,7 @@ fn restart_rejects_corrupt_partitioned_file_segment() {
     .expect("decode generation manifest");
     let segment_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
         .as_str()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .and_then(|digest| sha256_hex_suffix(digest))
         .expect("file segment digest");
     let segment_path = store
         .path()
