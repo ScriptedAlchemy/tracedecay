@@ -354,7 +354,7 @@ mod tests {
     use tracedecay_domain::{
         DeliveryChannelIdentityV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
         DeliverySettlementOutcomeV1, DeliverySurfaceFamilyV1, ProjectId, UtcMicros,
-        canonical_sha256,
+        canonical_sha256, sha256_hex_suffix,
     };
 
     use super::super::BoundedObservabilityProducerV1;
@@ -364,10 +364,7 @@ mod tests {
         let digest =
             canonical_sha256(&("tracedecay.delivery-recorder-source-receipt.v1", settlement))
                 .expect("legacy receipt digest");
-        let hex = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .expect("canonical digest prefix");
+        let hex = sha256_hex_suffix(digest.as_str()).expect("canonical digest prefix");
         let mut receipt_id = [0_u8; 16];
         for (index, slot) in receipt_id.iter_mut().enumerate() {
             let offset = index * 2;
