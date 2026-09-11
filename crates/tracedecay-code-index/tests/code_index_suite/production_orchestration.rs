@@ -34,13 +34,13 @@ use tracedecay_code_index::{
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
-    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, EdgeAuthorityV1,
-    FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RelationEdgeKindV1,
-    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, StackNodeId,
-    SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
+    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CodeSearchChunkGrainV1, CommitId,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId,
+    RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    StackNodeId, SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -1204,6 +1204,53 @@ fn active_generation_loads_share_the_published_allocation() {
         second.chunks().chunks().as_ptr(),
         "active reads must share the immutable generation instead of cloning its complete indices"
     );
+}
+
+#[test]
+fn sealed_store_drops_whitespace_only_window_chunks() {
+    const FUNCTIONS: usize = 32;
+    let source: String = (0..FUNCTIONS)
+        .map(|index| format!("pub fn symbol_{index}() {{}}\n\n"))
+        .collect();
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.whitespace-window-attribution",
+                1_260_000,
+                "commit.whitespace-window-attribution",
+                "tree.whitespace-window-attribution",
+                &source,
+            ),
+            &ActiveControl,
+        )
+        .expect("whitespace-heavy fixture publishes");
+    let chunks = generation.chunks().chunks();
+    assert!(
+        chunks.iter().all(|chunk| {
+            chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                || !chunk
+                    .sanitized_text
+                    .as_str()
+                    .chars()
+                    .all(char::is_whitespace)
+        }),
+        "sealed rows must not include whitespace-only FileWindow chunks"
+    );
+    // One-line functions previously minted signature + body + whitespace window
+    // (3N). Attribution keeps signature + body only.
+    assert_eq!(chunks.len(), FUNCTIONS * 2);
+    assert!(
+        chunks.len() < FUNCTIONS * 3,
+        "sealed chunk count must drop below the three-per-function baseline"
+    );
+    let sealed = generation.encode_sealed().expect("generation seals");
+    assert!(!sealed.is_empty(), "sealed store must carry bytes");
 }
 
 #[test]
@@ -3099,23 +3146,23 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:f1741f8ee5b4fec3dfc723e6de9ab9794de3a016f837ef7d1186306e09526abf";
+    "sha256:e96ece6001108c2449cf1792edb0597b6f2c4e1ce7e7ad6a93bd4048b3eac0e9";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:0ae42f3ae5844c46e7fea6cfb07f91e09d6634e8f9c2f1df053d62cc7d7c1f24",
-        8_584,
+        "sha256:e60fb9cbbc20e653116ea726d6967baba2ef5bf49b05ac9f567986d8abc21007",
+        7_958,
     ),
     (
-        "sha256:21d54dff99989ad1b91b8254ad1a7c1310fe866755e0c3157153c2ab18951b19",
-        3_856,
+        "sha256:cc1e8d56b83abef4f90373329ee58c3c84e8b175f8fe83ce4ff1893988ee5324",
+        3_543,
     ),
     (
-        "sha256:4f03e051764f885e2eb5f3537a2f7d26741f72f936fd6e4dc5ec1fd53a0751da",
-        3_964,
+        "sha256:07ff7248bb7c7f9674d5ae87d44355dffc5801c2bcb60d44475356cb3c125a9c",
+        3_651,
     ),
     (
-        "sha256:1bfa6399cd1a9f5d06ec697add39064ac1cc4f51dcfc866ba903c62ac3cad476",
-        11_830,
+        "sha256:d17aab52161832b3e2a6fd395b590edd26e1dab45f5df179d06c4868ca666c7a",
+        10_133,
     ),
 ];
 
@@ -3138,6 +3185,40 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             .collect::<Vec<_>>(),
         PARTITIONED_FORMAT_SEGMENTS,
         "a file or evidence segment changed bytes"
+    );
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+            .expect("partitioned text metadata parses")
+            .expect("revision seven partitioned manifest")
+            .generation_statistics(),
+        expected.generation_statistics().ok().as_ref(),
+        "a freshly sealed manifest carries the generation's own census"
+    );
+
+    // The same revision as a writer produced it before the census existed:
+    // these bytes minus that one field. Text owners still bind against it,
+    // and the census reads as unavailable rather than as a measured zero.
+    let mut pre_census: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    pre_census["generation"]
+        .as_object_mut()
+        .expect("generation payload")
+        .remove("statistics")
+        .expect("a fresh manifest carries a census to remove");
+    pre_census["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&pre_census["generation"]).expect("pre-census payload bytes")
+        ))
+    ));
+    let pre_census = serde_json::to_vec(&pre_census).expect("pre-census manifest bytes");
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&pre_census)
+            .expect("a manifest written without a census still authenticates")
+            .expect("revision seven partitioned manifest")
+            .generation_statistics(),
+        None,
+        "an absent census must read as unavailable, not as a measured zero"
     );
 
     // Decode at width two with three file segments: the third file read must
@@ -3199,6 +3280,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                     evidence_buffer_address.set(Some(address));
                 }
                 largest_evidence_page.set(largest_evidence_page.get().max(end - start));
+                evidence_buffer_capacity.set(buffer.capacity());
             }
             segment_reads.set(segment_reads.get() + 1);
             Ok(())

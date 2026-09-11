@@ -1,11 +1,16 @@
 //! Daemon-owned native integration transaction coordinator.
 
+mod analysis;
 mod authorization;
 mod gix_adapter;
 mod status_broadcast;
 mod topology;
 mod transaction;
 
+pub use analysis::{
+    NativeIntegrationAnalysisPort, NativeIntegrationGenerationAnalysisV1,
+    analyze_native_integration_generations, native_integration_generation_binding,
+};
 pub use authorization::{
     DaemonNativeIntegrationAuthorization, NativeIntegrationAuthorizationError,
 };
@@ -13,9 +18,9 @@ pub use gix_adapter::GixNativeIntegrationAdapter;
 pub use status_broadcast::NativeIntegrationStatusBroadcastV1;
 pub use topology::{ExactPairNativeIntegrationTopology, NativeIntegrationGraphRuntimeProviderV1};
 pub use transaction::{
-    NativeApplyEffectV1, NativeIntegrationAuthorizationOutcomeV1,
-    NativeIntegrationAuthorizationPort, NativeIntegrationMechanics, NativeIntegrationProbeV1,
-    NativeIntegrationTransactionCoordinator,
+    NativeApplyEffectV1, NativeIntegrationAnalysisRevalidationV1,
+    NativeIntegrationAuthorizationOutcomeV1, NativeIntegrationAuthorizationPort,
+    NativeIntegrationMechanics, NativeIntegrationProbeV1, NativeIntegrationTransactionCoordinator,
 };
 
 use tracedecay_contracts::NativeIntegrationPortError;

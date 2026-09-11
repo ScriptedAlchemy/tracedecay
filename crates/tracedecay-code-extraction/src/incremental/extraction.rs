@@ -247,7 +247,11 @@ fn merge_changed_artifact_unmeasured(
         .map(|row| shift_unaffected_import(row, edit, old_end_row))
         .collect::<Option<Vec<_>>>()?;
     imports.extend(delta.imports);
-    let mut artifact = ExtractionArtifactV1 { result, imports };
+    let mut artifact = ExtractionArtifactV1 {
+        result,
+        imports,
+        schema_evidence: None,
+    };
     artifact.canonicalize_order();
     Some(artifact)
 }

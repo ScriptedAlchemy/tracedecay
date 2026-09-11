@@ -9,7 +9,7 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::too_many_lines)]
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::wildcard_imports)]
@@ -37,6 +37,7 @@ pub mod bench;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
 #[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::too_many_lines)]
 pub mod test_support;
 pub use tracedecay_code_index as code_index;
 pub use tracedecay_query as query;
@@ -62,6 +63,7 @@ pub mod serve;
 // when a bench target or integration lane asks for `test-helpers`.
 #[cfg(any(test, feature = "test-helpers"))]
 #[path = "../benches/session_temporal/harness.rs"]
+#[allow(clippy::too_many_lines)]
 pub mod session_temporal_benchmark;
 pub mod tracedecay;
 #[doc(hidden)]

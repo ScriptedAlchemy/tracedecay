@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseAuthorityRole;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use crate::RegisteredGlobalDb;
 
@@ -94,7 +95,10 @@ impl RegisteredGlobalDb {
     #[hotpath::skip]
     pub async fn checkpoint(&self) {
         if let Err(error) = self.checkpoint_result().await {
-            eprintln!("[tracedecay] registered database WAL checkpoint failed: {error}");
+            log_daemon_event(
+                "registered_database_wal_checkpoint_failed",
+                &[("error", error.to_string())],
+            );
         }
     }
 

@@ -22,6 +22,10 @@ use super::semantic_activation_journey_test::{
     install_project_distribution_fixture, installed_selection_material, selection,
     set_semantic_profile, wait_for_semantic_generation,
 };
+use super::semantic_availability_fallback_digest::{
+    assert_activation_preserves_ranking_and_transitions_anchor,
+    assert_core_policy_evaluation_result_anchor,
+};
 use super::*;
 
 const PROBE_SYMBOL: &str = "semantic_availability_probe";
@@ -297,7 +301,25 @@ pub(super) fn assert_semantic_pending(payload: &Value) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retrieval_answers_before_activation() {
+    run_semantic_availability_journey(ActivationHalf::StopBeforeQualification).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_activation() {
+    run_semantic_availability_journey(ActivationHalf::ThroughActivation).await;
+}
+
+enum ActivationHalf {
+    /// Phase 1 only. Native qualification (#1197) is owned by other lanes;
+    /// this half must stay green on the redesign tip.
+    StopBeforeQualification,
+    /// Continues through evaluation and live activation as soon as
+    /// qualification publishes an accepted profile.
+    ThroughActivation,
+}
+
+async fn run_semantic_availability_journey(activation: ActivationHalf) {
     // The journey needs the byte-pinned FastEmbed package from distribution
     // acceptance; it cannot be synthesized, and a default `cargo test --lib`
     // has no reason to have it. Skip explicitly rather than fail the lane.
@@ -389,6 +411,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
         fallback_digest_before.is_string(),
         "the canonical core query bytes must be published while semantic is pending"
     );
+    assert_core_policy_evaluation_result_anchor(&core_before);
 
     let (refused_before, strict_before) = strict_search(&harness, &project).await;
     assert!(
@@ -445,6 +468,11 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
             .is_some_and(|count| count > 0),
         "ordinary session retrieval must answer non-vacuously before activation: {answers_before}"
     );
+
+    if matches!(activation, ActivationHalf::StopBeforeQualification) {
+        harness.shutdown().await;
+        return;
+    }
 
     // ---- Phase 2: the real accepted-profile evaluation. -------------------
     let accepted_profile = evaluate_native_profile(&harness, &project).await;
@@ -519,10 +547,7 @@ async fn retrieval_answers_before_activation_and_is_unchanged_by_live_semantic_a
     for lane in ["exact", "lexical", "graph"] {
         assert_lane_complete(&core_after["coverage"], lane);
     }
-    assert_eq!(
-        core_after["query_fallback_digest"], fallback_digest_before,
-        "activation must preserve the canonical core query bytes"
-    );
+    assert_activation_preserves_ranking_and_transitions_anchor(&core_before, &core_after);
     assert_eq!(
         non_semantic_answers(&harness, &project).await,
         answers_before,

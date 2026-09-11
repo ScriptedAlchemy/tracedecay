@@ -880,8 +880,7 @@ async fn semantic_search_on_db(
             RetainedSurfaceOperation::FactStoreRelated,
         ),
         SemanticRead::Reason(request) => {
-            memory_mapping::validate_reason_entities(&request.entities)?;
-            let entities = request.entities.clone();
+            let entities = memory_mapping::normalize_reason_entities(&request.entities)?;
             (
                 ProjectMemoryFactSearchKindV1::Reason { entities },
                 None,

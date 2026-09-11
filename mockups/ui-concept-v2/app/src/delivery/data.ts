@@ -96,16 +96,16 @@ export const DELIVERY_META: Record<DeliveryStateId, DeliveryMeta> = {
   },
   "03": {
     id: "03",
-    slug: "umbrella-delivery-graph",
-    kicker: "DELIVERY / UMBRELLA GRAPH",
+    slug: "registered-pr-evidence-graph",
+    kicker: "DELIVERY / REGISTERED PR EVIDENCE",
     scope: "all",
-    scopeNote: "Example outcome · 15 illustrated PRs / 6 repositories",
+    scopeNote: "registered repositories · tracked indexed heads",
     provider: "read-only",
     status: [
       { lab: "DATA", val: "authored example", tone: "quiet" },
-      { lab: "PR INBOX", val: "15 represented PRs", tone: "amber" },
+      { lab: "PR INBOX", val: "3 admitted · 1 not joined", tone: "amber" },
       { lab: "PROVIDER", val: "fixture only", tone: "violet" },
-      { lab: "SELECTION", val: "none · click a PR or repo", tone: "quiet" },
+      { lab: "SELECTION", val: "click a PR or signal", tone: "quiet" },
     ],
   },
   "04": {
@@ -259,6 +259,80 @@ export type PrRow = {
   freshness: "fresh" | "stale" | "unavailable";
   provider: HonestInbox | "ok";
 };
+
+export type DeliveryFixturePr = {
+  id: string;
+  repository: string;
+  trackedHead: string | null;
+  title: string;
+  agent: string;
+  code: string | null;
+  ci: string | null;
+  review: string | null;
+  nextAction: string;
+  attention: ("ci-failed" | "diagnostics" | "review" | "stale" | "conflicting-edits")[];
+  admission: "joined" | "not-joined";
+  gap?: string;
+  edges?: { to: string; kind: "shared commit / PR reference" | "CI job link" | "review reference" }[];
+};
+
+/** Authored delivery fixture: only `joined` records have a tracked indexed head. */
+export const DELIVERY_FIXTURE_PRS: DeliveryFixturePr[] = [
+  {
+    id: "#12977",
+    repository: "web-infra-dev/rspack",
+    trackedHead: "ecd6feb8cec8",
+    title: "feat(mf): add layer-aware shared module core",
+    agent: "agent session / explicit",
+    code: "57 changed files / indexed head",
+    ci: "CI failed · integration tests",
+    review: "review requested",
+    nextAction: "Inspect failing integration check",
+    attention: ["ci-failed", "review"],
+    admission: "joined",
+    edges: [{ to: "#707", kind: "shared commit / PR reference" }],
+  },
+  {
+    id: "#707",
+    repository: "ScriptedAlchemy/tracedecay",
+    trackedHead: "d4e56a7f2c91",
+    title: "feat: add ingest retry backoff",
+    agent: "agent session / exact",
+    code: "12 changed files / indexed head",
+    ci: "CI passed",
+    review: "changes requested",
+    nextAction: "Resolve requested retry review",
+    attention: ["review", "diagnostics"],
+    admission: "joined",
+  },
+  {
+    id: "#2314",
+    repository: "module-federation/core",
+    trackedHead: "a6c18d2f7510",
+    title: "feat: remote retry policy",
+    agent: "session unavailable",
+    code: "187 changed files / indexed head",
+    ci: "CI stale · observed 35m ago",
+    review: null,
+    nextAction: "Refresh CI evidence before review",
+    attention: ["stale"],
+    admission: "joined",
+  },
+  {
+    id: "#8187",
+    repository: "rslib/rslib",
+    trackedHead: null,
+    title: "fix: tree-shake side effects",
+    agent: "not joined",
+    code: null,
+    ci: "provider rate-limited",
+    review: null,
+    nextAction: "Index the tracked head to admit this PR",
+    attention: ["conflicting-edits"],
+    admission: "not-joined",
+    gap: "not joined to indexed head",
+  },
+];
 
 export const STATUS_FILTERS = [
   { label: "Unresolved", count: "1,842", tone: "danger" as StatusTone, pct: 100 },

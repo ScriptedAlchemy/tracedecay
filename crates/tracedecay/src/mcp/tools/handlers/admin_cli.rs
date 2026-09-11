@@ -282,6 +282,10 @@ fn parse_admin_cli_action(args: Value) -> Result<AdminCliAction> {
 }
 
 #[hotpath::measure(label = "mcp.admin.cli.total")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Admin CLI dispatch is one subcommand match onto the owning composition-root action."
+)]
 async fn dispatch_admin_cli(
     context: AdminCliContext<'_>,
     action: AdminCliAction,

@@ -562,6 +562,7 @@ mod tests {
             disposition: NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(
                 MechanicalIntegrationModeV1::FastForward,
             ),
+            analysis: None,
             ordered_commit_count: 2,
             created_at: UtcMicros(20),
             expires_at: UtcMicros(30),

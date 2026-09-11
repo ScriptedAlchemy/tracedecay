@@ -9,6 +9,7 @@
 //! keeps the automation_runner_test name because automation artifacts embed
 //! `cargo test --test automation_runner_test ...` replay commands.
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

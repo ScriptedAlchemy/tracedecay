@@ -166,6 +166,55 @@ pub async fn load_raw_message_by_identity(
     })
 }
 
+pub async fn load_raw_message_store_ids_by_identity(
+    conn: &(impl QueryExecutor + ?Sized),
+    identities: &[(String, String)],
+) -> Result<BTreeMap<(String, String), i64>, LcmError> {
+    if identities.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut message_ids_by_provider = BTreeMap::<&str, Vec<&str>>::new();
+    for (provider, message_id) in identities {
+        message_ids_by_provider
+            .entry(provider)
+            .or_default()
+            .push(message_id);
+    }
+    let mut values = Vec::with_capacity(identities.len() + message_ids_by_provider.len());
+    let predicate = message_ids_by_provider
+        .into_iter()
+        .map(|(provider, message_ids)| {
+            values.push(Value::Text(provider.to_owned()));
+            let provider_param = values.len();
+            let message_params = message_ids
+                .into_iter()
+                .map(|message_id| {
+                    values.push(Value::Text(message_id.to_owned()));
+                    format!("?{}", values.len())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("(provider = ?{provider_param} AND message_id IN ({message_params}))")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sql = format!(
+        "SELECT provider, message_id, store_id
+         FROM lcm_raw_messages
+         WHERE {predicate}"
+    );
+    let mut rows = hotpath::future!(
+        conn.query(&sql, values),
+        label = "sessions.lcm.grep.store_ids"
+    )
+    .await?;
+    let mut store_ids = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        store_ids.insert((row.get(0)?, row.get(1)?), row.get(2)?);
+    }
+    Ok(store_ids)
+}
+
 pub(crate) async fn load_raw_messages_by_identity(
     conn: &(impl QueryExecutor + ?Sized),
     identities: &[(String, String)],

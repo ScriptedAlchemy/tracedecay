@@ -10,7 +10,7 @@ use serde_json::Value;
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
+    CodeGraphSymbolPageV1, CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_contracts::{
     ApplicationOperation, CancellationSignal, Deadline, RequestContext, RequestId,
@@ -395,6 +395,17 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .symbols_page(after, max_symbols, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub fn find_symbols(
+        &self,
+        predicate: &CodeGraphSymbolPredicate<'_>,
+        limit: usize,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .find_symbols(predicate, limit, Arc::clone(&self.cancellation))
             .map_err(graph_projection_error)
     }
 

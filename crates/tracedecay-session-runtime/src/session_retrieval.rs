@@ -95,7 +95,7 @@ mod admitted;
 mod contract;
 mod primitive;
 pub use admitted::{
-    SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
+    LcmRawStoreIdsFutureV1, SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
     UnavailableSessionApplicationRetrievalV1,
 };
 pub use contract::{

@@ -375,6 +375,68 @@ fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
     })
 }
 
+/// Provider usage is scoped to the active project only when the request is
+/// project-scoped and the sessions shard's `project_id` matches the active
+/// store identity; any other combination reads all-project usage rather than
+/// a neighbouring project's.
+async fn observatory_and_costs_sections(
+    cg: &TraceDecay,
+    gdb: &RegisteredGlobalDb,
+    project_sessions: Option<&RegisteredGlobalDb>,
+    scope: &ResolvedScope,
+    all_projects: bool,
+    since: i64,
+    value: &mut Value,
+) -> Result<()> {
+    let observatory = hotpath::future!(
+        tracedecay_application::observability::observatory_read_model(
+            gdb,
+            scope.filter.as_deref(),
+            since,
+        ),
+        label = "mcp.analytics.report.observatory"
+    )
+    .await;
+    let observatory = tracedecay_application::observability::observatory_mcp_value(&observatory)
+        .map_err(config_error)?;
+    let provider_scope = if all_projects {
+        None
+    } else {
+        project_sessions.and_then(|sessions| {
+            let StoreShardScopeV1::ProjectSessions { project_id } =
+                &sessions.binding().shard_id.scope
+            else {
+                return None;
+            };
+            (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str())).then(
+                || ObservationScopeV1::Project {
+                    project_id: project_id.clone(),
+                },
+            )
+        })
+    };
+    let provider_usage_db = if all_projects { None } else { project_sessions };
+    let costs = hotpath::future!(
+        tracedecay_application::observability::costs_read_model(
+            gdb,
+            provider_usage_db,
+            provider_scope.as_ref(),
+            scope.filter.as_deref(),
+            since,
+        ),
+        label = "mcp.analytics.report.costs"
+    )
+    .await;
+    let costs =
+        tracedecay_application::observability::costs_mcp_value(&costs).map_err(config_error)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| config_error("analytics response must be a JSON object"))?;
+    object.insert("observatory".to_string(), observatory);
+    object.insert("costs".to_string(), costs);
+    Ok(())
+}
+
 #[hotpath::measure(label = "mcp.analytics.report.total")]
 pub(super) async fn handle_analytics(
     cg: &TraceDecay,
@@ -416,52 +478,16 @@ pub(super) async fn handle_analytics(
     });
 
     if section.is_none() {
-        let observatory = hotpath::future!(
-            tracedecay_application::observability::observatory_read_model(
-                gdb,
-                scope.filter.as_deref(),
-                since,
-            ),
-            label = "mcp.analytics.report.observatory"
+        observatory_and_costs_sections(
+            cg,
+            gdb,
+            project_sessions,
+            &scope,
+            all_projects,
+            since,
+            &mut value,
         )
-        .await;
-        let observatory =
-            tracedecay_application::observability::observatory_mcp_value(&observatory)
-                .map_err(config_error)?;
-        let provider_scope = if all_projects {
-            None
-        } else {
-            project_sessions.and_then(|sessions| {
-                let StoreShardScopeV1::ProjectSessions { project_id } =
-                    &sessions.binding().shard_id.scope
-                else {
-                    return None;
-                };
-                (cg.store_layout().identity.project_id.as_deref() == Some(project_id.as_str()))
-                    .then(|| ObservationScopeV1::Project {
-                        project_id: project_id.clone(),
-                    })
-            })
-        };
-        let provider_usage_db = if all_projects { None } else { project_sessions };
-        let costs = hotpath::future!(
-            tracedecay_application::observability::costs_read_model(
-                gdb,
-                provider_usage_db,
-                provider_scope.as_ref(),
-                scope.filter.as_deref(),
-                since,
-            ),
-            label = "mcp.analytics.report.costs"
-        )
-        .await;
-        let costs =
-            tracedecay_application::observability::costs_mcp_value(&costs).map_err(config_error)?;
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| config_error("analytics response must be a JSON object"))?;
-        object.insert("observatory".to_string(), observatory);
-        object.insert("costs".to_string(), costs);
+        .await?;
     }
 
     if wants_section(section, "tools") {
@@ -513,6 +539,10 @@ pub(super) async fn handle_analytics(
     }))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "The tools analytics section ranks every cataloged tool from one usage read."
+)]
 fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
     let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
     for row in rows {

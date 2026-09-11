@@ -99,6 +99,25 @@ pub(crate) async fn run_summary_convergence_page(
     })
 }
 
+/// One bounded page of the predecessor-range rewrite, with no other
+/// convergence work.
+///
+/// The scheduler admits this when historical continuation owns the pass:
+/// the rewrite must still converge on a profile whose history perpetually
+/// needs another window, and unlike summary convergence it carries no model
+/// call, so it fits the same bounded budget a history page takes.
+#[hotpath::measure(label = "daemon.lcm.predecessor_range_rewrite.page", future = true)]
+pub(crate) async fn run_predecessor_range_rewrite_page(
+    database: RegisteredGlobalDbLeaseV1,
+) -> Result<LcmSummaryConvergencePage, LcmError> {
+    let rewrite = rewrite_predecessor_ranges(&database).await?;
+    Ok(LcmSummaryConvergencePage {
+        has_more: rewrite.has_more,
+        predecessor_range_rows_rewritten: rewrite.rows_rewritten,
+        ..LcmSummaryConvergencePage::default()
+    })
+}
+
 async fn backfill_queue(
     database: &RegisteredGlobalDbLeaseV1,
 ) -> Result<tracedecay_lcm::summary_convergence::LcmSummaryQueueBackfillPage, LcmError> {
