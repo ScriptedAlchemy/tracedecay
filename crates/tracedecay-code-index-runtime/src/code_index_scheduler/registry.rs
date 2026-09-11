@@ -327,6 +327,14 @@ impl ServingSwapOutcomeV1 {
     }
 }
 
+pub(crate) fn semantic_handoff_has_exact_witness(
+    publication_matches: bool,
+    witness: Option<&super::ServingSourceWitnessV1>,
+    generation: &CodeGenerationId,
+) -> bool {
+    publication_matches && witness.is_some_and(|witness| &witness.generation_id == generation)
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 struct ColdMountFinalCommitGateV1 {
     project_root: PathBuf,
@@ -4334,6 +4342,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_generation = Arc::clone(&worker_text_generation);
                     let serving_seats = Arc::clone(&worker_serving_seats);
                     let serving_generation_changed = worker_serving_generation_changed.clone();
+                    let source_freshness = worker_source_freshness.clone();
+                    let project_root = worker_project_root.clone();
+                    let control_epoch = Arc::clone(&worker_control_epoch);
+                    let semantic_observed_epoch = control_epoch.load(Ordering::Acquire);
                     let text_latest = latest.clone();
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -4418,12 +4430,29 @@ impl CodeIndexSchedulerRegistryV1 {
                                 Self::record_serving_seat(&serving_seats);
                                 serving_generation_changed.send_replace(());
                             }
-                            // Semantic admission is independently retryable. A
-                            // prior attempt may have lost bounded queue capacity,
-                            // so an unchanged reconcile must offer the already-
-                            // serving generation again without reinstalling it.
-                            let _ =
-                                scheduler.schedule_semantic_generation(latest.generation_handle());
+                            // Only the exact-source witness authorizes this
+                            // decoded-seat handoff. A retained stale seat is
+                            // allowed to keep reads available while refresh
+                            // runs, but must not enter semantic projection. Its
+                            // later current Noop uses the retained-text handoff
+                            // below. A witnessed `Offered` generation remains
+                            // eligible for the existing retry semantics.
+                            let semantic_source_is_current = semantic_handoff_has_exact_witness(
+                                publication_matches,
+                                serving_source_witness
+                                    .read()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .as_ref(),
+                                &latest.generation().manifest().generation_id,
+                            ) && control_epoch
+                                .load(Ordering::Acquire)
+                                == semantic_observed_epoch
+                                && source_freshness
+                                    .ready_without_stat(&project_root, &shutting_down);
+                            if semantic_source_is_current {
+                                let _ = scheduler
+                                    .schedule_semantic_generation(latest.generation_handle());
+                            }
                             Ok::<_, CodeIndexSchedulerErrorV1>(outcome)
                         }),
                         label = "daemon.code_index.serving_swap"
@@ -4511,15 +4540,100 @@ impl CodeIndexSchedulerRegistryV1 {
                     // intentionally leaves that seat empty, so the canonical
                     // text owner and current source proof are the wake
                     // authority. Readers still validate scope and freshness.
-                    if matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_))
-                        && worker_text_generation
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .is_some()
+                    let retained_generation =
+                        matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_))
+                            .then(|| {
+                                worker_text_generation
+                                    .read()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .as_ref()
+                                    .map(|latest| {
+                                        latest.metadata().manifest().generation_id.clone()
+                                    })
+                            })
+                            .flatten();
+                    let source_is_current = retained_generation.is_some()
                         && worker_source_freshness
-                            .ready_without_stat(&worker_project_root, &worker_shutting_down)
-                    {
+                            .ready_without_stat(&worker_project_root, &worker_shutting_down);
+                    if source_is_current {
                         worker_serving_generation_changed.send_replace(());
+                    }
+                    if source_is_current && let Some(expected_generation) = retained_generation {
+                        // Semantic projection consumes the canonical immutable
+                        // generation, not the text/graph serving adapters. A
+                        // partitioned retained head intentionally has no decoded
+                        // seat, so load its shared publication only after the
+                        // quiet source proof. Publication caching makes repeated
+                        // Noops reuse this Arc; the semantic scheduler retains
+                        // its existing at-least-once deduplication and retry.
+                        let scheduler = Arc::clone(&worker_scheduler);
+                        let serving_generation = Arc::clone(&worker_serving_generation);
+                        let shutting_down = Arc::clone(&worker_shutting_down);
+                        let source_freshness = worker_source_freshness.clone();
+                        let project_root = worker_project_root.clone();
+                        let control_epoch = Arc::clone(&worker_control_epoch);
+                        let observed_epoch = control_epoch.load(Ordering::Acquire);
+                        let handoff = tokio::task::spawn_blocking(move || -> Result<
+                            Option<SavedGenerationScheduleOutcomeV1>,
+                            CodeIndexSchedulerErrorV1,
+                        > {
+                            let scheduler = Self::lock_scheduler_unless_shutting_down(
+                                &scheduler,
+                                &shutting_down,
+                            )?;
+                            if scheduler.semantic_schedule.is_none()
+                                || control_epoch.load(Ordering::Acquire) != observed_epoch
+                            {
+                                return Ok(None);
+                            }
+                            let generation = serving_generation
+                                .read()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .filter(|latest| {
+                                    latest.generation().manifest().generation_id
+                                        == expected_generation
+                                })
+                                .map(LatestCompleteCodeIndexV1::generation_handle)
+                                .or_else(|| {
+                                    scheduler.latest_complete().and_then(|latest| {
+                                        (latest.generation().manifest().generation_id
+                                            == expected_generation)
+                                            .then(|| latest.generation_handle())
+                                        })
+                                });
+                            if control_epoch.load(Ordering::Acquire) != observed_epoch
+                                || !source_freshness
+                                    .ready_without_stat(&project_root, &shutting_down)
+                            {
+                                return Ok(None);
+                            }
+                            let Some(generation) = generation else {
+                                tracing::warn!(
+                                    event = "code_index_semantic_schedule_declined",
+                                    outcome = SavedGenerationScheduleOutcomeV1::NoServingGeneration
+                                        .as_str(),
+                                    generation = %expected_generation,
+                                    "current retained generation could not be loaded for semantic projection"
+                                );
+                                return Ok(None);
+                            };
+                            Ok(Some(scheduler.schedule_semantic_generation(generation)))
+                        })
+                        .await;
+                        match handoff {
+                            Ok(Ok(Some(_)) | Ok(None)) => {}
+                            Ok(Err(error)) => tracing::warn!(
+                                event = "code_index_semantic_retained_handoff_failed",
+                                error = %error,
+                                "current retained generation could not reach semantic projection"
+                            ),
+                            Err(error) => tracing::warn!(
+                                event = "code_index_semantic_retained_handoff_task_failed",
+                                error = %error,
+                                "retained semantic handoff task failed"
+                            ),
+                        }
                     }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
@@ -5554,6 +5668,7 @@ impl CodeIndexSchedulerRegistryV1 {
             build_progress,
             hints,
             pending_wake,
+            source_freshness,
             graph_activation_enabled,
         ) = {
             let mounted = self.mounted.lock().await;
@@ -5569,6 +5684,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.pending_wake),
+                worktree.source_freshness.clone(),
                 worktree.graph_activation.policy().is_enabled(),
             )
         };
@@ -5590,14 +5706,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 progress
             });
-            let refreshing = reconcile_in_progress.load(Ordering::Acquire) != 0;
-            let rebuild_in_flight = refreshing
+            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0
                 || pending_wake
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .micros
                     != 0;
+            let source_change_pending = source_freshness.source_change_pending();
             let parked = convergence_park
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5641,6 +5757,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         graph_activation_enabled,
                         &code_graph_serving,
                     );
+                    let verifying = ready && refresh_in_flight && !source_change_pending;
+                    let refreshing = refresh_in_flight && !verifying;
+                    let rebuild_in_flight = refreshing;
                     let stale = hook_hint_count != Some(0);
                     let last_reconcile_micros = match last_reconciled_at_micros
                         .load(Ordering::Acquire)
@@ -5656,6 +5775,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         staleness_state: Some(
                             if parked.is_some() && !ready {
                                 "parked"
+                            } else if verifying {
+                                "verifying"
                             } else if refreshing {
                                 if ready {
                                     "refreshing"
@@ -5674,6 +5795,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         hook_hint_count,
                         coverage: if refreshing {
                             "partial_refresh_in_progress"
+                        } else if verifying {
+                            "partial_source_verification"
                         } else if hook_hint_count.is_some() {
                             "complete"
                         } else {
@@ -5712,8 +5835,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 graph_activation_enabled,
                 &code_graph_serving,
             );
+            let verifying = ready && refresh_in_flight && !source_change_pending;
+            let refreshing = refresh_in_flight && !verifying;
+            let rebuild_in_flight = refreshing;
             let staleness_state = if parked.is_some() && !ready {
                 "parked"
+            } else if verifying {
+                "verifying"
             } else if refreshing {
                 if ready {
                     "refreshing"
@@ -5745,6 +5873,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 hook_hint_count,
                 coverage: if refreshing {
                     "partial_refresh_in_progress"
+                } else if verifying {
+                    "partial_source_verification"
                 } else if !verified {
                     "partial_unverified_restore"
                 } else if hook_hint_count.is_some() {
@@ -6523,11 +6653,10 @@ impl CodeIndexSchedulerRegistryV1 {
         latest_matches_scope_identity(&latest, scope).then_some(latest)
     }
 
-    /// Whether a rebuild remedy is actually in motion for the exact mounted
-    /// root: a reconcile pass owns the worktree right now, or a wake is
-    /// pending for the background worker. A caller serving the stale seat
-    /// quotes this so a wedged route — days-old seat, nothing progressing —
-    /// is distinguishable from a routine rebuild window.
+    /// Whether a source-moving rebuild remedy is actually in motion for the
+    /// exact mounted root. An expired source proof can own the same worker
+    /// without any evidence that the checkout moved; that is verification,
+    /// not a replacement build.
     #[hotpath::measure(
         label = "daemon.code_index.query.rebuild_pass_in_flight",
         future = true
@@ -6549,14 +6678,15 @@ impl CodeIndexSchedulerRegistryV1 {
         {
             return false;
         }
-        worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
+        let refresh_in_flight = worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
             || worktree
                 .pending_wake
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .micros
-                != 0
+                != 0;
+        refresh_in_flight && worktree.source_freshness.source_change_pending()
     }
 
     /// Whether an exact mounted route has no admissible generation because its
@@ -6624,6 +6754,7 @@ impl CodeIndexSchedulerRegistryV1 {
             hints,
             wake,
             pending_wake,
+            reconcile_in_progress,
         ) = {
             let mounted = self.mounted.lock().await;
             let Some((root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
@@ -6638,6 +6769,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.reconcile_in_progress),
             )
         };
         #[cfg(test)]
@@ -6652,6 +6784,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let Some(wake_claim) = PendingWakeClaimV1::claim(Arc::clone(&pending_wake)) else {
             return false;
         };
+        // The pending marker covers admission until the worker dequeues it;
+        // the pass counter covers the interval after dequeue. A query arriving
+        // in that second interval is already covered by the running source
+        // proof and must not queue an identical follow-up pass.
+        if reconcile_in_progress.load(Ordering::Acquire) != 0 {
+            return false;
+        }
         #[cfg(test)]
         if let Some(test_control) = test_control.as_ref()
             && test_control.pauses_after_claim.load(Ordering::Acquire)

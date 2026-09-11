@@ -55,7 +55,7 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
     }
 }
 
-async fn sleep_until_deadline(deadline: &Deadline) {
+pub(crate) async fn sleep_until_deadline(deadline: &Deadline) {
     let now = now_micros();
     if deadline.is_elapsed_at(now) {
         return;

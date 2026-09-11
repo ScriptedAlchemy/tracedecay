@@ -41,13 +41,21 @@ impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
                 .await
                 .map_err(|_| ApplicationContractError::Inconsistent {
                     field: "managed test result code generation",
-                })?
-                .admit_commit_scope(&scope)
-                .map_err(|_| ApplicationContractError::Inconsistent {
-                    field: "managed test result sealed scope",
                 })?;
+            let head_commit_id =
+                current
+                    .head_commit_id
+                    .clone()
+                    .ok_or(ApplicationContractError::Inconsistent {
+                        field: "managed test result head commit",
+                    })?;
+            let current = current.admit_worktree_scope(&scope).map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "managed test result sealed scope",
+                }
+            })?;
             Ok(ManagedTestRunCurrentIdentity {
-                head_commit_id: current.head_commit_id,
+                head_commit_id,
                 code_generation_id: current.code_generation_id,
             })
         })

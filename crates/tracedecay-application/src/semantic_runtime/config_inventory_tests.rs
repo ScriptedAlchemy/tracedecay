@@ -480,7 +480,6 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
     let first_revision = primary.configuration_revision().clone();
     let sibling_revision = typed::<ConfigurationRevisionId>("configuration.sibling");
     let next_revision = typed::<ConfigurationRevisionId>("configuration.next");
-    let metadata = commit_metadata;
     let initial = cas(&primary);
     primary
         .activate(
@@ -489,7 +488,7 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
             candidate.active().clone(),
             &runtime,
             &runtime,
-            metadata(first_revision.clone(), sibling_revision.clone()),
+            commit_metadata(first_revision.clone(), sibling_revision.clone()),
         )
         .unwrap();
     // A project commit must not change the sibling's scope token. Its new grant
@@ -501,7 +500,7 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
             candidate.active().clone(),
             &runtime,
             &runtime,
-            metadata(sibling_revision.clone(), next_revision.clone()),
+            commit_metadata(sibling_revision.clone(), next_revision.clone()),
         )
         .unwrap();
     sibling.snapshot().unwrap().into_state().unwrap();
@@ -513,7 +512,7 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
             candidate.active().clone(),
             &runtime,
             &runtime,
-            metadata(next_revision.clone(), typed("configuration.stale")),
+            commit_metadata(next_revision.clone(), typed("configuration.stale")),
         ),
         Err(RetrievalProfileActivationErrorV1::CasConflict),
     );
@@ -525,7 +524,7 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
             &expected,
             &runtime,
             "restore".into(),
-            metadata(next_revision.clone(), typed("configuration.denied")),
+            commit_metadata(next_revision.clone(), typed("configuration.denied")),
         ),
         Err(RetrievalProfileActivationErrorV1::Unauthorized),
     );
@@ -538,7 +537,7 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
             &expected,
             &runtime,
             "restore".into(),
-            metadata(settings_revision, typed("configuration.restored")),
+            commit_metadata(settings_revision, typed("configuration.restored")),
         )
         .unwrap();
     assert_eq!(sibling.active(), committed.rollback_profile().unwrap());
@@ -552,7 +551,7 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
             candidate.active().clone(),
             &runtime,
             &runtime,
-            metadata(restored_revision, typed("configuration.reactivated")),
+            commit_metadata(restored_revision, typed("configuration.reactivated")),
         )
         .unwrap();
     assert_eq!(sibling.active(), committed.active());
@@ -565,7 +564,7 @@ fn sibling_configuration_commits_preserve_scope_cas_and_reject_stale_same_scope(
             &expected,
             &runtime,
             "stale restore".into(),
-            metadata(revision, typed("configuration.stale-aba")),
+            commit_metadata(revision, typed("configuration.stale-aba")),
         ),
         Err(RetrievalProfileActivationErrorV1::CasConflict),
     );

@@ -33,6 +33,7 @@ fn identity() -> LspCodeIndexProjectionIdentity {
         repository: id("repository.lsp-scope"),
         worktree: Some(id("worktree.lsp-scope")),
         reference: Some(id("ref.main")),
+        head_commit_id: Some(id("commit.lsp-scope")),
         source_revision: Some(id("commit.lsp-scope")),
         code_generation_id: id::<CodeGenerationId>("generation.lsp.scope.7"),
         snapshot_digest: id::<ManifestDigest>(&digest('a')),
