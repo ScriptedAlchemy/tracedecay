@@ -382,7 +382,6 @@ async fn execute_with_owner(
                     let application_request = NativeIntegrationPreflightRequestV1 {
                         context,
                         topology,
-                        evidence: preflight.evidence.into(),
                         preview_id,
                         preferred_mode: preflight.preferred_mode,
                         preview_expires_at,

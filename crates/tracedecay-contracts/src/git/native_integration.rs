@@ -233,26 +233,6 @@ impl<T: NativeIntegrationStackResolutionPort + ?Sized> NativeIntegrationStackRes
     }
 }
 
-/// Exact semantic evidence revisions joined to native conflict evidence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct NativeIntegrationEvidenceRevisionsV1 {
-    pub graph_revision_digest: ManifestDigest,
-    pub test_revision_digest: ManifestDigest,
-    pub schema_revision_digest: ManifestDigest,
-    pub migration_revision_digest: ManifestDigest,
-}
-
-impl NativeIntegrationEvidenceRevisionsV1 {
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        self.graph_revision_digest.validate()?;
-        self.test_revision_digest.validate()?;
-        self.schema_revision_digest.validate()?;
-        self.migration_revision_digest.validate()?;
-        Ok(())
-    }
-}
-
 /// Read-only preflight request. `preferred_mode` can only select one of the
 /// three fixed mechanical encodings; it cannot change topology or commits.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -260,7 +240,6 @@ impl NativeIntegrationEvidenceRevisionsV1 {
 pub struct NativeIntegrationPreflightRequestV1 {
     pub context: RequestContext,
     pub topology: NativeIntegrationStackResolutionRequestV1,
-    pub evidence: NativeIntegrationEvidenceRevisionsV1,
     pub preview_id: NativeIntegrationPreviewId,
     pub preferred_mode: Option<tracedecay_domain::MechanicalIntegrationModeV1>,
     pub preview_expires_at: UtcMicros,
@@ -289,7 +268,6 @@ impl NativeIntegrationPreflightRequestV1 {
             });
         }
         self.topology.validate()?;
-        self.evidence.validate()?;
         self.preview_id.validate()?;
         if self.context.scope().project_id != self.topology.destination.project_id
             || self.context.scope().repository_id != self.topology.destination.repository_id

@@ -717,7 +717,9 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn existing_exact_git_tree_generation(
         &self,
         source: &ExactGitTreeSourceV1,
+        control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSearchUnavailableReasonV1> {
+        control.termination().map_or(Ok(()), Err)?;
         let Some(pointer) = self
             .publication
             .read_publication_pointer()
@@ -744,6 +746,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         else {
             return Ok(None);
         };
+        if !generation
+            .compatibility_with(&self.production_config)
+            .is_reusable()
+        {
+            return Ok(None);
+        }
         if generation.snapshot().repository != self.repository_id
             || generation.snapshot().worktree.as_ref() != Some(&self.worktree_id)
             || generation.snapshot().reference.as_ref() != Some(&source.reference)
@@ -762,7 +770,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<LatestCompleteCodeIndexV1, CodeIndexSearchUnavailableReasonV1> {
-        if let Some(generation) = self.existing_exact_git_tree_generation(source)? {
+        control.termination().map_or(Ok(()), Err)?;
+        if let Some(generation) = self.existing_exact_git_tree_generation(source, control)? {
             return Ok(generation);
         }
         self.publish_exact_git_tree_generation(source, control)
@@ -833,7 +842,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         };
         let snapshot = generation.snapshot();
         let manifest = generation.manifest();
-        let matches = manifest.project_id == expected.project_id
+        let matches = generation
+            .compatibility_with(&self.production_config)
+            .is_reusable()
+            && manifest.project_id == expected.project_id
             && manifest.generation_id == expected.generation_id
             && snapshot.repository == expected.repository_id
             && snapshot.worktree == expected.worktree_id
