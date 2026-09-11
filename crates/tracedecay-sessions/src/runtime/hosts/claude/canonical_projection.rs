@@ -115,6 +115,9 @@ pub(super) fn map_canonical_claude_record(
                 Value::String(logical_parent_uuid.to_owned()),
             );
         }
+        // LCM native-compaction recognition decodes this envelope to confirm
+        // the boundary's preservedSegment.anchorUuid still names the summary.
+        metadata.insert("canonical_envelope".to_owned(), envelope_value);
         let message = SessionMessageRecord {
             provider: PROVIDER.to_owned(),
             message_id: format!(
@@ -375,6 +378,19 @@ fn canonical_message_metadata_from_facts(
                 _ => {}
             }
         }
+    }
+
+    if envelope
+        .facts()
+        .iter()
+        .any(|fact| matches!(fact, CanonicalObservationFactV1::Compaction { .. }))
+    {
+        // Compact-summary rows keep the canonical envelope so LCM can read the
+        // native flags and parent id without a second transcript pass.
+        metadata.insert(
+            "canonical_envelope".to_owned(),
+            serde_json::to_value(envelope).unwrap_or(Value::Null),
+        );
     }
 
     metadata
