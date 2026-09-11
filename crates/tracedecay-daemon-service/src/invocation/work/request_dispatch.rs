@@ -415,8 +415,14 @@ pub(super) async fn dispatch_work_application(
                     operation_key,
                     use_case.clone(),
                     input_digest,
-                    services.attempts().list(&context, &request, |authority| {
-                        preparation::current_executor_attempt_topology(&services, authority)
+                    services.attempts().list(&context, &request, |_authority| {
+                        preparation::current_work_product_attempt_topology(
+                            &registered,
+                            &context,
+                            capability,
+                            &use_case,
+                            observed_at,
+                        )
                     }),
                     observed_at,
                     deadline,
@@ -431,6 +437,7 @@ pub(super) async fn dispatch_work_application(
             &context,
             canonical_request_id,
             operation_key,
+            capability,
             use_case,
             input_digest,
             observed_at,
@@ -494,8 +501,14 @@ pub(super) async fn dispatch_work_application(
                         &registered.work_topology_policy,
                         &context,
                         &request,
-                        |authority| {
-                            preparation::current_executor_attempt_topology(&services, authority)
+                        |_authority| {
+                            preparation::current_work_product_attempt_topology(
+                                &registered,
+                                &context,
+                                capability,
+                                &use_case,
+                                observed_at,
+                            )
                         },
                     ),
                     observed_at,
@@ -536,8 +549,11 @@ pub(super) async fn dispatch_work_application(
         WorkApplicationInvocationV1::PrepareDuplicateAdjudication(request) => {
             hotpath::measure_block!("daemon.service.work.prepare_duplicate", {
                 let prepared = preparation::prepare_duplicate_adjudication(
+                    &registered,
                     &services,
                     &context,
+                    capability,
+                    &use_case,
                     request,
                     &canonical_request_id,
                     observed_at,
