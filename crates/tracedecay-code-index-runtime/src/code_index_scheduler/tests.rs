@@ -3850,7 +3850,7 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
     drop(config_a);
 
     let mut config_b = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    replace_scheduler_chunker_revision(&mut config_b, "chunker.daemon.v4");
+    replace_scheduler_chunker_revision(&mut config_b, "chunker.daemon.v5");
     assert_eq!(
         config_b
             .latest_complete()
@@ -3886,7 +3886,7 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
             .manifest()
             .chunker_revision
             .as_str(),
-        "chunker.daemon.v4"
+        "chunker.daemon.v5"
     );
 }
 
