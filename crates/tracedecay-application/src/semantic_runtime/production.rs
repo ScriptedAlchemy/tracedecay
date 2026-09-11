@@ -4624,7 +4624,7 @@ mod tests {
             max_threads: 8,
             max_concurrent_sessions: 2,
             max_batch_size: 32,
-            max_sequence_length: 512,
+            max_sequence_length: 4096,
             load_deadline_ms: 30_000,
         };
         let accepted = crate::config::retrieval::SemanticResourceRequirementV1 {
@@ -4703,7 +4703,7 @@ mod tests {
             max_threads: 8,
             max_concurrent_sessions: 4,
             max_batch_size: 32,
-            max_sequence_length: 512,
+            max_sequence_length: 4096,
             load_deadline_ms: 30_000,
         };
 
