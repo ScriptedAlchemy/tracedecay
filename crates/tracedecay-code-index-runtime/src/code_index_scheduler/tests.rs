@@ -10089,6 +10089,40 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn active_source_verification_does_not_queue_a_second_query_pass() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+
+    let pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted reconcile owner");
+    assert!(
+        !registry.request_query_background_reconcile(&scope).await,
+        "the active source proof already supplies the query's remedy"
+    );
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "query admission must not queue a duplicate pass after worker dequeue"
+    );
+
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness");
+    assert_eq!(projected.staleness_state.as_deref(), Some("verifying"));
+    assert_eq!(projected.coverage, "partial_source_verification");
+    assert!(!projected.rebuild_in_flight);
+
+    drop(pass);
+    registry.shutdown().await;
+}
+
 /// A dashboard status view reports the last execution-owned scheduler state; it
 /// must not run the freshness ladder, wake a worker, or publish an out-of-band
 /// source change merely because an operator opened the view.

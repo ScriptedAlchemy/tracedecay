@@ -788,12 +788,11 @@ pub fn handle_tool_call_with_registry_options<'a>(
         };
         match result {
             Ok(mut result) => {
-                // The verified-graph open funnel reports serve-old-while-
-                // rebuilding through the one-shot options slot; the answer is
-                // sound for the served generation but may trail the live
-                // worktree, and the response must say so — including whether
-                // a rebuild is actually in motion, so a wedged route serving
-                // days-old answers is visibly wedged, not "rebuilding".
+                // The verified-graph open funnel reports a stale serving seat
+                // through the one-shot options slot. The answer is sound for
+                // that generation but may trail the live worktree, so name
+                // whether source movement proved a rebuild or source currency
+                // remains unverified.
                 if let Some(served) = served_stale_graph_generation.get()
                     && let Some(content) = result
                         .value
@@ -805,8 +804,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                     let remedy = if served.rebuild_in_flight {
                         "while the code index rebuilds"
                     } else {
-                        "with no rebuild pass in flight — the scheduler is not \
-                         replacing this generation"
+                        "while source freshness remains unverified"
                     };
                     content.push(json!({"type": "text", "text": format!(
                         "\ncode_graph_freshness: stale — serving the last complete generation \
