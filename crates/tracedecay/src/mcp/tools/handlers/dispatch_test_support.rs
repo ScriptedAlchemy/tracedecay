@@ -132,9 +132,8 @@ pub(super) fn verified_graph_stale_options<'a>(
     )
 }
 
-/// [`verified_graph_stale_options`] with no rebuild pass in flight: the seat
-/// is stale and nothing is progressing, the wedged-route shape the trailer
-/// must distinguish from a routine rebuild.
+/// [`verified_graph_stale_options`] with no source-moving rebuild proven. The
+/// seat remains stale while source currency is unverified.
 pub(super) fn verified_graph_wedged_options<'a>(
     cg: &TraceDecay,
     options: ToolCallRegistryOptions<'a>,

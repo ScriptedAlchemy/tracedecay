@@ -5570,6 +5570,14 @@ impl SourceFreshnessFenceV1 {
             .reconciled_without_generation
     }
 
+    /// Whether canonical source input has advanced beyond the last completed
+    /// proof. An expired proof alone leaves the epochs equal: its background
+    /// pass is verification, not evidence that a replacement is being built.
+    fn source_change_pending(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        self.source_epoch.load(Ordering::Acquire) != state.reconciled_source_epoch
+    }
+
     fn ready_without_stat(&self, project_root: &Path, shutting_down: &AtomicBool) -> bool {
         let state = self.snapshot();
         self.snapshot_is_recently_verified(&state, project_root, shutting_down)
