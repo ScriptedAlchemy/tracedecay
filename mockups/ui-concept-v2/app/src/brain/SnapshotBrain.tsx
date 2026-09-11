@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import manifest from "../../profile-pack/manifest.json";
 import tracedecayBranch from "../../profile-pack/proj_ae394425f7837d4f/branch-meta.json";
 import zeroFsBranch from "../../profile-pack/proj_e19f6f383c982ea8/branch-meta.json";
@@ -28,10 +28,65 @@ const branches: Record<string, BranchMeta> = {
 const all = manifest.projects as RecordedProject[];
 const registered = all.filter(project => typeof project.tracedecay_db.graph_verified_heads_v1 === "number");
 
+type SnapshotProject = RecordedProject & { color: string; synced: Date | null };
+type SnapshotLayout = SnapshotProject & { x: number; y: number; size: number; labelDx: number; labelDy: number };
+
 function syncedAt(project: RecordedProject) {
   const branch = branches[project.id];
   const seconds = branch && Object.values(branch.branches)[0]?.last_synced_at;
   return seconds ? new Date(Number(seconds) * 1000) : null;
+}
+
+function circleHitsBox(circle: SnapshotLayout, box: { x: number; y: number; w: number; h: number }) {
+  const x = Math.max(box.x, Math.min(circle.x, box.x + box.w));
+  const y = Math.max(box.y, Math.min(circle.y, box.y + box.h));
+  return Math.hypot(circle.x - x, circle.y - y) < circle.size / 2 + 3;
+}
+
+function layoutProjects(projects: SnapshotProject[], width: number, height: number) {
+  const times = projects.map(project => project.synced?.getTime() ?? 0);
+  const oldest = Math.min(...times), newest = Math.max(...times);
+  const bodies: SnapshotLayout[] = projects.map((project, index) => {
+    const mass = project.tracedecay_db.graph_verified_heads_v1 ?? 0;
+    return {
+      ...project,
+      size: 66 + Math.sqrt(mass) * 35,
+      x: 80 + ((project.synced?.getTime() ?? 0) - oldest) / Math.max(1, newest - oldest) * Math.max(1, width - 180),
+      y: 110 + index * Math.max(72, (height - 190) / Math.max(1, projects.length - 1)),
+      labelDx: 14,
+      labelDy: 14,
+    };
+  });
+  const ordered = [...bodies].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  for (let pass = 0; pass < 64; pass++) {
+    let moved = false;
+    for (let i = 0; i < ordered.length; i++) for (let j = i + 1; j < ordered.length; j++) {
+      const a = ordered[i], b = ordered[j], dy = b.y - a.y;
+      const separation = Math.sqrt(Math.max(0, ((a.size + b.size) / 2 + 4) ** 2 - (b.x - a.x) ** 2));
+      if (Math.abs(dy) >= separation) continue;
+      const push = (separation - Math.abs(dy)) / 2 + 0.1;
+      if (dy < 0 || (dy === 0 && a.id < b.id)) { a.y += push; b.y -= push; } else { a.y -= push; b.y += push; }
+      moved = true;
+    }
+    for (const body of bodies) body.y = Math.max(body.size / 2 + 26, Math.min(height - body.size / 2 - 88, body.y));
+    if (!moved) break;
+  }
+  const occupied: { x: number; y: number; w: number; h: number }[] = [];
+  for (const body of [...bodies].sort((a, b) => a.label_from_store_manifest_root.length - b.label_from_store_manifest_root.length)) {
+    const w = Math.min(205, Math.max(100, body.label_from_store_manifest_root.length * 7 + 8)), h = 62;
+    const candidates = [[14, 14], [-w - 14, 14], [14, -h - 14], [-w - 14, -h - 14]].map(([dx, dy]) => ({
+      x: Math.max(8, Math.min(width - w - 8, body.x + dx)), y: Math.max(24, Math.min(height - h - 8, body.y + dy)), w, h,
+    }));
+    const best = candidates.reduce((a, b) => {
+      const cost = (box: typeof a) => occupied.reduce((sum, other) => sum + Math.max(0, Math.min(box.x + box.w, other.x + other.w) - Math.max(box.x, other.x)) * Math.max(0, Math.min(box.y + box.h, other.y + other.h) - Math.max(box.y, other.y)), 0)
+        + bodies.filter(other => other !== body).reduce((sum, other) => sum + (circleHitsBox(other, box) ? 1e9 : 0), 0);
+      return cost(a) <= cost(b) ? a : b;
+    });
+    body.labelDx = best.x - body.x;
+    body.labelDy = best.y - body.y;
+    occupied.push(best);
+  }
+  return bodies;
 }
 
 function SnapshotAbsence({ label, reason }: { label: string; reason: string }) {
@@ -46,10 +101,22 @@ export function SnapshotBrain(props: {
   setScoped: (scoped: boolean) => void;
 }) {
   const [atlas, setAtlas] = useState(new URLSearchParams(location.search).get("atlas") === "1");
+  const fieldRef = useRef<HTMLDivElement>(null);
+  const [fieldSize, setFieldSize] = useState({ width: 1000, height: 600 });
   const projects = useMemo(() => registered.map((project, index) => ({
     ...project, color: colors[index], synced: syncedAt(project),
   })).sort((a, b) => (b.synced?.getTime() ?? -Infinity) - (a.synced?.getTime() ?? -Infinity)), []);
   const active = projects.find(project => project.id === props.focusedId) ?? projects[0];
+  const layout = useMemo(() => layoutProjects(projects, fieldSize.width, fieldSize.height), [projects, fieldSize]);
+  useEffect(() => {
+    const field = fieldRef.current;
+    if (!field) return;
+    const measure = () => setFieldSize({ width: field.clientWidth, height: field.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(field);
+    return () => observer.disconnect();
+  }, []);
   const activityAbsent = "No admitted dashboard activity event was copied into this profile snapshot.";
 
   function choose(project: typeof active, scoped = false) {
@@ -97,17 +164,16 @@ export function SnapshotBrain(props: {
         </div>
       </div>
     ) : (
-      <div className="snapshot-brain-field">
+      <div className="snapshot-brain-field" ref={fieldRef}>
         <div className="snapshot-brain-axis"><b>RECENCY · recorded branch last_synced_at</b><span>older ← → newer</span></div>
-        {projects.map((project, index) => {
+        <svg className="snapshot-label-leaders" aria-hidden="true">{layout.filter(project => Math.hypot(project.labelDx, project.labelDy) > project.size / 2 + 28).map(project => <line key={project.id} x1={project.x} y1={project.y} x2={project.x + project.labelDx} y2={project.y + project.labelDy + 8} stroke={project.color} />)}</svg>
+        {layout.map((project) => {
           const mass = project.tracedecay_db.graph_verified_heads_v1 ?? 0;
-          const width = 66 + Math.sqrt(mass) * 35;
-          const left = 10 + ((project.synced?.getTime() ?? 0) - Math.min(...projects.map(item => item.synced?.getTime() ?? 0))) / Math.max(1, Math.max(...projects.map(item => item.synced?.getTime() ?? 0)) - Math.min(...projects.map(item => item.synced?.getTime() ?? 0))) * 75;
           return <button key={project.id} type="button" className={`snapshot-project ${active.id === project.id ? "is-active" : ""}`}
-            style={{ "--left": `${left}%`, "--size": `${width}px`, "--color": project.color, "--row": index % 3 } as CSSProperties}
+            style={{ "--left": `${project.x}px`, "--top": `${project.y}px`, "--size": `${project.size}px`, "--label-x": `${project.labelDx}px`, "--label-y": `${project.labelDy}px`, "--color": project.color } as CSSProperties}
             onMouseEnter={() => choose(project)} onFocus={() => choose(project)} onClick={() => choose(project, true)}>
-            <i /><b>{project.label_from_store_manifest_root}</b><span>{mass} verified head{mass === 1 ? "" : "s"} · EXACT</span>
-            <small>{project.synced ? project.synced.toISOString() : "recency unavailable"}</small>
+            <i /><span className="snapshot-project-label"><b>{project.label_from_store_manifest_root}</b><span>{mass} verified head{mass === 1 ? "" : "s"} · EXACT</span>
+            <small>{project.synced ? project.synced.toISOString() : "recency unavailable"}</small></span>
           </button>;
         })}
         <div className="snapshot-brain-key">BODY AREA · recorded indexed mass (graph_verified_heads_v1)<br />POSITION · recorded branch recency<br />Excluded: 1 registered project has an unsealed index, not an empty healthy body.</div>
