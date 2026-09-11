@@ -226,7 +226,7 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
 
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
-        "extractor.rust.v4"
+        "extractor.rust.v5"
     );
     assert_ne!(
         rebuilt.files[0].extraction.parser_import_rows_digest,
@@ -294,7 +294,7 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
 
     assert_eq!(
         rebuilt.files[0].extraction.extractor_revision.as_str(),
-        "extractor.rust.v4"
+        "extractor.rust.v5"
     );
     assert!(
         rebuilt.files[0]

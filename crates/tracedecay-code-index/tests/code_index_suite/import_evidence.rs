@@ -627,7 +627,7 @@ fn import_generation_pins_extractor_rows_and_chunker_revision_axes() {
     assert_eq!(manifest.extractor_revisions.len(), 1);
     let (language, extractor_revision) = &manifest.extractor_revisions[0];
     assert_eq!(language.as_str(), "typescript");
-    assert_eq!(extractor_revision.as_str(), "extractor.typescript.v3");
+    assert_eq!(extractor_revision.as_str(), "extractor.typescript.v4");
     assert_eq!(manifest.chunker_revision.as_str(), "chunker.v2");
 }
 

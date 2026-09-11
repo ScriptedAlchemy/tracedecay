@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::chunks::CodeIndexImportEvidenceV1;
+use crate::chunks::{CodeIndexImportEvidenceV1, published_symbol_spans};
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{
@@ -139,6 +139,7 @@ pub(super) fn build_projection(
                 }
             }
             let mut bindings = BTreeMap::<SymbolOccurrenceId, CodeGraphSymbolBindingV1>::new();
+            let symbol_spans = published_symbol_spans(chunks.iter().map(AsRef::as_ref));
             for chunk in chunks {
                 check()?;
                 chunk
@@ -161,7 +162,7 @@ pub(super) fn build_projection(
                     logical_path: files
                         .get(&chunk.anchor.file_occurrence_id)
                         .map(|file| file.logical_path.clone()),
-                    source_span: Some(chunk.anchor.source_span),
+                    source_span: symbol_spans.get(&symbol).copied(),
                     chunk: Some(chunk.id.clone()),
                     language_descriptor_revision: chunk.language_descriptor_revision.clone(),
                 };
@@ -184,13 +185,6 @@ pub(super) fn build_projection(
                         if candidate.chunk < current.chunk {
                             current.chunk = candidate.chunk;
                         }
-                        current.source_span = match (current.source_span, candidate.source_span) {
-                            (Some(left), Some(right)) => Some(tracedecay_domain::SourceSpan {
-                                start_byte: left.start_byte.min(right.start_byte),
-                                end_byte: left.end_byte.max(right.end_byte),
-                            }),
-                            (left, right) => left.or(right),
-                        };
                     }
                 }
             }
