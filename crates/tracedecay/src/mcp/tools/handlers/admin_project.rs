@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tracedecay_application::{CancellationSignal, Deadline, now_micros};
 use tracedecay_automation_runtime::automation::AutomationRunControl;
+use tracedecay_contracts::{CancellationSignal, Deadline, now_micros};
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::{MemoryApplication, MemoryApplicationError};
 
 use super::json_result;
@@ -138,6 +138,10 @@ fn automatic_fact_receipt_json(receipt: &ProjectMemoryAutomaticFactReceiptV1) ->
 }
 
 #[hotpath::measure(future = true, label = "mcp.admin.project.total")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Admin project handling is one action match onto registry and store owners."
+)]
 pub(super) async fn handle_admin_project(
     cg: &TraceDecay,
     args: Value,
@@ -209,8 +213,8 @@ pub(super) async fn handle_admin_project(
                     message: format!("configuration authority unavailable: {error}"),
                 })?;
             json!({
-                "git_ignore": configuration.config.git_ignore,
-                "revision_id": configuration.revision_id.as_str(),
+                "git_ignore": configuration.config().git_ignore,
+                "revision_id": configuration.revision_id().as_str(),
             })
         }
         AdminProjectAction::Bench {
@@ -227,8 +231,7 @@ pub(super) async fn handle_admin_project(
                     format: crate::bench::OutputFormat::Json,
                     max_nodes,
                 },
-            )
-            .await?;
+            )?;
             let output = if json {
                 crate::bench::format_report_json(&report)
             } else {
@@ -237,7 +240,7 @@ pub(super) async fn handle_admin_project(
             json!({ "output": output })
         }
         AdminProjectAction::AutomaticFactReceiptList { state, limit } => {
-            let db = cg.open_project_store_db().await?;
+            let db = cg.open_project_store_db()?;
             let memory = project_memory_application(cg, &db)?;
             let state = state
                 .as_deref()
@@ -268,7 +271,7 @@ pub(super) async fn handle_admin_project(
         }
         AdminProjectAction::AutomaticFactReceiptView { id } => {
             let apply_id = parse_automatic_fact_apply_id(id)?;
-            let db = cg.open_project_store_db().await?;
+            let db = cg.open_project_store_db()?;
             let memory = project_memory_application(cg, &db)?;
             let receipt = memory
                 .get_project_memory_automatic_fact_receipt(apply_id, run_control.read_control())
@@ -310,7 +313,7 @@ mod tests {
         use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
 
         let owner = cg.project_memory_owner().unwrap();
-        let db = cg.open_project_store_db().await.unwrap();
+        let db = cg.open_project_store_db().unwrap();
         let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
         let actor = ActorId::new("automation.session-reflector".to_owned()).unwrap();
         let request = tracedecay_session_memory::memory::automatic_fact_add_command(

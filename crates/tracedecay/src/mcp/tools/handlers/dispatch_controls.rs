@@ -1,7 +1,7 @@
 //! Exact admitted controls for the analytics handler entrypoint.
 
 use serde_json::Value;
-use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_contracts::{CancellationSignal, Deadline};
 
 use crate::tracedecay::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -43,7 +43,7 @@ pub(super) async fn dispatch_analytics(
         options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
         options
             .session_authorities
-            .project_registered
+            .project
             .map(RegisteredGlobalDbLeaseV1::as_ref),
         deadline,
         cancellation,

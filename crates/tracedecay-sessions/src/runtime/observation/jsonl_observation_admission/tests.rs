@@ -14,6 +14,7 @@
 //! the persist path and never reach either disposition.
 
 use std::io::Write as _;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,6 +26,7 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass, SessionId,
 };
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
     ObservationIdentityCollisionDispositionV1,
@@ -68,8 +70,14 @@ fn install_shared_jsonl_preparation_authority_is_idempotent_across_memory_arcs()
     let other = std::sync::Arc::new(ProcessResidentMemoryV1::new(
         NonZeroU64::new(64 * 1024 * 1024).expect("nonzero JSONL fixture budget"),
     ));
-    super::install_shared_jsonl_preparation_authority(other).expect(
-        "a second installer with a distinct memory Arc must not poison the process-wide authority",
+    let other_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN));
+    super::install_shared_jsonl_preparation_authority(other, other_cpu).expect(
+        "a second installer with distinct memory/CPU Arcs must not poison the process-wide authority",
+    );
+    assert_eq!(
+        super::shared_jsonl_preparation_workers(),
+        48,
+        "the first installed CPU width must remain the one preparation meters against"
     );
 }
 
@@ -192,6 +200,7 @@ async fn shared_jsonl_page_wait_is_operation_cancellable() {
         position: 0,
         generation: 0,
         max_new_bytes: Some(1024),
+        max_frames: None,
         resume: None,
         preparation: false.into(),
     };
@@ -269,8 +278,6 @@ async fn lazy_preparation_mutex_wait_is_operation_cancellable() {
 
 #[tokio::test]
 async fn lazy_preparation_cpu_wait_is_operation_cancellable() {
-    use std::num::NonZeroUsize;
-
     super::install_test_shared_jsonl_preparation_authority();
     let temp = tempfile::tempdir().expect("temp directory");
     let path = temp.path().join("cancel-lazy-cpu.jsonl");
@@ -285,9 +292,9 @@ async fn lazy_preparation_cpu_wait_is_operation_cancellable() {
     .await
     .expect("lazy page");
     let preparations_before = super::shared_jsonl_frame_preparations_for_test(page.file_identity);
-    let background_cpu = tracedecay_private_fs::background_cpu::test_process_background_cpu(
+    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(
         NonZeroUsize::new(1).expect("nonzero CPU width"),
-    );
+    ));
     let held = background_cpu.acquire();
     let task_page = Arc::clone(&page);
     let task_cpu = Arc::clone(&background_cpu);
@@ -823,6 +830,7 @@ fn speculative_capacity_is_one_global_quota_across_prefetch_generations() {
         position: 0,
         generation: 0,
         max_new_bytes: Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
+        max_frames: None,
         resume: None,
         preparation: true.into(),
     };
@@ -1137,7 +1145,7 @@ async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
             };
             observed_ids.lock().unwrap().push(id);
             let native_record_id = ObservationId::new(id).unwrap();
-            let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
                 bytes,
                 range,
                 ObservationOrderingDomainV1::FileBytes,
@@ -1162,7 +1170,7 @@ async fn eligible_identity_collision_retries_once_with_normalizer_fallback() {
                         ),
                     )
                     .map_err(|_| {
-                        tracedecay_runtime_core::privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
                     })
                 },
             )
@@ -1252,7 +1260,7 @@ async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_rea
                 "record.legacy-content-hash-terminal"
             })
             .unwrap();
-            let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+            let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
                 bytes,
                 range,
                 ObservationOrderingDomainV1::FileBytes,
@@ -1277,7 +1285,7 @@ async fn exhausted_identity_collision_retry_uses_its_exact_terminal_coverage_rea
                         ),
                     )
                     .map_err(|_| {
-                        tracedecay_runtime_core::privacy::ObservationRecordParseErrorV1::NormalizationFailed
+                        tracedecay_privacy::ObservationRecordParseErrorV1::NormalizationFailed
                     })
                 },
             )

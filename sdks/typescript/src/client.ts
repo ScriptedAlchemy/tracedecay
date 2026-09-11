@@ -247,23 +247,8 @@ function isReceipt(value: unknown): value is OperationReceipt {
   );
 }
 
-function isPageState(value: unknown): boolean {
-  if (
-    !isRecord(value) ||
-    !isBoundedOpaqueString(value.sort_contract_id, 512) ||
-    !isSafeUnsignedInteger(value.sort_revision) ||
-    value.sort_revision === 0 ||
-    (value.total !== null && !isSafeUnsignedInteger(value.total)) ||
-    !isSafeUnsignedInteger(value.returned) ||
-    (value.cursor !== null &&
-      !isBoundedOpaqueString(value.cursor, MAX_OPAQUE_CURSOR_BYTES)) ||
-    (value.expires_at !== null && !isSafeInteger(value.expires_at))
-  ) {
-    return false;
-  }
-  return value.total === null || value.returned <= value.total;
-}
-
+// Page structure (counts, bounded sort contract, tagged cursor variants) is the
+// generated decoder's authority; only receipt and payload semantics remain here.
 function isDecodedSuccessEnvelope(value: unknown): boolean {
   if (
     !isRecord(value) ||
@@ -276,9 +261,8 @@ function isDecodedSuccessEnvelope(value: unknown): boolean {
   }
   if (value.outcome.outcome === "evidence") {
     return (
-      isPageState(value.outcome.value.page) &&
-      (value.outcome.value.execution.termination !== "completed" ||
-        value.outcome.value.payload !== null)
+      value.outcome.value.execution.termination !== "completed" ||
+      value.outcome.value.payload !== null
     );
   }
   return value.outcome.outcome === "preview" || value.outcome.outcome === "effect";

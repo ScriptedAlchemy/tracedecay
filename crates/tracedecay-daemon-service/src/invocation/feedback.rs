@@ -2,7 +2,7 @@
 
 use super::*;
 #[cfg(all(test, not(windows)))]
-use tracedecay_usecases::feedback::FeedbackCycleRuntime;
+use tracedecay_application::feedback::FeedbackCycleRuntime;
 
 pub fn daemon_operation_event_authority() -> OperationEventAuthority {
     operation_event_authority()
@@ -312,10 +312,10 @@ pub fn advisory_cycle_invocation_result(
     started_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
-    outcome: tracedecay_usecases::advisory::AdvisoryCycleOutcome,
+    outcome: tracedecay_application::advisory::AdvisoryCycleOutcome,
 ) -> Result<DaemonFeedbackInvocationResult, ApplicationProblem> {
+    use tracedecay_application::advisory::AdvisoryCycleOutcome;
     use tracedecay_domain::feedback::FeedbackCycleTerminationV1;
-    use tracedecay_usecases::advisory::AdvisoryCycleOutcome;
 
     let ended_at = current_micros();
     let policy_digest = canonical_sha256(&(
@@ -408,6 +408,14 @@ pub fn advisory_cycle_invocation_result(
                     })
                 })
                 .collect::<Vec<_>>();
+            let read_handles = cycle.read_handles.as_ref().map(|handles| {
+                tracedecay_contracts::feedback::FeedbackAdvisoryReadHandlesV1 {
+                    diagnostics_handle: handles.diagnostics_handle.clone(),
+                    impact_handle: handles.diagnostics_handle.clone(),
+                    affected_tests_handle: handles.diagnostics_handle.clone(),
+                    list_handle: handles.list_handle.clone(),
+                }
+            });
             let mut cycle_wire = serde_json::to_value(&cycle.execution.cycle)
                 .map_err(|_| advisory_cycle_contract_problem())?;
             cycle_wire["published"] =
@@ -427,6 +435,7 @@ pub fn advisory_cycle_invocation_result(
                 page,
                 Some(serde_json::json!({
                     "cycle": cycle_wire,
+                    "read_handles": read_handles,
                     "finding_handles": finding_handles,
                 })),
             )
@@ -481,15 +490,15 @@ pub fn advisory_cycle_invocation_result(
         payload = None;
     }
     let cancellation = match termination {
-        OperationTermination::Cancelled => Some(tracedecay_application::CancellationObservation {
-            stage: tracedecay_application::CancellationStage::DuringRead,
+        OperationTermination::Cancelled => Some(tracedecay_contracts::CancellationObservation {
+            stage: tracedecay_contracts::CancellationStage::DuringRead,
             observed_at: match cancellation.state {
                 CancellationState::Cancelled { requested_at } => requested_at,
                 CancellationState::Active => ended_at,
             },
         }),
-        OperationTermination::TimedOut => Some(tracedecay_application::CancellationObservation {
-            stage: tracedecay_application::CancellationStage::DuringRead,
+        OperationTermination::TimedOut => Some(tracedecay_contracts::CancellationObservation {
+            stage: tracedecay_contracts::CancellationStage::DuringRead,
             observed_at: deadline.expires_at,
         }),
         OperationTermination::Completed

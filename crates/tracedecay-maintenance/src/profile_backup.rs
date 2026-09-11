@@ -14,7 +14,7 @@
 
 use std::{
     cell::Cell,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -894,15 +894,49 @@ fn copy_verified_file(
             ))
         })?;
     }
-    fs::copy(source, destination).map_err(|error| {
+    copy_private_file(source, destination)?;
+    verify_file(destination, expected)
+}
+
+/// Copies one backup artifact byte-for-byte into a destination the
+/// private-filesystem authority creates, then syncs it.
+///
+/// `fs::copy` carries the Unix mode across but not the Windows DACL: the copy
+/// inherits its destination directory's ACEs, and the private record readers
+/// (`profile-identity.json` on both the backup and the rehearsed profile)
+/// refuse that shape. Creating the destination through
+/// [`tracedecay_private_fs::create_private_file`] gives every host the same
+/// owner-private artifact from the first byte. It also creates exclusively, so
+/// a destination that already exists is refused instead of being overwritten
+/// and re-owned: both call sites publish into a staging directory this attempt
+/// just created, and taking ownership of foreign material is never a copy.
+pub(super) fn copy_private_file(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), ProfileBackupError> {
+    let mut reader = File::open(source).map_err(|error| {
         ProfileBackupError::unavailable(format!(
-            "copy backup file '{}' to '{}': {error}",
-            source.display(),
+            "open backup file '{}' for copy: {error}",
+            source.display()
+        ))
+    })?;
+    let mut writer = tracedecay_private_fs::create_private_file(destination).map_err(|error| {
+        ProfileBackupError::unavailable(format!(
+            "create private backup file '{}': {error}",
             destination.display()
         ))
     })?;
-    sync_file(destination)?;
-    verify_file(destination, expected)
+    let copied = std::io::copy(&mut reader, &mut writer).and_then(|_| writer.sync_all());
+    drop(writer);
+    if let Err(error) = copied {
+        let _ = fs::remove_file(destination);
+        return Err(ProfileBackupError::unavailable(format!(
+            "copy backup file '{}' to '{}': {error}",
+            source.display(),
+            destination.display()
+        )));
+    }
+    Ok(())
 }
 
 fn verify_file(path: &Path, expected: &ProfileBackupEntry) -> Result<(), ProfileBackupError> {
@@ -1021,26 +1055,13 @@ fn sha256_file(path: &Path) -> Result<String, ProfileBackupError> {
 }
 
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), ProfileBackupError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
+    let mut file = tracedecay_private_fs::create_private_file(path).map_err(|error| {
         ProfileBackupError::unavailable(format!("create '{}': {error}", path.display()))
     })?;
     file.write_all(bytes).map_err(|error| {
         ProfileBackupError::unavailable(format!("write '{}': {error}", path.display()))
     })?;
     file.sync_all().map_err(|error| {
-        ProfileBackupError::unavailable(format!("sync '{}': {error}", path.display()))
-    })
-}
-
-fn sync_file(path: &Path) -> Result<(), ProfileBackupError> {
-    tracedecay_private_fs::framed_log::sync_file_at(path).map_err(|error| {
         ProfileBackupError::unavailable(format!("sync '{}': {error}", path.display()))
     })
 }
@@ -1062,7 +1083,23 @@ fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
     })
 }
 
-#[cfg(not(unix))]
+/// Windows analogue of the 0700 mode above: the rehearsal staging directory
+/// was created by this attempt moments ago, so re-owning it and installing the
+/// protected current-user DACL is the same "make our own new directory
+/// private" step, not a repair of foreign material.
+#[cfg(windows)]
+fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
+    tracedecay_private_fs::make_private_directory(path)
+        .map(drop)
+        .map_err(|error| {
+            ProfileBackupError::unavailable(format!(
+                "restrict directory '{}': {error}",
+                path.display()
+            ))
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn restrict_private_directory(_path: &Path) -> Result<(), ProfileBackupError> {
     Ok(())
 }

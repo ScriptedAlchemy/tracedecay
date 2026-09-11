@@ -9,7 +9,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_application::CancellationSignal;
+use tracedecay_contracts::CancellationSignal;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
     EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
@@ -38,12 +38,12 @@ pub use self::interactive::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
     CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolSummaryV1, INTERACTIVE_CATALOG_ARTIFACT_NAME,
+    CodeGraphSymbolPredicate, CodeGraphSymbolSummaryV1, INTERACTIVE_CATALOG_ARTIFACT_NAME,
     write_interactive_catalog_artifact,
 };
 use self::schema::{
-    SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, serialize,
-    stable_identity,
+    SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, record_property,
+    serialize, stable_identity,
 };
 use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, compare_paths};
 use crate::lineage::LineageSymbolRecordV1;
@@ -54,15 +54,18 @@ const CODE_PROJECTION: &str = "code-generation";
 const CURRENT_GENERATION_ENTITY: &str = "code-current-generation";
 const CURRENT_GENERATION_PROPERTY: &str = "current-generation";
 const PROJECTION_NODE_COUNT_PROPERTY: &str = "projection-node-count";
-const CHUNK_RECORD_PROPERTY: &str = "chunk-record";
 const EDGE_RECORD_PROPERTY: &str = "edge-record";
-const CHUNK_LABEL: &str = "CodeChunk";
 const EDGE_LABEL: &str = "CodeRelationEvidence";
 const FILE_SYMBOL_EDGE_KIND: &str = "CodeFileContainsSymbol";
-const CHUNK_SYMBOL_EDGE_KIND: &str = "CodeChunkDescribesSymbol";
 const SOURCE_EDGE_KIND: &str = "CodeRelationSource";
 const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
-pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v5";
+/// Names the shape of the rows this projector emits for one sealed code
+/// generation; the graph generation id is derived from it, so a revision
+/// bump seals a new graph generation from the same code generation rather
+/// than mixing row shapes under one identity. v6 stopped projecting one
+/// `CodeChunk` entity and one `CodeChunkDescribesSymbol` relation per chunk
+/// and stores record payloads as JSON strings instead of byte properties.
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v6";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {
@@ -142,6 +145,10 @@ impl From<GraphDbError> for CodeGraphProjectionError {
             GraphDbError::Corrupt { message } => Self::Corrupt(message),
             GraphDbError::Unavailable { message }
             | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
+            error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
+            | GraphDbError::SealedRevisionIncompatible { .. }) => {
+                Self::Unavailable(error.to_string())
+            }
             GraphDbError::DurabilityUncertain { message } => Self::DurabilityUncertain(message),
             GraphDbError::Closed => Self::Closed,
         }
@@ -797,7 +804,7 @@ fn symbol_entity(
         BTreeSet::from([GraphLabel::new(SYMBOL_LABEL)?]),
         BTreeMap::from([(
             GraphPropertyName::new(SYMBOL_RECORD_PROPERTY)?,
-            GraphProperty::Bytes(serialize(&record)?),
+            record_property(serialize(&record)?)?,
         )]),
     )
     .map_err(Into::into)

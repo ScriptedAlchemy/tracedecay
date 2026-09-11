@@ -3,11 +3,11 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 #[cfg(test)]
-use tracedecay_application::context_scout::ContextScoutFeedbackV1;
-use tracedecay_application::context_scout::{
-    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
+use tracedecay_contracts::context_scout::ContextScoutFeedbackV1;
+use tracedecay_contracts::context_scout::{
+    ContextScoutAddressV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
 use tracedecay_hooks::{
@@ -28,6 +28,7 @@ use crate::agents::context_scout_v2::context_scout_delivery_receipt_matches_enve
 use crate::agents::context_scout_v2::{
     ContextScoutDeliveryReceiptHookV1, context_scout_delivery_receipt_id,
 };
+use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::analytics::{HookTimingSpan, elapsed_us};
 #[cfg(test)]
@@ -85,7 +86,9 @@ pub const NATIVE_HOOK_HOSTS: &[HookHostV1] = &[
     HookHostV1::OpenCode,
 ];
 
-pub fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Option<[u8; 16]> {
+pub fn project_id_for_layout(
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
+) -> Option<[u8; 16]> {
     layout
         .identity
         .project_id
@@ -93,22 +96,26 @@ pub fn project_id_for_layout(layout: &crate::storage::StoreLayout) -> Option<[u8
         .map(|project_id| envelope_identity_hash16("project", project_id))
 }
 
-pub fn publish_daemon_bindings(layout: &crate::storage::StoreLayout) -> crate::errors::Result<()> {
+pub fn publish_daemon_bindings(
+    runtime: &HookRuntimeV1,
+    layout: &tracedecay_runtime_core::storage::StoreLayout,
+) -> tracedecay_domain::errors::Result<()> {
     let project_key = layout.identity.project_id.as_deref().ok_or_else(|| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: "cannot publish Hook binding without typed project identity".to_owned(),
         }
     })?;
     let typed_project_id = ProjectId::new(project_key.to_owned()).map_err(|error| {
-        crate::errors::TraceDecayError::Config {
+        tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("cannot validate Hook project identity: {error}"),
         }
     })?;
     let scope =
-        crate::ports::hook_runtime::resolve_hook_scope(&layout.project_root, &typed_project_id)
-            .map_err(|error| crate::errors::TraceDecayError::Config {
+        (runtime.scope_resolver)(&layout.project_root, &typed_project_id).map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("cannot resolve Hook repository/worktree scope: {error}"),
-            })?;
+            }
+        })?;
     let now = now_utc();
     let revision = now.0.max(1) as u64;
     let (project_id, repository_id, worktree_id, worktree_epoch) =
@@ -147,7 +154,7 @@ pub fn publish_daemon_bindings(layout: &crate::storage::StoreLayout) -> crate::e
         );
         tracedecay_hooks::HookConfigurationPublisherV1::new(writer)
             .publish(snapshot)
-            .map_err(|error| crate::errors::TraceDecayError::Config {
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "failed to publish {} Hook binding: {error}",
                     host.hook_key()
@@ -411,12 +418,13 @@ fn admission_window_after_elapsed(elapsed: u64) -> Option<(HookSynchronousDeadli
 
 #[hotpath::measure(future = true, label = "hosts.hooks.dispatch")]
 pub(crate) async fn dispatch(
+    runtime: &HookRuntimeV1,
     host: HookHostV1,
     event_json: &str,
     project_root: &Path,
     telemetry: Option<&HookTimingSpan>,
+    started: Instant,
 ) -> HookDispatch {
-    let started = Instant::now();
     let decoded = match tracedecay_hooks::decode_native_hook_event(host, event_json.as_bytes()) {
         Ok(decoded) => decoded,
         Err(
@@ -433,36 +441,50 @@ pub(crate) async fn dispatch(
     let native_session_id = prepared.native_session_id.clone();
     let native_lifecycle = prepared.native_lifecycle.clone();
     let admission = DaemonAdmissionPort::new(
+        runtime,
         project_root,
         native_session_id.as_deref(),
         native_lifecycle.as_ref(),
         telemetry,
     );
-    let delivery = DaemonFeedbackNoticeDeliveryPort::new(project_root);
-    dispatch_decoded(prepared, project_root, started, &admission, &delivery).await
+    let delivery = DaemonFeedbackNoticeDeliveryPort::new(runtime, project_root);
+    dispatch_decoded(
+        runtime,
+        prepared,
+        project_root,
+        started,
+        &admission,
+        &delivery,
+    )
+    .await
 }
 
 /// Dispatches a native event through its exact project binding when one is
 /// known, or through the authenticated daemon profile when the host has no
 /// project identity. Both paths send only the closed event material.
 pub(crate) async fn dispatch_for_scope(
+    runtime: &HookRuntimeV1,
     host: HookHostV1,
     event_json: &str,
     project_root: Option<&Path>,
     telemetry: Option<&HookTimingSpan>,
+    started: Instant,
 ) -> HookDispatch {
     match project_root {
-        Some(project_root) => dispatch(host, event_json, project_root, telemetry).await,
-        None => dispatch_profile_scoped(host, event_json, telemetry).await,
+        Some(project_root) => {
+            dispatch(runtime, host, event_json, project_root, telemetry, started).await
+        }
+        None => dispatch_profile_scoped(runtime, host, event_json, telemetry, started).await,
     }
 }
 
 async fn dispatch_profile_scoped(
+    runtime: &HookRuntimeV1,
     host: HookHostV1,
     event_json: &str,
     telemetry: Option<&HookTimingSpan>,
+    started: Instant,
 ) -> HookDispatch {
-    let started = Instant::now();
     let decoded = match tracedecay_hooks::decode_native_hook_event(host, event_json.as_bytes()) {
         Ok(decoded) => decoded,
         Err(
@@ -485,6 +507,7 @@ async fn dispatch_profile_scoped(
     let response = tokio::time::timeout(
         timeout,
         super::daemon_hook_action(
+            runtime,
             None,
             serde_json::json!({
                 "action": "hook_v2_profile_admit",
@@ -522,11 +545,12 @@ async fn dispatch_profile_scoped(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode.dispatch_tool_after")]
 pub(crate) async fn dispatch_opencode_tool_after(
+    runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
     telemetry: Option<&HookTimingSpan>,
+    started: Instant,
 ) -> HookDispatch {
-    let started = Instant::now();
     let decoded = match tracedecay_hooks::decode_opencode_plugin_event(
         tracedecay_hooks::OpenCodePluginSurfaceV1::ToolExecuteAfter,
         event_json.as_bytes(),
@@ -548,17 +572,27 @@ pub(crate) async fn dispatch_opencode_tool_after(
     let native_session_id = prepared.native_session_id.clone();
     let native_lifecycle = prepared.native_lifecycle.clone();
     let admission = DaemonAdmissionPort::new(
+        runtime,
         project_root,
         native_session_id.as_deref(),
         native_lifecycle.as_ref(),
         telemetry,
     );
-    let delivery = DaemonFeedbackNoticeDeliveryPort::new(project_root);
-    dispatch_decoded(prepared, project_root, started, &admission, &delivery).await
+    let delivery = DaemonFeedbackNoticeDeliveryPort::new(runtime, project_root);
+    dispatch_decoded(
+        runtime,
+        prepared,
+        project_root,
+        started,
+        &admission,
+        &delivery,
+    )
+    .await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode.dispatch_lsp_updated")]
 pub(crate) async fn dispatch_opencode_lsp_updated(
+    runtime: &HookRuntimeV1,
     event_json: &str,
     project_root: &Path,
     telemetry: Option<&HookTimingSpan>,
@@ -569,7 +603,7 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
     let Ok(event) = serde_json::from_str::<serde_json::Value>(event_json) else {
         return unavailable();
     };
-    let port = DaemonOpenCodeLspUpdatePort::new(project_root, telemetry);
+    let port = DaemonOpenCodeLspUpdatePort::new(runtime, project_root, telemetry);
     if port.submit_updated_event(&event).await {
         HookDispatch::Handled {
             guidance: None,
@@ -582,7 +616,7 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
 
 struct PreparedBoundHook {
     host: HookHostV1,
-    layout: crate::storage::StoreLayout,
+    layout: tracedecay_runtime_core::storage::StoreLayout,
     snapshot: HookConfigurationSnapshotV1,
     envelope: HookEventEnvelopeV2,
     native_session_id: Option<String>,
@@ -629,12 +663,13 @@ fn prepare_bound_hook(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.dispatch_decoded")]
 async fn dispatch_decoded(
+    runtime: &HookRuntimeV1,
     prepared: PreparedBoundHook,
     project_root: &Path,
     started: Instant,
     admission: &DaemonAdmissionPort<'_>,
     delivery: &impl AsyncHookFeedbackDeliveryPortV1<
-        tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
     >,
 ) -> HookDispatch {
     let PreparedBoundHook {
@@ -690,6 +725,9 @@ async fn dispatch_decoded(
         now_utc(),
         elapsed_us(started),
     );
+    let Ok(context_scout_address) = admission.take_context_scout_address() else {
+        return unavailable();
+    };
     let feedback_notice = admission.take_feedback_notice();
     let github_stack_signal_available = admission.take_github_stack_signal_available();
     match completed {
@@ -713,7 +751,7 @@ async fn dispatch_decoded(
                 }),
                 _ => None,
             };
-            let receipts = DaemonDeliveryReceiptPort::new(project_root);
+            let receipts = DaemonDeliveryReceiptPort::new(runtime, project_root);
             // Scout receipt and advisory notice use independent ports; overlapping
             // them keeps both inside the leftover sync budget without combining
             // the two delivery contracts.
@@ -739,12 +777,17 @@ async fn dispatch_decoded(
                 feedback: None,
                 outcome: None,
             });
+            let guidance = match render_host_delivery(
+                result.rendered_guidance,
+                context_scout_address.as_ref(),
+                delivered.feedback.as_ref(),
+                github_stack_signal_available,
+            ) {
+                Ok(guidance) => guidance,
+                Err(_) => return unavailable(),
+            };
             HookDispatch::Handled {
-                guidance: render_host_delivery(
-                    result.rendered_guidance,
-                    delivered.feedback.as_ref(),
-                    github_stack_signal_available,
-                ),
+                guidance,
                 disposition: result.receipt.disposition,
             }
         }
@@ -762,6 +805,7 @@ impl HookScopedFeedbackV1 for ContextScoutFeedbackCommitV1 {
 
 #[cfg(test)]
 pub(crate) async fn record_context_scout_delivery(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     receipt: &ContextScoutDeliveryReceiptV1,
 ) -> bool {
@@ -769,7 +813,7 @@ pub(crate) async fn record_context_scout_delivery(
         return false;
     };
     outcome_is_committed(
-        DaemonDeliveryReceiptPort::new(project_root)
+        DaemonDeliveryReceiptPort::new(runtime, project_root)
             .post_receipt(receipt, deadline)
             .await,
     )
@@ -777,6 +821,7 @@ pub(crate) async fn record_context_scout_delivery(
 
 #[cfg(test)]
 pub(crate) async fn commit_context_scout_feedback(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     receipt: &ContextScoutDeliveryReceiptV1,
     feedback: ContextScoutFeedbackV1,
@@ -785,7 +830,7 @@ pub(crate) async fn commit_context_scout_feedback(
         return false;
     };
     outcome_is_committed(
-        DaemonContextScoutFeedbackPort::new(project_root)
+        DaemonContextScoutFeedbackPort::new(runtime, project_root)
             .post_feedback(receipt, &feedback, deadline)
             .await,
     )
@@ -793,24 +838,43 @@ pub(crate) async fn commit_context_scout_feedback(
 
 fn render_host_delivery(
     guidance: Option<String>,
-    feedback_notice: Option<&tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>,
+    context_scout_address: Option<&ContextScoutAddressV1>,
+    feedback_notice: Option<&tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     github_stack_signal_available: bool,
-) -> Option<String> {
+) -> Result<Option<String>, serde_json::Error> {
+    let scout_address = context_scout_address
+        .map(serde_json::to_string)
+        .transpose()?
+        .map(|address| {
+            format!("TraceDecay Context Scout address for authorized operations: {address}")
+        });
     let notice = feedback_notice
-        .and_then(|notice| serde_json::to_string(notice).ok())
+        .map(serde_json::to_string)
+        .transpose()?
         .map(|notice| format!("TraceDecay feedback ready for authorized lookup: {notice}"));
     let stack_wakeup = github_stack_signal_available
         .then_some("TraceDecay GitHub stack update available for authenticated expansion.");
-    [guidance, notice, stack_wakeup.map(str::to_owned)]
-        .into_iter()
-        .flatten()
-        .reduce(|mut rendered, next| {
-            rendered.push_str("\n\n");
-            rendered.push_str(&next);
-            rendered
-        })
+    Ok([
+        guidance,
+        scout_address,
+        notice,
+        stack_wakeup.map(str::to_owned),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|mut rendered, next| {
+        rendered.push_str("\n\n");
+        rendered.push_str(&next);
+        rendered
+    }))
 }
 
+/// Spool writer admission waits one synchronous budget measured from the lock
+/// attempt, not from hook start. The response lane spends its budget before it
+/// reaches the spool (analytics rows, layout resolution, the daemon admission
+/// window), so a deadline anchored at hook start was already expired on a
+/// loaded runner and refused an uncontended lock: the hook answered `{}` with
+/// exit 0 and the event was never spooled.
 fn append_for_replay(
     data_root: &Path,
     host: HookHostV1,
@@ -819,7 +883,12 @@ fn append_for_replay(
     now: UtcMicros,
 ) -> SpoolAppendOutcomeV1 {
     let root = data_root.join("hook-v2-spool").join(host.hook_key());
-    let Ok((mut spool, _)) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now) else {
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(
+        root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+    ) else {
         return SpoolAppendOutcomeV1::Unavailable;
     };
     match spool.append(envelope.clone(), binding, now) {
@@ -847,7 +916,12 @@ fn replay_envelope_if_pending(
     now: UtcMicros,
 ) -> PendingEnvelopeV1 {
     let root = data_root.join("hook-v2-spool").join(host.hook_key());
-    let Ok((mut spool, _)) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now) else {
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(
+        root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+    ) else {
         return PendingEnvelopeV1::Unavailable;
     };
     let queued = match spool.pending_envelope(retry.event_id) {

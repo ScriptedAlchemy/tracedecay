@@ -1,5 +1,7 @@
 //! Shared test fixtures for the invocation-handler unit suite.
 
+use std::path::Path;
+
 use super::*;
 
 use tracedecay_lsp::{
@@ -8,6 +10,13 @@ use tracedecay_lsp::{
     ContextProjectionRequest, GenerationDiagnostics, LspAnalyzerCancellationAuthority,
     LspRequestId, UnavailableSemanticProvider,
 };
+use url::Url;
+
+fn fixture_directory_uri(path: &Path) -> String {
+    Url::from_directory_path(path)
+        .expect("fixture directory path must convert to a file URL")
+        .to_string()
+}
 
 #[derive(Default)]
 struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<FeedbackSourceEventV1>>);
@@ -67,7 +76,7 @@ impl CanonicalContextProjectionAuthority for UnavailableContextAuthority {
     }
 }
 
-fn unavailable_lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
+pub(crate) fn unavailable_lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
     Arc::new(DaemonLspSessionFactory::new(
         tokio::runtime::Handle::current(),
         Arc::new(unavailable_feedback_cycle(Arc::new(
@@ -98,4 +107,4 @@ mod git_tests;
 mod handoff_tests;
 mod invocation_observability_tests;
 mod project_admission_tests;
-mod retained_registrar_tests;
+mod source_edit_tests;

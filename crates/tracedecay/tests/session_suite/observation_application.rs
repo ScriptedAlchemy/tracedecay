@@ -1,6 +1,12 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_application::observation::{
+    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
+    CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,
+    GetObservationRequest, ObservationApplication, ObservationApplicationError,
+    ObservationCancellation, ReplayObservationsRequest,
+};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ClaudeByteRangeV1,
@@ -10,7 +16,7 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
     PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
@@ -20,12 +26,6 @@ use tracedecay_store::observation::{NonDurableFrameReason, ObservationCursorAdva
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationReplayRequest,
     ObservationStore, ProjectionPersistOutcome,
-};
-use tracedecay_usecases::observation::{
-    AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
-    CaptureClaudeObservationRequest, CaptureObservationOutcome, CaptureObservationRequest,
-    GetObservationRequest, ObservationApplication, ObservationApplicationError,
-    ObservationCancellation, ReplayObservationsRequest,
 };
 
 const GENERATION: u64 = 17;

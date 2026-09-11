@@ -26,7 +26,7 @@ const FOLD_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// the database into a second file, doubling both the bytes written and the
 /// peak scratch space for large families.
 #[hotpath::measure(label = "runtime_core.db.snapshot.materialize")]
-pub(super) async fn materialize(path: &Path, control: SnapshotReadControl) -> io::Result<()> {
+pub async fn materialize(path: &Path, control: SnapshotReadControl) -> io::Result<()> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         control.checkpoint()?;

@@ -56,6 +56,13 @@ pub enum AnalyzerEvent {
     StartupFailed,
     TimedOut,
     Cancelled,
+    /// The owning lane released a live client without a result. The
+    /// diagnostics refresh lane retires its client whenever a refresh ends
+    /// without a publication, whether the analyzer was silent past the quiet
+    /// window or already gone, and that boundary cannot tell the two apart.
+    /// Not a failure the analyzer demonstrably caused, so it spends no restart
+    /// budget: the process is stopped and the next caller restarts it.
+    Retired,
     RemoteError,
     TransportFailed,
     InvalidResponse,
@@ -69,6 +76,7 @@ impl AnalyzerEvent {
             Self::StartupFailed => Some("analyzer-start-failed"),
             Self::TimedOut => Some("analyzer-timeout"),
             Self::Cancelled => Some("analyzer-cancelled"),
+            Self::Retired => Some("analyzer-retired"),
             Self::RemoteError => Some("analyzer-remote-error"),
             Self::TransportFailed => Some("analyzer-transport-failed"),
             Self::InvalidResponse => Some("analyzer-invalid-response"),
@@ -82,6 +90,7 @@ impl AnalyzerEvent {
             Self::StartupFailed => Some("Analyzer failed to start."),
             Self::TimedOut => Some("Analyzer request timed out."),
             Self::Cancelled => Some("Analyzer request was cancelled."),
+            Self::Retired => Some("Analyzer client was retired without a result."),
             Self::RemoteError => Some("Analyzer request failed with a remote error."),
             Self::TransportFailed => Some("Analyzer transport failed."),
             Self::InvalidResponse => Some("Analyzer returned an invalid response."),
@@ -274,9 +283,10 @@ impl AnalyzerSupervisor {
                     AnalyzerState::RestartBackoff
                 }
             }
-            (AnalyzerState::Starting | AnalyzerState::Ready, AnalyzerEvent::Cancelled) => {
-                AnalyzerState::RestartBackoff
-            }
+            (
+                AnalyzerState::Starting | AnalyzerState::Ready,
+                AnalyzerEvent::Cancelled | AnalyzerEvent::Retired,
+            ) => AnalyzerState::RestartBackoff,
             (AnalyzerState::Ready, AnalyzerEvent::RemoteError) => AnalyzerState::Ready,
             (_, AnalyzerEvent::Disabled) => AnalyzerState::Unavailable,
             (from, event) => {
@@ -290,6 +300,7 @@ impl AnalyzerSupervisor {
             | AnalyzerEvent::StartupFailed
             | AnalyzerEvent::TimedOut
             | AnalyzerEvent::Cancelled
+            | AnalyzerEvent::Retired
             | AnalyzerEvent::RemoteError
             | AnalyzerEvent::TransportFailed
             | AnalyzerEvent::InvalidResponse => self.last_failure = Some(event),
@@ -945,6 +956,45 @@ mod tests {
             supervisor.failure_evidence(),
             Some(("analyzer-crashed", "Analyzer process exited unexpectedly."))
         );
+    }
+
+    /// The refresh lane retiring a client is not evidence against the
+    /// analyzer: the state must stop claiming `Ready` over a process that is
+    /// gone, but the restart budget stays untouched and the next start is a
+    /// fresh incarnation.
+    #[test]
+    fn a_retired_client_leaves_ready_without_spending_the_restart_budget() {
+        let root = AdmittedRoot::new("file:///project");
+        let mut supervisor = AnalyzerSupervisor::new(root.clone());
+        supervisor
+            .apply(&root, AnalyzerEvent::StartRequested)
+            .unwrap();
+        supervisor.apply(&root, AnalyzerEvent::Ready).unwrap();
+        let live = supervisor.attempt();
+
+        assert_eq!(
+            supervisor.apply(&root, AnalyzerEvent::Retired).unwrap(),
+            AnalyzerState::RestartBackoff
+        );
+        assert_eq!(supervisor.restart_attempts(), 0);
+        assert_eq!(
+            supervisor.failure_evidence(),
+            Some((
+                "analyzer-retired",
+                "Analyzer client was retired without a result."
+            ))
+        );
+
+        supervisor
+            .apply(&root, AnalyzerEvent::StartRequested)
+            .unwrap();
+        assert_eq!(supervisor.attempt(), live + 1);
+        assert_eq!(
+            supervisor.apply(&root, AnalyzerEvent::Retired).unwrap(),
+            AnalyzerState::RestartBackoff,
+            "a start abandoned mid-flight is retired the same way"
+        );
+        assert_eq!(supervisor.restart_attempts(), 0);
     }
 
     #[test]

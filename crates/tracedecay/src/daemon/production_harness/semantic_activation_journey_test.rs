@@ -1,20 +1,23 @@
-#![cfg(feature = "semantic-fastembed")]
+#![cfg(all(feature = "semantic-fastembed", not(windows)))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_application::ConfigurationSetRequestV1;
+use tracedecay_application::semantic_runtime::{
+    ProjectSemanticActivationExt, SemanticRuntimeStateV1,
+};
+use tracedecay_application::store::vector_generations::{
+    GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
+};
+use tracedecay_contracts::ConfigurationSetRequestV1;
 use tracedecay_domain::configuration::{ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey};
 use tracedecay_domain::{ManifestDigest, VectorGenerationIdV1};
 use tracedecay_semantic_contracts::{
-    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticModelLifecycleStateV1,
-    SemanticProfileSelection, SemanticResourceCeilings,
-};
-use tracedecay_usecases::semantic_runtime::{ProjectSemanticActivationExt, SemanticRuntimeStateV1};
-use tracedecay_usecases::store::vector_generations::{
-    GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticFallbackReasonV1,
+    SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1, SemanticProfileSelection,
+    SemanticResourceCeilings,
 };
 
 use super::journey_test_support::{
@@ -75,11 +78,75 @@ pub(super) fn seed_distribution_fixture(
     std::fs::write(reference, &model.source.revision).expect("write revision reference");
 }
 
+/// The live lifecycle owner the composition's session registry retains for
+/// this project. The registry owns it, so a composition restart retires the
+/// previous instance: resolve again after every reopen before observing or
+/// mutating the model lifecycle.
+pub(super) async fn project_semantic_lifecycle(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1> {
+    let project_id = tracedecay_domain::ProjectId::new(
+        harness
+            .project_id(project)
+            .await
+            .expect("installed project identity"),
+    )
+    .expect("canonical project identity");
+    harness
+        .resources
+        .as_ref()
+        .expect("live harness")
+        .store_administration
+        .session_runtime_registry()
+        .await
+        .expect("session registry")
+        .project_semantic_lifecycle(&project_id)
+        .await
+        .expect("installed project lifecycle")
+}
+
+pub(super) async fn install_project_distribution_fixture(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    fixture_root: &Path,
+) -> Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1> {
+    let lifecycle = project_semantic_lifecycle(harness, project).await;
+    let project_id = tracedecay_domain::ProjectId::new(
+        harness
+            .project_id(project)
+            .await
+            .expect("installed project identity"),
+    )
+    .expect("canonical project identity");
+    let lifecycle_root = tracedecay_semantic::default_lifecycle_root_in(harness.profile_root())
+        .join("projects")
+        .join(project_id.as_str());
+    seed_distribution_fixture(&lifecycle_root, fixture_root, &lifecycle);
+    lifecycle
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
+        .expect("select production semantic model");
+    lifecycle
+        .acquire_blocking_for_tests()
+        .expect("install verified distribution fixture");
+    lifecycle
+}
+
 pub(super) fn installed_selection_material(
     owner: &tracedecay_semantic::SemanticModelLifecycleOwnerV1,
 ) -> (String, PathBuf) {
     match owner.status().state.expect("installed model state") {
         SemanticModelLifecycleStateV1::Installed {
+            artifact_digest,
+            install_path,
+            ..
+        }
+        | SemanticModelLifecycleStateV1::Loading {
+            artifact_digest,
+            install_path,
+            ..
+        }
+        | SemanticModelLifecycleStateV1::Indexing {
             artifact_digest,
             install_path,
             ..
@@ -91,6 +158,32 @@ pub(super) fn installed_selection_material(
         } => (artifact_digest, install_path),
         state => panic!("expected installed production model, got {state:?}"),
     }
+}
+
+#[test]
+#[ignore = "requires the verified TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE"]
+fn installed_selection_survives_background_projection_progress() {
+    let fixture = std::env::var_os("TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE")
+        .map(PathBuf::from)
+        .expect("verified distribution fixture");
+    let root = tempfile::tempdir().expect("isolated lifecycle");
+    let owner = tracedecay_semantic::SemanticModelLifecycleOwnerV1::open_default(root.path())
+        .expect("lifecycle owner");
+    seed_distribution_fixture(root.path(), &fixture, &owner);
+    owner
+        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
+        .expect("select model");
+    owner
+        .acquire_blocking_for_tests()
+        .expect("verified installation");
+    let installed = installed_selection_material(&owner);
+    owner.mark_loading().expect("background load");
+    assert_eq!(installed_selection_material(&owner), installed);
+    owner.mark_indexing(0, 3).expect("background projection");
+    assert_eq!(installed_selection_material(&owner), installed);
+    owner.mark_indexing(3, 3).expect("projection complete");
+    owner.mark_ready().expect("published projection");
+    assert_eq!(installed_selection_material(&owner), installed);
 }
 
 pub(super) async fn wait_for_semantic_generation(
@@ -186,7 +279,7 @@ pub(super) async fn wait_for_semantic_generation(
             }
             observed.set("semantic_runtime_active_generation");
             let vector_id =
-                match tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+                match tracedecay_application::semantic_runtime::project_semantic_application_status(
                     project, None,
                 )
                 .map(|status| status.state)
@@ -213,16 +306,19 @@ pub(super) async fn wait_for_semantic_generation(
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            observed.set("retained_vector_graph");
             let Ok(retained) = provider.graph_for_generation(&code).await else {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            observed.set("read_only_vector_generation_store");
             let Ok(Some(store)) =
-                GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_id)
+                GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_id).await
             else {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 continue;
             };
+            observed.set("published_vector_generation");
             let Ok(Some(vector)) = store
                 .generation(&vector_id, Arc::clone(retained.cancellation()))
                 .await
@@ -238,10 +334,9 @@ pub(super) async fn wait_for_semantic_generation(
             if vector.source_generation() == expected_source {
                 observed.set("model_lifecycle_ready");
                 let lifecycle =
-                    tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(
-                        project,
-                    )
-                    .expect("production lifecycle status");
+                    tracedecay_application::semantic_runtime::project_lifecycle_status(project)
+                        .expect("production lifecycle status");
+                *last.borrow_mut() = json!(lifecycle.state);
                 if matches!(
                     lifecycle.state,
                     Some(SemanticModelLifecycleStateV1::Ready { .. })
@@ -259,12 +354,12 @@ pub(super) async fn wait_for_semantic_generation(
              awaiting source {expected_source:?}; semantic runtime {:?}; \
              last observation {}; model lifecycle {:?}",
             gate.get(),
-            tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+            tracedecay_application::semantic_runtime::project_semantic_application_status(
                 project, None
             )
             .map(|status| status.state),
             evidence.borrow(),
-            tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(project)
+            tracedecay_application::semantic_runtime::project_lifecycle_status(project)
                 .and_then(|status| status.state),
         )
     })
@@ -322,33 +417,19 @@ async fn wait_for_settled_semantic_generation(
 
 /// The generation this root serves, with the source content it sealed.
 ///
-/// This walks the same complete-seat-then-text-owner ladder as
-/// `CodeIndexSchedulerRegistryV1::latest_generation_id`, because that resolver
-/// answers an identity only and the journey needs the content that identity
-/// sealed; the registry's content-bearing resolver
-/// (`current_serving_generation_for_scope`) is scope-shaped while the journey
-/// holds a project root.
+/// Strict queries pin the text owner even while a complete graph seat lags, so
+/// this helper deliberately reads only that owner's authenticated metadata.
 async fn serving_source_identity(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project: &Path,
 ) -> Option<(
     tracedecay_domain::CodeGenerationId,
-    tracedecay_domain::ContentDigest,
+    tracedecay_domain::ManifestDigest,
 )> {
-    if let Some(seated) = schedulers
-        .serving_code_scope(project)
-        .await
-        .and_then(|serving| serving.serving_generation)
-    {
-        return Some((
-            seated.manifest().generation_id.clone(),
-            seated.snapshot().content_identity.clone(),
-        ));
-    }
     let text = schedulers.latest_text_serving_for_root(project).await?;
     Some((
         text.metadata().manifest().generation_id.clone(),
-        text.metadata().snapshot().content_identity.clone(),
+        text.source_commitments().ok()?.full_replay_digest.clone(),
     ))
 }
 
@@ -378,7 +459,13 @@ async fn wait_for_restored_source_content(
         .expect("live harness")
         .invocation
         .code_index_schedulers;
-    let expected_content = expected.snapshot().content_identity.clone();
+    let expected_content = expected
+        .manifest()
+        .source_commitments
+        .as_ref()
+        .expect("sealed source commitments")
+        .full_replay_digest
+        .clone();
     let restored = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Some((generation_id, content)) =
@@ -436,8 +523,8 @@ pub(super) async fn evaluate_native_profile(
         // vector generation is a `sha256:<hex>` digest, which cannot be embedded
         // in a daemon request token; doing so truthfully fails at request
         // validation before the evaluator is reached.
-        let request_id = tracedecay_application::request_identity::mint_global_request_id(
-            tracedecay_application::request_identity::GlobalRequestSurface::SemanticEvaluation,
+        let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+            tracedecay_contracts::request_identity::GlobalRequestSurface::SemanticEvaluation,
         )
         .expect("mint a production semantic-evaluation request id");
         let dispatched = std::time::Instant::now();
@@ -454,12 +541,12 @@ pub(super) async fn evaluate_native_profile(
                     request_id.as_str(),
                     EVALUATED_PROFILE_ID.to_owned(),
                     observed_at,
-                    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
                         observed_at.0
                             + tracedecay_daemon_protocol::SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
                     ))
                     .expect("evaluation deadline"),
-                    tracedecay_application::CancellationContext::active(
+                    tracedecay_contracts::CancellationContext::active(
                         "cancellation.semantic-native-evaluation",
                     )
                     .expect("evaluation cancellation"),
@@ -526,8 +613,21 @@ pub(super) async fn evaluate_native_profile(
                 let measured = report
                     .semantic_activation_resource_pins(EVALUATED_PROFILE_ID)
                     .expect("PASS carries exact current/10x resource pins");
-                let lifecycle = tracedecay_semantic::default_shared_lifecycle_owner()
-                    .expect("production lifecycle");
+                let project_id = tracedecay_domain::ProjectId::new(
+                    harness
+                        .project_id(project)
+                        .await
+                        .expect("installed project identity"),
+                )
+                .expect("canonical project identity");
+                let lifecycle = resources
+                    .store_administration
+                    .session_runtime_registry()
+                    .await
+                    .expect("session registry")
+                    .project_semantic_lifecycle(&project_id)
+                    .await
+                    .expect("installed project lifecycle");
                 let model = lifecycle
                     .catalog()
                     .get(DEFAULT_FASTEMBED_MODEL_ID)
@@ -566,7 +666,7 @@ pub(super) async fn evaluate_native_profile(
                 return profile_digest;
             }
             tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
-                problem: tracedecay_application::ApplicationProblem::Conflict { .. },
+                problem: tracedecay_contracts::ApplicationProblem::Conflict { .. },
             } if attempt == 0 => {}
             outcome => panic!("native semantic profile publication failed: {outcome:?}"),
         }
@@ -589,8 +689,8 @@ async fn activate_native_profile(
             )
             .expect("activation time"),
         );
-        let request_id = tracedecay_application::request_identity::mint_global_request_id(
-            tracedecay_application::request_identity::GlobalRequestSurface::SemanticEvaluation,
+        let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+            tracedecay_contracts::request_identity::GlobalRequestSurface::SemanticEvaluation,
         )
         .expect("mint a production semantic-activation request id");
         let dispatched = std::time::Instant::now();
@@ -608,12 +708,12 @@ async fn activate_native_profile(
                     EVALUATED_PROFILE_ID.to_owned(),
                     true,
                     observed_at,
-                    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
                         observed_at.0
                             + tracedecay_daemon_protocol::SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
                     ))
                     .expect("activation deadline"),
-                    tracedecay_application::CancellationContext::active(
+                    tracedecay_contracts::CancellationContext::active(
                         "cancellation.semantic-native-activation",
                     )
                     .expect("activation cancellation"),
@@ -640,7 +740,7 @@ async fn activate_native_profile(
                 return profile_digest;
             }
             tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem {
-                problem: tracedecay_application::ApplicationProblem::Conflict { .. },
+                problem: tracedecay_contracts::ApplicationProblem::Conflict { .. },
             } if attempt == 0 => {}
             outcome => panic!("composed semantic activation failed: {outcome:?}"),
         }
@@ -654,6 +754,16 @@ pub(super) async fn set_semantic_profile(
     active: SemanticProfileSelection,
     rollback: Option<SemanticProfileSelection>,
 ) {
+    let response = set_semantic_profile_response(harness, project, active, rollback).await;
+    assert_tool_effect_succeeded(&response);
+}
+
+async fn set_semantic_profile_response(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    active: SemanticProfileSelection,
+    rollback: Option<SemanticProfileSelection>,
+) -> JsonRpcResponse {
     let graph = harness.server(project).expect("project server").cg().await;
     let project_id = graph
         .configuration_runtime()
@@ -666,7 +776,8 @@ pub(super) async fn set_semantic_profile(
         .current()
         .await
         .expect("current production configuration")
-        .revision_id;
+        .revision_id()
+        .clone();
     let request = ConfigurationSetRequestV1 {
         layer: ConfigurationLayerIdV1::Project { project_id },
         key: SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
@@ -689,15 +800,14 @@ pub(super) async fn set_semantic_profile(
         .expect("semantic configuration idempotency key"),
         expected_revision,
     };
-    let response = harness
+    harness
         .call_tool(
             project,
             "tracedecay_configuration_set",
             serde_json::to_value(request).expect("configuration set request"),
         )
         .await
-        .expect("public semantic configuration mutation");
-    assert_tool_effect_succeeded(&response);
+        .expect("public semantic configuration mutation")
 }
 
 async fn search(
@@ -796,7 +906,7 @@ async fn semantic_runtime_status(
         .clone()
 }
 
-async fn wait_for_semantic_runtime_ready(
+pub(super) async fn wait_for_semantic_runtime_ready(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
@@ -821,7 +931,7 @@ async fn retain_graph(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-) -> tracedecay_usecases::semantic_runtime::RetainedSemanticVectorGraphV1 {
+) -> tracedecay_application::semantic_runtime::RetainedSemanticVectorGraphV1 {
     harness
         .resources
         .as_ref()
@@ -839,13 +949,14 @@ async fn retain_graph(
 async fn graph_bytes(
     generations: &[(
         &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-        &tracedecay_usecases::semantic_runtime::RetainedSemanticVectorGraphV1,
+        &tracedecay_application::semantic_runtime::RetainedSemanticVectorGraphV1,
         VectorGenerationIdV1,
     )],
 ) -> Vec<u8> {
     let mut snapshots = Vec::new();
     for (code, retained, vector_id) in generations {
         let store = GraphVectorGenerationStoreV1::read_only_generation(retained, vector_id)
+            .await
             .expect("read exact vector generation")
             .expect("published vector generation");
         let generation = store
@@ -856,7 +967,7 @@ async fn graph_bytes(
         let head = retained
             .runtime()
             .verified_head(
-                &tracedecay_usecases::semantic_runtime::SemanticGraphExecutionAuthorityV1::new(
+                &tracedecay_application::semantic_runtime::SemanticGraphExecutionAuthorityV1::new(
                     Arc::clone(retained.cancellation()),
                     std::time::Instant::now() + Duration::from_secs(10),
                 ),
@@ -873,6 +984,7 @@ async fn graph_bytes(
             vector_id.clone(),
             store
                 .verified_revision(Arc::clone(retained.cancellation()))
+                .await
                 .expect("verified semantic graph revision"),
             head,
             generation.generation_id().clone(),
@@ -946,26 +1058,6 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     // panics.
     let _stage_report = StageLedgerReportV1::arm("semantic activation journey");
     let _profile = crate::config::PinnedUserDataDir::new();
-    let lifecycle_root =
-        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
-    let lifecycle =
-        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
-    seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
-    lifecycle
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select production semantic model");
-    let model_install = std::time::Instant::now();
-    lifecycle
-        .acquire_blocking_for_tests()
-        .expect("install verified distribution fixture");
-    record_stage(
-        "model.verify_and_install",
-        model_install.elapsed(),
-        1,
-        "artifact",
-    );
-    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
-
     let isolation = tempfile::TempDir::new().expect("journey isolation");
     let project = isolation.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source directory");
@@ -984,11 +1076,69 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     .await
     .expect("production composition");
     let resources = harness.resources.as_ref().expect("live harness");
+    // Publication before genuine model acquisition must recover from its typed
+    // artifact refusal without a source edit or a test-triggered reschedule.
+    let initially_unavailable_code = tokio::time::timeout(Duration::from_mins(3), async {
+        loop {
+            let state =
+                tracedecay_application::semantic_runtime::project_semantic_application_status(
+                    &project, None,
+                )
+                .map(|status| status.state);
+            if matches!(
+                state,
+                Some(SemanticRuntimeStateV1::Degraded {
+                    active_generation: None,
+                    reason: SemanticFallbackReasonV1::ArtifactUnavailable,
+                })
+            ) {
+                break resources
+                    .invocation
+                    .code_index_schedulers
+                    .latest_generation_id(&project)
+                    .await
+                    .expect("published code generation before model acquisition");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("initial generation must expose its missing semantic artifact");
+    let lifecycle = timed_stage(
+        "model.verify_and_install",
+        install_project_distribution_fixture(&harness, &project, &fixture_root),
+    )
+    .await;
+    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
     let (first_code_id, first_code, first_vector) = timed_stage(
         "G1.index+embed+publish(settle)",
         wait_for_settled_semantic_generation(&harness, &project, None),
     )
     .await;
+    assert_eq!(
+        first_code_id, initially_unavailable_code,
+        "verified model acquisition must recover the existing code generation"
+    );
+    let runtime = tool_payload(
+        &harness
+            .call_tool(&project, "tracedecay_runtime", json!({ "format": "json" }))
+            .await
+            .expect("public runtime model observation"),
+    );
+    let model: SemanticModelLifecycleStatusV1 =
+        serde_json::from_value(runtime["semantic_model"].clone())
+            .expect("public exact-project model lifecycle");
+    assert_eq!(
+        model.selected_model.as_deref(),
+        Some(DEFAULT_FASTEMBED_MODEL_ID)
+    );
+    assert!(matches!(model.state,
+        Some(SemanticModelLifecycleStateV1::Installed {
+            model_id, artifact_digest: observed_digest, ..
+        } | SemanticModelLifecycleStateV1::Ready {
+            model_id, artifact_digest: observed_digest, ..
+        }) if model_id == DEFAULT_FASTEMBED_MODEL_ID && observed_digest == artifact_digest
+    ));
     let graph = harness.server(&project).expect("project server").cg().await;
     assert!(
         graph
@@ -1046,6 +1196,48 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         json!(first_code.manifest().generation_id)
     );
 
+    drop(first_generation);
+    drop(first_graph);
+    drop(graph);
+    timed_stage("harness.shutdown(restart)", harness.shutdown()).await;
+    let harness = timed_stage(
+        "harness.reopen(daemon composition)",
+        ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()]),
+    )
+    .await
+    .expect("restart production composition");
+    // The restarted composition's registry owns a new lifecycle instance over
+    // the same durable root; the pre-restart handle is retired. Every later
+    // injection and retry must reach the owner the daemon actually serves.
+    let lifecycle = project_semantic_lifecycle(&harness, &project).await;
+    let restarted_runtime = timed_stage(
+        "restart.await_runtime_ready",
+        wait_for_semantic_runtime_ready(&harness, &project),
+    )
+    .await;
+    assert_eq!(
+        restarted_runtime["state"]["receipt"]["activated_generation"],
+        json!(first_vector.generation_id())
+    );
+    let restarted_query =
+        timed_stage("restart.strict_query", search(&harness, &project, true)).await;
+    assert_eq!(restarted_query["semantic"]["status"], "complete");
+    assert_semantic_probe_contribution(
+        &restarted_query,
+        "semantic_product_probe",
+        "semantic restart",
+    );
+    let first_code_id = harness
+        .resources
+        .as_ref()
+        .expect("restarted harness")
+        .invocation
+        .code_index_schedulers
+        .latest_generation_id(&project)
+        .await
+        .expect("restarted serving generation");
+    let first_graph = retain_graph(&harness, &project, &first_code).await;
+
     std::fs::write(
         project.join("src/lib.rs"),
         "pub fn semantic_product_probe() -> &'static str { \"generation-two\" }\n",
@@ -1053,7 +1245,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     .expect("G2 source");
     let second_commit = commit(&project, "test: publish semantic generation two");
     assert!(
-        resources
+        harness
+            .resources
+            .as_ref()
+            .expect("live harness")
             .invocation
             .code_index_schedulers
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
@@ -1136,7 +1331,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         &["checkout", "--quiet", "--detach", &first_commit],
     );
     assert!(
-        resources
+        harness
+            .resources
+            .as_ref()
+            .expect("live harness")
             .invocation
             .code_index_schedulers
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
@@ -1229,7 +1427,10 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         &["checkout", "--quiet", "--detach", &second_commit],
     );
     assert!(
-        resources
+        harness
+            .resources
+            .as_ref()
+            .expect("live harness")
             .invocation
             .code_index_schedulers
             .notify_hook_paths(&project, &["src/lib.rs".to_owned()])
@@ -1277,10 +1478,23 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     let graph_before_retry = graph_bytes(&generations).await;
     let core_before_failure = search(&harness, &project, false).await;
     assert_ne!(core_before_failure["semantic"]["status"], "complete");
+    // A vector generation identity binds the code generation it projected, so
+    // the retry checkout's own publication is a different identity from V2's
+    // even over byte-identical content: what the live pointer holds here is
+    // `retry_vector`, and V2's vectors are only a retained artifact no
+    // committed activation currently pins. Prove that, then unbind the live
+    // pointer so the exact retry below has to restore V2's retained vectors
+    // over this checkout rather than serve anything already warm.
     assert!(
-        tracedecay_usecases::semantic_runtime::unbind_project_semantic_cache_if_current(
+        !tracedecay_application::semantic_runtime::unbind_project_semantic_cache_if_current(
             &project,
             second_vector.generation_id(),
+        )
+    );
+    assert!(
+        tracedecay_application::semantic_runtime::unbind_project_semantic_cache_if_current(
+            &project,
+            retry_vector.generation_id(),
         )
     );
     lifecycle
@@ -1307,13 +1521,73 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
         injected_failure["state"]["retryable"], true,
         "runtime status must preserve the injected retry disposition: {injected_failure}"
     );
-    set_semantic_profile(
+    let graph = harness.server(&project).expect("project server").cg().await;
+    let configuration_before_refusal = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("configuration before failed transition");
+    let application_status_before_refusal =
+        tracedecay_application::semantic_runtime::project_semantic_application_status(
+            &project, None,
+        )
+        .expect("application status before failed transition");
+    let refused = set_semantic_profile_response(
         &harness,
         &project,
         selection(second_profile.clone(), &artifact_digest, &artifact_path),
-        Some(selection(first_profile, &artifact_digest, &artifact_path)),
+        Some(selection(
+            first_profile.clone(),
+            &artifact_digest,
+            &artifact_path,
+        )),
     )
     .await;
+    assert!(
+        refused.error.is_none(),
+        "failed semantic transition became a transport error: {refused:?}"
+    );
+    let refused = refused
+        .result
+        .as_ref()
+        .expect("failed semantic transition result");
+    assert_eq!(refused["isError"], true);
+    assert_eq!(
+        refused["problem"]["code"], "configuration.invalid_request",
+        "failed lifecycle must refuse before configuration admission: {refused}"
+    );
+    assert_eq!(refused["problem"]["retryable"], false);
+    assert!(
+        refused["problem"]["diagnostic"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("inspect_generation.load_artifact")),
+        "refusal must name the unavailable lifecycle artifact: {refused}"
+    );
+    let configuration_after_refusal = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .expect("configuration after failed transition");
+    assert_eq!(
+        configuration_after_refusal.revision_id(),
+        configuration_before_refusal.revision_id(),
+        "pre-admission refusal must not advance the configuration revision"
+    );
+    assert_eq!(
+        configuration_after_refusal.config().semantic,
+        configuration_before_refusal.config().semantic,
+        "pre-admission refusal must preserve active and rollback selections"
+    );
+    assert_eq!(
+        tracedecay_application::semantic_runtime::project_semantic_application_status(
+            &project, None
+        )
+        .expect("application status after failed transition"),
+        application_status_before_refusal,
+        "pre-admission refusal must preserve the activation receipt and epoch"
+    );
     assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;
     let core_during_failure = search(&harness, &project, false).await;
     assert_eq!(
@@ -1342,6 +1616,30 @@ async fn public_semantic_activation_rollback_and_exact_retry_preserve_graph_auth
     lifecycle
         .retry()
         .expect("re-admit verified installed model");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(
+                lifecycle.status().state,
+                Some(
+                    SemanticModelLifecycleStateV1::Installed { .. }
+                        | SemanticModelLifecycleStateV1::Ready { .. }
+                )
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("lifecycle retry did not restore the verified artifact");
+    set_semantic_profile(
+        &harness,
+        &project,
+        selection(second_profile.clone(), &artifact_digest, &artifact_path),
+        Some(selection(first_profile, &artifact_digest, &artifact_path)),
+    )
+    .await;
+    assert_code_generation_unchanged(&harness, &project, &retry_code_id).await;
     let recovery = std::time::Instant::now();
     let (recovered, recovered_status) = tokio::time::timeout(Duration::from_secs(30), async {
         loop {

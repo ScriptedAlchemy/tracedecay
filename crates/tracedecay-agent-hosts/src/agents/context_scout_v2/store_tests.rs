@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tokio::sync::Barrier;
 
 use super::*;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_contracts::request_identity::{
+    LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
+};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 async fn database() -> (TempDir, Database) {
     crate::register_test_schema_installer();
@@ -68,6 +72,144 @@ fn lease(id: u8, expires_at: i64) -> ContextScoutLeaseV1 {
     }
 }
 
+fn mutation_binding(
+    mutation: &ContextScoutPublicMutationV1,
+    key: &str,
+) -> ContextScoutMutationBindingV1 {
+    let evidence = super::evidence::fixture_context_scout_evidence();
+    let idempotency_key = tracedecay_contracts::IdempotencyKey::new(key).unwrap();
+    let operation = mutation.operation();
+    let actor = tracedecay_domain::ActorId::new("actor.context-scout-test").unwrap();
+    let effect_identity = derive_logical_effect_idempotency(
+        LogicalEffectIdempotencyDomain::ContextScoutEffect,
+        &(
+            &actor,
+            &evidence.authorized_scope,
+            operation.as_str(),
+            &idempotency_key,
+        ),
+    )
+    .unwrap();
+    ContextScoutMutationBindingV1 {
+        effect_identity,
+        actor,
+        scope: evidence.authorized_scope,
+        operation,
+        idempotency_key,
+        input_digest: mutation.input_digest().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn public_claim_retains_empty_and_changed_settlements_for_exact_replay() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let empty = ContextScoutPublicMutationV1::Claim {
+        address: address(project_id),
+        window: ContextScoutDeliveryWindowV1::IdleWindow,
+        configuration_revision: [16; 32],
+        now: UtcMicros(10),
+        lease: lease(70, 40),
+    };
+    let empty_binding = mutation_binding(&empty, "scout-empty-replay");
+    let first = store
+        .commit_public_mutation(empty_binding.clone(), empty.clone())
+        .await;
+    let ContextScoutMutationSettlementOutcomeV1::Reconciled(first) = first else {
+        panic!("empty claim must retain a reconciled settlement");
+    };
+    assert_eq!(
+        first.result,
+        ContextScoutMutationResultV1::Claim(Box::new(ContextScoutDurableClaimOutcomeV1::Empty))
+    );
+    assert_eq!(
+        store
+            .commit_public_mutation(empty_binding.clone(), empty)
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(first.clone())
+    );
+
+    let mut conflicting = ContextScoutPublicMutationV1::Claim {
+        address: address(project_id),
+        window: ContextScoutDeliveryWindowV1::OnRequest,
+        configuration_revision: [16; 32],
+        now: UtcMicros(11),
+        lease: lease(71, 40),
+    };
+    let mut conflicting_binding = empty_binding.clone();
+    conflicting_binding.input_digest = conflicting.input_digest().unwrap();
+    assert_eq!(
+        store
+            .commit_public_mutation(conflicting_binding, conflicting.clone())
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict
+    );
+
+    let mut pending = entry(project_id, 1);
+    pending.envelope.delivery_window = ContextScoutDeliveryWindowV1::IdleWindow;
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let replay_after_enqueue = ContextScoutPublicMutationV1::Claim {
+        address: address(project_id),
+        window: ContextScoutDeliveryWindowV1::IdleWindow,
+        configuration_revision: [17; 32],
+        now: UtcMicros(12),
+        lease: lease(73, 40),
+    };
+    assert_eq!(
+        store
+            .commit_public_mutation(empty_binding, replay_after_enqueue)
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(first)
+    );
+    if let ContextScoutPublicMutationV1::Claim {
+        configuration_revision,
+        window,
+        now,
+        lease: claim_lease,
+        ..
+    } = &mut conflicting
+    {
+        *window = ContextScoutDeliveryWindowV1::IdleWindow;
+        *configuration_revision = [16; 32];
+        *now = UtcMicros(12);
+        *claim_lease = lease(72, 40);
+    }
+    let binding = mutation_binding(&conflicting, "scout-claim-replay");
+    let ContextScoutMutationSettlementOutcomeV1::Reconciled(claimed) = store
+        .commit_public_mutation(binding.clone(), conflicting.clone())
+        .await
+    else {
+        panic!("claim must retain a reconciled settlement");
+    };
+    assert!(matches!(
+        claimed.result,
+        ContextScoutMutationResultV1::Claim(ref outcome)
+            if matches!(**outcome, ContextScoutDurableClaimOutcomeV1::Claimed(_))
+    ));
+    assert_eq!(
+        store
+            .commit_public_mutation(binding.clone(), conflicting.clone())
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(claimed.clone())
+    );
+    if let ContextScoutPublicMutationV1::Claim {
+        configuration_revision,
+        ..
+    } = &mut conflicting
+    {
+        *configuration_revision = [17; 32];
+    }
+    assert_eq!(
+        store.commit_public_mutation(binding, conflicting).await,
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(claimed)
+    );
+}
+
 #[tokio::test]
 async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() {
     let (_temporary, database) = database().await;
@@ -89,6 +231,14 @@ async fn restart_requeues_expired_claim_and_keeps_receipt_feedback_idempotent() 
         other => panic!("expected claimed entry, got {other:?}"),
     };
     assert_eq!(claimed.entry, pending);
+    let retried = match store
+        .claim(pending.work.address, UtcMicros(11), lease(21, 30))
+        .await
+    {
+        ContextScoutDurableClaimOutcomeV1::Claimed(claimed) => claimed,
+        other => panic!("expected idempotent claim retry, got {other:?}"),
+    };
+    assert_eq!(retried, claimed);
 
     drop(store);
     let (restarted, startup) = ProjectContextScoutDurableStoreV1::startup_from_project_database(
@@ -372,6 +522,23 @@ async fn delivery_by_lease_persists_exact_receipt_and_idempotent_authority() {
             .await,
         ContextScoutDurableStoreOutcomeV1::Superseded
     );
+    let mut foreign_address = pending.work.address;
+    foreign_address.thread_id = [99; 16];
+    let foreign_feedback = ContextScoutPublicMutationV1::Feedback {
+        address: foreign_address,
+        receipt: receipt.clone(),
+        feedback: ContextScoutFeedbackV1 {
+            receipt_id: receipt.receipt_id,
+            kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+        },
+    };
+    let foreign_binding = mutation_binding(&foreign_feedback, "scout-foreign-feedback");
+    assert_eq!(
+        restarted
+            .commit_public_mutation(foreign_binding, foreign_feedback)
+            .await,
+        ContextScoutMutationSettlementOutcomeV1::Unavailable
+    );
     assert_eq!(
         restarted
             .recent(
@@ -425,6 +592,53 @@ async fn restart_generation_snapshot_includes_a_live_claim_without_requeueing_it
             entries: vec![pending],
             truncated: false,
         }
+    );
+}
+
+#[tokio::test]
+async fn concurrent_startups_discover_one_entry_but_only_one_claims_it() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let pending = entry(project_id, 5);
+    assert_eq!(
+        store.enqueue(pending.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+
+    let claim_boundary = Arc::new(Barrier::new(2));
+    let contender = |claim_lease| {
+        let store = Arc::clone(&store);
+        let pending = pending.clone();
+        let claim_boundary = Arc::clone(&claim_boundary);
+        async move {
+            assert_eq!(
+                store.startup(UtcMicros(10), 8).await,
+                ContextScoutDurableStartupOutcomeV1::Ready {
+                    entries: vec![pending.clone()],
+                    truncated: false,
+                }
+            );
+            claim_boundary.wait().await;
+            store
+                .claim(pending.work.address, UtcMicros(10), claim_lease)
+                .await
+        }
+    };
+    let (first, second) = tokio::join!(contender(lease(47, 50)), contender(lease(48, 50)));
+    assert!(
+        matches!(
+            (&first, &second),
+            (
+                ContextScoutDurableClaimOutcomeV1::Claimed(_),
+                ContextScoutDurableClaimOutcomeV1::Empty,
+            ) | (
+                ContextScoutDurableClaimOutcomeV1::Empty,
+                ContextScoutDurableClaimOutcomeV1::Claimed(_),
+            )
+        ),
+        "discovery must yield one durable claim and one typed empty outcome: {first:?}, {second:?}"
     );
 }
 
@@ -683,4 +897,106 @@ async fn cancellation_tombstone_blocks_stale_generation_but_allows_newer_work() 
         }
     );
     assert!(Arc::strong_count(&store) >= 1);
+}
+
+/// `1be14bdaa` lets startup answer from the read path when the reconciliation
+/// would change nothing, so startup no longer takes the exclusive writer lane
+/// to *discover* work. Discovery is not acquisition: two routes starting
+/// concurrently both see the same unclaimed entry, and exactly one of them
+/// converts that sighting into a durable claim.
+#[tokio::test]
+async fn concurrent_read_first_startups_discover_one_entry_and_claim_it_once() {
+    let (_temporary, database) = database().await;
+    let project_id = [9; 16];
+    let pending = {
+        let store =
+            ProjectContextScoutDurableStoreV1::from_project_database(database.clone(), project_id)
+                .expect("owned project store");
+        let pending = entry(project_id, 1);
+        assert_eq!(
+            store.enqueue(pending.clone()).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        pending
+    };
+
+    // Nothing has expired, so both startups take the read-first path.
+    let (left, right) = tokio::join!(
+        ProjectContextScoutDurableStoreV1::startup_from_project_database(
+            database.clone(),
+            project_id,
+            UtcMicros(10),
+            8,
+        ),
+        ProjectContextScoutDurableStoreV1::startup_from_project_database(
+            database.clone(),
+            project_id,
+            UtcMicros(10),
+            8,
+        ),
+    );
+    let (left_store, left_startup) = left.expect("left startup");
+    let (right_store, right_startup) = right.expect("right startup");
+    for (side, startup) in [("left", &left_startup), ("right", &right_startup)] {
+        let ContextScoutDurableStartupOutcomeV1::Ready { entries, truncated } = startup else {
+            panic!("{side} startup must be ready, got {startup:?}");
+        };
+        assert_eq!(
+            entries,
+            &vec![pending.clone()],
+            "{side} startup must discover the unclaimed entry"
+        );
+        assert!(!truncated, "{side} startup page must not be truncated");
+    }
+
+    // Both saw it; only one may own it.
+    let (left_claim, right_claim) = tokio::join!(
+        left_store.claim(pending.work.address, UtcMicros(11), lease(31, 40)),
+        right_store.claim(pending.work.address, UtcMicros(11), lease(32, 40)),
+    );
+    let outcomes = [&left_claim, &right_claim];
+    let claimed = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, ContextScoutDurableClaimOutcomeV1::Claimed(_)))
+        .count();
+    assert_eq!(
+        claimed, 1,
+        "exactly one concurrent startup may hold the durable claim: \
+         left={left_claim:?} right={right_claim:?}"
+    );
+    let empty = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, ContextScoutDurableClaimOutcomeV1::Empty))
+        .count();
+    assert_eq!(
+        empty, 1,
+        "the losing startup must be told the entry is taken, not that the store is \
+         unavailable: left={left_claim:?} right={right_claim:?}"
+    );
+    let ContextScoutDurableClaimOutcomeV1::Claimed(winner) = outcomes
+        .iter()
+        .find(|outcome| matches!(outcome, ContextScoutDurableClaimOutcomeV1::Claimed(_)))
+        .expect("one winner")
+    else {
+        unreachable!()
+    };
+    assert_eq!(winner.entry, pending);
+
+    // The durable state agrees: a third startup finds nothing unclaimed.
+    let (_third, third_startup) = ProjectContextScoutDurableStoreV1::startup_from_project_database(
+        database,
+        project_id,
+        UtcMicros(12),
+        8,
+    )
+    .await
+    .expect("third startup");
+    assert_eq!(
+        third_startup,
+        ContextScoutDurableStartupOutcomeV1::Ready {
+            entries: Vec::new(),
+            truncated: false,
+        },
+        "the claimed entry must not be offered again before its lease expires"
+    );
 }

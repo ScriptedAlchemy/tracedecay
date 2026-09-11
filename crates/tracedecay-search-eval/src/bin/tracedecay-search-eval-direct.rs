@@ -4,9 +4,10 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
-use tracedecay_application::CancellationSignal;
+use tracedecay_contracts::CancellationSignal;
+use tracedecay_daemon_identity::invocation_client_for_current;
 use tracedecay_daemon_protocol::{
-    DaemonClientIdentity, DaemonHandshake, DaemonInvocationClient, MovedStoreAdoption,
+    DaemonClientIdentity, DaemonHandshake, MovedStoreAdoption,
     SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
 };
 use tracedecay_domain::errors::{Result as RuntimeResult, TraceDecayError};
@@ -247,7 +248,7 @@ fn evaluate_and_publish(project_root: PathBuf, evaluated_profile_id: String) -> 
             Ok(handshake) => handshake,
             Err(error) => return invalid("evaluate_and_publish", error),
         };
-        let client = match invocation_client_for_eval(handshake) {
+        let client = match invocation_client_for_current(handshake) {
             Ok(client) => client,
             Err(error) => return invalid("evaluate_and_publish", error),
         };
@@ -283,7 +284,7 @@ fn qualify_native(
             Ok(handshake) => handshake,
             Err(error) => return invalid("qualify_native", error),
         };
-        let client = match invocation_client_for_eval(handshake) {
+        let client = match invocation_client_for_current(handshake) {
             Ok(client) => client,
             Err(error) => return invalid("qualify_native", error),
         };
@@ -371,13 +372,6 @@ fn handshake_for_eval_client(project_root: PathBuf) -> RuntimeResult<DaemonHands
     })
 }
 
-/// Consume the composition-root daemon authority record through the typed
-/// discovery authority. Discovery stays owned by that record; this binary
-/// does not mint a second endpoint or parse the record itself.
-fn invocation_client_for_eval(handshake: DaemonHandshake) -> RuntimeResult<DaemonInvocationClient> {
-    tracedecay_daemon_identity::invocation_client_for_current(handshake)
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -407,7 +401,7 @@ mod tests {
         assert_eq!(summary.status, DirectEvaluationStatusV1::Pass);
         assert_eq!(
             summary.workload_digest,
-            "sha256:a4c7d68b3adbfac6fd3bb32c511dbf9f3588c74f1696e0ee4cc4cf1f00f37ab8"
+            "sha256:cc1b479b9f561c7bd76b8e86b7c0d69ab41eccd4d808fa99f96150728fde14cb"
         );
         assert_eq!(summary.profile_count, 3);
     }

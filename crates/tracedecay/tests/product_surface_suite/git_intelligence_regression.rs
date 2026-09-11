@@ -22,15 +22,15 @@ use tempfile::TempDir;
 use tracedecay::git_query::{
     GenerationBoundGitQueryV1, GenerationStalenessV1, GitQueryBounds, GitQueryEngine, GitQueryError,
 };
+use tracedecay_application::git_intelligence::{
+    GitBlameRequest, GitHistoryRequest, GitIntelligenceError, NativeGitIntelligence,
+};
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::git::{
     GitBlameAvailabilityV1, GitChangeKindV1, GitDiffScopeV1, GitOidV1, GitOperationStateV1,
     HunkDirectionV1,
 };
 use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId};
-use tracedecay_usecases::git_intelligence::{
-    GitBlameRequest, GitHistoryRequest, GitIntelligenceError, NativeGitIntelligence,
-};
 
 /// An isolated repository fixture driven by the real `git` executable.
 struct Fixture {

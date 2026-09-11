@@ -2,9 +2,10 @@ use tree_sitter::Node as TsNode;
 
 use super::{CppExtractor, ExtractionState};
 use crate::{
+    common::local_node_id,
     complexity::{CPP_COMPLEXITY, count_complexity},
     traversal::{find_descendant_by_kind, find_direct_child_by_kind, has_direct_child_kind},
-    types::{Edge, EdgeKind, Node, NodeKind, Visibility, generate_node_id},
+    types::{ComplexityAnalysisV1, Edge, EdgeKind, Node, NodeKind, Visibility},
 };
 
 impl CppExtractor {
@@ -51,7 +52,7 @@ impl CppExtractor {
         } else {
             NodeKind::Function
         };
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
         let graph_node = Node {
             id: id.clone(),
@@ -75,6 +76,7 @@ impl CppExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -125,7 +127,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Constructor,
+            &name,
+            node,
+        );
         let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
         let graph_node = Node {
             id: id.clone(),
@@ -149,6 +157,7 @@ impl CppExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -181,7 +190,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Method,
+            &name,
+            node,
+        );
         let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
         let graph_node = Node {
             id: id.clone(),
@@ -205,6 +220,7 @@ impl CppExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -310,7 +326,13 @@ impl CppExtractor {
             let start_column = node.start_position().column as u32;
             let end_column = node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
+            let id = local_node_id(
+                &state.file_path,
+                state.source,
+                &NodeKind::Constructor,
+                &name,
+                node,
+            );
             let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
             let graph_node = Node {
                 id: id.clone(),
@@ -334,6 +356,7 @@ impl CppExtractor {
                 unsafe_blocks: metrics.unsafe_blocks,
                 unchecked_calls: metrics.unchecked_calls,
                 assertions: metrics.assertions,
+                complexity_analysis: metrics.analysis,
                 updated_at: state.timestamp,
                 parent_id: None,
             };
@@ -360,7 +383,7 @@ impl CppExtractor {
         } else {
             NodeKind::Method
         };
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let metrics = count_complexity(node, &CPP_COMPLEXITY, state.source);
         let graph_node = Node {
             id: id.clone(),
@@ -384,6 +407,7 @@ impl CppExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -413,7 +437,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Field, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Field,
+            &name,
+            node,
+        );
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Field,
@@ -436,6 +466,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -467,7 +498,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Function,
@@ -490,6 +527,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -523,7 +561,13 @@ impl CppExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Static, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Static,
+            &name,
+            node,
+        );
         let graph_node = Node {
             id: id.clone(),
             kind: NodeKind::Static,
@@ -546,6 +590,7 @@ impl CppExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

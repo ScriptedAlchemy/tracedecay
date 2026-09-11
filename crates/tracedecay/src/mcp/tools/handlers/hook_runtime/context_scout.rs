@@ -1,15 +1,18 @@
-use crate::agents::context_scout_v2::{
-    ContextScoutControlV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
-};
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
-use tracedecay_application::context_scout::{
+use tracedecay_agent_hosts::agents::context_scout_v2::{
+    ContextScoutControlV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
+};
+use tracedecay_application::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
+use tracedecay_automation_runtime::automation::config_error;
+use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryReceiptV1, ContextScoutDurableClaimV1, ContextScoutFeedbackV1,
     ContextScoutWorkV1,
 };
-use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -20,13 +23,9 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_runtime_core::privacy::{
-    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
-use tracedecay_usecases::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-};
 
 use super::admission::{
     HookV2BindingAdmission, hook_v2_binding_admission, hook_v2_catchup_response,
@@ -37,7 +36,7 @@ use super::required_value;
 async fn hook_v2_context_scout_lifecycle(
     args: &Value,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
+) -> Option<tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
     hook_v2_context_scout_lifecycle_for_session(envelope, hook_v2_native_session_id(args, envelope))
         .await
 }
@@ -45,7 +44,7 @@ async fn hook_v2_context_scout_lifecycle(
 pub(super) async fn hook_v2_context_scout_lifecycle_for_session(
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     session_id: Option<SessionId>,
-) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
+) -> Option<tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
     let session_id = session_id?;
     crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
         envelope.project_id,
@@ -65,8 +64,13 @@ pub(super) fn hook_v2_native_context_scout_lifecycle(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_lifecycle")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Context-scout admission is one native lifecycle bind for the scout claim."
+)]
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
+    background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,
     provider: ProviderId,
     lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
     range: ObservationSourceRangeV1,
@@ -126,12 +130,18 @@ pub(super) async fn admit_native_context_scout_lifecycle(
             Err(_) => return false,
         };
     let binding = sessions.binding();
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::registered_for_project(
+    let authorities = HostAdmissionAuthorities::registered_for_project(
         binding.shard_id.brain_id.clone(),
         binding.shard_id.profile_id.clone(),
         project_id,
         sessions,
-    ));
+    );
+    let facade = HostAdmissionFacade::new(match background_cpu {
+        Some(background_cpu) => {
+            authorities.with_background_cpu(std::sync::Arc::clone(background_cpu))
+        }
+        None => authorities,
+    });
     let expected_cursor = match facade.get_source_cursor(&source, &scope).await {
         Ok(None) => None,
         Ok(Some(cursor))
@@ -346,12 +356,11 @@ pub(super) async fn hook_v2_feedback_notice_delivery(
             return Ok(hook_v2_catchup_response(ACTION));
         }
     }
-    let notice =
-        serde_json::from_value::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(
-            required_value(args, "feedback_notice")?,
-        )
-        .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
-    let status = if tracedecay_usecases::advisory::acknowledge_advisory_hook_notice(
+    let notice = serde_json::from_value::<
+        tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
+    >(required_value(args, "feedback_notice")?)
+    .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
+    let status = if tracedecay_application::advisory::acknowledge_advisory_hook_notice(
         envelope.project_id,
         envelope.worktree_id,
         &notice,
@@ -450,10 +459,12 @@ pub(super) async fn hook_v2_scout_read(
     let Some(lifecycle) = hook_v2_context_scout_lifecycle(args, &envelope).await else {
         return Ok(json!({ "action": action, "status": "unavailable" }));
     };
-    let Some(hook) = crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
-        envelope,
-        &snapshot.binding,
-    ) else {
+    let Some(hook) =
+        tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
+            envelope,
+            &snapshot.binding,
+        )
+    else {
         return Ok(json!({ "action": action, "status": "unavailable" }));
     };
     let Some((address, _)) = cg

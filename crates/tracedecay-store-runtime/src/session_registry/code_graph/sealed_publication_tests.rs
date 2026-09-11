@@ -22,19 +22,22 @@ use tracedecay_domain::{
     CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphProjectorRevision, SealedCodeGenerationReplay,
+    GraphCancellation, GraphDbError, GraphGenerationManifestProvider, GraphGenerationReplaySource,
+    GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
 };
 use tracedecay_store::{
     GraphGenerationIdV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
     GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationStoreV1,
-    GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
+    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationReplayV1,
+    GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1,
+    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+    RuntimeRequestControlV1,
 };
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 use super::{
-    AtomicGraphCancellationV1, GraphPublicationProbeV1, RetainedCodeGraphRuntimeV1,
+    AtomicGraphCancellationV1, GraphPublicationProbeV1, PUBLICATION_PROJECTION_IN_FLIGHT,
+    ResidentMemoryGuardedGraphCancellationV1, RetainedCodeGraphRuntimeV1,
     take_publication_projection_overlap_peak,
 };
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
@@ -85,7 +88,7 @@ fn with_publication_context<T>(
         deadline_warned: AtomicBool::new(false),
     };
     let control = RuntimeRequestControlV1 {
-        requested_at: tracedecay_application::clock::now_micros(),
+        requested_at: tracedecay_contracts::clock::now_micros(),
         deadline,
         cancellation,
     };
@@ -196,6 +199,46 @@ fn assert_unverified_publication_state(
     });
 }
 
+#[test]
+fn resident_memory_trip_is_permanent_for_one_publication_attempt() {
+    let pressure = Arc::new(
+        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
+            std::num::NonZeroU64::new(1024 * 1024 * 1024).expect("nonzero pressure limit"),
+        ),
+    );
+    let request_cancelled = Arc::new(AtomicBool::new(false));
+    let attempt = ResidentMemoryGuardedGraphCancellationV1::new(
+        Arc::clone(&request_cancelled),
+        Arc::clone(&pressure),
+    );
+
+    assert!(!attempt.is_cancelled());
+    pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+    assert!(attempt.is_cancelled());
+    assert!(attempt.refused_by_resident_memory());
+
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    assert!(
+        attempt.is_cancelled(),
+        "pressure recovery must not revive the publication attempt that tripped"
+    );
+    assert!(attempt.refused_by_resident_memory());
+
+    request_cancelled.store(true, Ordering::Release);
+    assert!(attempt.is_cancelled());
+    assert!(
+        !attempt.refused_by_resident_memory(),
+        "explicit request cancellation keeps its identity after a pressure trip"
+    );
+
+    let next_attempt =
+        ResidentMemoryGuardedGraphCancellationV1::new(Arc::new(AtomicBool::new(false)), pressure);
+    assert!(
+        !next_attempt.is_cancelled(),
+        "recovered pressure admits a distinct publication attempt"
+    );
+}
+
 fn journal_publication_without_head(
     runtime: &RetainedCodeGraphRuntimeV1,
     generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
@@ -211,6 +254,237 @@ fn journal_publication_without_head(
                 .append_replay(&replay, context)
                 .expect("append sealed publication replay"),
             GraphReplayAppendOutcomeV1::Appended(_)
+        ));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_pending_replay_without_source_commitments_is_discarded_before_fresh_publication()
+ {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn fresh_publication_value() -> usize { 41 }\n",
+    )
+    .expect("project source");
+    git(&project_root, &["add", "."]);
+    git(
+        &project_root,
+        &["commit", "-qm", "fresh publication fixture"],
+    );
+    let project_id = ProjectId::new("project.historical-pending-replay").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let canonical_project = project_root.canonicalize().expect("canonical project root");
+    let scoped_store =
+        scoped_code_index_store_root(&root.join("code-index-store"), &canonical_project);
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &canonical_project,
+        scoped_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler");
+    scheduler.reconcile_now().expect("seal fresh generation");
+    let latest = scheduler
+        .latest_complete()
+        .expect("fresh complete generation");
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("active generation pointer"),
+    )
+    .expect("decode active generation pointer");
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        49,
+        "historical pending replay",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(project_id.clone(), [canonical_project.clone()])
+        .await
+        .expect("project graph database");
+    let runtime = registry
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            latest.generation().snapshot().repository.clone(),
+            scheduler.identity().worktree_id().clone(),
+            latest.generation().snapshot().reference.clone(),
+            latest.generation().manifest().generation_id.clone(),
+            project_database,
+            CodeGraphReplayBindingV1 {
+                generations_root: scoped_store.join("code-generations-v1"),
+                sealed_state_digest: SealedGraphStateDigest::try_from(pointer.state_digest)
+                    .expect("fresh sealed state digest"),
+            },
+            None,
+        )
+        .await
+        .expect("retain fresh code graph runtime");
+
+    let historical_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tracedecay-code-index/tests/fixtures/partitioned_pre_paging");
+    let historical_digest = "6fece830a4b12904018853a467e404edc60ea76e2cab48d4645fbbb4132bd6af";
+    let generations_root = scoped_store.join("code-generations-v1");
+    let segments_root = scoped_store.join("code-generation-segments-v1");
+    std::fs::create_dir_all(&segments_root).expect("historical segment root");
+    std::fs::copy(
+        historical_fixture.join("manifest.json"),
+        generations_root.join(format!("generation-{historical_digest}.json")),
+    )
+    .expect("install historical partitioned manifest");
+    for digest in [
+        "462ca12853ede4c82969ef6cc161dedc0952b5b7ef85dcf23b125adddb25ecf8",
+        "5cea7a47c6160776faa037dc1a530e5cecd38440d4833f8ebaf60a86e7535ea7",
+        "cc82022dad2a1bfc50f483df6a1433962ffd454b70d63a73b6ddd7ebaee2cf12",
+        "d1b83239d4010ac53b635c2d7c4bef3d1be9aa2e59d8f09d0404d28c1d00e8ab",
+    ] {
+        std::fs::copy(
+            historical_fixture
+                .join("segments")
+                .join(format!("{digest}.json")),
+            segments_root.join(format!("segment-{digest}.json")),
+        )
+        .expect("install historical partitioned segment");
+    }
+    let historical_repository =
+        RepositoryId::new("repository.production").expect("historical repository id");
+    let _historical_route = runtime
+        .graph_manifest_provider
+        .bind(
+            runtime.authority.binding().shard_id.clone(),
+            project_id,
+            historical_repository.clone(),
+            generations_root,
+            runtime.replay_root.clone(),
+        )
+        .expect("bind historical generation source");
+
+    let (_, fresh_key, fresh_replay) = publication_replay(&runtime, latest.generation());
+    let historical_generation = CodeGenerationId::new(
+        "generation.v1.d7eb9547.00000002.c221a7303ac5f89c1b1a553f26217136fda771a17cc1578d4cb232ef7a5f32c2",
+    )
+    .expect("historical generation id");
+    let projector_revision = GraphProjectorRevision::try_from(
+        tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+    )
+    .expect("projector revision");
+    let historical_key = GraphPublicationKeyV1::new(
+        fresh_key.projection.clone(),
+        GraphGenerationIdV1::new(
+            tracedecay_code_index::graph_projection::code_graph_generation_id(
+                &historical_generation,
+                &projector_revision,
+            )
+            .expect("historical graph generation")
+            .as_str(),
+        )
+        .expect("relational historical graph generation"),
+        GraphPublicationIdempotencyKeyV1::new(
+            tracedecay_code_index::graph_projection::code_graph_idempotency_key(
+                &historical_generation,
+                &projector_revision,
+            )
+            .expect("historical idempotency key")
+            .as_str(),
+        )
+        .expect("relational historical idempotency key"),
+    );
+    let historical_sealed_source = SealedCodeGenerationReplay {
+        repository: historical_repository,
+        generation: historical_generation,
+        sealed_state_digest: SealedGraphStateDigest::try_from(format!(
+            "sha256:{historical_digest}"
+        ))
+        .expect("historical sealed state digest"),
+        projector_revision,
+    };
+    // The historical fixture predates required documentation evidence, so the
+    // current reader refuses its rows by name before the source-commitment
+    // check can run (69df412d2 pins the same refusal in the code-index suite).
+    let refused = runtime
+        .graph_manifest_provider
+        .hydrate_sealed_code_generation(
+            &fresh_key.projection,
+            &historical_sealed_source,
+            &|| Ok(()),
+        )
+        .expect_err("historical seal must remain unavailable to current readers");
+    assert!(
+        matches!(
+            &refused,
+            GraphDbError::SealedRevisionIncompatible { sealed_state_digest, message }
+                if sealed_state_digest == &format!("sha256:{historical_digest}")
+                    && message.contains("missing field `docstring`")
+        ),
+        "unexpected error: {refused}"
+    );
+    let historical_source =
+        GraphGenerationReplaySource::SealedCodeGeneration(historical_sealed_source);
+    let historical_replay = GraphPublicationReplayV1::new(
+        historical_key.clone(),
+        fresh_replay.input_digest.clone(),
+        fresh_replay.dependency_generation_closure_digest.clone(),
+        fresh_replay.direct_dependency_generations.clone(),
+        None,
+        fresh_replay.expected_recovered_digest.clone(),
+        serde_json::to_vec(&historical_source).expect("historical replay source"),
+    )
+    .expect("historical replay");
+    with_publication_context("journal-historical-pending-replay", |context| {
+        let mut storage = runtime
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .append_replay(&historical_replay, context)
+                .expect("append historical replay"),
+            GraphReplayAppendOutcomeV1::Appended(_)
+        ));
+    });
+
+    let snapshot = runtime
+        .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        .expect("fresh publication discards the permanently incompatible predecessor");
+    assert_eq!(snapshot.verified_head().key, fresh_key);
+    with_publication_context("inspect-historical-pending-replay", |context| {
+        let mut storage = runtime
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        assert!(matches!(
+            storage
+                .replay(&historical_key, context)
+                .expect("historical replay lookup"),
+            GraphPublicationReplayLookupV1::Missing
+        ));
+        assert!(matches!(
+            storage
+                .replay(&fresh_key, context)
+                .expect("fresh replay lookup"),
+            GraphPublicationReplayLookupV1::Active(_)
         ));
     });
 }
@@ -1232,6 +1506,235 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     });
 }
 
+/// Sealed publication answers to the daemon's measured-RSS admission authority
+/// (issue #917). On the 4925-file dogfood checkout the projection grew from a
+/// 6.5 GiB text-serving baseline past the 11.3 GiB high watermark to a 15.4 GiB
+/// OOM kill while the maintenance sampler had already logged over-budget: the
+/// publication never consulted the cell. Over the watermark it must stop at
+/// its next checkpoint with the typed `resident_memory` budget (which the
+/// scheduler classifies as a graph refusal that keeps text seated, not a
+/// retryable fault), leave the publication journal untouched, and publish
+/// normally once measured RSS falls back under the low watermark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
+    let temporary = tempfile::tempdir().expect("temporary fixture parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    git(&project_root, &["init", "-q", "-b", "main"]);
+    git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project_root,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn resident_memory_refusal_value() -> usize { 917 }\n",
+    )
+    .expect("project source");
+    git(&project_root, &["add", "."]);
+    git(
+        &project_root,
+        &["commit", "-qm", "resident memory refusal fixture"],
+    );
+    let project_id =
+        ProjectId::new("project.resident-memory-code-publication").expect("project id");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        &project_root,
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let canonical_project = project_root.canonicalize().expect("canonical project root");
+
+    let store_root = root.join("code-index-store");
+    let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        &canonical_project,
+        scoped_store.clone(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open worktree scheduler");
+    scheduler.reconcile_now().expect("seal the generation");
+    let latest = scheduler.latest_complete().expect("complete generation");
+    let repository_id = latest.generation().snapshot().repository.clone();
+    let reference = latest.generation().snapshot().reference.clone();
+    let worktree_id = scheduler.identity().worktree_id().clone();
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    drop(scheduler);
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+            .expect("active generation pointer"),
+    )
+    .expect("decode active generation pointer");
+    let replay_binding = CodeGraphReplayBindingV1 {
+        generations_root: scoped_store.join("code-generations-v1"),
+        sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+            pointer.state_digest.clone(),
+        )
+        .expect("sealed state digest"),
+    };
+
+    let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        61,
+        "resident memory code publication",
+    )
+    .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(project_id.clone(), [canonical_project.clone()])
+        .await
+        .expect("project graph database");
+    let replay_root = project_database
+        .database_path()
+        .with_extension("graph-replay");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+        .expect("private graph replay root");
+
+    // An isolated cell driven by a fake RSS series: no `/proc` read, and no
+    // interference with the process cell other cases observe.
+    let pressure = Arc::new(
+        tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::new(
+            std::num::NonZeroU64::new(1024 * 1024 * 1024).expect("nonzero pressure limit"),
+        ),
+    );
+    let runtime = registry
+        .retain_code_graph_runtime(
+            project_id,
+            repository_id,
+            worktree_id,
+            reference,
+            generation_id,
+            project_database,
+            replay_binding,
+            None,
+        )
+        .await
+        .expect("retain the code graph runtime")
+        .with_resident_memory_pressure(&pressure);
+
+    // Start under nominal pressure, let the real publication claim the corpus
+    // build permit and enter manifest projection, then trip the watermark.
+    // Holding the short publication gate keeps the attempt alive after that
+    // phase so this cannot collapse into an over-budget admission test.
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    let publication_gate = runtime
+        .publication_locks
+        .gate
+        .lock()
+        .expect("hold publication gate after manifest projection");
+    let _ = take_publication_projection_overlap_peak();
+    let not_cancelled = Arc::new(AtomicBool::new(false));
+    let refused = std::thread::scope(|scope| {
+        let publisher = scope.spawn(|| {
+            runtime.publish_verified_snapshot(latest.generation(), Arc::clone(&not_cancelled))
+        });
+        let projection_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let build_claimed = runtime.publication_locks.build.try_lock().is_err();
+            if build_claimed
+                && (PUBLICATION_PROJECTION_IN_FLIGHT.load(Ordering::Acquire) != 0
+                    || take_publication_projection_overlap_peak() != 0)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() <= projection_deadline,
+                "publication never entered manifest projection"
+            );
+            std::thread::yield_now();
+        }
+        pressure.publish_observed_resident_bytes(pressure.high_watermark_bytes() + 1);
+        drop(publication_gate);
+        publisher.join().expect("join pressured publisher")
+    });
+    let _ = take_publication_projection_overlap_peak();
+    match refused {
+        Err(GraphDbError::BudgetExhausted { kind, limit }) => {
+            assert_eq!(kind, tracedecay_graph_db::GraphBudgetKind::ResidentMemory);
+            assert_eq!(limit, pressure.limit_bytes());
+        }
+        other => {
+            panic!("over-budget publication must report the resident-memory budget: {other:?}")
+        }
+    }
+    assert!(
+        !not_cancelled.load(Ordering::Acquire),
+        "the refusal must not be mistaken for a request cancellation"
+    );
+    // The refusal is the same abort path a request cancellation takes: no
+    // journal append, no verified head, nothing a retry has to repair.
+    assert_unverified_publication_state(&runtime, latest.generation(), false);
+
+    // The scheduler-facing classification names this budget as a graph
+    // refusal that keeps text serving, never a retryable activation fault.
+    let projection_error = tracedecay_code_index::graph_projection::CodeGraphProjectionError::from(
+        GraphDbError::budget_exhausted(
+            tracedecay_graph_db::GraphBudgetKind::ResidentMemory,
+            pressure.limit_bytes(),
+        ),
+    );
+    assert!(
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerErrorV1::GraphProjection(
+            projection_error
+        )
+        .is_graph_activation_refusal()
+    );
+
+    // A request cancellation observed while the watermark is also tripped
+    // keeps its own identity: the caller cancelled, so it is told so.
+    let cancelled = Arc::new(AtomicBool::new(true));
+    assert!(matches!(
+        runtime.publish_verified_snapshot(latest.generation(), cancelled),
+        Err(GraphDbError::Cancelled)
+    ));
+
+    // Back under the low watermark the same runtime publishes the generation
+    // it just refused; the refusal poisoned nothing.
+    pressure.publish_observed_resident_bytes(pressure.low_watermark_bytes());
+    let published = runtime
+        .publish_verified_snapshot(latest.generation(), Arc::new(AtomicBool::new(false)))
+        .expect("nominal measured RSS publishes the sealed generation");
+    let projector_revision = GraphProjectorRevision::try_from(
+        tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+    )
+    .expect("projector revision");
+    let expected_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
+        &latest.generation().manifest().generation_id,
+        &projector_revision,
+    )
+    .expect("graph generation id");
+    assert_eq!(
+        published.generation().as_str(),
+        expected_generation.as_str(),
+        "the refused generation publishes unchanged once memory is nominal"
+    );
+    let (projection, key, _) = publication_replay(&runtime, latest.generation());
+    with_publication_context("inspect-refused-then-published", |context| {
+        let mut storage = runtime
+            .project_database
+            .graph_publication_storage()
+            .expect("graph publication storage");
+        let head = storage
+            .verified_head(&projection, context)
+            .expect("verified graph head")
+            .expect("the nominal publication advanced the verified head");
+        assert_eq!(&head, published.verified_head());
+        assert!(matches!(
+            storage.replay(&key, context).expect("publication replay"),
+            GraphPublicationReplayLookupV1::Active(_)
+        ));
+    });
+}
+
 fn pinned_publication_lock_cells(registry: &DaemonSessionRuntimeRegistryV1) -> usize {
     registry
         .code_graph_publication_gates
@@ -1859,4 +2362,180 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
          build transient plus the retention ceiling ({peak_ceiling} bytes); observed \
          {peak_growth} bytes"
     );
+}
+
+#[test]
+fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain() {
+    let executor = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("isolated blocking-pool runtime");
+    executor.block_on(async {
+        let temporary = tempfile::tempdir().expect("temporary fixture parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+        git(&project_root, &["init", "-q", "-b", "main"]);
+        git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            &project_root,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::write(
+            project_root.join("src/lib.rs"),
+            "pub fn staging_release_value() -> usize { 917 }\n",
+        )
+        .expect("project source");
+        git(&project_root, &["add", "."]);
+        git(&project_root, &["commit", "-qm", "staging release fixture"]);
+        let project_id = ProjectId::new("project.staging-release-drain").expect("project id");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+        let canonical_project = project_root.canonicalize().expect("canonical project root");
+
+        let store_root = root.join("code-index-store");
+        let scoped_store = scoped_code_index_store_root(&store_root, &canonical_project);
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_project,
+            scoped_store.clone(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open worktree scheduler");
+        scheduler.reconcile_now().expect("seal the generation");
+        let latest = scheduler.latest_complete().expect("complete generation");
+        let repository_id = latest.generation().snapshot().repository.clone();
+        let reference = latest.generation().snapshot().reference.clone();
+        let worktree_id = scheduler.identity().worktree_id().clone();
+        let generation_id = latest.generation().manifest().generation_id.clone();
+        drop(scheduler);
+        let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+            &std::fs::read(scoped_store.join("active-code-generation-v1.json"))
+                .expect("active generation pointer"),
+        )
+        .expect("decode active generation pointer");
+        let replay_binding = CodeGraphReplayBindingV1 {
+            generations_root: scoped_store.join("code-generations-v1"),
+            sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest::try_from(
+                pointer.state_digest.clone(),
+            )
+            .expect("sealed state digest"),
+        };
+
+        let identity = profile_identity::load_or_create(&profile_root).expect("profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            61,
+            "staging release drain",
+        )
+        .expect("daemon database scope");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let project_database = registry
+            .project_memory(project_id.clone(), [canonical_project.clone()])
+            .await
+            .expect("project graph database");
+        let replay_root = project_database
+            .database_path()
+            .with_extension("graph-replay");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
+            .expect("private graph replay root");
+
+        let runtime = registry
+            .retain_code_graph_runtime(
+                project_id,
+                repository_id,
+                worktree_id,
+                reference,
+                generation_id,
+                project_database,
+                replay_binding,
+                None,
+            )
+            .await
+            .expect("retain real code graph runtime");
+        let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
+            runtime.authority.namespace().clone(),
+        )
+        .expect("canonical code projection");
+        let projection = runtime.relational_projection(&projection).unwrap();
+        let build = Arc::clone(&runtime.publication_locks.build)
+            .lock_owned()
+            .await;
+        let database_leases = Arc::strong_count(&runtime.project_database);
+        let graph_leases = Arc::strong_count(&runtime.authority);
+
+        // Occupy the actual blocking-pool slot. Dropping the sender on any
+        // assertion failure also releases this worker, so teardown cannot hang.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        });
+        entered.await.unwrap();
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.release_sealed_staging_rows(build, projection))
+                .join()
+                .expect("publication from a plain OS thread");
+        });
+        assert!(
+            Arc::clone(&runtime.publication_locks.build)
+                .try_lock_owned()
+                .is_err()
+        );
+        assert_eq!(
+            Arc::strong_count(&runtime.project_database),
+            database_leases + 1
+        );
+        assert_eq!(Arc::strong_count(&runtime.authority), graph_leases + 1);
+
+        // Poll the operation owner itself: terminal shutdown has other blocking
+        // phases, which must not make a detached release falsely pass this test.
+        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown());
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(operation_drain.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks());
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(terminal_drain.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(!runtime.operation_task_owner.retain(async {}));
+        assert!(
+            Arc::clone(&runtime.publication_locks.build)
+                .try_lock_owned()
+                .is_err()
+        );
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        operation_drain.await.expect("accepted sweep is joined");
+        terminal_drain
+            .await
+            .expect("terminal shutdown joins the sweep");
+        assert!(
+            Arc::clone(&runtime.publication_locks.build)
+                .try_lock_owned()
+                .is_ok()
+        );
+        assert_eq!(
+            Arc::strong_count(&runtime.project_database),
+            database_leases
+        );
+        assert_eq!(Arc::strong_count(&runtime.authority), graph_leases);
+    });
 }

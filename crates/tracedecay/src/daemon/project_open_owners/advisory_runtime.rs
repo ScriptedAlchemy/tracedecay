@@ -6,15 +6,49 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::context_scout::ContextScoutDeliveryOutcomeV1;
-use tracedecay_application::feedback::observations::{
+use tracedecay_application::advisory::github_runtime::{
+    ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
+    GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
+    ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
+    discover_exact_commit_pull_request_v1, public_repository_read_credential_v1,
+    resolve_registered_github_read_only_credential_v1,
+};
+use tracedecay_application::advisory::{
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
+    AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1,
+    AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
+    CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1, CiSourceAccessAuthorityV1,
+    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
+    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
+    GitHubReviewRuntimeOwnerConfigV1, ProductionCiFailureDiscoveryOutcomeV1,
+    ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
+    discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
+    open_advisory_production_authorities, register_advisory_daemon_startup,
+    register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
+};
+use tracedecay_application::delivery::{
+    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
+    ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
+    gated_project_delivery_read_handle_v1, open_project_delivery_read_authority_v1,
+};
+use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
+use tracedecay_application::feedback::{
+    FeedbackCycleInvocation, FeedbackCycleLspInput, FeedbackCycleRuntime,
+    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
+    ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
+    resolve_production_feedback_cycle_parts, resolve_project_feedback_scope_v1,
+};
+use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_application::operation_stream::OperationKind;
+use tracedecay_contracts::context_scout::ContextScoutDeliveryOutcomeV1;
+use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
-use tracedecay_application::feedback::{
+use tracedecay_contracts::feedback::{
     FeedbackRuntimeStatePort, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GITHUB_REVIEW_INGEST_USE_CASE_ID_V1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, SafeDiagnostic, now_micros,
 };
@@ -24,7 +58,8 @@ use tracedecay_domain::feedback::{
     GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    CommitId, HostKindV1, ManifestDigest, ProviderId, UtcMicros, canonical_sha256,
+    CommitId, ConfigurationRevisionId, HostKindV1, ManifestDigest, ProviderId, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_hooks::{
@@ -36,72 +71,38 @@ use tracedecay_lsp::{
     LspRuntimeFuture,
 };
 use tracedecay_session_memory::context::MonotonicDeadline;
-use tracedecay_usecases::advisory::github_runtime::{
-    ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
-    GitHubExactCommitDiscoveryOutcomeV1, GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-    ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
-    discover_exact_commit_pull_request_v1, resolve_registered_github_read_only_credential_v1,
-};
-use tracedecay_usecases::advisory::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookDeliveryV1,
-    AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1,
-    AdvisoryProductionOpenV1, AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
-    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
-    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
-    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
-    ProductionCiFailureDiscoveryOutcomeV1, ProductionCiProviderConfigV1,
-    ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
-    discover_production_ci_failure_request_v1, github_anchor_authorities_arc_v1,
-    register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
-};
-use tracedecay_usecases::delivery::{
-    ProjectDeliveryProviderMountGateV1, ProjectDeliveryReadAuthorityOpenOutcomeV1,
-    ProjectDeliveryReadOpenV1, ProjectDeliveryReviewBodySourceV1,
-    gated_project_delivery_read_handle_v1, open_project_delivery_read_authority_v1,
-};
-use tracedecay_usecases::feedback::concrete::FeedbackRuntime;
-use tracedecay_usecases::feedback::observations::FeedbackObservationEmitterV1;
-use tracedecay_usecases::feedback::{
-    FeedbackCycleInvocation, FeedbackCycleLspInput, FeedbackCycleRuntime,
-    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
-    ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
-    resolve_production_feedback_cycle_parts, resolve_project_feedback_scope_v1,
-};
-use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
-use tracedecay_usecases::operation_stream::OperationKind;
 
-use super::{
-    DaemonInvocationState, POLICY_REVISION_V1, daemon_owned_project_source_access_at,
-    register_semantic_activation_owner,
-};
-use crate::agents::context_scout_owner::ProjectContextScoutOwnerV1;
-use crate::agents::context_scout_ports::{
-    ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
-    ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
-};
-use crate::agents::context_scout_v2::{
-    ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
-    ContextScoutTriggerV1,
-};
+use super::{DaemonInvocationState, POLICY_REVISION_V1, register_semantic_configuration_owners};
 use crate::daemon::context_scout_lifecycle::{
     AuthorityRegistrationV1, register_context_scout_lifecycle_authority,
     unregister_context_scout_lifecycle_authority,
 };
 use crate::mcp::McpServer;
 use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
+use tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1;
+use tracedecay_agent_hosts::agents::context_scout_ports::{
+    ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
+    ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
+};
+use tracedecay_agent_hosts::agents::context_scout_v2::{
+    ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
+    ContextScoutTriggerV1,
+};
 use tracedecay_daemon_service::RegisteredDeliveryReadAuthorityV1;
 use tracedecay_daemon_service::{
-    BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
-    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
-    DaemonAdvisoryCycleInvocationRequest, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
-    HookOrchestrationWorkOutcomeV1, advisory_cycle_invocation_result,
-    daemon_operation_event_authority, register_hook_orchestration_runtime,
-    unregister_hook_orchestration_runtime,
+    BoundedHookOrchestratorV1, ConfigurationRuntimeRefreshFuture, ConfigurationRuntimeRefreshPort,
+    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
+    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
+    advisory_cycle_invocation_result, daemon_operation_event_authority,
+    daemon_owned_project_source_access_at, project_open_source_access_authority,
+    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 mod deferred;
 mod model;
+pub(in crate::daemon) use deferred::spawn_semantic_owner_registration;
 pub(crate) use model::ProjectOpenDependentOwnerState;
 use model::advisory_monotonic_deadline;
 #[cfg(test)]
@@ -111,7 +112,6 @@ mod tests;
 
 #[derive(Clone)]
 struct ProjectOpenAdvisoryFeedbackCycleV1 {
-    registration: Arc<AdvisoryProductionStartupRegistrationV1>,
     producer: Arc<ProjectOpenScoutProducerV1>,
     root_uri: String,
     feedback_scope: FeedbackScopeV1,
@@ -125,6 +125,14 @@ struct ProjectOpenAdvisoryCycleExecutionV1 {
     outcome: AdvisoryCycleOutcome,
     observed_at: UtcMicros,
     configuration_digest: ManifestDigest,
+    feedback_cycle: Arc<FeedbackCycleRuntime>,
+}
+
+#[derive(Clone)]
+struct ProjectOpenFeedbackCyclePinV1 {
+    revision_id: ConfigurationRevisionId,
+    runtime: Arc<FeedbackCycleRuntime>,
+    registration: Arc<AdvisoryProductionStartupRegistrationV1>,
 }
 
 struct PublishedAdvisoryRuntimeV1 {
@@ -180,13 +188,9 @@ impl Drop for ScoutHookRegistrationV1 {
 }
 
 impl ProjectOpenAdvisoryFeedbackCycleV1 {
-    /// Resolves the cycle input from the current configuration revision and
-    /// the current sealed code-index generation on every invocation. A
-    /// settings PATCH landing after project open (for example enabling the
-    /// Context Scout checkbox) therefore remounts the producer path on the
-    /// next cycle instead of rejecting every cycle as
-    /// `feedback-cycle-configuration-drift` until the project is reopened, and
-    /// files sealed by later generations stay eligible without a reopen.
+    /// Builds the request through the input authority selected with this
+    /// runtime's admitted providers. That authority resolves the requested
+    /// document against the current sealed generation on every invocation.
     #[hotpath::skip]
     async fn run_cycle(
         &self,
@@ -194,17 +198,16 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
-        let indexed_files = current_indexed_files(&self.producer)
-            .await
-            .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-census"))?;
-        let lsp_input = current_feedback_lsp_input(&self.producer, &indexed_files).await?;
-        self.run_cycle_with_lsp_input(lsp_input, request, deadline, agent_stop_gate)
+        let pin = self.producer.feedback_cycle.read().await.clone();
+        let lsp_input = pin.runtime.lsp_input();
+        self.run_cycle_with_lsp_input(pin, lsp_input, request, deadline, agent_stop_gate)
             .await
     }
 
     #[hotpath::skip]
     async fn run_cycle_with_lsp_input(
         &self,
+        pin: ProjectOpenFeedbackCyclePinV1,
         lsp_input: FeedbackCycleLspInput,
         request: FeedbackCycleRequest,
         deadline: MonotonicDeadline,
@@ -252,7 +255,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 );
                 LspRuntimeFailure::new("feedback-cycle-advisory-operation")
             })?;
-        let outcome = self
+        let outcome = pin
             .registration
             .runtime()
             .run_once(
@@ -276,7 +279,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                         scope: self.feedback_scope.clone(),
                         observed_at,
                     }),
-                    validity: tracedecay_application::AdvisoryFindingValidityWindowV1 {
+                    validity: tracedecay_contracts::AdvisoryFindingValidityWindowV1 {
                         valid_at: observed_at,
                         expires_at,
                     },
@@ -294,13 +297,14 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 LspRuntimeFailure::new("feedback-cycle-advisory-execution")
             })?;
         if outcome.publication().is_some() {
-            self.deliver_completed_publication(&outcome);
+            self.deliver_completed_publication(&pin.registration, &outcome);
         }
         Ok(ProjectOpenAdvisoryCycleExecutionV1 {
             context: invocation.context,
             outcome,
             observed_at,
             configuration_digest,
+            feedback_cycle: pin.runtime,
         })
     }
 
@@ -309,7 +313,11 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
     /// bound hosts' next admission, while MCP/CLI/LSP callers keep reading the
     /// same publication store. Every non-delivered state stays typed and
     /// reported; none of them fails the already-completed cycle.
-    fn deliver_completed_publication(&self, outcome: &AdvisoryCycleOutcome) {
+    fn deliver_completed_publication(
+        &self,
+        registration: &AdvisoryProductionStartupRegistrationV1,
+        outcome: &AdvisoryCycleOutcome,
+    ) {
         let project_id = self.feedback_scope.project_id.as_str();
         let worktree_id = self.feedback_scope.worktree_id.as_str();
         let Some((host, rollback)) =
@@ -323,10 +331,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             );
             return;
         };
-        match self
-            .registration
-            .consume_completed_publication(host, outcome, rollback)
-        {
+        match registration.consume_completed_publication(host, outcome, rollback) {
             // The daemon retains the LSP session factory itself, so the
             // returned provider-bundle mount is already owned by the live LSP
             // sessions; only the hook delivery outcome needs reporting here.
@@ -464,7 +469,7 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
 
 struct ProjectOpenFeedbackCycleAuthorizationV1 {
     project_root: std::path::PathBuf,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     configuration: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
 }
 
@@ -504,7 +509,7 @@ async fn install_project_open_context_scout_configuration(
     model_config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<()> {
     let admitted_model_config = pin.control().model_path.and_then(|expected| {
-        (crate::agents::context_scout_model::context_scout_backend_from_automation_config(
+        (tracedecay_agent_hosts::agents::context_scout_model::context_scout_backend_from_automation_config(
             model_config,
         ) == expected)
             .then_some(model_config)
@@ -525,56 +530,113 @@ struct ProjectOpenScoutProducerV1 {
     graph: Arc<crate::tracedecay::TraceDecay>,
     scout_owner: Arc<ProjectContextScoutOwnerV1>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
-    feedback_runtime: Arc<FeedbackRuntime>,
-    project_root: std::path::PathBuf,
-    scope: tracedecay_application::ResolvedScope,
-    code_index_schedulers:
-        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    feedback_cycle: tokio::sync::RwLock<ProjectOpenFeedbackCyclePinV1>,
+    feedback_refresh: tokio::sync::Mutex<()>,
+    feedback_builder: tracedecay_daemon_service::FeedbackCycleRuntimeBuilderV1,
+    feedback_router: Arc<tracedecay_daemon_service::SwitchableFeedbackCycleRuntimeV1>,
+    advisory_production: AdvisoryProductionOpenV1,
+    github: Option<GitHubReviewRuntimeOwnerConfigV1>,
+    lsp_session_factory: Arc<DaemonLspSessionFactory>,
+    database: tracedecay_runtime_core::db::Database,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     requester: tracedecay_domain::ActorId,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
+    project_root: std::path::PathBuf,
+    scope: tracedecay_contracts::ResolvedScope,
+    code_index_schedulers:
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
 }
 
 /// Sorted logical paths from the current sealed code-index generation,
 /// resolved per cycle. The one-time project-open census is never retained, so
 /// files sealed by later generations map saved-edit hooks and mount providers
 /// without a project reopen. `None` is the typed no-sealed-generation state.
-async fn current_indexed_files(producer: &ProjectOpenScoutProducerV1) -> Option<Vec<String>> {
-    let generation = producer
+async fn current_indexed_files(
+    producer: &ProjectOpenScoutProducerV1,
+) -> Option<(
+    tracedecay_code_index_runtime::code_index_scheduler::LatestCodeTextGenerationV1,
+    Vec<String>,
+)> {
+    let selection = producer
         .code_index_schedulers
-        .latest_complete_ready_decoded_for_root_scope(&producer.project_root, &producer.scope)
+        .latest_feedback_generation_for_scope(&producer.project_root, &producer.scope)
         .await?;
-    let mut indexed_files = generation
-        .generation()
+    let mut indexed_files = selection
+        .metadata()
         .snapshot()
         .files
         .iter()
         .map(|file| file.logical_path.clone())
         .collect::<Vec<_>>();
     indexed_files.sort();
-    Some(indexed_files)
+    Some((selection, indexed_files))
 }
 
-async fn current_feedback_lsp_input(
+async fn selected_feedback_generation(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    scope: &tracedecay_contracts::ResolvedScope,
+) -> Option<tracedecay_code_index_runtime::code_index_scheduler::LatestCodeTextGenerationV1> {
+    invocation
+        .code_index_schedulers
+        .latest_feedback_generation_for_scope(project_root, scope)
+        .await
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Feedback refresh is one advisory cycle over the mounted project owners."
+)]
+async fn refresh_feedback_cycle(
     producer: &ProjectOpenScoutProducerV1,
-    indexed_files: &[String],
-) -> std::result::Result<FeedbackCycleLspInput, LspRuntimeFailure> {
-    let pinned_configuration = producer
+    current: tracedecay_configuration::ConfigurationCurrentStateV1,
+) -> std::result::Result<(), LspRuntimeFailure> {
+    {
+        let pinned = producer.feedback_cycle.read().await;
+        if pinned.revision_id == current.revision_id {
+            return Ok(());
+        }
+    }
+    let _refresh = producer.feedback_refresh.lock().await;
+    let desired = producer
         .graph
         .configuration_runtime()
         .client()
         .current()
         .await
         .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-configuration"))?;
-    let current_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
-        revision_id: pinned_configuration.revision_id,
-        snapshot: pinned_configuration.snapshot,
-    };
-    let configuration_digest = current_configuration
-        .snapshot
-        .effective_behavior_digest
-        .clone();
+    if desired.revision_id() != &current.revision_id {
+        return Ok(());
+    }
+    {
+        let pinned = producer.feedback_cycle.read().await;
+        if pinned.revision_id == current.revision_id {
+            return Ok(());
+        }
+    }
+    let (indexed_generation, indexed_files) = current_indexed_files(producer)
+        .await
+        .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-census"))?;
+    let mounted_providers = producer
+        .diagnostic_broker
+        .lock()
+        .await
+        .mounted_providers_for_files(&indexed_files);
+    let provider_seed =
+        tracedecay_code_index_runtime::code_index_scheduler::feedback_document_identity_from_generation(
+            indexed_generation,
+            &producer.project_root,
+            None,
+        )?;
+    let document_identity =
+        tracedecay_code_index_runtime::code_index_scheduler::ScopedFeedbackDocumentIdentityV1::new(
+            producer.code_index_schedulers.clone(),
+            &producer.project_root,
+            producer.scope.clone(),
+        )
+        .ok_or_else(|| LspRuntimeFailure::new("feedback-cycle-current-identity"))?;
+    let configuration_digest = current.snapshot.effective_behavior_digest.clone();
     let policy_digest = canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
         &configuration_digest,
@@ -593,28 +655,82 @@ async fn current_feedback_lsp_input(
             scope: producer.scope.clone(),
             configuration: Arc::clone(producer.graph.configuration_runtime()),
         });
-    let mounted_providers = producer
-        .diagnostic_broker
-        .lock()
-        .await
-        .mounted_providers_for_files(indexed_files);
-    resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
+    let parts = resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
         project_root: producer.project_root.clone(),
         scope: producer.scope.clone(),
-        access_configuration: current_configuration,
+        access_configuration: current.clone(),
         requester: producer.requester.clone(),
         authorization,
         code_graph: Arc::clone(&producer.code_graph),
         project_runtime_db: producer.session_db.clone(),
         runtime_state,
-        document_identity: Arc::new(producer.code_index_schedulers.clone()),
+        provider_seed,
+        document_identity: Arc::new(document_identity),
         code_index_identity: Arc::new(producer.code_index_schedulers.clone()),
         test_attribution: Arc::new(producer.code_index_schedulers.clone()),
         mounted_providers,
     })
     .await
-    .map(|parts| parts.lsp_input)
-    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-input"))
+    .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-parts"))?;
+    let feedback_scope = parts.feedback_scope.clone();
+    let (runtime, production_input) = producer
+        .feedback_builder
+        .build(
+            &producer.project_root,
+            producer.database.clone(),
+            Arc::clone(&producer.code_graph),
+            parts,
+        )
+        .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-publication"))?;
+    let authorities = open_advisory_production_authorities(producer.advisory_production.clone())
+        .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-advisory"))?;
+    let (providers, hook_delivery_port) = authorities.into_registrar_parts();
+    let registration = Arc::new(
+        register_advisory_daemon_startup(
+            AdvisoryRuntimeOpenV1 {
+                database: producer.database.clone(),
+                project_root: producer.project_root.clone(),
+                resolved_scope: producer.scope.clone(),
+                feedback_scope,
+                github: producer.github.clone(),
+                feedback_cycle: Arc::clone(&runtime),
+            },
+            providers,
+            Arc::clone(&producer.lsp_session_factory),
+            hook_delivery_port,
+        )
+        .map_err(|_| LspRuntimeFailure::new("feedback-cycle-current-advisory"))?,
+    );
+    let pin = ProjectOpenFeedbackCyclePinV1 {
+        revision_id: current.revision_id,
+        runtime: Arc::clone(&runtime),
+        registration,
+    };
+    let mut published = producer.feedback_cycle.write().await;
+    producer.feedback_router.replace(production_input)?;
+    *published = pin;
+    Ok(())
+}
+
+struct ProjectOpenFeedbackConfigurationRefreshV1 {
+    cycle: std::sync::Weak<ProjectOpenAdvisoryFeedbackCycleV1>,
+}
+
+impl ConfigurationRuntimeRefreshPort for ProjectOpenFeedbackConfigurationRefreshV1 {
+    fn refresh(
+        &self,
+        current: tracedecay_configuration::ConfigurationCurrentStateV1,
+    ) -> ConfigurationRuntimeRefreshFuture {
+        let cycle = self.cycle.upgrade();
+        Box::pin(async move {
+            let cycle = cycle.ok_or_else(|| {
+                "project-open feedback configuration owner is unavailable".to_owned()
+            })?;
+            refresh_feedback_cycle(&cycle.producer, current)
+                .await
+                .map_err(|error| error.class().to_owned())
+        })
+    }
 }
 
 /// One admitted hook boundary's advisory-and-Scout cycle: the one-shot
@@ -623,6 +739,10 @@ async fn current_feedback_lsp_input(
 /// delivery selection, `prepare_configured`, and a claim-authority mount for
 /// the enqueued generation. Every early return is a typed fail-closed state;
 /// none of them invents guidance.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Production hook cycle is one ingest-and-advise pass for the opened project."
+)]
 async fn run_production_hook_cycle(
     cycle: Arc<ProjectOpenAdvisoryFeedbackCycleV1>,
     request: HookOrchestrationRequestV1,
@@ -632,9 +752,14 @@ async fn run_production_hook_cycle(
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
     let producer = Arc::clone(&cycle.producer);
-    let Some(indexed_files) = current_indexed_files(&producer).await else {
+    let observation_pin = producer.feedback_cycle.read().await.clone();
+    let observations = &observation_pin
+        .registration
+        .host_delivery
+        .source_observations;
+    let Some((_, indexed_files)) = current_indexed_files(&producer).await else {
         observe_hook_feedback_cycle_terminal(
-            &cycle.registration.host_delivery.source_observations,
+            observations,
             &request,
             FeedbackOutcomeV1::Unavailable,
         );
@@ -644,16 +769,8 @@ async fn run_production_hook_cycle(
         &producer.project_root,
         &indexed_files,
         &request,
-        &cycle.registration.host_delivery.source_observations,
+        observations,
     ) else {
-        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
-    };
-    let Ok(lsp_input) = current_feedback_lsp_input(&producer, &indexed_files).await else {
-        observe_hook_feedback_cycle_terminal(
-            &cycle.registration.host_delivery.source_observations,
-            &request,
-            FeedbackOutcomeV1::Unavailable,
-        );
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let diagnostic_trigger = match request.trigger {
@@ -663,8 +780,7 @@ async fn run_production_hook_cycle(
         }
     };
     let execution = match cycle
-        .run_cycle_with_lsp_input(
-            lsp_input,
+        .run_cycle(
             FeedbackCycleRequest {
                 root_uri: cycle.root_uri.clone(),
                 document_uri,
@@ -678,7 +794,7 @@ async fn run_production_hook_cycle(
         Ok(execution) => execution,
         Err(_) => {
             observe_hook_feedback_cycle_terminal(
-                &cycle.registration.host_delivery.source_observations,
+                observations,
                 &request,
                 FeedbackOutcomeV1::Unavailable,
             );
@@ -702,8 +818,8 @@ async fn run_production_hook_cycle(
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let current_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
-        revision_id: pinned_configuration.revision_id.clone(),
-        snapshot: pinned_configuration.snapshot.clone(),
+        revision_id: pinned_configuration.revision_id().clone(),
+        snapshot: pinned_configuration.snapshot().clone(),
     };
     let Some(scout_configuration) =
         ContextScoutConfigurationPinV1::from_current(&current_configuration)
@@ -715,7 +831,7 @@ async fn run_production_hook_cycle(
     }
     let Ok(model_config) =
         tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-            &pinned_configuration.snapshot,
+            pinned_configuration.snapshot(),
         )
     else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
@@ -741,9 +857,10 @@ async fn run_production_hook_cycle(
     ) else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
+    let feedback_runtime = execution.feedback_cycle.feedback_runtime();
     let assembler = ContextScoutCanonicalInputAssemblerV1::new(
         producer.scout_registry.as_ref(),
-        producer.feedback_runtime.as_ref(),
+        feedback_runtime.as_ref(),
     );
     let Some(canonical) = assembler
         .bind_and_assemble(
@@ -934,11 +1051,13 @@ fn hash16(value: &[u8]) -> [u8; 16] {
 pub(super) async fn register_production_feedback_and_advisory(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    state: &ProjectOpenDependentOwnerState,
+    state: &mut ProjectOpenDependentOwnerState,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
+    indexed_generation: tracedecay_code_index_runtime::code_index_scheduler::LatestCodeTextGenerationV1,
 ) -> Result<()> {
     let (feedback_cycle, feedback_scope) =
-        register_production_feedback_cycle(invocation, project_root, state).await?;
+        register_production_feedback_cycle(invocation, project_root, state, indexed_generation)
+            .await?;
     register_production_advisory_owner(
         invocation,
         project_root,
@@ -950,17 +1069,50 @@ pub(super) async fn register_production_feedback_and_advisory(
     .await
 }
 
+async fn refresh_project_open_feedback_configuration(
+    state: &mut ProjectOpenDependentOwnerState,
+) -> Result<()> {
+    let configuration = state
+        .graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open feedback configuration is unavailable: {error}"),
+        })?;
+    let access = daemon_owned_project_source_access_at(
+        &state.scope,
+        state.graph.project_root(),
+        &configuration,
+        now_micros(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open feedback source access is unavailable: {error}"),
+    })?;
+    state.scout_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
+        revision_id: configuration.revision_id().clone(),
+        snapshot: configuration.snapshot().clone(),
+    };
+    state.access = access;
+    Ok(())
+}
+
 /// Registers owners whose exact authority depends on a mounted code index.
 #[hotpath::measure(label = "daemon.project.owners.dependent", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Dependent-owner registration is one follow-on bind after production owners exist."
+)]
 pub(in crate::daemon) async fn register_project_open_dependent_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     server: &McpServer,
     state: ProjectOpenDependentOwnerState,
 ) -> Result<()> {
-    let state = state;
+    let mut state = state;
     if !matches!(
-        tracedecay_usecases::git_intelligence::NativeGitIntelligence::new(
+        tracedecay_application::git_intelligence::NativeGitIntelligence::new(
             project_root,
             state.scope.repository_id.clone(),
             state.scope.worktree_id.clone(),
@@ -968,7 +1120,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         .head(),
         Ok(GitHeadStateV1::Attached { .. })
     ) {
-        register_semantic_activation_owner(
+        register_semantic_configuration_owners(
             invocation,
             project_root,
             server,
@@ -987,12 +1139,17 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         return Ok(());
     }
     register_project_delivery_read_authority(invocation, project_root, &state).await?;
-    if let Some(lsp_session_factory) = state.lsp_session_factory.as_ref() {
+    let indexed_generation =
+        selected_feedback_generation(invocation, project_root, &state.scope).await;
+    if let (Some(lsp_session_factory), Some(indexed_generation)) =
+        (state.lsp_session_factory.clone(), indexed_generation)
+    {
         if let Err(error) = register_production_feedback_and_advisory(
             invocation,
             project_root,
-            &state,
-            Arc::clone(lsp_session_factory),
+            &mut state,
+            lsp_session_factory,
+            indexed_generation,
         )
         .await
         {
@@ -1003,7 +1160,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
                 reason = %error,
                 "initial advisory mount raced its generation authority"
             );
-            register_semantic_activation_owner(
+            register_semantic_configuration_owners(
                 invocation,
                 project_root,
                 server,
@@ -1026,8 +1183,8 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
             project = %project_root.display(),
             phase = "feedback_advisory_registered",
         );
-        let semantic_activation_started = Instant::now();
-        register_semantic_activation_owner(
+        let semantic_configuration_started = Instant::now();
+        register_semantic_configuration_owners(
             invocation,
             project_root,
             server,
@@ -1040,14 +1197,14 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
-            phase = "semantic_activation_resolved",
-            elapsed_ms = semantic_activation_started.elapsed().as_millis(),
+            phase = "semantic_configuration_resolved",
+            elapsed_ms = semantic_configuration_started.elapsed().as_millis(),
         );
         return Ok(());
     }
 
-    let semantic_activation_started = Instant::now();
-    register_semantic_activation_owner(
+    let semantic_configuration_started = Instant::now();
+    register_semantic_configuration_owners(
         invocation,
         project_root,
         server,
@@ -1060,8 +1217,8 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
-        phase = "semantic_activation_resolved",
-        elapsed_ms = semantic_activation_started.elapsed().as_millis(),
+        phase = "semantic_configuration_resolved",
+        elapsed_ms = semantic_configuration_started.elapsed().as_millis(),
     );
     tracing::info!(
         event = "project_open_owner_phase",
@@ -1081,8 +1238,10 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
 async fn register_production_feedback_cycle(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    state: &ProjectOpenDependentOwnerState,
+    state: &mut ProjectOpenDependentOwnerState,
+    indexed_generation: tracedecay_code_index_runtime::code_index_scheduler::LatestCodeTextGenerationV1,
 ) -> Result<(Arc<FeedbackCycleRuntime>, FeedbackScopeV1)> {
+    refresh_project_open_feedback_configuration(state).await?;
     let configuration_digest = &state.scout_configuration.snapshot.effective_behavior_digest;
     let policy_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
@@ -1104,6 +1263,24 @@ async fn register_production_feedback_cycle(
             scope: state.scope.clone(),
             configuration: Arc::clone(state.graph.configuration_runtime()),
         });
+    let provider_seed =
+        tracedecay_code_index_runtime::code_index_scheduler::feedback_document_identity_from_generation(
+            indexed_generation,
+            project_root,
+            None,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open provider code-index identity failed: {}", error.class()),
+        })?;
+    let document_identity =
+        tracedecay_code_index_runtime::code_index_scheduler::ScopedFeedbackDocumentIdentityV1::new(
+            invocation.code_index_schedulers.clone(),
+            project_root,
+            state.scope.clone(),
+        )
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open feedback document identity is unavailable".to_owned(),
+        })?;
     let parts = resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
         project_root: project_root.to_path_buf(),
         scope: state.scope.clone(),
@@ -1113,7 +1290,8 @@ async fn register_production_feedback_cycle(
         code_graph: Arc::clone(&state.code_graph),
         project_runtime_db: state.session_db.clone(),
         runtime_state,
-        document_identity: Arc::new(invocation.code_index_schedulers.clone()),
+        provider_seed,
+        document_identity: Arc::new(document_identity),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         test_attribution: Arc::new(invocation.code_index_schedulers.clone()),
         mounted_providers: state.mounted_providers.clone(),
@@ -1131,18 +1309,8 @@ async fn register_production_feedback_cycle(
         .open_cycle_and_register(
             project_root.to_path_buf(),
             state.database.clone(),
-            parts.runtime_state,
-            parts.policy_context,
-            parts.evidence_horizon,
-            parts.evaluated_at,
-            parts.provider_candidates,
             Arc::clone(&state.code_graph),
-            parts.affected_tests,
-            parts.operation,
-            parts.graph_operation,
-            parts.tests_operation,
-            parts.lsp_input,
-            parts.proximity,
+            parts,
         )
         .await
         .map_err(|error| TraceDecayError::Config {
@@ -1151,6 +1319,41 @@ async fn register_production_feedback_cycle(
     Ok((runtime, feedback_scope))
 }
 
+/// Retained CI store and CI anchor store are built for the same feedback scope
+/// GitHub resolved; a rejected scope is typed unavailability, not a silent None.
+fn production_ci_observation_stores(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    state: &ProjectOpenDependentOwnerState,
+    feedback_scope: &FeedbackScopeV1,
+) -> Result<(
+    Arc<dyn CiRetainedProviderObservationAuthorityV1>,
+    Arc<dyn CiCodeAnchorStoreV1>,
+)> {
+    let ci_retained = Arc::new(
+        ProjectCiRetainedObservationStoreV1::new(state.database.clone(), feedback_scope.clone())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project-open CI retained store rejected the feedback scope".to_owned(),
+            })?,
+    ) as _;
+    let ci_code_anchors = Arc::new(
+        ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+            project_root.to_path_buf(),
+            feedback_scope.clone(),
+            Arc::clone(&state.code_graph),
+            Arc::new(invocation.code_index_schedulers.clone()),
+        )
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open CI anchor store rejected the feedback scope".to_owned(),
+        })?,
+    ) as _;
+    Ok((ci_retained, ci_code_anchors))
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "The Context Scout owner, configuration, feedback cycle, and LSP session factory are bound in one pass so an advisory owner is never registered with a partially wired dependency set."
+)]
 async fn register_production_advisory_owner(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -1159,14 +1362,12 @@ async fn register_production_advisory_owner(
     feedback_scope: FeedbackScopeV1,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
 ) -> Result<()> {
-    let scout_owner =
-        state
-            .graph
-            .context_scout_owner()
-            .cloned()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open Context Scout owner is unavailable".to_owned(),
-            })?;
+    let scout_owner = state
+        .graph
+        .context_scout_owner()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open Context Scout owner is unavailable".to_owned(),
+        })?;
     let configuration = state
         .graph
         .configuration_runtime()
@@ -1177,8 +1378,8 @@ async fn register_production_advisory_owner(
             message: format!("project-open automation configuration is unavailable: {error}"),
         })?;
     let current_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
-        revision_id: configuration.revision_id.clone(),
-        snapshot: configuration.snapshot.clone(),
+        revision_id: configuration.revision_id().clone(),
+        snapshot: configuration.snapshot().clone(),
     };
     // The control pin and the model configuration are read from the same
     // current snapshot: a settings PATCH that landed after project open (a
@@ -1190,7 +1391,7 @@ async fn register_production_advisory_owner(
         })?;
     let model_config =
         tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
-            &configuration.snapshot,
+            configuration.snapshot(),
         )?;
     install_project_open_context_scout_configuration(
         scout_owner.as_ref(),
@@ -1219,23 +1420,8 @@ async fn register_production_advisory_owner(
         .as_ref()
         .map(|github| github.target.pull_request_id.clone());
     let ci_discovery_config = ci_config.clone();
-    let ci_retained = Arc::new(
-        ProjectCiRetainedObservationStoreV1::new(state.database.clone(), feedback_scope.clone())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open CI retained store rejected the feedback scope".to_owned(),
-            })?,
-    ) as _;
-    let ci_code_anchors = Arc::new(
-        ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
-            project_root.to_path_buf(),
-            feedback_scope.clone(),
-            Arc::clone(&state.code_graph),
-            Arc::new(invocation.code_index_schedulers.clone()),
-        )
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project-open CI anchor store rejected the feedback scope".to_owned(),
-        })?,
-    ) as _;
+    let (ci_retained, ci_code_anchors) =
+        production_ci_observation_stores(invocation, project_root, state, &feedback_scope)?;
     let hook_notices = AdvisoryHookNoticeQueueV1::new(feedback_scope.clone());
     let (hook_project_id, hook_worktree_id) =
         tracedecay_agent_hosts::hooks::hook_scope_locators(&state.scope);
@@ -1254,7 +1440,7 @@ async fn register_production_advisory_owner(
         project_root: project_root.to_path_buf(),
         resolved_scope: state.scope.clone(),
         feedback_scope: feedback_scope.clone(),
-        github,
+        github: github.clone(),
         feedback_cycle: Arc::clone(&feedback_cycle),
     };
     let production = AdvisoryProductionOpenV1 {
@@ -1273,26 +1459,54 @@ async fn register_production_advisory_owner(
     };
     let registration = invocation
         .advisory_runtime_registrar()
-        .build_production(project_root, input, production, lsp_session_factory)
+        .build_production(
+            project_root,
+            input,
+            production.clone(),
+            Arc::clone(&lsp_session_factory),
+        )
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory runtime construction failed: {error}"),
+        })?;
+    let feedback_registrar = invocation.feedback_runtime_registrar();
+    let feedback_builder = feedback_registrar
+        .refresh_builder(project_root)
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open feedback runtime builder is unavailable".to_owned(),
+        })?;
+    let feedback_router = feedback_registrar
+        .feedback_router(project_root)
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open feedback runtime router is unavailable".to_owned(),
         })?;
     let producer = Arc::new(ProjectOpenScoutProducerV1 {
         graph: Arc::clone(&state.graph),
         scout_owner,
         scout_registry,
-        feedback_runtime: feedback_cycle.feedback_runtime(),
-        project_root: project_root.to_path_buf(),
-        scope: state.scope.clone(),
-        code_index_schedulers: invocation.code_index_schedulers.clone(),
+        feedback_cycle: tokio::sync::RwLock::new(ProjectOpenFeedbackCyclePinV1 {
+            revision_id: current_configuration.revision_id.clone(),
+            runtime: Arc::clone(&feedback_cycle),
+            registration: Arc::clone(&registration),
+        }),
+        feedback_refresh: tokio::sync::Mutex::new(()),
+        feedback_builder,
+        feedback_router,
+        advisory_production: production,
+        github,
+        lsp_session_factory,
+        database: state.database.clone(),
         session_db: state.session_db.clone(),
         code_graph: Arc::clone(&state.code_graph),
         requester: state.requester.clone(),
         diagnostic_broker: Arc::clone(&state.diagnostic_broker),
+        project_root: project_root.to_path_buf(),
+        scope: state.scope.clone(),
+        code_index_schedulers: invocation.code_index_schedulers.clone(),
     });
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
-        registration: Arc::clone(&registration),
         producer,
         root_uri: state.admitted_root_uri.clone(),
         feedback_scope: feedback_scope.clone(),
@@ -1369,12 +1583,44 @@ async fn register_production_advisory_owner(
             published_registration,
             orchestrator,
             invocation_owner,
-            advisory_cycle as Arc<dyn FeedbackCycleRuntimePort>,
+            Arc::clone(&advisory_cycle) as Arc<dyn FeedbackCycleRuntimePort>,
         )
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory runtime publication failed: {error}"),
-        })
+        })?;
+    invocation
+        .configuration_runtime_registrar()
+        .install_feedback_refresh(
+            project_root,
+            Arc::new(ProjectOpenFeedbackConfigurationRefreshV1 {
+                cycle: Arc::downgrade(&advisory_cycle),
+            }),
+        )
+        .await?;
+    let catch_up = state
+        .graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open feedback configuration catch-up failed: {error}"),
+        })?;
+    refresh_feedback_cycle(
+        &advisory_cycle.producer,
+        tracedecay_configuration::ConfigurationCurrentStateV1 {
+            revision_id: catch_up.revision_id().clone(),
+            snapshot: catch_up.snapshot().clone(),
+        },
+    )
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "project-open feedback configuration refresh failed: {}",
+            error.class()
+        ),
+    })
 }
 
 /// Registers the daemon-owned Delivery read authority for this admitted
@@ -1456,6 +1702,10 @@ async fn register_project_delivery_read_authority(
             gated_project_delivery_read_handle_v1(feedback_scope, gate)
         }
     };
+    let source_access =
+        project_open_source_access_authority().map_err(|error| TraceDecayError::Config {
+            message: format!("project-open delivery source access is invalid: {error}"),
+        })?;
     invocation
         .advisory_runtime_registrar()
         .publish_delivery_read(
@@ -1465,7 +1715,7 @@ async fn register_project_delivery_read_authority(
                 state.scope.clone(),
                 Arc::clone(state.graph.configuration_runtime()),
                 handle,
-                Arc::new(super::DaemonOwnedProjectSourceAccess),
+                Arc::new(source_access),
             ),
         )
         .await
@@ -1499,7 +1749,7 @@ fn resolve_production_github_provider_access(
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
 ) -> std::result::Result<ProductionGitHubProviderAccessV1, ProjectDeliveryProviderMountGateV1> {
-    let Some(remote_url) = crate::tracedecay::git_remote_url(project_root) else {
+    let Some(remote_url) = tracedecay_runtime_core::git::git_remote_url(project_root) else {
         return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
     };
     let Some((owner, repository)) = super::github_repository_from_remote(&remote_url) else {
@@ -1512,7 +1762,7 @@ fn resolve_production_github_provider_access(
         &repository,
     ) {
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public => {
-            GitHubReadOnlyCredentialV1::anonymous()
+            public_repository_read_credential_v1(&owner, &repository)
         }
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
             return Err(ProjectDeliveryProviderMountGateV1::GitHubCredentialNotConfigured);
@@ -1652,7 +1902,7 @@ async fn resolve_github_stack_observability(
     state: &ProjectOpenDependentOwnerState,
     github_owner: &str,
     github_repository: &str,
-) -> Option<tracedecay_usecases::advisory::GitHubStackObservabilityV1> {
+) -> Option<tracedecay_application::advisory::GitHubStackObservabilityV1> {
     let unavailable = |reason: &str, detail: String| {
         tracing::warn!(
             event = "github_stack_observability_mount",
@@ -1678,7 +1928,7 @@ async fn resolve_github_stack_observability(
     // admitted Git worktree (project open fails earlier otherwise).
     let native_git_fallback_mounted =
         tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some();
-    let probe_owner = match tracedecay_usecases::observability::GitHubStackProbeOwnerV1::mount(
+    let probe_owner = match tracedecay_application::observability::GitHubStackProbeOwnerV1::mount(
         state.scope.clone(),
         topology_policy,
         github_owner,
@@ -1699,11 +1949,13 @@ async fn resolve_github_stack_observability(
         unavailable("producer_unmounted", String::new());
         return None;
     };
-    Some(tracedecay_usecases::advisory::GitHubStackObservabilityV1 {
-        probe_owner,
-        producer,
-        observation_db: state.session_db.clone(),
-    })
+    Some(
+        tracedecay_application::advisory::GitHubStackObservabilityV1 {
+            probe_owner,
+            producer,
+            observation_db: state.session_db.clone(),
+        },
+    )
 }
 
 /// Assembles the CI provider config for a credential that already proved
@@ -1743,7 +1995,7 @@ fn github_discovery_source_access_request(
 }
 
 fn github_discovery_authorization_context(
-    access: &tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot,
+    access: &tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
     feedback_scope: &FeedbackScopeV1,
 ) -> Option<RequestContext> {
     let observed_at = now_micros();
@@ -1798,8 +2050,8 @@ fn github_discovery_authorization_context(
         DisclosureClass::Evidence,
     )
     .ok()?;
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(
-        tracedecay_application::request_identity::GlobalRequestSurface::ProjectOpenGithubDiscovery,
+    let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+        tracedecay_contracts::request_identity::GlobalRequestSurface::ProjectOpenGithubDiscovery,
     )
     .ok()?;
     RequestContext::new(
@@ -1817,7 +2069,7 @@ fn resolve_production_github_identity(
     project_root: &Path,
     feedback_scope: &FeedbackScopeV1,
     target: &GitHubRepositoryTargetV1,
-    pull: tracedecay_usecases::advisory::github_runtime::GitHubExactCommitPullRequestV1,
+    pull: tracedecay_application::advisory::github_runtime::GitHubExactCommitPullRequestV1,
 ) -> Option<GitHubReviewProviderIdentityV1> {
     let base = pull.base_commit_id;
     let head = pull.head_commit_id;

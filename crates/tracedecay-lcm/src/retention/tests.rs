@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use crate::{LcmSourceRef, dag, schema};
 use tracedecay_domain::HydrationStateV1;
+use tracedecay_privacy::sanitize_lcm_payload_text;
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, IntoParams, QueryExecutor, TestConnection, params,
 };
-use tracedecay_runtime_core::privacy::sanitize_lcm_payload_text;
 
 use super::*;
 
@@ -475,7 +475,7 @@ async fn backlog_read_reports_real_eligible_bytes_and_watermark() -> Result<(), 
 
     let records = read_session_retention_backlog(
         &store.conn,
-        tracedecay_application::storage::StoreKeyV1::new("sessions.db")
+        tracedecay_contracts::storage::StoreKeyV1::new("sessions.db")
             .map_err(|error| error.to_string())?,
         &drop_config(30),
         NOW,
@@ -502,7 +502,7 @@ async fn backlog_read_emits_clean_zero_record_for_configured_window() -> Result<
     let store = test_store().await?;
     let records = read_session_retention_backlog(
         &store.conn,
-        tracedecay_application::storage::StoreKeyV1::new("sessions.db")
+        tracedecay_contracts::storage::StoreKeyV1::new("sessions.db")
             .map_err(|error| error.to_string())?,
         &drop_config(30),
         NOW,
@@ -559,7 +559,7 @@ async fn dedupe_retains_projected_copy_until_summary_lineage_is_durable() -> Res
     let config = LcmRetentionConfig::default();
     let backlog = read_session_retention_backlog(
         conn,
-        tracedecay_application::storage::StoreKeyV1::new("sessions.db")
+        tracedecay_contracts::storage::StoreKeyV1::new("sessions.db")
             .map_err(|error| error.to_string())?,
         &config,
         NOW,

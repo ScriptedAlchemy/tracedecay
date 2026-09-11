@@ -11,11 +11,12 @@ mod metadata;
 pub mod migrations;
 mod purpose;
 mod retrieval_anchor_authority;
+pub use retrieval_anchor_authority::append_retrieval_anchor_disposition_on;
 pub mod retrieval_anchor_schema;
 mod semantic_vector_staging;
 mod sql;
 
-pub use crate::store_runtime::registry::RepositoryRuntimePhysicalSnapshot;
+pub use crate::shard_runtime::registry::RepositoryRuntimePhysicalSnapshot;
 pub use access::OwnedMaintenanceDatabaseScope;
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;
@@ -32,7 +33,7 @@ pub use access::{
 };
 pub use connection::Database;
 pub use connection::MemoryGraphReconciliationTaskOwnerV1;
-pub(crate) use connection::MemoryGraphReconciliationTaskScheduleV1;
+pub use connection::MemoryGraphReconciliationTaskScheduleV1;
 pub use connection::{
     DatabaseAccessMode, DatabaseClientGuardV1, DatabaseEngineReadConnection,
     DatabaseEngineReadSnapshot, DatabaseMemoryTransaction, DatabaseRuntimeClientV1,
@@ -44,7 +45,8 @@ pub use connection::{
     DatabaseOwnerWeakLeaseIssuerV1,
 };
 pub use connection::{
-    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationRetirementReservationV1,
+    MemoryGraphReconciliationCancelErrorV1, MemoryGraphReconciliationInlinePassV1,
+    MemoryGraphReconciliationRetirementReservationV1,
     MemoryGraphReconciliationRetirementStartErrorV1, MemoryGraphReconciliationRetirementTerminalV1,
     MemoryGraphRuntimeOperationErrorV1, MemoryGraphRuntimeOperationV1,
 };
@@ -63,7 +65,7 @@ pub use file_identity::{
 };
 pub use memory_connection::MemoryConnection;
 pub use metadata::BoundedMetadataValue;
-pub(crate) use retrieval_anchor_authority::{
+pub use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
 };
 pub use sql::{

@@ -125,7 +125,8 @@ fn compose_node_independent_definitions(
     available_scope: &BTreeSet<ScopeDimension>,
     registry_mode: ToolRegistryMode,
 ) -> Result<Vec<ToolDefinition>, McpDispatchMetadataError> {
-    let catalog = crate::application_surface::application_surface_catalog_ref()?;
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_catalog_ref()?;
     let visible_operations = catalog
         .visible_bindings(
             profile_id,
@@ -324,9 +325,9 @@ pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
 }
 
 pub fn default_catalog_discovery_authority()
--> Result<BTreeSet<CapabilityId>, crate::application_surface::ApplicationSurfaceAdapterError> {
+-> Result<BTreeSet<CapabilityId>, tracedecay_daemon_protocol::ApplicationSurfaceAdapterError> {
     Ok(
-        crate::application_surface::application_surface_catalog_ref()?
+        tracedecay_daemon_service::application_surface::application_surface_catalog_ref()?
             .capabilities()
             .map(|capability| capability.capability_id().clone())
             .collect(),
@@ -340,7 +341,7 @@ mod tests {
 
     #[test]
     fn catalog_filtered_discovery_uses_the_deterministic_maximal_registry() {
-        let profile_id = ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID)
+        let profile_id = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
             .expect("default profile");
         let definitions = get_catalog_filtered_tool_definitions_with_budget(
             0,
@@ -416,8 +417,7 @@ mod tests {
 
     #[test]
     fn catalog_filter_preserves_non_catalog_tools_and_filters_catalog_bindings() {
-        let profile =
-            ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+        let profile = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID).unwrap();
         let definitions = get_catalog_filtered_tool_definitions_with_budget(
             10_000,
             4,
@@ -445,7 +445,7 @@ mod tests {
 
     fn default_discovery_inputs() -> (ProfileId, BTreeSet<CapabilityId>, BTreeSet<ScopeDimension>) {
         (
-            ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID)
+            ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
                 .expect("default profile"),
             default_catalog_discovery_authority().expect("default discovery authority"),
             project_catalog_discovery_scope(),

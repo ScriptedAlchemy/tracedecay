@@ -1,16 +1,16 @@
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest as _, Sha256};
 use tracedecay_graph_db::{GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision};
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
 use super::{
-    CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION_V1,
-    GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionV1, SessionGitSpan,
-    SpanObservation, SpanOverlapKind, git_evidence_projection_identity, normalize_worktree,
-    observation_extends_span, providers_compatible, publish_git_evidence_projection,
-    recover_git_evidence_projection,
+    CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION,
+    GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionStore,
+    GitEvidenceProjectionV1, SessionGitSpan, SpanObservation, SpanOverlapKind,
+    git_evidence_projection_identity, normalize_worktree, observation_extends_span,
+    providers_compatible, publish_git_evidence_projection, recover_git_evidence_projection,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
@@ -215,18 +215,68 @@ pub(crate) fn publish_graph_evidence_controlled<S: GitCorrelationSessionStore>(
 ) -> Result<(usize, usize), GitCorrelationError> {
     session_store.require_project_sessions_authority()?;
     let publication_lock = session_store.git_evidence_publication_lock()?;
-    let _publication = publication_lock.lock().map_err(|_| {
-        GitCorrelationError::Unavailable(
-            "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
-        )
-    })?;
-    publish_graph_evidence_locked(
-        session_store,
+    let runtime = session_store.graph_runtime()?;
+    GitEvidenceProjectionStore::publish_graph_evidence_with_runtime(
+        runtime,
+        publication_lock.as_ref(),
         publication_prefix,
         new_spans,
         new_commits,
         cancelled,
     )
+}
+
+impl GitEvidenceProjectionStore {
+    /// Publishes one evidence merge through an already-authorized graph route.
+    ///
+    /// The caller supplies the exact shared projection mutex. Its guard spans
+    /// recovery, merge, and the verified-head CAS, so no sibling generation
+    /// can be derived from the same recovered head by another publisher.
+    pub fn publish_graph_evidence_with_runtime(
+        runtime: &dyn VerifiedGraphRuntimePortV1,
+        publication_lock: &Mutex<()>,
+        publication_prefix: &str,
+        new_spans: &[SessionGitSpan],
+        new_commits: &[CommitSessionRecord],
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<(usize, usize), GitCorrelationError> {
+        let _publication = publication_lock.lock().map_err(|_| {
+            GitCorrelationError::Unavailable(
+                "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
+            )
+        })?;
+        publish_graph_evidence_locked(
+            runtime,
+            publication_prefix,
+            new_spans,
+            new_commits,
+            cancelled,
+        )
+    }
+
+    /// Shapes raw transcript observations and publishes their complete
+    /// recovery/merge/verified-head transaction through an authorized runtime.
+    pub fn publish_transcript_graph_evidence_with_runtime(
+        runtime: &dyn VerifiedGraphRuntimePortV1,
+        publication_lock: &Mutex<()>,
+        publication_prefix: &str,
+        observations: &[SpanObservation],
+        new_commits: &[CommitSessionRecord],
+        merge_gap_secs: i64,
+    ) -> Result<(usize, usize), GitCorrelationError> {
+        let _publication = publication_lock.lock().map_err(|_| {
+            GitCorrelationError::Unavailable(
+                "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
+            )
+        })?;
+        publish_transcript_graph_evidence_locked(
+            runtime,
+            publication_prefix,
+            observations,
+            new_commits,
+            merge_gap_secs,
+        )
+    }
 }
 
 /// Shapes raw transcript observations and publishes them while holding the
@@ -240,12 +290,24 @@ pub fn publish_transcript_graph_evidence<S: GitCorrelationSessionStore>(
 ) -> Result<(usize, usize), GitCorrelationError> {
     session_store.require_project_sessions_authority()?;
     let publication_lock = session_store.git_evidence_publication_lock()?;
-    let _publication = publication_lock.lock().map_err(|_| {
-        GitCorrelationError::Unavailable(
-            "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
-        )
-    })?;
     let runtime = session_store.graph_runtime()?;
+    GitEvidenceProjectionStore::publish_transcript_graph_evidence_with_runtime(
+        runtime,
+        publication_lock.as_ref(),
+        publication_prefix,
+        observations,
+        new_commits,
+        merge_gap_secs,
+    )
+}
+
+fn publish_transcript_graph_evidence_locked(
+    runtime: &dyn VerifiedGraphRuntimePortV1,
+    publication_prefix: &str,
+    observations: &[SpanObservation],
+    new_commits: &[CommitSessionRecord],
+    merge_gap_secs: i64,
+) -> Result<(usize, usize), GitCorrelationError> {
     let identity =
         git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -276,14 +338,13 @@ pub fn publish_transcript_graph_evidence<S: GitCorrelationSessionStore>(
     )
 }
 
-fn publish_graph_evidence_locked<S: GitCorrelationSessionStore>(
-    session_store: &S,
+fn publish_graph_evidence_locked(
+    runtime: &dyn VerifiedGraphRuntimePortV1,
     publication_prefix: &str,
     new_spans: &[SessionGitSpan],
     new_commits: &[CommitSessionRecord],
     cancelled: Arc<AtomicBool>,
 ) -> Result<(usize, usize), GitCorrelationError> {
-    let runtime = session_store.graph_runtime()?;
     let identity =
         git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     // A never-published projection is the typed empty start.
@@ -332,7 +393,7 @@ fn publish_merged_graph_evidence(
     }
     let publication_key = graph_evidence_publication_key(publication_prefix, &spans, &commits)?;
     let projection = GitEvidenceProjectionV1::new(&publication_key, spans, commits)?;
-    let revision = GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned())?;
+    let revision = GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned())?;
     publish_git_evidence_projection(
         runtime,
         identity,
@@ -534,7 +595,9 @@ where
     if records.is_empty() {
         return Ok(0);
     }
-    let (_, inserted) = publish_graph_evidence(session_store, "git-attribution", &[], &records)?;
+    let (_, inserted) = session_store
+        .publish_graph_evidence_owned("git-attribution".to_owned(), Vec::new(), records)
+        .await?;
     Ok(inserted)
 }
 

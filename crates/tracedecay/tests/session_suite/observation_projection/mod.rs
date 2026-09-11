@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
@@ -23,7 +24,6 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
-use tracedecay_usecases::observation::ObservationCancellation;
 
 use crate::common::isolated_lcm_db_path;
 
@@ -560,15 +560,19 @@ async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
 }
 
 async fn projected_raw_store_ids(tmp: &TempDir) -> Vec<(String, i64)> {
+    projected_raw_store_ids_for_provider(tmp, "claude").await
+}
+
+async fn projected_raw_store_ids_for_provider(tmp: &TempDir, provider: &str) -> Vec<(String, i64)> {
     let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let mut statement = conn
         .prepare(
             "SELECT message_id, store_id FROM lcm_raw_messages
-             WHERE provider = 'claude' ORDER BY message_id",
+             WHERE provider = ?1 ORDER BY message_id",
         )
         .unwrap();
     statement
-        .query_map((), |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([provider], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
@@ -617,3 +621,4 @@ mod failure_audit;
 mod message_ids;
 mod queue;
 mod rebuild;
+mod source_transition;

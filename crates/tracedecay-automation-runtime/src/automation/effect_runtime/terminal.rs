@@ -1,11 +1,11 @@
 //! Settled automation-effect terminals.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
     RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, ResolvedScope, retained_surface_outcome_matches_terminal,
 };
 

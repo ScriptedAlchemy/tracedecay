@@ -1,6 +1,8 @@
 mod authority;
 mod composition;
+mod composition_order;
 mod cursor;
+mod diversity_caps;
 mod evidence_lanes;
 mod request;
 mod rerank;
@@ -211,4 +213,91 @@ fn composition_lanes<E>(
         .into_iter()
         .map(|(kind, outcome)| lane(kind, outcome))
         .collect()
+}
+
+/// A bounded corpus that exercises every ordering and collapse rule at once:
+/// score ties broken by source validity and anchor, same-source duplicate
+/// rows, multi-occurrence fusions, evidence-backed logical-copy clusters
+/// (one holding a contradiction and a corroboration), stale evidence, shared
+/// files and sessions for diversity caps, and protected exact hits.
+fn corpus_lanes() -> Vec<(
+    RetrieverKind,
+    RetrieverOutcome<RetrieverBatch<&'static str>>,
+)> {
+    let mut lexical = Vec::new();
+    let mut graph = Vec::new();
+    for index in 0..24_u32 {
+        let name = format!("c{index:02}");
+        // Groups of three share a raw score so the later comparator fields
+        // decide the order.
+        let raw_score = 900_000 - u64::from(index / 3) * 10_000;
+        let mut hit = candidate(RetrieverKind::Lexical, &name, raw_score, index);
+        hit.file_occurrence_id = Some(id(&format!("file.{}", index % 4)));
+        hit.session_or_thread_id = Some(id(&format!("session.{}", index % 3)));
+        if index % 7 == 0 {
+            hit.freshness.compatibility = FreshnessCompatibilityV1::Stale;
+        }
+        // Three of every five candidates share an evidence-backed copy cluster.
+        if index % 5 < 3 {
+            let cluster = index / 5;
+            hit.logical_copy_cluster_id = Some(id(&format!("copy.{cluster}")));
+            hit.logical_copy_evidence_anchor =
+                Some(RetrievalAnchorId::new(format!("copy-evidence.{cluster}")).unwrap());
+        }
+        if index == 11 {
+            hit.evidence_role = EvidenceRole::Contradiction;
+        }
+        if index == 12 {
+            hit.evidence_role = EvidenceRole::Corroboration;
+        }
+        // The graph lane returns every even candidate: multiples of four as
+        // the identical evidence pair (same-source duplicate rows), the rest
+        // as a second occurrence of the same logical evidence.
+        if index % 2 == 0 {
+            let mut graph_hit = candidate(RetrieverKind::Graph, &name, 500_000, index / 2);
+            graph_hit.anchor_id = hit.anchor_id.clone();
+            graph_hit.logical_evidence_id = hit.logical_evidence_id.clone();
+            graph_hit.source_occurrence_id = hit.source_occurrence_id.clone();
+            graph_hit.file_occurrence_id = hit.file_occurrence_id.clone();
+            graph_hit.session_or_thread_id = hit.session_or_thread_id.clone();
+            graph_hit.logical_copy_cluster_id = hit.logical_copy_cluster_id.clone();
+            graph_hit.logical_copy_evidence_anchor = hit.logical_copy_evidence_anchor.clone();
+            graph_hit.evidence_role = hit.evidence_role;
+            graph_hit.freshness = hit.freshness.clone();
+            if index % 4 == 0 {
+                graph_hit.retriever_evidence_anchor = hit.retriever_evidence_anchor.clone();
+            }
+            graph.push(graph_hit);
+        }
+        lexical.push(hit);
+    }
+    let mut second_exact = exact_candidate("exact-b", 1);
+    second_exact.ordinal_rank = 1;
+    let exact = vec![exact_candidate("exact-a", 1), second_exact];
+    vec![
+        (
+            RetrieverKind::ExactLiteral,
+            RetrieverOutcome::Complete(batch(exact, "exact")),
+        ),
+        (
+            RetrieverKind::Lexical,
+            RetrieverOutcome::Complete(batch(lexical, "lexical")),
+        ),
+        (
+            RetrieverKind::Graph,
+            RetrieverOutcome::Complete(batch(graph, "graph")),
+        ),
+    ]
+}
+
+/// Caps that bite on the corpus along several dimensions at once, including
+/// a boundary cap of one and one cap the corpus never reaches.
+fn mixed_caps() -> DiversityPolicy {
+    DiversityPolicy {
+        per_file: Some(3),
+        per_session_or_thread: Some(5),
+        per_copy_cluster: Some(1),
+        per_evidence_role: Some(40),
+        ..no_caps()
+    }
 }

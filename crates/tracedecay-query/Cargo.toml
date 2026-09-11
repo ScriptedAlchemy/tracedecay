@@ -33,7 +33,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracing = "0.1"
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
@@ -42,37 +43,11 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "
 zeroize = "1.9.0"
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "tracedecay-application/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-graph-db/hotpath",
-    "tracedecay-private-fs/hotpath",
-    "tracedecay-temporal-query/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-graph-db/hotpath-alloc",
-    "tracedecay-private-fs/hotpath-alloc",
-    "tracedecay-temporal-query/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-graph-db/hotpath-cpu",
-    "tracedecay-private-fs/hotpath-cpu",
-    "tracedecay-temporal-query/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+hotpath = ["hotpath/hotpath"]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
 # exposes `*_for_test` constructors to dependent crates' test builds only.
 test-helpers = ["tracedecay-temporal-query/test-helpers"]

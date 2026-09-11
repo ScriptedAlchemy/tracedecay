@@ -41,7 +41,7 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     SelectedWorkEvidenceV1, VerifiedWorkEvidenceExpansionV1, VerifiedWorkGraphVersionV1,
     WorkEvidenceExpandRequestV1, WorkEvidenceExpansionV1, WorkEvidenceReadPortErrorV1,
     WorkEvidenceReadPortV1, WorkEvidenceSelectRequestV1, WorkProductPortContextV1,

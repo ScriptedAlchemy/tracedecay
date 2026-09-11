@@ -605,9 +605,8 @@ fn parse_rust(source: &str) -> Option<tree_sitter::Tree> {
 fn module_child_directory(file: &Path) -> PathBuf {
     let parent = file.parent().map(Path::to_path_buf).unwrap_or_default();
     match file.file_stem().and_then(|stem| stem.to_str()) {
-        Some("mod") => parent,
+        Some("mod") | None => parent,
         Some(stem) => parent.join(stem),
-        None => parent,
     }
 }
 

@@ -3,7 +3,7 @@ use std::path::{Component, Path};
 
 use sha2::{Digest, Sha256};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const DIGEST_DOMAIN: &[u8] = b"tracedecay.rendered-host-bundle.v1";
 

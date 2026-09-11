@@ -1,0 +1,11 @@
+{
+  "default_branch": "main",
+  "branches": {
+    "main": {
+      "db_file": "tracedecay.db",
+      "created_at": "1787679977",
+      "last_synced_at": "1787679977",
+      "gc_protected": false
+    }
+  }
+}

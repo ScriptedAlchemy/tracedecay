@@ -11,10 +11,9 @@
 
 use super::*;
 
-use tracedecay_configuration::ConfigurationCurrentStateV1;
+use tracedecay_application::semantic_runtime::SemanticConfigurationPinV1;
 use tracedecay_domain::configuration::{ConfigurationValueV1, SettingKey};
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_usecases::semantic_runtime::SemanticConfigurationPinV1;
 
 use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
 #[cfg(test)]
@@ -90,10 +89,8 @@ impl DaemonInvocationService {
         // evaluation so a missing model is a fast typed refusal, not a
         // late one.
         let material = match semantic_activation_material(
-            tracedecay_usecases::semantic_runtime::project_or_shared_lifecycle_status(
-                &project_root_path,
-            )
-            .as_ref(),
+            tracedecay_application::semantic_runtime::project_lifecycle_status(&project_root_path)
+                .as_ref(),
         ) {
             Ok(material) => material,
             Err(problem) => return application_problem(request_id, problem),
@@ -134,7 +131,7 @@ impl DaemonInvocationService {
             Err(error) => return application_problem(request_id, configuration_problem(error)),
         };
         let composed = compose_activated_semantic_config(
-            &current.config.semantic,
+            &current.config().semantic,
             &evaluated_profile_id,
             &profile_digest,
             &material,
@@ -158,7 +155,7 @@ impl DaemonInvocationService {
                 );
             }
         };
-        let expected_revision = current.revision_id.clone();
+        let expected_revision = current.revision_id().clone();
         let idempotency_key = match ConfigurationIdempotencyKey::new(format!(
             "configuration.idempotency.semantic-activation.{expected_revision}"
         )) {
@@ -216,14 +213,10 @@ impl DaemonInvocationService {
             .await
             .ok()
             .and_then(|post| {
-                SemanticConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {
-                    revision_id: post.revision_id,
-                    snapshot: post.snapshot,
-                })
-                .ok()
+                SemanticConfigurationPinV1::from_current(&post.into_current_state()).ok()
             });
         let runtime_state =
-            tracedecay_usecases::semantic_runtime::resolve_project_semantic_runtime_status(
+            tracedecay_application::semantic_runtime::resolve_project_semantic_runtime_status(
                 Some(&project_root_path),
                 pin,
             )
@@ -366,10 +359,25 @@ mod tests {
             .expect("valid manifest digest")
     }
 
+    /// Host-absolute fixture path: `artifact_path` validation requires
+    /// `Path::is_absolute`, which a bare `/...` literal fails on Windows.
+    fn absolute_fixture_path(posix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+        } else {
+            PathBuf::from(posix)
+        }
+    }
+
+    /// The installed model every fixture activates. `install_path` becomes the
+    /// composed `artifact_path`, so it must carry the same host-absolute
+    /// spelling [`selection`] uses: otherwise the composed selection fails
+    /// `SemanticConfig::validate` on Windows, and the "is this the profile
+    /// already active?" comparison sees two spellings of one path.
     fn material() -> InstalledSemanticModelMaterialV1 {
         InstalledSemanticModelMaterialV1 {
             artifact_digest: "a".repeat(64),
-            install_path: PathBuf::from("/models/jina"),
+            install_path: absolute_fixture_path("/models/jina"),
         }
     }
 
@@ -378,7 +386,7 @@ mod tests {
             profile_id: profile_id.to_owned(),
             accepted_profile_digest: digest(seed),
             artifact_digest: "a".repeat(64),
-            artifact_path: PathBuf::from("/models/jina"),
+            artifact_path: absolute_fixture_path("/models/jina"),
         }
     }
 
@@ -391,7 +399,7 @@ mod tests {
                 model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
                 revision: "rev".to_owned(),
                 artifact_digest: "a".repeat(64),
-                install_path: PathBuf::from("/models/jina"),
+                install_path: absolute_fixture_path("/models/jina"),
             }),
             remediation: SemanticModelRemediationV1 {
                 retry: false,
@@ -408,7 +416,7 @@ mod tests {
         let material =
             semantic_activation_material(Some(&status)).expect("installed model material");
         assert_eq!(material.artifact_digest, "a".repeat(64));
-        assert_eq!(material.install_path, PathBuf::from("/models/jina"));
+        assert_eq!(material.install_path, absolute_fixture_path("/models/jina"));
     }
 
     #[test]

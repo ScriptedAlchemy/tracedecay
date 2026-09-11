@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
@@ -41,7 +41,6 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "reviewing-changes",
     "tracing-functions",
     "using-the-cli",
-    "using-tracedecay",
 ];
 
 impl AgentIntegration for CursorIntegration {
@@ -84,6 +83,7 @@ impl AgentIntegration for CursorIntegration {
         }
         Ok(vec![
             tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Cursor,
                 &cursor_plugin_install_dir(home),
@@ -378,6 +378,7 @@ fn install_cursor_managed_skill_overlay(home: &Path, install_dir: &Path) -> Resu
         tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     super::retired_memory_digest::remove_state(&profile_root)?;
     tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+        &crate::host_io(),
         &profile_root,
         tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Cursor,
         install_dir,
@@ -1150,10 +1151,14 @@ fn cursor_plugin_rule_doctor_state(rule_path: &Path) -> CursorPluginRuleDoctorSt
     if !rule_path.exists() {
         return CursorPluginRuleDoctorState::Missing;
     }
+    // The installer deploys the embedded rule byte-for-byte, so an active
+    // rule is one that still matches the bundle shipped with this binary; any
+    // edit or stale version is a reinstall, not a prose check.
     match std::fs::read_to_string(rule_path) {
         Ok(contents)
-            if contents.contains("alwaysApply: true")
-                && contents.contains("tracedecay MCP tools") =>
+            if embedded_plugin_files().iter().any(|(relative, embedded)| {
+                *relative == "rules/tracedecay.mdc" && *embedded == contents
+            }) =>
         {
             CursorPluginRuleDoctorState::Active
         }
@@ -2460,6 +2465,23 @@ mod tests {
         assert_eq!(
             cursor_plugin_rule_doctor_state(&incomplete),
             CursorPluginRuleDoctorState::Incomplete
+        );
+
+        let (_, embedded) = embedded_plugin_files()
+            .into_iter()
+            .find(|(relative, _)| *relative == "rules/tracedecay.mdc")
+            .expect("the Cursor bundle ships rules/tracedecay.mdc");
+        let active = tmp.path().join("active.mdc");
+        std::fs::write(&active, embedded).unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&active),
+            CursorPluginRuleDoctorState::Active
+        );
+        std::fs::write(&active, format!("{embedded}\n# local edit\n")).unwrap();
+        assert_eq!(
+            cursor_plugin_rule_doctor_state(&active),
+            CursorPluginRuleDoctorState::Incomplete,
+            "an edited rule is drift, not an active install"
         );
 
         let unreadable = tmp.path().join("unreadable.mdc");

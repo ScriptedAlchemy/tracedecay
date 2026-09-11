@@ -17,7 +17,7 @@
             Arc::clone(&source) as Arc<dyn ModelMemberSourceV1>,
         )
         .unwrap();
-        let selected = apply_config_selection_to_owner(&owner, Some(&model_id), true).unwrap();
+        let selected = owner.select_model(Some(&model_id), true).unwrap();
 
         assert!(matches!(
             selected.state,
@@ -113,7 +113,7 @@
     // capability absence without the bundled runtime. Workspace builds unify
     // `semantic-fastembed` on via the root crate's `production` default; the
     // gate keeps scoped `-p tracedecay-semantic` runs truthful.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn restart_re_admits_explicit_import_without_legacy_acquisition() {
         let fixture = tempfile::tempdir().unwrap();
@@ -573,7 +573,7 @@
         }
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     fn pinned_reranker_fixture_catalog(fixture: &Path) -> (FastEmbedModelCatalogV1, String) {
         let mut members = BTreeMap::new();
         for (role, name) in [
@@ -615,7 +615,7 @@
                         .to_owned(),
             },
             expected_dimensions: 1,
-            max_length: 512,
+            max_length: 4096,
             members,
         };
         let mut catalog = FastEmbedModelCatalogV1::production();
@@ -623,7 +623,7 @@
         (catalog, model.model_id)
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     #[ignore = "requires TRACEDECAY_FASTEMBED_FIXTURE_DIR with a pinned local reranker"]
     fn pinned_reranker_cold_first_and_warm_queries_reuse_one_session() {
@@ -659,7 +659,7 @@
             package_bytes.saturating_sub(manifest.payload.model_member.byte_length);
         manifest.payload.resource_ceiling.max_resident_bytes = package_bytes.saturating_mul(4);
         manifest.payload.resource_ceiling.max_batch_size = 8;
-        manifest.payload.resource_ceiling.max_sequence_length = 512;
+        manifest.payload.resource_ceiling.max_sequence_length = 4096;
         let pins = reranker_pins(&manifest);
         owner
             .import_local_reranker_artifact(pins.clone(), &manifest, &fixture, 10)
@@ -803,7 +803,7 @@
 
     // Reranker publication admits the artifact for runtime against
     // `detect_fastembed_process()` evidence; see the gate rationale above.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn independent_reranker_import_rotates_active_and_rollback_leases() {
         let fixture = tempfile::tempdir().unwrap();
@@ -865,13 +865,13 @@
         ));
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     struct FixtureRerankerHttpsTransport {
         members: BTreeMap<String, Vec<u8>>,
         revision: String,
     }
 
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     impl ExplicitHttpsArtifactTransportV1 for FixtureRerankerHttpsTransport {
         fn fetch_range(
             &self,
@@ -900,7 +900,7 @@
     }
 
     // Same runtime-evidence gate as the local reranker import above.
-    #[cfg(feature = "semantic-fastembed")]
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn configured_https_reranker_acquisition_uses_immutable_member_pins() {
         let fixture = tempfile::tempdir().unwrap();
@@ -997,6 +997,65 @@
     }
 
     #[test]
+    fn reranker_import_rejects_unsupported_identity_before_transport() {
+        struct CountingTransport {
+            calls: AtomicUsize,
+        }
+
+        impl ExplicitHttpsArtifactTransportV1 for CountingTransport {
+            fn fetch_range(
+                &self,
+                _request: &super::super::artifact_store::HttpsArtifactRangeRequestV1,
+            ) -> Result<
+                super::super::artifact_store::HttpsArtifactRangeResponseV1,
+                ArtifactImportErrorV1,
+            > {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(ArtifactImportErrorV1::MemberMismatch)
+            }
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            scoped_hub_source(root.path()),
+        )
+        .unwrap();
+        let manifest = reranker_manifest(&model, "unsupported/reranker");
+        let pins = reranker_pins(&manifest);
+        let source = ConfiguredHttpsArtifactSourceV1::new(
+            "https://models.example.test/reranker",
+            "immutable-reranker-revision",
+        )
+        .unwrap();
+        let transport = CountingTransport {
+            calls: AtomicUsize::new(0),
+        };
+
+        assert_eq!(
+            crate::rerank_adapter::validate_reranker_manifest_pins(&manifest, &pins),
+            Err(crate::rerank_adapter::RerankArtifactAdmissionErrorV1::IncompatibleArtifact)
+        );
+        assert_eq!(
+            owner
+                .import_configured_https_reranker_artifact(
+                    pins, &manifest, &source, &transport, None, 30,
+                )
+                .unwrap_err(),
+            ModelLifecycleErrorV1::VerificationFailed
+        );
+        assert_eq!(
+            transport.calls.load(Ordering::SeqCst),
+            0,
+            "unsupported reranker identity must be rejected before transport"
+        );
+    }
+
+    #[test]
     fn settings_change_schedules_acquire_to_installed_without_blocking_semantics_flag() {
         let fixture = tempfile::tempdir().unwrap();
         let (catalog, model_id) = tiny_catalog(fixture.path());
@@ -1025,7 +1084,10 @@
             ready.state,
             Some(SemanticModelLifecycleStateV1::Ready { .. })
         ));
-        assert!(!ready.semantics_omitted);
+        assert_eq!(
+            ready.semantics_omitted,
+            !crate::embedding_backend::EmbeddingRuntimeFamilyV1::FastEmbedOrt.is_compiled()
+        );
     }
 
     #[test]
@@ -1122,6 +1184,127 @@
         assert!(status.state.is_none());
         assert!(status.semantics_omitted);
         assert!(status.auto_download);
+    }
+
+    #[cfg(not(all(feature = "semantic-fastembed", not(windows))))]
+    #[test]
+    fn unavailable_runtime_preserves_ready_selection_and_rollback_leases() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(FixtureSource {
+            root: fixture.path().to_path_buf(),
+            calls: AtomicUsize::new(0),
+        });
+        let owner =
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog.clone(), source.clone())
+                .unwrap();
+        let first_manifest = tiny_manifest(model);
+        owner
+            .import_local_artifact(&model_id, &first_manifest, fixture.path(), 10)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let previous = owner.status().state;
+        let mut second_manifest = first_manifest.clone();
+        second_manifest.payload.resource_ceiling.max_resident_bytes += 1;
+        owner
+            .import_local_artifact(&model_id, &second_manifest, fixture.path(), 20)
+            .unwrap();
+        owner.mark_ready().unwrap();
+        let ready = owner.status().state;
+        let before = fs::read(root.path().join("lifecycle.json")).unwrap();
+        drop(owner);
+
+        let reopened =
+            SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source.clone()).unwrap();
+        assert_eq!(
+            fs::read(root.path().join("lifecycle.json")).unwrap(),
+            before
+        );
+        assert_eq!(reopened.status().state, ready);
+        assert!(reopened.status().semantics_omitted);
+        assert!(reopened.status().remediation.rollback);
+        assert!(matches!(
+            crate::LoadableLifecycleArtifactV1::resolve(&reopened),
+            Err(crate::SemanticRuntimeScheduleFailureV1::Runtime)
+        ));
+        let projection = crate::session_pool::test_support::authority()
+            .projection()
+            .clone();
+        assert!(matches!(
+            crate::LoadedSemanticArtifactV1::from_lifecycle_projection(
+                &reopened,
+                &projection,
+                SemanticResourceCeilings::default(),
+            ),
+            Err(crate::SemanticRuntimeScheduleFailureV1::Runtime)
+        ));
+        // Re-selecting on an incapable binary must verify bytes without runtime admission.
+        assert_eq!(
+            reopened.select_model(Some(&model_id), true).unwrap().state,
+            ready
+        );
+        for (slot, kind, expected) in [
+            (
+                EMBEDDING_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                second_manifest.artifact_identity_digest(),
+            ),
+            (
+                EMBEDDING_ROLLBACK_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Rollback,
+                first_manifest.artifact_identity_digest(),
+            ),
+        ] {
+            assert_eq!(
+                reopened
+                    .artifact_store
+                    .artifact_digest_for_lease(slot, kind, 40)
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        assert_eq!(reopened.rollback_to_previous().unwrap().state, previous);
+        assert!(reopened.status().semantics_omitted);
+        assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "semantic-model2vec")]
+    #[test]
+    fn model2vec_selection_remains_available_without_fastembed() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (mut catalog, model_id) = tiny_catalog(fixture.path());
+        catalog
+            .models
+            .iter_mut()
+            .find(|model| model.model_id == model_id)
+            .unwrap()
+            .backend = CatalogedEmbeddingBackendV1::Model2VecStatic {
+            table_precision: EmbeddingPrecisionV1::Fp32,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(FixtureSource {
+                root: fixture.path().to_path_buf(),
+                calls: AtomicUsize::new(0),
+            }),
+        )
+        .unwrap();
+
+        let selected = owner.select_model(Some(&model_id), true).unwrap();
+        assert!(matches!(
+            selected.state,
+            Some(SemanticModelLifecycleStateV1::SelectedNotDownloaded { .. })
+        ));
+        assert!(
+            RuntimeEnvironmentV1::detect_embedding_process(
+                crate::embedding_backend::EmbeddingRuntimeFamilyV1::Model2VecStatic,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1350,4 +1533,280 @@
         assert_eq!(reopened_status.state, Some(installed));
         assert!(!reopened.enqueue_demand_acquisition_if_needed());
         assert_eq!(offline_source.calls.load(Ordering::SeqCst), 0);
+    }
+
+
+    #[test]
+    fn scoped_owners_share_verified_bytes_without_selection_or_lease_aliasing() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("fixture");
+        let (catalog, model_id) = tiny_catalog(&fixture);
+        let source = Arc::new(FixtureSource {
+            root: fixture,
+            calls: AtomicUsize::new(0),
+        });
+        let shared = temp.path().join("artifacts");
+        let first_root = temp.path().join("first");
+        let first = SemanticModelLifecycleOwnerV1::open_scoped(
+            &first_root,
+            &shared,
+            "profile/project-a",
+            catalog.clone(),
+            source.clone(),
+        )
+        .unwrap();
+        let second = SemanticModelLifecycleOwnerV1::open_scoped(
+            temp.path().join("second"),
+            &shared,
+            "profile/project-b",
+            catalog.clone(),
+            source.clone(),
+        )
+        .unwrap();
+        first.select_model(Some(&model_id), false).unwrap();
+        second.select_model(None, true).unwrap();
+        first.acquire_blocking_for_tests().unwrap();
+        let state = first.status().state.unwrap();
+        // The lifecycle names the catalog package — the identity every
+        // projection and compatibility pin carries — while the inventory
+        // addresses the shared bytes by its own content digest.
+        assert_eq!(
+            state.artifact_digest(),
+            catalog_package_digest(catalog.get(&model_id).unwrap())
+        );
+        let installed = install_path_of(&state).unwrap().to_path_buf();
+        assert!(installed.starts_with(&shared));
+        let digest = first
+            .artifact_store
+            .installed_digest(&installed)
+            .expect("a scoped install is addressed by the shared inventory");
+        assert_eq!(first.artifact_store.installed_directory(&digest), installed);
+        assert_ne!(digest.as_str(), state.artifact_digest());
+        assert_eq!(second.status().selected_model, None);
+        assert!(second.status().auto_download);
+        let fetched = source.calls.load(Ordering::SeqCst);
+        second.select_model(Some(&model_id), false).unwrap();
+        assert_eq!(source.calls.load(Ordering::SeqCst), fetched);
+        let discovered = second.status().state.unwrap();
+        assert_eq!(discovered.artifact_digest(), state.artifact_digest());
+        assert_eq!(install_path_of(&discovered), Some(installed.as_path()));
+        assert_eq!(first.artifact_store.inventory().unwrap().records.len(), 1);
+        let second_lease = second.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1);
+        first.select_model(None, false).unwrap();
+        drop(first);
+        let reopened = SemanticModelLifecycleOwnerV1::open_scoped(
+            &first_root,
+            &shared,
+            "profile/project-a",
+            catalog,
+            source,
+        )
+        .unwrap();
+        assert_eq!(reopened.status().selected_model, None);
+        assert_eq!(
+            reopened
+                .artifact_store
+                .artifact_digest_for_lease(
+                    &second_lease,
+                    ArtifactLeaseKindV1::Active,
+                    current_unix_seconds().unwrap(),
+                )
+                .unwrap(),
+            Some(digest.clone())
+        );
+        let now = current_unix_seconds().unwrap() + 8 * 24 * 60 * 60;
+        reopened.run_daemon_artifact_gc(now).unwrap();
+        assert!(installed.is_dir());
+        assert_eq!(
+            second.status().selected_model.as_deref(),
+            Some(model_id.as_str())
+        );
+    }
+
+    /// A scoped acquisition survives restart under its catalog identity: the
+    /// reopened owner re-admits the inventory install by its directory, keeps
+    /// the catalog package digest the pins compare against, and re-acquires
+    /// its own active lease without fetching again. Re-admission verifies the
+    /// manifest against the bundled runtime, so the gate matches
+    /// `restart_re_admits_explicit_import_without_legacy_acquisition`.
+    #[cfg(all(feature = "semantic-fastembed", not(windows)))]
+    #[test]
+    fn scoped_acquisition_re_admits_after_restart_under_catalog_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("fixture");
+        let (catalog, model_id) = tiny_catalog(&fixture);
+        let source = Arc::new(FixtureSource {
+            root: fixture,
+            calls: AtomicUsize::new(0),
+        });
+        let shared = temp.path().join("artifacts");
+        let root = temp.path().join("owner");
+        let owner = SemanticModelLifecycleOwnerV1::open_scoped(
+            &root,
+            &shared,
+            "profile/project-a",
+            catalog.clone(),
+            source.clone(),
+        )
+        .unwrap();
+        owner.select_model(Some(&model_id), false).unwrap();
+        owner.acquire_blocking_for_tests().unwrap();
+        owner.mark_ready().unwrap();
+        let ready = owner.status().state.unwrap();
+        let catalog_digest = catalog_package_digest(catalog.get(&model_id).unwrap());
+        assert_eq!(ready.artifact_digest(), catalog_digest);
+        let installed = install_path_of(&ready).unwrap().to_path_buf();
+        let inventory_digest = owner.artifact_store.installed_digest(&installed).unwrap();
+        let active_lease = owner.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1);
+        let fetched = source.calls.load(Ordering::SeqCst);
+        drop(owner);
+
+        let reopened = SemanticModelLifecycleOwnerV1::open_scoped(
+            &root,
+            &shared,
+            "profile/project-a",
+            catalog,
+            source.clone(),
+        )
+        .unwrap();
+        let readmitted = reopened.select_model(Some(&model_id), false).unwrap();
+        let state = readmitted.state.expect("re-admitted install");
+        assert!(matches!(state, SemanticModelLifecycleStateV1::Ready { .. }));
+        assert_eq!(state.artifact_digest(), catalog_digest);
+        assert_eq!(install_path_of(&state), Some(installed.as_path()));
+        assert_eq!(source.calls.load(Ordering::SeqCst), fetched);
+        assert!(!reopened.enqueue_demand_acquisition_if_needed());
+        assert_eq!(
+            reopened
+                .artifact_store
+                .artifact_digest_for_lease(
+                    &active_lease,
+                    ArtifactLeaseKindV1::Active,
+                    current_unix_seconds().unwrap(),
+                )
+                .unwrap(),
+            Some(inventory_digest)
+        );
+    }
+
+    #[test]
+    fn scoped_reranker_active_and_rollback_slots_do_not_replace_foreign_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("fixture");
+        let (catalog, model_id) = tiny_catalog(&fixture);
+        let source = Arc::new(FixtureSource {
+            root: fixture.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let shared = temp.path().join("artifacts");
+        let first = SemanticModelLifecycleOwnerV1::open_scoped(
+            temp.path().join("first"),
+            &shared,
+            "profile/project-a",
+            catalog.clone(),
+            source.clone(),
+        )
+        .unwrap();
+        let second = SemanticModelLifecycleOwnerV1::open_scoped(
+            temp.path().join("second"),
+            &shared,
+            "profile/project-b",
+            catalog.clone(),
+            source,
+        )
+        .unwrap();
+        let mut manifest = tiny_manifest(catalog.get(&model_id).unwrap());
+        let now = current_unix_seconds().unwrap();
+        let old = first
+            .artifact_store
+            .import_local_directory(&manifest, &fixture, now)
+            .unwrap();
+        manifest.payload.resource_ceiling.max_resident_bytes += 1;
+        let new = first
+            .artifact_store
+            .import_local_directory(&manifest, &fixture, now)
+            .unwrap();
+        for owner in [&first, &second] {
+            owner
+                .artifact_store
+                .activate_artifact_with_rollback(
+                    &old.artifact_digest,
+                    &owner.lease_id(RERANKER_ACTIVE_LEASE_ID_V1),
+                    &owner.lease_id(RERANKER_ROLLBACK_LEASE_ID_V1),
+                    now,
+                )
+                .unwrap();
+        }
+        first
+            .artifact_store
+            .activate_artifact_with_rollback(
+                &new.artifact_digest,
+                &first.lease_id(RERANKER_ACTIVE_LEASE_ID_V1),
+                &first.lease_id(RERANKER_ROLLBACK_LEASE_ID_V1),
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            first.reranker_artifact_status().unwrap(),
+            RerankerArtifactLifecycleStatusV1 {
+                active_artifact_digest: Some(new.artifact_digest),
+                rollback_artifact_digest: Some(old.artifact_digest.clone()),
+            }
+        );
+        assert_eq!(
+            second.reranker_artifact_status().unwrap(),
+            RerankerArtifactLifecycleStatusV1 {
+                active_artifact_digest: Some(old.artifact_digest.clone()),
+                rollback_artifact_digest: None,
+            }
+        );
+        first.rollback_reranker_artifact(now).unwrap();
+        assert_eq!(
+            second
+                .reranker_artifact_status()
+                .unwrap()
+                .active_artifact_digest,
+            Some(old.artifact_digest)
+        );
+    }
+
+
+    #[test]
+    fn scoped_model2vec_acquisition_preserves_catalog_member_paths_for_reuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("fixture");
+        let (mut catalog, model_id) = tiny_catalog(&fixture);
+        let model = catalog.models.iter_mut().find(|model| model.model_id == model_id).unwrap();
+        model.backend = CatalogedEmbeddingBackendV1::Model2VecStatic {
+            table_precision: EmbeddingPrecisionV1::Fp32,
+        };
+        let member = model.members.get_mut("model").unwrap();
+        fs::rename(fixture.join(&member.path), fixture.join("model.safetensors")).unwrap();
+        member.path = "model.safetensors".to_owned();
+        member.upstream_path = member.path.clone();
+        let source = Arc::new(FixtureSource { root: fixture, calls: AtomicUsize::new(0) });
+        let shared = temp.path().join("artifacts");
+        let first = SemanticModelLifecycleOwnerV1::open_scoped(
+            temp.path().join("first"), &shared, "profile/project-a", catalog.clone(), source.clone(),
+        ).unwrap();
+        first.select_model(Some(&model_id), false).unwrap();
+        first.acquire_blocking_for_tests().unwrap();
+        let state = first.status().state.unwrap();
+        let install = install_path_of(&state).unwrap();
+        assert!(install.join("model.safetensors").is_file());
+        assert!(!install.join("model.onnx").exists());
+        let second = SemanticModelLifecycleOwnerV1::open_scoped(
+            temp.path().join("second"), &shared, "profile/project-b", catalog, source.clone(),
+        ).unwrap();
+        let fetched = source.calls.load(Ordering::SeqCst);
+        let reused = second.select_model(Some(&model_id), false).unwrap();
+        assert_eq!(reused.state.as_ref().and_then(install_path_of), Some(install));
+        assert_eq!(source.calls.load(Ordering::SeqCst), fetched);
+        #[cfg(feature = "semantic-model2vec")]
+        {
+            let environment = RuntimeEnvironmentV1::detect_embedding_process(
+                crate::embedding_backend::EmbeddingRuntimeFamilyV1::Model2VecStatic,
+            ).unwrap();
+            assert_eq!(environment.runtime, crate::model2vec_adapter::MODEL2VEC_RUNTIME_FAMILY_V1);
+        }
     }

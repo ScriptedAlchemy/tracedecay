@@ -69,6 +69,8 @@ impl ProjectionProvenance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionSkipReason {
     NonConversationalRecord,
+    /// A proven native stream observation replaced the historical combined source.
+    NativeSourceSuperseded,
     /// The observation's deterministic output identity is already owned by a
     /// different observation (duplicate-era provider records). The first
     /// binder keeps the output; this observation converges as a durable,
@@ -86,6 +88,7 @@ impl ProjectionSkipReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NonConversationalRecord => "non_conversational_record",
+            Self::NativeSourceSuperseded => "native_source_superseded",
             Self::OutputCollision => "output_collision",
             Self::InvalidContract => "invalid_contract",
             Self::SanitizationRefused => "sanitization_refused",
@@ -95,6 +98,7 @@ impl ProjectionSkipReason {
     pub fn from_durable_str(value: &str) -> Option<Self> {
         match value {
             "non_conversational_record" => Some(Self::NonConversationalRecord),
+            "native_source_superseded" => Some(Self::NativeSourceSuperseded),
             "output_collision" => Some(Self::OutputCollision),
             "invalid_contract" => Some(Self::InvalidContract),
             "sanitization_refused" => Some(Self::SanitizationRefused),

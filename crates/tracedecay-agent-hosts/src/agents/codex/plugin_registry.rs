@@ -35,7 +35,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::codex_config_path;
 

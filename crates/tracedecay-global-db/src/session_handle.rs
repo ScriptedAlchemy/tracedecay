@@ -13,7 +13,7 @@ use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Error as EngineError, Executor, IntoParams, QueryExecutor, Rows,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_sessions::runtime::{
     SessionExec, SessionQuery, SessionRegisteredDb, SessionWriteTxn,
 };

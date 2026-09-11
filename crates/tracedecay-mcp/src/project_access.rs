@@ -7,6 +7,15 @@ pub fn registered_project_reader_tool_names() -> Vec<&'static str> {
 }
 
 const REGISTERED_PROJECT_READER_TOOL_NAMES: &[&str] = &[
+    "tracedecay_fact_store_search",
+    "tracedecay_fact_store_probe",
+    "tracedecay_fact_store_related",
+    "tracedecay_fact_store_reason",
+    "tracedecay_fact_store_contradict",
+    "tracedecay_fact_store_get",
+    "tracedecay_fact_store_list",
+    "tracedecay_memory_status",
+    "tracedecay_message_search",
     "tracedecay_grep",
     "tracedecay_retrieve",
     "tracedecay_context",

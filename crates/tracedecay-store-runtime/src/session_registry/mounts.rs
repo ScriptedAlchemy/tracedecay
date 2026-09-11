@@ -6,7 +6,8 @@ use std::sync::atomic::AtomicBool;
 #[cfg(any(test, feature = "test-helpers"))]
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
-use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_application::semantic_runtime::SemanticVectorOperationTaskOwnerV1;
+use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 #[cfg(any(test, feature = "test-helpers"))]
@@ -202,6 +203,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             graph_registry,
             graph_manifest_provider,
             graph_lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
+            semantic_vector_operation_task_owner: Arc::new(
+                SemanticVectorOperationTaskOwnerV1::new(),
+            ),
             profile_pin: Mutex::new(Some(profile_pin)),
             profile_database_mount: Mutex::new(()),
             profile_database: std::sync::Mutex::new(None),
@@ -213,6 +217,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             remote_replay_transaction,
             remote_recovery_authorities: Mutex::new(BTreeMap::new()),
             project_owners: super::ProjectRuntimeOwnerRegistryV1::default(),
+            profile_semantic_lifecycle: super::SemanticLifecycleOwnerCell::default(),
+            semantic_lifecycle_closed: Arc::new(AtomicBool::new(false)),
             code_graph_publication_gates: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
             retained_hook_tasks: RetainedHookTasks::new(),
@@ -628,7 +634,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     Ok(runtime) => {
                         let runtime = Arc::new(runtime);
                         let graph_port: Arc<
-                            dyn tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1,
+                            dyn tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1,
                         > = runtime.clone();
                         let activation = task_database.bind_memory_graph_runtime(graph_port);
                         let reconciliation = activation
@@ -855,9 +861,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         if newly_mounted {
             hotpath::measure_block!(
                 "daemon.session_registry.mount.remote_replay_recovery",
-                storage.recover_interrupted_replay_attempts(
-                    tracedecay_application::clock::now_micros()
-                )
+                storage
+                    .recover_interrupted_replay_attempts(tracedecay_contracts::clock::now_micros())
             )
             .map_err(|error| {
                 session_registry_error("recover interrupted Remote Brain replay", error.to_string())
@@ -885,6 +890,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 self.registry.clone(),
                 self.graph_registry.clone(),
                 Arc::clone(&self.graph_lifecycle_cancelled),
+                Arc::clone(&self.semantic_vector_operation_task_owner),
                 self.profile_authority_pin("attach remote recovery authority")
                     .await?,
                 self.project_owners.clone(),
@@ -952,7 +958,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// authorities.
     pub fn remote_operational_status(
         &self,
-    ) -> tracedecay_application::remote::status::RemoteOperationalStatusReadV1 {
+    ) -> tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1 {
         self.remote_credential_authority.operational_status()
     }
 
@@ -1011,8 +1017,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         databases
     }
 
-    /// Releases exclusive Grafeo writers at daemon shutdown, after the
-    /// reconciliation workers have joined.
+    /// Releases exclusive Grafeo writers at daemon shutdown, after semantic
+    /// vector operation settlement and reconciliation workers have joined.
     ///
     /// The shutdown close requires every graph owner to be unleased, so this
     /// first drains the retained owners out of the registry maps: dropping a
@@ -1065,10 +1071,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some((project_id, state)) = projects.iter().find_map(|(project_id, state)| {
                 let state = match state {
-                    ProjectRuntimeOwnerStateV1::Opening => "opening",
-                    ProjectRuntimeOwnerStateV1::ReplacingSessions => "replacing_sessions",
-                    ProjectRuntimeOwnerStateV1::Recovering => "recovering",
-                    ProjectRuntimeOwnerStateV1::Retiring => "retiring",
+                    ProjectRuntimeOwnerStateV1::Opening(_) => "opening",
+                    ProjectRuntimeOwnerStateV1::ReplacingSessions(_) => "replacing_sessions",
+                    ProjectRuntimeOwnerStateV1::Recovering(_) => "recovering",
+                    ProjectRuntimeOwnerStateV1::Retiring(_) => "retiring",
                     ProjectRuntimeOwnerStateV1::Ready(_)
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_) => return None,
@@ -1165,10 +1171,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                         ));
                     }
                 }
-                ProjectRuntimeOwnerStateV1::Opening
-                | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                | ProjectRuntimeOwnerStateV1::Recovering
-                | ProjectRuntimeOwnerStateV1::Retiring => {
+                ProjectRuntimeOwnerStateV1::Opening(_)
+                | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                | ProjectRuntimeOwnerStateV1::Recovering(_)
+                | ProjectRuntimeOwnerStateV1::Retiring(_) => {
                     return Err(session_registry_error(
                         "drain graph owners for shutdown",
                         "project runtime owner transition changed after terminal preflight"
@@ -1241,7 +1247,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     }
                     true
                 }
-                Some(ProjectRuntimeOwnerStateV1::Opening) => {
+                Some(ProjectRuntimeOwnerStateV1::Opening(_)) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     return Err(TraceDecayError::project_route(
@@ -1251,9 +1257,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                     ));
                 }
                 Some(
-                    ProjectRuntimeOwnerStateV1::Retiring
-                    | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                    | ProjectRuntimeOwnerStateV1::Recovering
+                    ProjectRuntimeOwnerStateV1::Retiring(_)
+                    | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                    | ProjectRuntimeOwnerStateV1::Recovering(_)
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_),
                 ) => {
@@ -1381,6 +1387,106 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(lease)
     }
 
+    /// Issues a lease for a project-memory store that is already mounted.
+    ///
+    /// Retained project memory never discovers or initializes a store; the root
+    /// assembler selected this runtime because the project is already Ready.
+    /// Read access and read-only graphs take a read-only lease. A write
+    /// request against a read-only owner is refused rather than silently
+    /// narrowed.
+    pub fn mounted_project_memory(
+        &self,
+        project_id: &ProjectId,
+        access: DatabaseAccessMode,
+    ) -> Result<Database> {
+        let mounted = self
+            .project_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match mounted.get(project_id) {
+            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
+                let owner = owners.memory.as_ref().ok_or_else(|| {
+                    session_registry_error(
+                        "issue mounted project memory database client",
+                        "project memory owner is not mounted".to_string(),
+                    )
+                })?;
+                issue_mounted_memory_lease(owner, access, true)
+            }
+            Some(ProjectRuntimeOwnerStateV1::Opening(_)) => Err(TraceDecayError::project_route(
+                "project_runtime_opening",
+                true,
+                "Project runtime is already opening",
+            )),
+            Some(
+                ProjectRuntimeOwnerStateV1::Retiring(_)
+                | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                | ProjectRuntimeOwnerStateV1::Recovering(_)
+                | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                | ProjectRuntimeOwnerStateV1::Faulted(_),
+            ) => Err(TraceDecayError::project_route(
+                "project_runtime_retiring",
+                true,
+                "Project runtime is unavailable while retirement is terminal or in progress",
+            )),
+            None => Err(session_registry_error(
+                "issue mounted project memory database client",
+                "project memory owner is not mounted".to_string(),
+            )),
+        }
+    }
+
+    /// Issues a retrieval-recording lease: write when the owner is writable,
+    /// otherwise a read-only lease so search can still serve evidence.
+    pub fn mounted_project_memory_recording(
+        &self,
+        project_id: &ProjectId,
+        graph_read_only: bool,
+    ) -> Result<Database> {
+        if graph_read_only {
+            return self.mounted_project_memory(project_id, DatabaseAccessMode::ReadOnly);
+        }
+        let mounted = self
+            .project_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match mounted.get(project_id) {
+            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => {
+                let owner = owners.memory.as_ref().ok_or_else(|| {
+                    session_registry_error(
+                        "issue mounted project memory database client",
+                        "project memory owner is not mounted".to_string(),
+                    )
+                })?;
+                match issue_mounted_memory_lease(owner, DatabaseAccessMode::ReadWrite, false) {
+                    Ok(database) if database.is_writable() => Ok(database),
+                    Ok(_) => issue_mounted_memory_lease(owner, DatabaseAccessMode::ReadOnly, false),
+                    Err(error) => Err(error),
+                }
+            }
+            Some(ProjectRuntimeOwnerStateV1::Opening(_)) => Err(TraceDecayError::project_route(
+                "project_runtime_opening",
+                true,
+                "Project runtime is already opening",
+            )),
+            Some(
+                ProjectRuntimeOwnerStateV1::Retiring(_)
+                | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                | ProjectRuntimeOwnerStateV1::Recovering(_)
+                | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
+                | ProjectRuntimeOwnerStateV1::Faulted(_),
+            ) => Err(TraceDecayError::project_route(
+                "project_runtime_retiring",
+                true,
+                "Project runtime is unavailable while retirement is terminal or in progress",
+            )),
+            None => Err(session_registry_error(
+                "issue mounted project memory database client",
+                "project memory owner is not mounted".to_string(),
+            )),
+        }
+    }
+
     /// Mounts one project graph/memory database through the retained registry.
     ///
     /// The typed project id and enrollment roots authorize the resolver; the
@@ -1423,7 +1529,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                         Ok((true, None))
                     }
                 }
-                Some(ProjectRuntimeOwnerStateV1::Opening) => {
+                Some(ProjectRuntimeOwnerStateV1::Opening(_)) => {
                     #[cfg(feature = "hotpath")]
                     hotpath::gauge!("daemon.session_registry.mount.denied_total").inc(1_u64);
                     Err(TraceDecayError::project_route(
@@ -1433,9 +1539,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                     ))
                 }
                 Some(
-                    ProjectRuntimeOwnerStateV1::Retiring
-                    | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                    | ProjectRuntimeOwnerStateV1::Recovering
+                    ProjectRuntimeOwnerStateV1::Retiring(_)
+                    | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                    | ProjectRuntimeOwnerStateV1::Recovering(_)
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_),
                 ) => {
@@ -1538,15 +1644,17 @@ impl DaemonSessionRuntimeRegistryV1 {
                         Ok(None)
                     }
                 }
-                Some(ProjectRuntimeOwnerStateV1::Opening) => Err(TraceDecayError::project_route(
-                    "project_runtime_opening",
-                    true,
-                    "Project runtime is already opening",
-                )),
+                Some(ProjectRuntimeOwnerStateV1::Opening(_)) => {
+                    Err(TraceDecayError::project_route(
+                        "project_runtime_opening",
+                        true,
+                        "Project runtime is already opening",
+                    ))
+                }
                 Some(
-                    ProjectRuntimeOwnerStateV1::Retiring
-                    | ProjectRuntimeOwnerStateV1::ReplacingSessions
-                    | ProjectRuntimeOwnerStateV1::Recovering
+                    ProjectRuntimeOwnerStateV1::Retiring(_)
+                    | ProjectRuntimeOwnerStateV1::ReplacingSessions(_)
+                    | ProjectRuntimeOwnerStateV1::Recovering(_)
                     | ProjectRuntimeOwnerStateV1::RecoveryRequired(_)
                     | ProjectRuntimeOwnerStateV1::Faulted(_),
                 ) => Err(TraceDecayError::project_route(
@@ -1600,4 +1708,109 @@ impl DaemonSessionRuntimeRegistryV1 {
                 )
             })
     }
+
+    /// Test-only: occupy a registry slot with a read-only memory owner so
+    /// recording-lease degradation can be exercised without teaching the
+    /// production read-only open to publish.
+    #[cfg(test)]
+    pub async fn publish_read_only_memory_owner_for_test(
+        &self,
+        project_id: ProjectId,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Database> {
+        self.resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                enrollment_roots,
+            ))
+            .map_err(|error| {
+                session_registry_error("register project memory authority", format!("{error:?}"))
+            })?;
+        let shard_id = StoreShardIdV1::project(
+            self.identity.brain_id().clone(),
+            self.identity.profile_id().clone(),
+            project_id.clone(),
+        );
+        let pin = self
+            .profile_authority_pin("publish read-only project memory owner for test")
+            .await?;
+        let runtime = match self
+            .registry
+            .open(StoreRuntimeOpenRequest::new_read_only(
+                shard_id.clone(),
+                self.incarnation,
+                Some(pin),
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(runtime) => runtime,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                return Err(registry_open_error(
+                    "publish read-only project memory owner for test",
+                    failure,
+                ));
+            }
+        };
+        let owner = Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await?;
+        let database = owner.issue_read_only_lease().map_err(|error| {
+            session_registry_error(
+                "issue project memory read-only database client",
+                format!("{error:?}"),
+            )
+        })?;
+        let mut admission = match self.admit_project_runtime_owner(&project_id)? {
+            ProjectRuntimeOwnerAdmissionV1::Opening(admission) => admission,
+            ProjectRuntimeOwnerAdmissionV1::Existing => return Ok(database),
+        };
+        admission.publish_memory(MemoryStoreOwnerV1 {
+            database: owner.weak_lease_issuer(),
+            graph: Arc::new(std::sync::Mutex::new(
+                MemoryGraphAttachmentStateV1::Detached {
+                    database: owner,
+                    error: "test read-only memory owner does not attach a writer graph".to_owned(),
+                },
+            )),
+            graph_open_task_key: format!("{shard_id:?}"),
+        })?;
+        Ok(database)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project_has_ready_memory_owner(&self, project_id: &ProjectId) -> bool {
+        let mounted = self
+            .project_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            mounted.get(project_id),
+            Some(ProjectRuntimeOwnerStateV1::Ready(owners)) if owners.memory.is_some()
+        )
+    }
+}
+
+fn issue_mounted_memory_lease(
+    owner: &MemoryStoreOwnerV1,
+    access: DatabaseAccessMode,
+    refuse_nonwritable_write: bool,
+) -> Result<Database> {
+    let database = match access {
+        DatabaseAccessMode::ReadOnly => owner.issue_database_read_only_lease(),
+        DatabaseAccessMode::ReadWrite => owner.issue_database_lease(),
+    }
+    .map_err(|error| {
+        session_registry_error(
+            "issue mounted project memory database client",
+            error.to_string(),
+        )
+    })?;
+    if refuse_nonwritable_write
+        && matches!(access, DatabaseAccessMode::ReadWrite)
+        && !database.is_writable()
+    {
+        return Err(session_registry_error(
+            "issue mounted project memory database client",
+            "project memory owner is read-only".to_string(),
+        ));
+    }
+    Ok(database)
 }

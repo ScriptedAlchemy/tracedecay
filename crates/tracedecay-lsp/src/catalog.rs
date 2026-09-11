@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, LazyLock};
 
 use thiserror::Error;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ApplicationHandlerDescriptors, application_catalog_contributions,
     application_handler_descriptors,
 };
@@ -152,7 +152,7 @@ fn admit_binding(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         application_catalog_contributions, application_handler_descriptors,
     };
     use tracedecay_tool_catalog::{

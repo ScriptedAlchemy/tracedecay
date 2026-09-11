@@ -23,8 +23,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 pub struct QuintExtractor;
@@ -192,7 +194,11 @@ impl QuintExtractor {
                 // Parse failed; record the error and skip extraction rather
                 // than emitting bogus structure.
                 let start = Instant::now();
-                let mut state = Self::initialize_state(file_path, source);
+                let mut state = Self::initialize_state(
+                    file_path,
+                    source,
+                    crate::common::unparsed_file_end_line(source),
+                );
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
@@ -213,7 +219,11 @@ impl QuintExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
-        let mut state = Self::initialize_state(file_path, source);
+        let mut state = Self::initialize_state(
+            file_path,
+            source,
+            crate::common::file_end_line(source, tree),
+        );
 
         let mut walker = TokenWalker::default();
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
@@ -228,7 +238,11 @@ impl QuintExtractor {
         )
     }
 
-    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
+    fn initialize_state<'s>(
+        file_path: &str,
+        source: &'s str,
+        end_line: u32,
+    ) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -238,7 +252,7 @@ impl QuintExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -252,6 +266,7 @@ impl QuintExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -323,7 +338,7 @@ impl QuintExtractor {
             None => state.file_path.clone(),
         };
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &kind, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, name, ident_node);
 
         let node_obj = Node {
             id: id.clone(),
@@ -347,6 +362,7 @@ impl QuintExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

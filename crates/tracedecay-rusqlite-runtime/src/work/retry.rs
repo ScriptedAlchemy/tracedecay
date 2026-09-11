@@ -1,8 +1,9 @@
 //! Atomic persistence of a new retry attempt and its durable lineage receipt.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{
-    WorkAttemptStorageError, WorkRetryAttemptOutcomeV1, WorkRetryReceiptV1, WorkRetryStoragePortV1,
+use tracedecay_contracts::{
+    RuntimeWorkRetryEvidenceV1, WorkAttemptStorageError, WorkRetryAttemptOutcomeV1,
+    WorkRetryEvidenceErrorV1, WorkRetryEvidencePortV1, WorkRetryReceiptV1, WorkRetryStoragePortV1,
     WorkRetryWriteV1,
 };
 use tracedecay_domain::{
@@ -95,17 +96,13 @@ pub(crate) fn insert_retry_bounded_in_transaction(
             Err(WorkAttemptStorageError::AttemptConflict)
         };
     }
-    require_attempt(
-        transaction,
-        authority,
-        &write.receipt.command.original_attempt,
-        true,
-    )?;
+    require_original_retry_evidence(transaction, authority, write)?;
     if load_attempt(transaction, authority, write.attempt.identity())?.is_some() {
         return Err(WorkAttemptStorageError::AttemptConflict);
     }
     require_run_reservation(transaction, authority, write.attempt.identity())?;
     require_first_run_admission(transaction, authority, &write.attempt)?;
+    insert_receipt(transaction, authority, write)?;
     crate::work::capacity::require_capacity(
         transaction,
         authority,
@@ -113,7 +110,6 @@ pub(crate) fn insert_retry_bounded_in_transaction(
         concurrency,
     )?;
     insert_attempt(transaction, authority, &write.attempt)?;
-    insert_receipt(transaction, authority, write)?;
     Ok(WorkRetryAttemptOutcomeV1::Created {
         receipt: write.receipt.clone(),
         attempt: write.attempt.clone(),
@@ -185,7 +181,7 @@ fn replay(
     )
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     let expected_receipt_digest = canonical_sha256(
-        &tracedecay_application::WorkOwnerObservationReceiptV1::Retry(receipt.clone()),
+        &tracedecay_contracts::WorkOwnerObservationReceiptV1::Retry(receipt.clone()),
     )
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     if !receipt.validate_for_observation()
@@ -269,30 +265,27 @@ const fn attempt_state(state: tracedecay_domain::WorkAttemptStateV1) -> &'static
     }
 }
 
-fn require_attempt(
+fn require_original_retry_evidence(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
-    identity: &WorkAttemptIdentityV1,
-    terminal: bool,
+    write: &WorkRetryWriteV1,
 ) -> Result<(), WorkAttemptStorageError> {
-    let rows = registered_work_query(
+    let original = load_attempt(
         transaction,
-        "SELECT terminal FROM work_attempts_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5
-           AND task_id = ?6 AND run_id = ?7 AND attempt_id = ?8",
-        authority_params_owned(authority)
-            .into_iter()
-            .chain(identity_params(identity))
-            .collect(),
-    )
-    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    let observed = rows
-        .rows
-        .first()
-        .and_then(|row| exact_sql_integer(&row.values, 0))
-        .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-    if observed == i64::from(terminal) {
+        authority,
+        &write.receipt.command.original_attempt,
+    )?
+    .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
+    let verified = RuntimeWorkRetryEvidenceV1
+        .resolve_failure(authority, &original, &write.receipt.command.failure)
+        .map_err(|error| match error {
+            WorkRetryEvidenceErrorV1::NotFoundOrNotAuthorized => {
+                WorkAttemptStorageError::NotFoundOrNotAuthorized
+            }
+            WorkRetryEvidenceErrorV1::Conflict => WorkAttemptStorageError::AttemptConflict,
+            WorkRetryEvidenceErrorV1::Unavailable => WorkAttemptStorageError::Unavailable,
+        })?;
+    if verified == write.receipt.failure {
         Ok(())
     } else {
         Err(WorkAttemptStorageError::AttemptConflict)
@@ -411,7 +404,7 @@ fn insert_receipt(
     let payload =
         serde_json::to_string(&write.receipt).map_err(|_| WorkAttemptStorageError::Unavailable)?;
     let receipt_digest = canonical_sha256(
-        &tracedecay_application::WorkOwnerObservationReceiptV1::Retry(write.receipt.clone()),
+        &tracedecay_contracts::WorkOwnerObservationReceiptV1::Retry(write.receipt.clone()),
     )
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
     transaction

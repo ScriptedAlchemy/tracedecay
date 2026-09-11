@@ -1,12 +1,12 @@
 //! Canonical admitted problem mapping for automation runs.
 
-use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunRequestV1};
-use tracedecay_application::{
+use tracedecay_automation::backend::AgentTaskFailureClass;
+use tracedecay_contracts::retained_surfaces::{AutomationRunProblemV1, AutomationRunRequestV1};
+use tracedecay_contracts::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationUnavailableClassV1, CancellationSignal, CancellationStage, LegalAction,
     ProblemOwningLayer, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic,
 };
-use tracedecay_automation::backend::AgentTaskFailureClass;
 
 use crate::automation::run_ledger::AutomationRunLedgerRecord;
 
@@ -15,7 +15,7 @@ use super::terminal::AutomationSettledProblem;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub fn reset_required_problem(
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
 ) -> Result<AutomationSettledProblem> {
@@ -36,7 +36,7 @@ pub fn reset_required_problem(
 }
 
 pub fn indeterminate_external_effect_problem(
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
 ) -> Result<AutomationSettledProblem> {
@@ -57,7 +57,7 @@ pub fn indeterminate_external_effect_problem(
 }
 
 pub fn shipped_proposal_reset_required_problem(
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
 ) -> Result<AutomationSettledProblem> {
@@ -167,7 +167,7 @@ fn post_admission_termination_problem(
             .map(Some)
             .map_err(contract_error);
     }
-    match context.admission_at(tracedecay_application::now_micros()) {
+    match context.admission_at(tracedecay_contracts::now_micros()) {
         // A request admitted with a cancelled snapshot cannot reach this
         // post-admission mapper, but retain the exact typed state if a corrupt
         // caller violates that boundary.
@@ -186,7 +186,7 @@ fn post_admission_termination_problem(
 }
 
 fn zero_effect_terminal(
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
     problem: ApplicationProblem,
@@ -213,13 +213,13 @@ fn zero_effect_terminal(
 mod tests {
     use crate::automation::run_ledger::AutomationRunLedgerRecord;
     use serde_json::json;
-    use tracedecay_application::{
+    use tracedecay_automation::backend::AgentTaskFailureClass;
+    use tracedecay_contracts::{
         ApplicationExecutionFailureClassV1, ApplicationProblemKind, ApplicationUnavailableClassV1,
         CancellationContext, CancellationSignal, CancellationStage, CapabilityGrantId,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
         ResolvedScope,
     };
-    use tracedecay_automation::backend::AgentTaskFailureClass;
     use tracedecay_domain::{
         ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };

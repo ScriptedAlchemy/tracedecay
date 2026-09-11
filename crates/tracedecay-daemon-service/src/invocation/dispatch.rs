@@ -65,6 +65,14 @@ impl DaemonInvocationService {
         self.operation_events.clone()
     }
 
+    /// The cancellation table of this service generation. Every transport
+    /// and executor path registers and cancels requests through it.
+    pub fn request_cancellations(
+        &self,
+    ) -> &crate::request_cancellation::RequestCancellationRegistryV1 {
+        &self.request_cancellations
+    }
+
     pub fn admit_project_request(
         &self,
         project_root: &Path,
@@ -179,10 +187,12 @@ impl DaemonInvocationService {
         admitted_cancellation: Option<CancellationToken>,
         project_admission: Option<&crate::project_runtime::ProjectRuntimeRequestLeaseV1>,
     ) -> DaemonInvocationResponse {
+        // Keep the admitted dispatch frame behind one allocation for every invocation entry point.
+        Box::pin(async move {
         let _dispatch_gauges = InvocationDispatchGaugeGuard::enter();
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
-            let Some(lease) = crate::request_cancellation::register(&request_id) else {
+            let Some(lease) = self.request_cancellations.register(&request_id) else {
                 observe_front_door_denial(DaemonInvocationProblem::InvalidRequest);
                 return DaemonInvocationResponse::problem(
                     request_id,
@@ -208,24 +218,13 @@ impl DaemonInvocationService {
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass
         // so dispatch sees one consistent view of the project. A pre-admitted
-        // lease already stored the canonicalize result; reuse it.
-        let canonical_root = match (project_root, project_admission) {
-            (Some(project_root), Some(project_admission)) => project_admission
-                .admitted_canonical_root()
-                .map(ToOwned::to_owned)
-                .or_else(|| project_root.canonicalize().ok()),
-            (Some(project_root), None) => project_root.canonicalize().ok(),
-            (None, _) => None,
-        };
+        // lease already holds the exact registered-root key.
         let runtimes = match (project_root, project_admission) {
-            (Some(project_root), Some(project_admission)) => {
-                self.project_runtimes.request_runtimes_with_admission(
-                    project_root,
-                    canonical_root.as_deref(),
-                    project_admission,
-                )
-            }
+            (Some(project_root), Some(project_admission)) => self
+                .project_runtimes
+                .request_runtimes_with_admission(project_root, project_admission),
             _ => {
+                let canonical_root = project_root.and_then(|root| root.canonicalize().ok());
                 hotpath::future!(
                     self.project_runtimes
                         .request_runtimes(project_root, canonical_root.as_deref()),
@@ -235,6 +234,8 @@ impl DaemonInvocationService {
             }
         };
         let project_runtime_admitted = runtimes.is_admitted();
+        let registered_project_root = runtimes.resolved_root;
+        let publication = runtimes.publication;
         let feedback_runtime = runtimes.feedback;
         let observations = feedback_runtime
             .as_ref()
@@ -319,6 +320,7 @@ impl DaemonInvocationService {
         let work_runtime = runtimes.work;
         let retained_runtime = runtimes.retained;
         let lsp_owner = runtimes.lsp_owner;
+        let source_edit_owner = runtimes.source_edit;
 
         let response = match request.payload {
             DaemonInvocationPayload::GitRead {
@@ -576,7 +578,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::FeedbackImpact,
                     PrimitiveRequest::Impact(request),
@@ -594,7 +597,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::AffectedTests,
                     PrimitiveRequest::AffectedFileTests(request),
@@ -612,7 +616,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     ApplicationSurfaceOperation::TestResults,
                     PrimitiveRequest::RecentTestResults(page),
@@ -631,7 +636,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
@@ -649,7 +655,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                let request = match tracedecay_application::primitive_code_into_primitive(
+                let request = match tracedecay_contracts::primitive_code_into_primitive(
                     request,
                     tracedecay_code_index_runtime::code_index_scheduler::queries::callable_query_sanitizer_revision(
                     ),
@@ -667,7 +673,8 @@ impl DaemonInvocationService {
                 };
                 Box::pin(execute_primitive(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
@@ -687,7 +694,8 @@ impl DaemonInvocationService {
             } => {
                 Box::pin(execute_callable_code(
                     self,
-                    project_root,
+                    registered_project_root.as_deref(),
+                    publication,
                     request_id,
                     surface_operation,
                     request,
@@ -716,9 +724,15 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::NotFoundOrNotAuthorized,
                     );
                 }
+                let Some(configuration_runtime) = configuration_runtime else {
+                    return match project_root {
+                        Some(_) => missing_registered_owner_problem(publication, request_id),
+                        None => runtime_mounting_problem(request_id),
+                    };
+                };
                 Box::pin(execute_configuration(
                     request_id,
-                    configuration_runtime,
+                    Some(configuration_runtime),
                     surface_operation,
                     request,
                     observed_at,
@@ -772,6 +786,9 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
+                let Some(retained_runtime) = retained_runtime else {
+                    return missing_retained_runtime_problem(publication, request_id);
+                };
                 Box::pin(execute_retained_application(
                     request_id,
                     retained_runtime,
@@ -798,10 +815,7 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let Some(registered) = work_runtime else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 let observability_producer = self.observability_producer(project_root).await;
                 Box::pin(execute_work_application(
@@ -830,10 +844,7 @@ impl DaemonInvocationService {
                     );
                 };
                 let Some(registered) = work_runtime.clone() else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 let observability_producer = self.observability_producer(Some(project_root)).await;
                 Box::pin(execute_workflow_application(
@@ -857,10 +868,7 @@ impl DaemonInvocationService {
                 cancellation,
             } => {
                 let Some(registered) = work_runtime else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                    return missing_work_runtime_problem(publication, request_id);
                 };
                 Box::pin(execute_handoff_application(
                     registered,
@@ -1004,6 +1012,54 @@ impl DaemonInvocationService {
                 }
                 Err(response) => *response,
             },
+            DaemonInvocationPayload::SourceEdit {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::SourceEditReconcile {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit_reconcile(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
+            DaemonInvocationPayload::SourceEditRollback {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_source_edit_rollback(
+                    request_id,
+                    source_edit_owner,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
         };
         if is_observable_operation(operation) {
             hotpath::measure_block!(
@@ -1019,7 +1075,18 @@ impl DaemonInvocationService {
             );
         }
         response
+        }).await
     }
+}
+
+fn missing_work_runtime_problem(
+    publication: Option<crate::project_runtime::ProjectRuntimePublicationStateV1>,
+    request_id: String,
+) -> DaemonInvocationResponse {
+    if publication == Some(crate::project_runtime::ProjectRuntimePublicationStateV1::Ready) {
+        return super::work::concealed_application_problem(request_id);
+    }
+    super::work::missing_registered_owner_problem(publication, request_id)
 }
 
 #[cfg(test)]

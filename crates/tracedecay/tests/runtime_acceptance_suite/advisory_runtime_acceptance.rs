@@ -1,22 +1,46 @@
 //! Strict advisory runtime acceptance over authentic provider response captures.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay::tracedecay::TraceDecay;
+use tracedecay_application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
 #[cfg(feature = "test-transport")]
-use tracedecay_application::feedback::{
+use tracedecay_application::advisory::ci_runtime::{
+    CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
+    ProjectCiCodeAnchorStoreV1,
+};
+use tracedecay_application::advisory::github_runtime::{
+    GitHubProviderLifecycleV1, GitHubReviewBodyReadOutcomeV1, GitHubSourceAccessAuthorityV1,
+    ProjectGitHubAnchorAuthorityV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::advisory::github_runtime::{
+    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
+    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
+    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::advisory::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
+use tracedecay_application::advisory::{
+    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1,
+    GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
+    GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
+    GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_contracts::feedback::{
     CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
     GitHubReviewReadPort, GitHubReviewReadPortOutcomeV1,
 };
-use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
+use tracedecay_contracts::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
 #[cfg(feature = "test-transport")]
-use tracedecay_application::now_micros;
-use tracedecay_application::{
+use tracedecay_contracts::now_micros;
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
 };
@@ -32,40 +56,27 @@ use tracedecay_domain::{
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-use tracedecay_usecases::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::ci_runtime::{
-    CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
-    ProjectCiCodeAnchorStoreV1,
-};
-use tracedecay_usecases::advisory::github_runtime::{
-    GitHubProviderLifecycleV1, GitHubReviewBodyReadOutcomeV1, GitHubSourceAccessAuthorityV1,
-    ProjectGitHubAnchorAuthorityV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::github_runtime::{
-    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
-    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
-    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
-use tracedecay_usecases::advisory::{
-    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1,
-    GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
-    GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
-    GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
-};
 
 #[cfg(feature = "test-transport")]
-use tracedecay_application::feedback::{
+use tracedecay_application::ProjectSourceAccessSnapshot;
+#[cfg(feature = "test-transport")]
+use tracedecay_application::advisory::fixtures::AdvisoryProximityFixtureEvidenceV1;
+#[cfg(feature = "test-transport")]
+use tracedecay_application::advisory::proximity_runtime::{
+    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
+    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::feedback::concrete::open_feedback_runtime;
+#[cfg(feature = "test-transport")]
+use tracedecay_contracts::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleControl, FeedbackCycleExecutionRequest,
     FeedbackCycleService, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
     FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
     FeedbackRuntimeStateV1, ProximityEvaluationRequestV1, feedback_surface_operation,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay_application::{
+use tracedecay_contracts::{
     AdvisoryFindingContributorV1, AdvisoryFindingValidityWindowV1, DiagnosticProviderDescriptor,
     DiagnosticProviderIdentity, DiagnosticProviderIdentityParts, DiagnosticProviderResult,
     DiagnosticProviderState, PolicyDecisionRef, ProviderCoverage, ProviderDocumentIdentity,
@@ -94,17 +105,6 @@ use tracedecay_domain::{
     ComponentVersion, LocatorDigest, ObservationId, ObservationOrderingDomainV1,
     ObservationSourceRangeV1, SessionId, SymbolOccurrenceId,
 };
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::ProjectSourceAccessSnapshot;
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::fixtures::AdvisoryProximityFixtureEvidenceV1;
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::advisory::proximity_runtime::{
-    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
-    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
-};
-#[cfg(feature = "test-transport")]
-use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
 
 mod code_graph;
 use crate::common;
@@ -225,7 +225,7 @@ impl GitHubSourceAccessAuthorityV1 for PanicGitHubSourceAccess {
         &'a self,
         _context: &'a RequestContext,
         _request: &'a GitHubReviewReadRequestV1,
-    ) -> FeedbackPortFuture<'a, tracedecay_usecases::advisory::GitHubProviderLifecycleV1> {
+    ) -> FeedbackPortFuture<'a, tracedecay_application::advisory::GitHubProviderLifecycleV1> {
         Box::pin(async { panic!("denied GitHub request reached source access authority") })
     }
 }
@@ -288,7 +288,7 @@ fn github_source_access_uses_owner_bound_ureq_dtos() {
 #[tokio::test]
 async fn authentic_github_and_ci_responses_use_production_decoders() {
     let pull_request = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/pull_request.json"
     ));
     let request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::RestGetPullRequest,
@@ -331,7 +331,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
         ..request.clone()
     };
     let review = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review.json"
     ));
     assert!(
         decoder
@@ -360,7 +360,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     )
     .unwrap();
     let thread = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
     ));
     let thread_request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
@@ -401,16 +401,16 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(
         include_str!(
-            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_run.json"
+            "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/workflow_run.json"
         ),
         include_str!(
-            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_job.json"
+            "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/workflow_job.json"
         ),
         include_str!(
-            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_run.json"
+            "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/check_run.json"
         ),
         include_str!(
-            "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_annotations.json"
+            "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/check_annotations.json"
         ),
     )
     .expect("authentic CI responses decode");
@@ -421,7 +421,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 #[tokio::test]
 async fn corrupt_provider_identity_fails_production_decoder() {
     let mut pull_request = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/pull_request.json"
     ));
     pull_request["id"] = json!(0);
     let request = GitHubReviewReadRequestV1 {
@@ -616,14 +616,13 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
     };
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_comment.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review_comment.json"
     ))
     .unwrap();
     let body = fixture.pointer("/response/body").unwrap().as_str().unwrap();
     let provider_body_digest =
         ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(body)))).unwrap();
-    let retained_body =
-        tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(body).unwrap();
+    let retained_body = tracedecay_privacy::sanitize_provider_metadata_text(body).unwrap();
     let seed = GitHubReviewAnchorSeedV1 {
         comment_id: GitHubReviewCommentIdV1::new("3556767423").unwrap(),
         author_node_id: "BOT_kgDOC98s_g".to_owned(),
@@ -739,7 +738,7 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
 #[tokio::test]
 async fn unauthorized_ci_request_is_denied_before_provider_read() {
     let fixture =
-        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap();
     let scope = scope();
     let request = CiFailureLocalizationRequestV1 {
@@ -800,7 +799,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
     scope.head_commit_id = CommitId::new(head).unwrap();
     let code_graph = hermetic_ci_code_graph(&scope, &project);
     let mut provider_record =
-        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap()
             .ci_provider_record;
     provider_record.workflow_run.head_sha = scope.head_commit_id.as_str().to_owned();
@@ -896,7 +895,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
 #[tokio::test]
 async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
     let fixture =
-        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap();
     let scope = scope();
     let request = GitHubReviewReadRequestV1 {
@@ -948,7 +947,17 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         );
     }
     common::initialize_tracedecay_cli_project(environment.home(), &project);
-    let _daemon = common::spawn_tracedecay_daemon(environment.home());
+    let daemon_log = environment.home().join("advisory-daemon.log");
+    let _daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
+        // `.cargo/config.toml` sets TRACEDECAY_DISABLE_GLOBAL_DB=1 so cargo
+        // children never touch the operator ledger. This journey depends on
+        // the registered profile accounting owner for hint-outcome settlement.
+        command
+            .env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+            .stderr(Stdio::from(
+                std::fs::File::create(&daemon_log).expect("create isolated advisory daemon log"),
+            ));
+    });
     let transcript = project.join("cursor-proximity.jsonl");
     std::fs::write(
         &transcript,
@@ -1100,7 +1109,11 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
     );
 
     let advisory_args = json!({
-        "document_uri": format!("file://{}", project.join("src/lib.rs").display()),
+        // Serialized as a file URL rather than concatenated: a Windows native
+        // path pasted after `file://` is not a file URI at all.
+        "document_uri": url::Url::from_file_path(project.join("src/lib.rs"))
+            .expect("advisory document URI")
+            .to_string(),
     })
     .to_string();
     // Feedback/advisory registration is a deferred background upgrade keyed
@@ -1140,7 +1153,8 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         );
         assert!(
             std::time::Instant::now() < advisory_deadline,
-            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}",
+            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}\ndaemon log:\n{}",
+            std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
@@ -1195,8 +1209,8 @@ fn assert_four_pillar_terminal_cycle(advisory: &Value) {
         .unwrap_or_else(|| panic!("cycle published is not a boolean: {cycle}"));
     if termination == FeedbackCycleTerminationV1::IncompleteCoverage {
         assert!(
-            !published,
-            "an incomplete-coverage cycle is not publishable: {cycle}"
+            published,
+            "current incomplete-coverage evidence must remain inspectable: {cycle}"
         );
     }
 }
@@ -1219,7 +1233,7 @@ fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
         "cycle": {
             "termination": "incomplete_coverage",
             "provider_states": ["unavailable", "unavailable", "supported_completed_complete"],
-            "published": false,
+            "published": true,
         },
         "producer_contributions": contributions.clone(),
     })));
@@ -1246,14 +1260,6 @@ fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
             json!({"cycle": {
                 "termination": "clean",
                 "provider_states": ["supported_completed_complete"],
-                "published": true,
-            }}),
-        ),
-        (
-            "an incomplete-coverage cycle claiming publication",
-            json!({"cycle": {
-                "termination": "incomplete_coverage",
-                "provider_states": ["unavailable"],
                 "published": true,
             }}),
         ),
@@ -1326,7 +1332,7 @@ fn find_advisory_cycle(value: &Value) -> Option<Value> {
 // The remote halves cannot come from the network in a hermetic test, and the
 // plan rejects synthetic lookalike providers as acceptance evidence. So both
 // remote pillars are replayed from the suite's checked-in recorded provider
-// captures (`crates/tracedecay-usecases/src/advisory/fixtures/
+// captures (`crates/tracedecay-application/src/advisory/fixtures/
 // provider_branch_review/`, the same captures the decoder tests above consume)
 // through the shipped decoders, sanitizer, and canonical anchor authorities.
 // Only immutable *identity* (head commit, reviewed path and lines) is
@@ -1433,33 +1439,33 @@ fn four_pillar_digest(fill: char) -> ManifestDigest {
 fn four_pillar_context(
     resolved: &ResolvedScope,
     requester: &ActorId,
-    operation: &tracedecay_application::ApplicationOperation,
+    operation: &tracedecay_contracts::ApplicationOperation,
     now: UtcMicros,
 ) -> RequestContext {
     let capabilities = BTreeSet::from([
         operation.capability_id().clone(),
         CapabilityId::new(
-            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1.to_owned(),
+            tracedecay_contracts::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1.to_owned(),
         )
         .expect("ci capability"),
         CapabilityId::new(
-            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1.to_owned(),
+            tracedecay_contracts::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1.to_owned(),
         )
         .expect("github capability"),
-        CapabilityId::new(tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1.to_owned())
+        CapabilityId::new(tracedecay_contracts::feedback::PROXIMITY_CAPABILITY_ID_V1.to_owned())
             .expect("proximity capability"),
     ]);
     let use_cases = BTreeSet::from([
         operation.use_case_id().clone(),
         UseCaseId::new(
-            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_USE_CASE_ID_V1.to_owned(),
+            tracedecay_contracts::feedback::CI_FAILURE_LOCALIZE_USE_CASE_ID_V1.to_owned(),
         )
         .expect("ci use case"),
         UseCaseId::new(
-            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_USE_CASE_ID_V1.to_owned(),
+            tracedecay_contracts::feedback::GITHUB_REVIEW_INGEST_USE_CASE_ID_V1.to_owned(),
         )
         .expect("github use case"),
-        UseCaseId::new(tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1.to_owned())
+        UseCaseId::new(tracedecay_contracts::feedback::PROXIMITY_USE_CASE_ID_V1.to_owned())
             .expect("proximity use case"),
     ]);
     let grant = CapabilityGrantSnapshot::new(
@@ -1589,7 +1595,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     // cross-response identity, so a drifted or hand-edited fixture fails here
     // rather than silently weakening the assertions.
     let fixture =
-        tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        tracedecay_application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .expect("checked-in composite provider capture");
 
     // ---- Pillar 2: a localized CI failure, through the production store ----
@@ -1682,7 +1688,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     // ---- Pillar 3: an existing GitHub review finding, through the production
     // decoder, sanitizer, and canonical anchor authority ----
     let mut thread = captured_response(include_str!(
-        "../../../../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
+        "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
     ));
     let pull_request = thread
         .pointer_mut("/data/repository/pullRequest")
@@ -2068,7 +2074,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
                 input,
                 providers: vec![provider],
                 maximum_returned_findings: 32,
-                usage: tracedecay_application::feedback::FeedbackBudgetUsage {
+                usage: tracedecay_contracts::feedback::FeedbackBudgetUsage {
                     completed_at: UtcMicros(now.0.saturating_add(1_000)),
                     tokens_consumed: 1,
                     cost_microunits: 1,

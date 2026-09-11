@@ -7,8 +7,6 @@ pub(crate) mod binding;
 pub(crate) mod catalog_discovery;
 pub mod dispatch;
 pub(crate) mod handlers;
-#[cfg(test)]
-mod plugin_conformance_tests;
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -25,7 +23,7 @@ pub use catalog_discovery::{
     get_catalog_filtered_tool_definitions_with_warming_budget,
 };
 pub(crate) use handlers::retained_catalog::{
-    execute_profile_retained_mcp_tool, retained_mcp_operation,
+    execute_profile_retained_mcp_tool, session_refresh_profile_scope_requested,
 };
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,

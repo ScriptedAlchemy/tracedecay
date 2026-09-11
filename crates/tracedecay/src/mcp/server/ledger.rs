@@ -102,7 +102,7 @@ impl McpServer {
                     "cannot read desired upload setting: {error}"
                 ))
             })?;
-        upload_enabled_from_desired_configuration(&desired.snapshot)
+        upload_enabled_from_desired_configuration(desired.snapshot())
     }
 
     /// Estimates the raw-file token cost ("before") for the given file
@@ -179,7 +179,7 @@ impl McpServer {
             // The monitor entry opens, locks, and mmaps a file; keep that
             // off the async workers.
             let monitor_write = tokio::task::spawn_blocking(move || {
-                tracedecay_runtime_core::monitor_ring::write_entry(
+                tracedecay_session_memory::monitor_ring::write_entry(
                     &monitor_project_root,
                     "tracedecay",
                     &tool_name,
@@ -446,9 +446,9 @@ impl McpServer {
                 })
                 .map(str::to_string)
         };
-        let Some(session_id) = bounded_identifier(route.session_id.as_deref()).and_then(|value| {
-            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&value).ok()
-        }) else {
+        let Some(session_id) = bounded_identifier(route.session_id.as_deref())
+            .and_then(|value| tracedecay_privacy::protect_sensitive_structural_id(&value).ok())
+        else {
             return;
         };
         let route_cwd = route.cwd.as_deref().or(event.cwd.as_deref());
@@ -458,12 +458,11 @@ impl McpServer {
         let Ok(selected_server) = selected.retained_server() else {
             return;
         };
-        let Some(db) = self.session_db.clone() else {
+        let Some(db) = self.project_session_db.clone() else {
             return;
         };
-        let thread_id = bounded_identifier(route.thread_id.as_deref()).and_then(|value| {
-            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(&value).ok()
-        });
+        let thread_id = bounded_identifier(route.thread_id.as_deref())
+            .and_then(|value| tracedecay_privacy::protect_sensitive_structural_id(&value).ok());
         let ts = crate::tracedecay::current_timestamp();
         // Session-only pre-debounce: the full key needs branch/worktree, which
         // cost gix/git discovery. A burst for one session almost always shares
@@ -565,7 +564,9 @@ impl McpServer {
 fn persist_worldwide_delta(delta: u64, upload_enabled: bool) -> bool {
     let mut config = tracedecay_session_memory::user_config::UserConfig::load();
     config.pending_upload = config.pending_upload.saturating_add(delta);
-    if upload_enabled && crate::cloud::flush_pending(config.pending_upload).is_some() {
+    if upload_enabled
+        && tracedecay_dashboard_api::cloud::flush_pending(config.pending_upload).is_some()
+    {
         config.pending_upload = 0;
         config.last_upload_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

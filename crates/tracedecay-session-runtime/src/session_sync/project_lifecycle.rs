@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use tracedecay_application::session_sync::{
+use tracedecay_contracts::session_sync::{
     SessionSyncCommandV1, SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1,
     SessionSyncRequestV1, SessionSyncScopeV1, SessionTranscriptImportV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId, now_micros,
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
@@ -26,9 +26,7 @@ pub struct SessionSyncProjectContext {
     pub(super) brain_id: BrainId,
     pub(super) profile_id: UserProfileId,
     pub(super) project_id: ProjectId,
-    pub(super) profile_root: PathBuf,
     pub(super) project_root: PathBuf,
-    pub(super) transcript_source_home: Option<PathBuf>,
     pub(super) project_sessions: RwLock<Option<RegisteredGlobalDbLeaseV1>>,
     project_sessions_locator: VerifiedStoreLocatorV1,
     pub(super) user_sessions: RegisteredGlobalDbLeaseV1,
@@ -300,9 +298,7 @@ impl DaemonSessionSyncService {
             brain_id: config.brain_id,
             profile_id: config.profile_id,
             project_id: config.project_id,
-            profile_root: config.profile_root,
             project_root: config.project_root,
-            transcript_source_home: config.transcript_source_home,
             project_sessions: RwLock::new(None),
             project_sessions_locator,
             user_sessions: config.user_sessions,

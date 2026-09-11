@@ -1,6 +1,6 @@
 //! Daemon façade over canonical multi-root CAS and query authorities.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedMultiRootQueryService, MultiRootQueryError, MultiRootQueryPageV1, MultiRootQueryPort,
     MultiRootQueryRequestV1,
 };

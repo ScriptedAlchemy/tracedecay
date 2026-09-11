@@ -54,9 +54,9 @@ pub mod git_index_transactions;
 pub mod git_transactions;
 #[cfg(unix)]
 pub mod git_watch;
-pub(crate) mod logging;
 pub mod mcp_admission;
 pub(crate) mod ports;
+pub mod project_reads;
 pub mod semantic_activation_reconciler;
 pub(crate) mod semantic_code;
 pub mod semantic_evaluation;
@@ -76,9 +76,8 @@ pub use code_graph_seat::{
 pub use code_index_scheduler::CodeIndexSchedulerRegistryV1;
 pub use code_index_scheduler::identity::resolved_scope_for_project;
 pub use ports::{
-    AdmissionParkLeaseV1, ApplicationCatalogProviderV1, ApplicationCatalogSnapshotErrorV1,
-    CONNECTION_ADMISSION, GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1,
-    PreparedQueryActivationViewV1, park_admission,
+    AdmissionParkLeaseV1, ApplicationCatalogSnapshotErrorV1, CONNECTION_ADMISSION,
+    GitWatchMaintenanceWakeV1, GitWatchSyncConfigV1, PreparedQueryActivationViewV1, park_admission,
 };
 pub use semantic_evaluation_shutdown::{
     SemanticEvaluationShutdownJoinV1, SemanticEvaluationShutdownReceiptV1,

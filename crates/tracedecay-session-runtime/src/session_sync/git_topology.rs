@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_application::{AuthorizedRoot, AuthorizedScopeSet};
 use tracedecay_code_index::git_projection::{
     GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitTopologyProjectionError, GitTopologyProjectionStore,
     build_git_topology_manifest_checked, git_topology_idempotency_key, git_topology_namespace,
     git_topology_projection_identity,
 };
+use tracedecay_contracts::{AuthorizedRoot, AuthorizedScopeSet};
 use tracedecay_domain::{GitHeadStateV1, RefId, RepositoryId, WorktreeId};
 use tracedecay_global_db::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{GraphCancellation, GraphDbError, GraphProjectorRevision};
@@ -16,8 +16,10 @@ use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 use tracedecay_store::FactReadControl;
 
+use tracedecay_application::git_intelligence::{
+    GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence,
+};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_usecases::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
 
 use super::{DaemonSessionSyncService, SessionSyncProjectContext, work::SessionSyncInterruption};
 
@@ -49,7 +51,7 @@ impl SessionSyncProjectContext {
     pub(super) async fn publish_git_topology(
         &self,
         service: &DaemonSessionSyncService,
-        request: &tracedecay_application::session_sync::SessionSyncRequestV1,
+        request: &tracedecay_contracts::session_sync::SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> GitTopologySyncOutcome {
         let scope = match tracedecay_code_index_runtime::resolved_scope_for_project(

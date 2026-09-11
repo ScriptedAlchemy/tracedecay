@@ -290,7 +290,7 @@ mod tests {
 
     use tracedecay_code_index::graph_projection::CodeGraphSymbolBindingV1;
     use tracedecay_code_index::lineage::LineageSymbolRecordV1;
-    use tracedecay_domain::SourceSpan;
+    use tracedecay_domain::{ComplexityAnalysisV1, SourceSpan};
 
     use super::*;
 
@@ -345,9 +345,13 @@ mod tests {
                 branches: 0,
                 loops: 0,
                 max_nesting: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
                 line_span,
                 start_line,
                 signature: signature.map(str::to_owned),
+                docstring: None,
+                is_async: false,
+                derives: Vec::new(),
                 skip_test_coverage: false,
                 file_identity: digest('e'),
                 content_digest: digest('d'),

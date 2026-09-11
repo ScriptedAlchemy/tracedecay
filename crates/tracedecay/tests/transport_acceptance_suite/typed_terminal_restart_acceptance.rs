@@ -12,12 +12,12 @@
 //!   (`src/mcp/tool_call_deadline.rs`) and is what daemon admission and
 //!   settlement measure. A real `fact_store add` runs, commits durably, and is
 //!   parked at the commit boundary by the `test-transport` fact-commit barrier
-//!   (`crates/tracedecay-runtime-core/src/store/memory/commit_barrier.rs`)
+//!   (`crates/tracedecay-session-memory/src/fact_store/commit_barrier.rs`)
 //!   until that deadline has elapsed. The retained memory owner then observes
 //!   exactly what production observes when a commit outlives its budget —
 //!   commit started, deadline elapsed — and reports `PartialEffect` with a real
 //!   committed receipt and a `Reconcile`-only legal action
-//!   (`crates/tracedecay-application/src/retained_receipts.rs::complete_at`,
+//!   (`crates/tracedecay-contracts/src/retained_receipts.rs::complete_at`,
 //!   `src/daemon/retained_owner/memory.rs::execute_add_on_db`).
 //!
 //!   The barrier exists because that window is otherwise one fsync wide: a

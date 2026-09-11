@@ -1,17 +1,24 @@
 use rusqlite::Connection;
 use serde_json::json;
 use tracedecay_domain::{
-    ComponentVersion, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
-    ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros,
+    AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
+    ComponentVersion, CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass, FactOwnerV1,
+    GenerationBoundRepositoryProvenanceV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, ProjectId,
+    ProjectionGenerationId, ProviderId, ProviderUsageContractDimensionV1, RefId,
+    RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1,
+    RetentionClass, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1,
-    ObservationCoverageReason, ObservationCursorAdvance, ObservationReadOperationV1,
-    ObservationReadResultV1, ObservationWrite, SESSION_MESSAGE_PROJECTOR_VERSION,
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
+    CursorAdvanceLedgerReasonV1, CursorAdvanceLedgerReceiptIdV1, ObservationCoverageReason,
+    ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
+    ObservationWrite, RetrievalAnchorDispositionRecordV1, SESSION_MESSAGE_PROJECTOR_VERSION,
     StorageRuntimeErrorV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
@@ -140,6 +147,102 @@ fn semantic_anchor_replay_ignores_local_ingest_clock() {
             .unwrap(),
         1
     );
+}
+
+fn repository_write(
+    clock: i64,
+    branch: &str,
+    evidence_class: EvidenceClass,
+) -> AnchoredObservationWrite {
+    let write = anchored_at(
+        observation_write("repository replay", "receipt.repository-replay"),
+        UtcMicros(clock),
+    );
+    let capture = RepositoryProvenanceV1::new(
+        RepositoryId::new("repository.fixture").unwrap(),
+        Some(ProjectId::new("project.fixture").unwrap()),
+        None,
+        PrivacyDomainBoundLocatorDigest::new(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap(),
+        RepositoryEvidenceV1::new(
+            EvidenceAvailabilityV1::Known(RefId::new(branch).unwrap()),
+            EvidenceAvailabilityV1::Unborn,
+            EvidenceAvailabilityV1::Unavailable,
+            EvidenceAvailabilityV1::Unknown,
+            RepositoryRemoteIdentityV1::Unknown,
+            EvidenceAvailabilityV1::Unknown,
+        )
+        .unwrap(),
+        UtcMicros(clock),
+    )
+    .unwrap();
+    let binding = GenerationBoundRepositoryProvenanceV1::new(
+        write.projection_generation().clone(),
+        capture,
+        Some(write.observation().observation_id().clone()),
+    )
+    .unwrap();
+    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::RepositoryCapture {
+            repository_id: binding.capture().repository_id().clone(),
+            capture_id: binding.capture_id().clone(),
+            receipt: write.observation().receipt().receipt().clone(),
+        },
+        owner: write.observation().scope().clone(),
+        aliases: vec![],
+        occurred_at: None,
+        ingested_at: UtcMicros(clock),
+        evidence_class,
+        source_generation: AnchorSourceGenerationV2::RepositoryCapture(
+            binding.capture_id().clone(),
+        ),
+        projection_generation: write.projection_generation().clone(),
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![write.observation().observation_id().clone()],
+        source_anchors: vec![],
+        authorization: write.retrieval_anchor().authorization().clone(),
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: write.observation().retention_class().clone(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    })
+    .unwrap();
+    write
+        .with_repository_provenance_attachment(EvidenceAvailabilityV1::Known(binding), Some(anchor))
+        .unwrap()
+}
+
+#[test]
+fn repository_capture_replay_preserves_first_receipt_and_refuses_changed_evidence() {
+    let mut connection = connection();
+    let first = repository_write(1, "refs/heads/main", EvidenceClass::Observed);
+    let replay = repository_write(2, "refs/heads/main", EvidenceClass::Observed);
+    assert_eq!(first.observation(), replay.observation());
+    assert_ne!(
+        first.repository_provenance_attachment(),
+        replay.repository_provenance_attachment()
+    );
+    execute(&mut connection, &first).unwrap();
+    let request = ObservationReadOperationV1::Observation {
+        observation_id: first.observation().observation_id().clone(),
+    };
+    let retained = read(&mut connection, &request).unwrap();
+    execute(&mut connection, &replay).expect("same evidence with a new capture clock must replay");
+    assert_eq!(read(&mut connection, &request).unwrap(), retained);
+    let changed = repository_write(3, "refs/heads/other", EvidenceClass::Observed);
+    assert!(
+        execute(&mut connection, &changed).is_err(),
+        "different repository evidence must remain a conflict"
+    );
+    assert_eq!(read(&mut connection, &request).unwrap(), retained);
+    let changed_authority = repository_write(4, "refs/heads/main", EvidenceClass::Inferred);
+    assert!(
+        execute(&mut connection, &changed_authority).is_err(),
+        "same repository evidence with changed anchor authority must remain a conflict"
+    );
+    assert_eq!(read(&mut connection, &request).unwrap(), retained);
 }
 
 fn connection() -> Connection {
@@ -923,5 +1026,216 @@ fn point_and_replay_reads_reject_incomplete_observation_authority() {
                 .to_string()
                 .contains("observation retrieval anchor is missing")
         );
+    }
+}
+
+fn cline_ui_write(stream_key: Option<&str>, ordinal: u64, tokens: u64) -> AnchoredObservationWrite {
+    let provider = ProviderId::new("cline").unwrap();
+    let session = SessionId::new("native-task").unwrap();
+    let source = match stream_key {
+        Some(key) => ObservationSourceIdentityV1::for_provider_source(
+            provider.clone(),
+            session.clone(),
+            SessionId::new(key).unwrap(),
+        )
+        .unwrap(),
+        None => {
+            ObservationSourceIdentityV1::for_provider(provider.clone(), session.clone()).unwrap()
+        }
+    };
+    let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let generation =
+        ObservationSourceGenerationV1::new(if stream_key.is_some() { 2 } else { 1 }).unwrap();
+    let native_id = ObservationId::new("native-ui-record").unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider,
+        "usage",
+        native_id.clone(),
+        CanonicalObservationRelationsV1::new(session),
+        vec![CanonicalObservationFactV1::UncorrelatedUsage {
+            input_tokens: Some(tokens),
+            output_tokens: Some(350),
+            cache_read_tokens: Some(8000),
+            cache_write_tokens: Some(500),
+            reasoning_tokens: None,
+            total_tokens: None,
+            native_kind: "usage".into(),
+            native_field: "usage".into(),
+            missing_dimensions: [
+                ProviderUsageContractDimensionV1::Model,
+                ProviderUsageContractDimensionV1::Scope,
+                ProviderUsageContractDimensionV1::CounterSemantics,
+                ProviderUsageContractDimensionV1::Correlation,
+            ]
+            .into_iter()
+            .collect(),
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range)
+            .with_native_sequence(ordinal)
+            .with_native_timestamp(1_800_000_005),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(format!(
+                "receipt.cline.{}.{}",
+                stream_key.unwrap_or("combined"),
+                tokens
+            ))
+            .unwrap(),
+            ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+    )
+    .unwrap();
+    let observation = tracedecay_domain::DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            source.clone(),
+            scope.clone(),
+            generation,
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            native_id,
+        )
+        .unwrap(),
+        receipt,
+        RetentionClass::new("transcript.cline.v1").unwrap(),
+        payload,
+    )
+    .unwrap();
+    let cursor = ObservationSourceCursorV1::for_ordering(
+        source,
+        scope,
+        generation,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        ordinal + 1,
+    )
+    .unwrap();
+    anchored(ObservationWrite::new(observation, None, cursor).unwrap())
+}
+
+#[test]
+fn cline_stream_alias_waits_for_projection_and_preserves_historical_receipt() {
+    let mut connection = connection();
+    connection
+        .execute_batch(
+            "CREATE TABLE retrieval_anchor_dispositions (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, disposition_id TEXT NOT NULL UNIQUE,
+            anchor_id TEXT NOT NULL, owner_json TEXT NOT NULL, state TEXT NOT NULL,
+            superseded_by TEXT, reason_class TEXT NOT NULL, effective_at INTEGER NOT NULL,
+            record_json TEXT NOT NULL);
+         CREATE TABLE retrieval_anchor_reverse_lineage (
+            source_anchor_id TEXT, owner_json TEXT, derivative_kind TEXT, derivative_id TEXT);
+         CREATE TABLE retrieval_anchor_derivative_tombstones (
+            source_anchor_id TEXT, owner_json TEXT, derivative_kind TEXT, derivative_id TEXT,
+            disposition_id TEXT, effective_at INTEGER);",
+        )
+        .unwrap();
+    let old = cline_ui_write(None, 2, 1200);
+    let new = cline_ui_write(Some("ui_messages"), 0, 1200);
+    execute(&mut connection, &old).unwrap();
+    let old_anchor_json: String = connection
+        .query_row(
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
+            [old.retrieval_anchor_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    execute(&mut connection, &new)
+        .expect("verified successor capture keeps current alias readable");
+    let alias: String = connection
+        .query_row(
+            "SELECT anchor_id FROM retrieval_anchor_aliases",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(alias, old.retrieval_anchor_id().as_str());
+    execute(&mut connection, &old).unwrap();
+    execute(&mut connection, &new).unwrap();
+
+    // Exercise the writer's historical verification boundary independently of
+    // projector scheduling: alias promotion without its disposition is invalid.
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE retrieval_anchor_aliases SET anchor_id = ?1 WHERE anchor_id = ?2",
+                [
+                    new.retrieval_anchor_id().as_str(),
+                    old.retrieval_anchor_id().as_str()
+                ],
+            )
+            .unwrap(),
+        1
+    );
+    assert!(execute(&mut connection, &old).is_err());
+    let disposition = RetrievalAnchorDispositionRecordV1::new(
+        "cline-source-transition",
+        old.retrieval_anchor_id().clone(),
+        FactOwnerV1::from(old.observation().scope().clone()),
+        AnchorDispositionStateV1::Superseded,
+        Some(new.retrieval_anchor_id().clone()),
+        AnchorDispositionReasonClassV1::Correction,
+        UtcMicros(2),
+    )
+    .unwrap();
+    let mut transaction = connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    super::super::retrieval_anchor::RetrievalAnchorExecutor
+        .execute_disposition_write(&savepoint, &disposition)
+        .unwrap();
+    savepoint.commit().unwrap();
+    transaction.commit().unwrap();
+    execute(&mut connection, &old).expect("exact historical receipt remains verifiable");
+    execute(&mut connection, &new).unwrap();
+    let retained: String = connection
+        .query_row(
+            "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
+            [old.retrieval_anchor_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, old_anchor_json);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM observations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn cline_stream_alias_refuses_changed_usage_or_wrong_native_stream() {
+    for (stream, tokens) in [
+        ("ui_messages", 1201),
+        ("api_history", 1200),
+        ("foreign", 1200),
+    ] {
+        let mut connection = connection();
+        let old = cline_ui_write(None, 2, 1200);
+        execute(&mut connection, &old).unwrap();
+        let candidate = cline_ui_write(Some(stream), 0, tokens);
+        assert!(execute(&mut connection, &candidate).is_err());
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM observations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let alias: String = connection
+            .query_row(
+                "SELECT anchor_id FROM retrieval_anchor_aliases",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alias, old.retrieval_anchor_id().as_str());
     }
 }

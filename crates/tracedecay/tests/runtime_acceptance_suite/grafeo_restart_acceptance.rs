@@ -5,15 +5,15 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay::application_surface::ApplicationSurfaceRequest;
-use tracedecay::daemon::{DaemonHandshake, call_default_tool};
+use tracedecay::daemon::call_default_tool;
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
-use tracedecay_application::retained_surfaces::RetainedSurfaceResultV1;
-use tracedecay_application::retrieval::PrimitiveRequest;
-use tracedecay_application::{ApplicationEnvelope, RequestId};
-use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
+use tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1;
+use tracedecay_contracts::retrieval::PrimitiveRequest;
+use tracedecay_contracts::{ApplicationEnvelope, RequestId};
+use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
+use tracedecay_daemon_protocol::{DaemonHandshake, DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-use tracedecay_usecases::primitives::StorageStatusPrimitiveRequest;
 
 fn initialize_project(home: &Path, project: &Path) {
     copy_dir(
@@ -442,6 +442,7 @@ async fn get_fact(
 
 async fn get_selected_project_fact(
     handshake: &DaemonHandshake,
+    admitted_project_id: &str,
     project_id: &str,
     fact_id: &str,
     label: &str,
@@ -458,6 +459,10 @@ async fn get_selected_project_fact(
         }),
     )
     .await;
+    // A selector opens the target's read-only memory authority from the
+    // caller's admitted runtime, and the evidence envelope names the project
+    // whose store actually answered rather than the admitting project (#899).
+    assert_ne!(admitted_project_id, project_id);
     assert_eq!(envelope["scope"]["project_id"], project_id);
     let fact = available_fact(&application_payload(&envelope, "evidence")["fact"]);
     assert_eq!(fact["fact_id"], fact_id);
@@ -489,7 +494,7 @@ async fn assert_selected_project_write_denied(
     assert_eq!(result["isError"], true, "selected-project write succeeded");
     let problem = tracedecay::daemon::tool_json_payload(&result, tool)
         .expect("selected-project write denial problem");
-    serde_json::from_value::<tracedecay_application::ApplicationProblemEnvelope>(problem.clone())
+    serde_json::from_value::<tracedecay_contracts::ApplicationProblemEnvelope>(problem.clone())
         .unwrap_or_else(|error| panic!("invalid selected-project denial envelope: {error}"));
     assert_eq!(problem["problem"]["kind"], "not_found_or_not_authorized");
 }
@@ -778,6 +783,7 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     let initial_b = wait_for_related_fact(&first_b, &added_b, "project", "initial B").await;
     let selected_b = get_selected_project_fact(
         &first_a,
+        &project_a_id,
         &project_b_id,
         &added_b.fact_id,
         "selected B through A",
@@ -882,6 +888,7 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
     assert_eq!(
         get_selected_project_fact(
             &restarted_a,
+            &project_a_id,
             &project_b_id,
             &added_b.fact_id,
             "restarted selected B through A",

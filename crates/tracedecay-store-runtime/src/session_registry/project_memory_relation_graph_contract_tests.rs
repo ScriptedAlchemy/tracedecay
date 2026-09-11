@@ -23,7 +23,7 @@ use tracedecay_store::{
 
 use super::DaemonSessionRuntimeRegistryV1;
 use tracedecay_daemon_identity::profile_identity;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 
 const CORE_RELATIONS_BEFORE_CHORD: usize = 9;
 const CORE_RELATIONS_AFTER_CHORD: usize = 10;
@@ -586,7 +586,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
             CORE_RELATIONS_AFTER_CHORD,
         )
         .await,
-        Err(MemoryApplicationError::Store(
+        Err(MemoryApplicationError::Cancelled(
             FactStoreError::GraphCancelled
         ))
     ));
@@ -599,7 +599,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
             3,
         )
         .await,
-        Err(MemoryApplicationError::Store(
+        Err(MemoryApplicationError::Cancelled(
             FactStoreError::GraphCancelled
         ))
     ));

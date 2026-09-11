@@ -1,7 +1,7 @@
 use super::evidence::{
     AutomationEvidenceFilters, AutomationTemporalEvidence, AutomationTemporalEvidenceItem,
     SESSION_REPLAY_HEAD_TURNS, SESSION_REPLAY_SUMMARY_NODES, SESSION_REPLAY_TAIL_TURNS,
-    find_i64_field_in_json, find_string_field_in_json,
+    find_i64_field_in_json,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1;
-use tracedecay_application::{
+use tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1;
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     ProfileIdentityReadPort, RequestContext, RequestId,
 };
@@ -26,28 +26,27 @@ use tracedecay_domain::{
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::application::context::{
+use crate::ports::session_evidence::LcmScope;
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
-use crate::application::session::{
+use tracedecay_session_memory::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionFreshnessPolicy, SessionRequestBinding, SessionRetrievalConfiguration,
     SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionPort,
     SessionTemporalQuery,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::ports::session_evidence::LcmScope;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use crate::tracedecay::TraceDecay;
-use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ports::ExecutionLimits;
-use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate};
 
 pub(super) const AUTOMATION_SESSION_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const AUTOMATION_SESSION_MAX_RESULTS: u64 = 64;
@@ -455,14 +454,13 @@ pub(super) fn accept_automation_temporal_outcome(
                             "session_evidence_unavailable",
                         );
                     }
-                    let provider =
-                        find_string_field_in_json(&snippet, "provider").unwrap_or_default();
-                    let session_id = ranked.session.unwrap_or_default();
-                    if provider.is_empty() || session_id.is_empty() {
+                    let Some((provider, session_id)) = ranked_evidence_owner(&ranked) else {
                         return AutomationTemporalRetrieval::Rejected(
                             "session_evidence_unavailable",
                         );
-                    }
+                    };
+                    let provider = provider.to_string();
+                    let session_id = session_id.to_string();
                     evidence_items.push(AutomationTemporalEvidenceItem {
                         anchor_id: ranked.anchor_id.to_string(),
                         stable_id: ranked.stable_id,
@@ -556,6 +554,19 @@ pub(super) fn accept_automation_temporal_outcome(
     }
 }
 
+pub(super) fn ranked_evidence_owner(ranked: &RankedCandidate) -> Option<(&str, &str)> {
+    Some((
+        ranked
+            .source
+            .as_deref()
+            .filter(|provider| !provider.is_empty())?,
+        ranked
+            .session
+            .as_deref()
+            .filter(|session_id| !session_id.is_empty())?,
+    ))
+}
+
 pub(super) const fn automation_structural_refusal_reason(
     refusal: SessionRetrievalStructuralRefusalV1,
 ) -> &'static str {
@@ -575,9 +586,9 @@ pub(super) const fn automation_structural_refusal_reason(
 }
 
 const fn automation_budget_refusal_reason(
-    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
 ) -> &'static str {
-    use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
+    use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 
     match stage {
         SessionRetrievalBudgetStageV1::RequestResultLimit => {
@@ -756,13 +767,9 @@ pub async fn registered_project_automation_retrieval(
     Ok(registered_automation_retrieval_for_identity(database, identity).await)
 }
 
-pub(super) async fn production_project_automation_retrieval(
-    _cg: &TraceDecay,
+pub(super) fn unavailable_automation_retrieval(
+    reason: &'static str,
 ) -> Box<dyn AutomationSessionRetrieval> {
-    unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
-}
-
-fn unavailable_automation_retrieval(reason: &'static str) -> Box<dyn AutomationSessionRetrieval> {
     // The static fallback session id is a fixed, valid identifier.
     #[allow(clippy::expect_used)]
     Box::new(UnavailableAutomationSessionRetrieval {

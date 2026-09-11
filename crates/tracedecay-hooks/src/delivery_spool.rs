@@ -6,6 +6,9 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use crate::lock_admission::{LockAdmissionError, lock_until};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -100,6 +103,8 @@ pub enum HookDeliverySpoolError {
     Full,
     #[error("hook delivery receipt spool is busy")]
     Busy,
+    #[error("hook delivery writer admission deadline expired")]
+    AdmissionTimedOut,
     #[error("hook delivery receipt spool path is unsafe")]
     UnsafePath,
     #[error("hook delivery receipt spool is corrupt")]
@@ -116,19 +121,26 @@ pub struct HookDeliveryReceiptSpoolV1 {
 }
 
 impl HookDeliveryReceiptSpoolV1 {
-    /// Opens the spool, waiting out a sibling hook that holds the writer lock.
-    /// See [`crate::contention`] for why a contended lock must not fail the
-    /// callback.
+    /// Opens the spool without waiting for a held writer lock. Native callbacks
+    /// use `open_within` with one synchronous budget for the lock wait.
     #[hotpath::measure(label = "hooks.delivery.open")]
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, HookDeliverySpoolError> {
-        let root = root.into();
-        crate::contention::wait_out_contention(
-            || Self::try_open(root.clone()),
-            |error| matches!(error, HookDeliverySpoolError::Busy),
-        )
+        Self::open_bounded(root.into(), None)
     }
 
-    fn try_open(root: PathBuf) -> Result<Self, HookDeliverySpoolError> {
+    /// `wait_budget` bounds only the lock wait, measured from the lock attempt
+    /// after the spool root and lock file exist (see `HookSpoolV1::open_within`).
+    pub fn open_within(
+        root: impl Into<PathBuf>,
+        wait_budget: Duration,
+    ) -> Result<Self, HookDeliverySpoolError> {
+        Self::open_bounded(root.into(), Some(wait_budget))
+    }
+
+    fn open_bounded(
+        root: PathBuf,
+        wait_budget: Option<Duration>,
+    ) -> Result<Self, HookDeliverySpoolError> {
         ensure_root(&root)?;
         let lock_path = root.join(LOCK_FILE);
         validate_regular_or_missing(&lock_path).map_err(|_| HookDeliverySpoolError::UnsafePath)?;
@@ -147,13 +159,25 @@ impl HookDeliveryReceiptSpoolV1 {
         {
             return Err(HookDeliverySpoolError::UnsafePath);
         }
-        lock.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => {
-                hotpath::gauge!("hooks.delivery.lock.contended").inc(1);
-                HookDeliverySpoolError::Busy
+        match wait_budget {
+            Some(wait_budget) => {
+                lock_until(&lock, Instant::now() + wait_budget).map_err(|error| match error {
+                    LockAdmissionError::TimedOut => HookDeliverySpoolError::AdmissionTimedOut,
+                    LockAdmissionError::Io => HookDeliverySpoolError::Io,
+                })?;
             }
-            std::fs::TryLockError::Error(_) => HookDeliverySpoolError::Io,
-        })?;
+            None => {
+                hotpath::measure_block!("hooks.delivery.lock.try_lock", lock.try_lock()).map_err(
+                    |error| match error {
+                        std::fs::TryLockError::WouldBlock => {
+                            hotpath::gauge!("hooks.delivery.lock.contended").inc(1);
+                            HookDeliverySpoolError::Busy
+                        }
+                        std::fs::TryLockError::Error(_) => HookDeliverySpoolError::Io,
+                    },
+                )?;
+            }
+        }
         let spool = Self { root, _lock: lock };
         spool.receipt_paths()?;
         Ok(spool)
@@ -193,9 +217,9 @@ impl HookDeliveryReceiptSpoolV1 {
     }
 
     /// Appends a source receipt or returns the exact durable receipt already
-    /// retained for its stable identity.  Callers must forward the returned
-    /// settlement to the daemon so a retry replays the original timestamps
-    /// rather than reconstructing a conflicting delivery attempt.
+    /// retained for its stable identity. The daemon drains the retained
+    /// settlement with its original timestamps, so retries never reconstruct
+    /// a conflicting delivery attempt.
     #[hotpath::measure(label = "hooks.delivery.append_or_replay")]
     pub fn append_or_replay(
         &self,
@@ -436,6 +460,37 @@ mod tests {
                 let _ = fs::remove_file(&self.0);
             }
         }
+    }
+
+    #[test]
+    fn bounded_delivery_admission_preserves_receipts_and_does_not_renew_deadlines() {
+        let root = TestDir::new();
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0).unwrap();
+        let original = receipt();
+        owner.append(&original).unwrap();
+        let paths = owner.receipt_paths().unwrap();
+        let before = fs::read(&paths[0]).unwrap();
+        assert_eq!(
+            HookDeliveryReceiptSpoolV1::open(&root.0).unwrap_err(),
+            HookDeliverySpoolError::Busy
+        );
+        assert_eq!(
+            HookDeliveryReceiptSpoolV1::open_within(&root.0, Duration::from_millis(20))
+                .unwrap_err(),
+            HookDeliverySpoolError::AdmissionTimedOut
+        );
+        assert_eq!(fs::read(&paths[0]).unwrap(), before);
+        drop(owner);
+        // An exhausted budget never admits, even when the lock is free.
+        assert_eq!(
+            HookDeliveryReceiptSpoolV1::open_within(&root.0, Duration::ZERO).unwrap_err(),
+            HookDeliverySpoolError::AdmissionTimedOut
+        );
+        let admitted =
+            HookDeliveryReceiptSpoolV1::open_within(&root.0, crate::HOOK_SYNCHRONOUS_BUDGET)
+                .unwrap();
+        assert!(!admitted.append(&original).unwrap());
+        assert_eq!(fs::read(&paths[0]).unwrap(), before);
     }
 
     fn receipt() -> HookDeliverySourceReceiptV1 {

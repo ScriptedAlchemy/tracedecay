@@ -21,12 +21,35 @@
 //! projection of observations. The session-temporal projection *is* one, so it
 //! resets with the stream it projects (see
 //! [`OBSERVATION_DERIVED_TEMPORAL_DELETES`]) rather than being orphaned or
-//! left advertising coverage of rows that no longer exist.
+//! left advertising coverage of rows that no longer exist. So are the
+//! retrieval anchors the reset observations bound and the native-record
+//! aliases that resolve to them (see [`OBSERVATION_ANCHOR_BINDING_COLUMNS`]):
+//! an anchor is verified field-for-field when its observation is admitted
+//! again, so a retained one whose source generation moved (the transcript
+//! file was replaced) fails every re-admission as a storage collision, and a
+//! retained alias whose record was revised refuses it deterministically —
+//! either way the rebuild the reset promises never happens.
 //!
-//! The derived usage (`observation_provider_usage`) and the admission cursors
-//! (`source_cursors`, `source_cursor_advances`) always reset together: leaving
-//! either behind is what would let the rebuilt authority double-count or skip
-//! the native events it re-reads.
+//! The derived usage (`observation_provider_usage`), the admission cursors
+//! (`source_cursors`, `source_cursor_advances`), and the native-source
+//! scheduling cursors in `parse_offsets` (see
+//! [`NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE`]) always reset together: leaving
+//! any of them behind is what would let the rebuilt authority double-count or
+//! skip the native events it re-reads.
+//!
+//! The host-observation external-source journal is the same class. Those
+//! receipts and current-state rows attest observation commits the reset just
+//! destroyed. Re-admission of an unchanged transcript reuses the same
+//! logical-effect idempotency key (derived from the stable observation id)
+//! with a new request digest — new anchors, cursors, and sanitization
+//! receipts — so the surviving journal reports a conflict and the admission
+//! worker retries the whole batch on its fixed cadence. That is not a
+//! supersession of the prior command: the attested state was deliberately
+//! removed. The receipts therefore reset with the stream they describe (see
+//! [`OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES`]), together with the
+//! writer-ledger rows that name those same `external-source.` keys. Other
+//! ledger identities stay; the exclusive maintenance transaction is the
+//! lease that authorizes exactly this scoped retirement.
 //!
 //! Two invariants bound the deletion. Rows the reset preserves must never be
 //! left pointing at rows it removes: [`PRESERVED_DEPENDENT_TABLES`] refuses
@@ -39,6 +62,7 @@
 //! transaction, so a failure anywhere leaves the store exactly as refused.
 
 use std::collections::BTreeSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -53,6 +77,9 @@ use crate::observation_projection::{
 };
 use crate::schema_contract::{
     invariant_trigger_names_for_tables, invariant_trigger_sql_for_tables,
+};
+use tracedecay_runtime_core::db::retrieval_anchor_schema::{
+    RETRIEVAL_ANCHOR_DELETE_GUARD_TRIGGERS, RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL,
 };
 
 const OPERATION: &str = "reset refused observation authority";
@@ -136,8 +163,9 @@ const IMMUTABLE_DERIVED_TEMPORAL_TABLES: &[&str] = &[
 ///
 /// Everything session-temporal that is not projector output stays: summary
 /// nodes and their FTS index, external payload manifests (see
-/// [`PRESERVED_DEPENDENT_TABLES`]), cursor keys, and the retrieval anchors the
-/// rebuilt projection re-attaches to.
+/// [`PRESERVED_DEPENDENT_TABLES`]), retained cursor keys, and the retrieval anchors
+/// the rebuilt projection re-attaches to. The active cursor key rotates so a
+/// rebuilt generation cannot alias a pre-reset frozen snapshot.
 const OBSERVATION_DERIVED_TEMPORAL_DELETES: &[&str] = &[
     "DELETE FROM session_refresh_batch_bindings",
     "DELETE FROM session_refresh_bindings",
@@ -161,6 +189,73 @@ const OBSERVATION_DERIVED_TEMPORAL_DELETES: &[&str] = &[
     "DELETE FROM session_temporal_generations",
     "DELETE FROM session_temporal_observation_effects",
 ];
+
+/// Every `(table, column)` through which a reset observation table binds a
+/// `retrieval_anchors` row: the exact-observation anchor, the repository
+/// capture anchor, and the projector's message anchors. The anchors those
+/// columns name, and the aliases resolving native records to them, are
+/// re-derived and re-verified by the next admission of the same records; they
+/// go with the stream. Anchors owned by preserved rows — summary anchors,
+/// git-topology anchors — are never named here and stay.
+const OBSERVATION_ANCHOR_BINDING_COLUMNS: &[(&str, &str)] = &[
+    ("observation_retrieval_anchors", "anchor_id"),
+    ("observation_repository_provenance", "retrieval_anchor_id"),
+    ("observation_projection_provenance", "retrieval_anchor_id"),
+    ("observation_workflow_facts", "retrieval_anchor_id"),
+    (
+        "observation_projection_rebuild_provenance",
+        "retrieval_anchor_id",
+    ),
+    (
+        "observation_projection_rebuild_workflow_facts",
+        "retrieval_anchor_id",
+    ),
+];
+
+/// The `parse_offsets` rows that schedule native-source admission, by key
+/// namespace: per-provider coverage verdicts (`host-coverage://`), host
+/// discovery frontiers (`host-frontier://`), the discovery queue
+/// (`host-discovery-queue://`), and the internal history frontiers, corpus
+/// epochs, and provider-rotation cursors (`tracedecay-internal:`). A retained
+/// Codex epoch that says the corpus was swept, or a coverage row that says
+/// `complete`, makes the rebuilt authority skip exactly the transcripts the
+/// reset promised to re-read — so they reset with the observation cursors.
+/// The only other tenant of the table, the hook-analytics import cursor, feeds
+/// `analytics_events` and is not a derivation of observations; it stays.
+const NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE: &str =
+    "DELETE FROM parse_offsets WHERE file_path NOT LIKE 'hook_analytics:%'";
+
+/// Host-observation projector tables that attest the observation stream.
+///
+/// Current-state and receipt rows are not reconstructible from the
+/// transcripts the way LCM content is: they name the anchors, frontiers, and
+/// sanitization receipts the reset recreates empty. Leaving them makes the
+/// next admission of the same observation id a conflicting reuse of the
+/// prior command rather than a rebuild. Definition and binding revisions
+/// stay — they are the source contract, not observation content, and the
+/// next commit `INSERT OR IGNORE`s them.
+const OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES: &[&str] = &[
+    "DELETE FROM external_source_acquisition_queue_v1",
+    "DELETE FROM external_source_pending_projections_v1",
+    "DELETE FROM external_source_projection_effects_v1",
+    "DELETE FROM external_source_projection_lineage_v1",
+    "DELETE FROM external_source_projected_objects_v1",
+    "DELETE FROM external_source_projection_publications_v1",
+    "DELETE FROM external_source_mutations_v1",
+    "DELETE FROM external_source_lineage_v1",
+    "DELETE FROM external_source_objects_v1",
+    "DELETE FROM external_source_commit_receipts_v1",
+    "DELETE FROM external_source_authority_receipts_v1",
+    "DELETE FROM external_source_states_v1",
+];
+
+/// Writer-ledger identities minted for external-source commits
+/// (`external-source.{logical-effect-suffix}`). A remount that keeps the
+/// same incarnation and epoch would otherwise replay those rows as a
+/// conflict even after the receipt tables are empty. Other ledger keys —
+/// including newer or foreign markers — are not named here.
+const EXTERNAL_SOURCE_RUNTIME_IDEMPOTENCY_DELETE: &str =
+    "DELETE FROM td_runtime_writer_idempotency_v1 WHERE idempotency_key LIKE 'external-source.%'";
 
 /// Preserved rows that would be orphaned by the reset, with the authority
 /// they would be orphaned from.
@@ -189,13 +284,79 @@ pub struct ObservationAuthorityResetV1 {
     /// Session-temporal projection rows cleared because they derive from the
     /// reset observation stream (see [`OBSERVATION_DERIVED_TEMPORAL_DELETES`]).
     pub cleared_derived_temporal_rows: u64,
+    /// Retrieval anchors (and the native-record aliases resolving to them)
+    /// cleared because the reset observation stream bound them (see
+    /// [`OBSERVATION_ANCHOR_BINDING_COLUMNS`]).
+    pub cleared_retrieval_anchor_rows: u64,
+    /// Native-source scheduling cursors cleared so the next open re-reads
+    /// every provider transcript (see
+    /// [`NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE`]).
+    pub cleared_native_source_cursor_rows: u64,
+    /// Host-observation external-source receipts, current-state rows, and
+    /// matching writer-ledger identities cleared so re-admission is a rebuild
+    /// rather than a conflicting reuse of the destroyed stream (see
+    /// [`OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES`]).
+    pub cleared_external_source_rows: u64,
 }
 
-fn reset_storage(error: rusqlite::Error) -> TraceDecayError {
+fn reset_storage(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         operation: OPERATION.to_string(),
         message: error.to_string(),
     }
+}
+
+/// Offline reset cannot reuse the async ensure-active adapter: it must rotate
+/// even an existing healthy key, in this exact maintenance transaction. The
+/// canonical INSERT triggers retire the previous key without deleting history.
+fn rotate_session_cursor_key(conn: &rusqlite::Connection) -> Result<(), TraceDecayError> {
+    if !table_exists(conn, "session_query_cursor_keys")? {
+        return Ok(());
+    }
+    let (count, active, version, latest_time): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(retired_at IS NULL), 0),
+                COALESCE(MAX(key_version), 0),
+                COALESCE(MAX(MAX(created_at, COALESCE(retired_at, created_at))), 0)
+         FROM session_query_cursor_keys",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(reset_storage)?;
+    if count == 0 {
+        return Ok(());
+    }
+    if active != 1 || version < 1 {
+        return Err(reset_storage(
+            "session cursor key rotation state is invalid",
+        ));
+    }
+    let next_version = version
+        .checked_add(1)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| reset_storage("session cursor key version exhausted"))?;
+    let minimum_created_at = latest_time
+        .checked_add(1)
+        .ok_or_else(|| reset_storage("session cursor key timestamp exhausted"))?;
+    let observed_at = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(reset_storage)?
+            .as_micros(),
+    )
+    .map_err(reset_storage)?;
+    let created_at = observed_at.max(minimum_created_at);
+    let mut random = [0_u8; 48];
+    getrandom::getrandom(&mut random).map_err(reset_storage)?;
+    let key_id = format!("cursor-key-{next_version}-{}", hex::encode(&random[..16]));
+    conn.execute(
+        "INSERT INTO session_query_cursor_keys
+            (key_id, key_version, key_material, created_at, retired_at)
+         VALUES (?1, ?2, ?3, ?4, NULL)",
+        rusqlite::params![key_id, i64::from(next_version), &random[16..], created_at],
+    )
+    .map_err(reset_storage)?;
+    Ok(())
 }
 
 fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, TraceDecayError> {
@@ -365,6 +526,7 @@ fn reset_within_maintenance_transaction(
             });
         }
     }
+    rotate_session_cursor_key(&transaction)?;
     // The session-temporal projection derives from the observation stream, so
     // it resets with it rather than being orphaned or refused over.
     let mut cleared_derived_temporal_rows = 0u64;
@@ -393,6 +555,21 @@ fn reset_within_maintenance_transaction(
     for sql in invariant_trigger_sql_for_tables(IMMUTABLE_DERIVED_TEMPORAL_TABLES) {
         transaction.execute_batch(sql).map_err(reset_storage)?;
     }
+    let cleared_retrieval_anchor_rows = clear_observation_bound_anchors(&transaction)?;
+    let cleared_native_source_cursor_rows = if table_exists(&transaction, "parse_offsets")? {
+        u64::try_from(
+            transaction
+                .execute(NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE, [])
+                .map_err(reset_storage)?,
+        )
+        .map_err(|_| TraceDecayError::Database {
+            operation: OPERATION.to_string(),
+            message: "parse_offsets delete count overflowed".to_string(),
+        })?
+    } else {
+        0
+    };
+    let cleared_external_source_rows = clear_observation_derived_external_source(&transaction)?;
 
     // Clear the recoverable projector output before dropping the projection
     // tables: the audit-invalidation trigger on `session_messages` reads
@@ -471,7 +648,118 @@ fn reset_within_maintenance_transaction(
         reset_tables,
         cleared_session_message_rows,
         cleared_derived_temporal_rows,
+        cleared_retrieval_anchor_rows,
+        cleared_native_source_cursor_rows,
+        cleared_external_source_rows,
     })
+}
+
+/// Removes the host-observation journal that attested the reset stream.
+/// Runs inside the maintenance transaction with foreign keys suspended, the
+/// same way the temporal projection and scheduling cursors are retired.
+fn clear_observation_derived_external_source(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<u64, TraceDecayError> {
+    let mut cleared = 0u64;
+    for statement in OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES {
+        let table = statement
+            .strip_prefix("DELETE FROM ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("each external-source statement names its table");
+        if !table_exists(transaction, table)? {
+            continue;
+        }
+        let deleted = transaction.execute(statement, []).map_err(reset_storage)?;
+        cleared = cleared.saturating_add(u64::try_from(deleted).map_err(|_| {
+            TraceDecayError::Database {
+                operation: OPERATION.to_string(),
+                message: format!("{table} delete count overflowed"),
+            }
+        })?);
+    }
+    if table_exists(transaction, "td_runtime_writer_idempotency_v1")? {
+        let deleted = transaction
+            .execute(EXTERNAL_SOURCE_RUNTIME_IDEMPOTENCY_DELETE, [])
+            .map_err(reset_storage)?;
+        cleared = cleared.saturating_add(u64::try_from(deleted).map_err(|_| {
+            TraceDecayError::Database {
+                operation: OPERATION.to_string(),
+                message: "td_runtime_writer_idempotency_v1 delete count overflowed".to_string(),
+            }
+        })?);
+    }
+    Ok(cleared)
+}
+
+/// Removes the retrieval anchors the reset observation stream bound, and the
+/// aliases resolving native records to them, while their binding tables still
+/// exist to name them. Runs inside the maintenance transaction: the two
+/// delete guards come off, the rows go, and every anchor guard is reinstalled
+/// from the schema authority before the transaction can commit.
+fn clear_observation_bound_anchors(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<u64, TraceDecayError> {
+    if !table_exists(transaction, "retrieval_anchors")? {
+        return Ok(0);
+    }
+    let mut bound = BTreeSet::new();
+    for (table, column) in OBSERVATION_ANCHOR_BINDING_COLUMNS {
+        if !table_exists(transaction, table)? {
+            continue;
+        }
+        if !table_columns(transaction, table)?.contains(*column) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "a scoped {OBSERVATION_AUTHORITY} reset expects {table}.{column} to name \
+                     the retrieval anchors it binds; this store carries a shape the reset \
+                     does not know how to invalidate, so nothing was reset"
+                ),
+            });
+        }
+        let mut statement = transaction
+            .prepare(&format!(
+                "SELECT DISTINCT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL"
+            ))
+            .map_err(reset_storage)?;
+        let anchors = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(reset_storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(reset_storage)?;
+        bound.extend(anchors);
+    }
+    if bound.is_empty() {
+        return Ok(0);
+    }
+    for trigger in RETRIEVAL_ANCHOR_DELETE_GUARD_TRIGGERS {
+        transaction
+            .execute_batch(&format!("DROP TRIGGER IF EXISTS \"{trigger}\""))
+            .map_err(reset_storage)?;
+    }
+    let mut cleared = 0u64;
+    let has_aliases = table_exists(transaction, "retrieval_anchor_aliases")?;
+    for anchor_id in &bound {
+        if has_aliases {
+            let aliases = transaction
+                .execute(
+                    "DELETE FROM retrieval_anchor_aliases WHERE anchor_id = ?1",
+                    [anchor_id],
+                )
+                .map_err(reset_storage)?;
+            cleared = cleared.saturating_add(u64::try_from(aliases).unwrap_or(u64::MAX));
+        }
+        let anchors = transaction
+            .execute(
+                "DELETE FROM retrieval_anchors WHERE anchor_id = ?1",
+                [anchor_id],
+            )
+            .map_err(reset_storage)?;
+        cleared = cleared.saturating_add(u64::try_from(anchors).unwrap_or(u64::MAX));
+    }
+    transaction
+        .execute_batch(RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL)
+        .map_err(reset_storage)?;
+    Ok(cleared)
 }
 
 #[cfg(test)]

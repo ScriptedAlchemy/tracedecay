@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_application::remote::status::{
+use tracedecay_contracts::remote::status::{
     RemoteOperationalStatusReadV1, RemoteOperationalStatusV1, RemoteSpoolOperationalStatusV1,
 };
-use tracedecay_application::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
+use tracedecay_contracts::{DoctorCoverageCompletenessV1, RemoteListenerReadV1};
 use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
 
 use crate::config::lock_user_data_dir_test_env;
@@ -110,7 +110,7 @@ async fn dispatch_returns_provider_json_or_typed_unavailable() {
     .unwrap();
 
     let expected = observed_fixture();
-    let provider = {
+    let provider: tracedecay_contracts::RemoteOperationalStatusReaderV1 = {
         let expected = expected.clone();
         Arc::new(move || expected.clone())
     };

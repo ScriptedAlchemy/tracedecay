@@ -13,8 +13,8 @@ use super::{
 
 #[derive(Clone)]
 pub struct BranchGenerationReadControlV1 {
-    pub deadline: Option<tracedecay_application::Deadline>,
-    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+    pub deadline: Option<tracedecay_contracts::Deadline>,
+    pub cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
 impl BranchGenerationReadControlV1 {
@@ -22,14 +22,14 @@ impl BranchGenerationReadControlV1 {
         if self
             .cancellation
             .as_ref()
-            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
         {
             return Some(CodeIndexSearchUnavailableReasonV1::Cancelled);
         }
         self.deadline
             .as_ref()
             .is_some_and(|deadline| {
-                deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+                deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros())
             })
             .then_some(CodeIndexSearchUnavailableReasonV1::TimedOut)
     }
@@ -229,9 +229,60 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    /// Run one native candidate producer against the exact mounted scope.
+    ///
+    /// Native preflight drives this future from its existing blocking owner,
+    /// because the borrowed gix object-memory tree cannot outlive that call.
+    /// The callback runs only while the canonical publication fence is held
+    /// and never receives a scheduler handle it could retain.
+    pub async fn with_native_candidate_generation_producer<T>(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+        control: BranchGenerationReadControlV1,
+        produce: impl FnOnce(
+            &mut super::CodeIndexWorktreeSchedulerV1,
+            &BranchGenerationReadControlV1,
+        ) -> Result<T, CodeIndexSearchUnavailableReasonV1>,
+    ) -> Result<T, CodeIndexSearchUnavailableReasonV1> {
+        let (scheduler, build_publication_lock) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = unique_mounted_for_scope(&mounted, scope)
+                .unique()
+                .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+                .1;
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.build_publication_lock),
+            )
+        };
+        let mut build_publication = std::pin::pin!(build_publication_lock.lock_owned());
+        let _build_publication = loop {
+            tokio::select! {
+                guard = &mut build_publication => break guard,
+                () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                    if let Some(reason) = control.termination() {
+                        return Err(reason);
+                    }
+                }
+            }
+        };
+        control.termination().map_or(Ok(()), Err)?;
+        let mut scheduler = match scheduler.try_lock() {
+            Ok(scheduler) => scheduler,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(CodeIndexSearchUnavailableReasonV1::Internal);
+            }
+        };
+        control.termination().map_or(Ok(()), Err)?;
+        produce(&mut scheduler, &control)
+    }
+
     pub async fn generations_for_revisions(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -256,7 +307,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn bounded_generations_for_revisions(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -286,7 +337,7 @@ impl CodeIndexSchedulerRegistryV1 {
     )]
     async fn generations_for_revisions_with_bounds(
         &self,
-        scope: &tracedecay_application::ResolvedScope,
+        scope: &tracedecay_contracts::ResolvedScope,
         base_reference: &RefId,
         base_revision: &GitOidV1,
         base_tree: &GitOidV1,
@@ -436,7 +487,7 @@ mod tests {
     use std::process::Command;
 
     use tempfile::TempDir;
-    use tracedecay_application::ResolvedScope;
+    use tracedecay_contracts::ResolvedScope;
     use tracedecay_domain::{GitOidV1, ProjectId};
     use tracedecay_query::code_search;
 
@@ -726,9 +777,9 @@ mod tests {
         );
 
         let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.large-generation")
+            tracedecay_contracts::CancellationSignal::active("cancel.large-generation")
                 .expect("cancellation");
-        cancellation.cancel(tracedecay_application::clock::now_micros());
+        cancellation.cancel(tracedecay_contracts::clock::now_micros());
         assert_eq!(
             bounded_diff(
                 large_generation.generation(),
@@ -743,7 +794,7 @@ mod tests {
             Err(CodeIndexSearchUnavailableReasonV1::Cancelled)
         );
         let expired =
-            tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
+            tracedecay_contracts::Deadline::new(tracedecay_contracts::clock::now_micros())
                 .expect("expired deadline");
         assert_eq!(
             bounded_diff(

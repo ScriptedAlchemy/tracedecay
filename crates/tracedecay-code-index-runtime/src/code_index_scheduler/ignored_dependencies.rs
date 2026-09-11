@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
 use serde_json::Value;
-use tracedecay_application::ResolvedScope;
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::production::{
@@ -15,13 +14,14 @@ use tracedecay_code_index::production::{
     CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
     MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1,
 };
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1, canonical_sha256};
-use tracedecay_runtime_core::privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
+use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 use super::{
     CapturedSnapshotV1, CodeIndexPublishEvidenceV1, CodeIndexSchedulerErrorV1,
-    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, StaticLanguageRegistry, now_micros,
-    projection_key,
+    CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SourceContentManifestV1,
+    StaticLanguageRegistry, now_micros, projection_key,
 };
 use crate::code_index::languages::LanguageRegistry;
 
@@ -77,7 +77,24 @@ pub struct CodeIndexIgnoredDependencyBuildV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
+    /// Admit one verified ignored dependency entrypoint.
+    ///
+    /// This is the admission boundary: every interruption observed inside it —
+    /// including the shared source-read and snapshot-capture helpers, which
+    /// report interruptions as reconcile interruptions because the ordinary
+    /// reconcile path owns them too — surfaces to the caller as the typed
+    /// ignored-dependency refusal.
     pub fn index_verified_ignored_dependency(
+        &mut self,
+        serving: &LatestCompleteCodeIndexV1,
+        request: CodeIndexIgnoredDependencyRequestV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
+        self.index_verified_ignored_dependency_admission(serving, request, control)
+            .map_err(map_reconcile_interruption)
+    }
+
+    fn index_verified_ignored_dependency_admission(
         &mut self,
         serving: &LatestCompleteCodeIndexV1,
         request: CodeIndexIgnoredDependencyRequestV1,
@@ -257,7 +274,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             Ok(generation) => generation,
             Err(error) => {
                 self.ignored_source_admissions = previous_roster;
-                return Err(map_production_interruption(error));
+                return Err(error.into());
             }
         };
         let generation_id = generation.manifest().generation_id.clone();
@@ -265,7 +282,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.retained_snapshot_bytes = retained_bytes;
         self._retained_snapshot_memory = retained_reservations;
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
-        self.mark_reconciled();
+        self.mark_reconciled(SourceContentManifestV1::for_snapshot(generation.snapshot()));
         let latest = self.bind_latest_complete(Arc::clone(&generation), None);
         let publication = publication_evidence(reextracted_files, &generation)?;
         Ok(CodeIndexIgnoredDependencyBuildV1 {
@@ -791,35 +808,59 @@ fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSch
     }
 }
 
+/// Admission-owned checkpoint: the caller is the ignored-dependency admission
+/// itself, so an interruption is that admission's typed refusal.
 fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndexSchedulerErrorV1> {
+    map_reconcile_interruption_result(checkpoint_if_present(Some(control)))
+}
+
+/// Shared checkpoint for the source-read and snapshot-capture helpers.
+///
+/// These helpers run under the ordinary background reconcile as well as under
+/// an ignored-dependency admission, so an observed interruption is reported as
+/// the reconcile interruption the production pipeline itself raises. Reporting
+/// it as an ignored-dependency refusal attributed every superseded or shutdown
+/// reconcile to a dependency admission that never ran, and bypassed the
+/// superseded-reconcile retry that only recognizes the production
+/// interruption. The admission boundary maps the interruption back to its own
+/// refusal (see [`map_reconcile_interruption`]).
+pub fn checkpoint_if_present(
+    control: Option<&dyn CodeIndexExecutionControlV1>,
+) -> Result<(), CodeIndexSchedulerErrorV1> {
+    let Some(control) = control else {
+        return Ok(());
+    };
     if control.is_cancelled() {
-        Err(CodeIndexIgnoredDependencyRefusalV1::Cancelled.into())
+        Err(CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled).into())
     } else if control.is_deadline_exceeded() {
-        Err(CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into())
+        Err(
+            CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
+                .into(),
+        )
     } else {
         Ok(())
     }
 }
 
-pub fn checkpoint_if_present(
-    control: Option<&dyn CodeIndexExecutionControlV1>,
-) -> Result<(), CodeIndexSchedulerErrorV1> {
-    match control {
-        Some(control) => checkpoint(control),
-        None => Ok(()),
+/// Re-attribute a reconcile interruption observed under an ignored-dependency
+/// admission to that admission's typed refusal. Every other error passes
+/// through unchanged.
+fn map_reconcile_interruption(error: CodeIndexSchedulerErrorV1) -> CodeIndexSchedulerErrorV1 {
+    match error {
+        CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Interrupted(
+            CodeIndexInterruptionV1::Cancelled,
+        )) => CodeIndexIgnoredDependencyRefusalV1::Cancelled.into(),
+        CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Interrupted(
+            CodeIndexInterruptionV1::DeadlineExceeded,
+        )) => CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into(),
+        other => other,
     }
 }
 
-fn map_production_interruption(error: CodeIndexProductionErrorV1) -> CodeIndexSchedulerErrorV1 {
-    match error {
-        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled) => {
-            CodeIndexIgnoredDependencyRefusalV1::Cancelled.into()
-        }
-        CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded) => {
-            CodeIndexIgnoredDependencyRefusalV1::DeadlineExceeded.into()
-        }
-        other => other.into(),
-    }
+fn map_reconcile_interruption_result<T>(
+    result: Result<T, CodeIndexSchedulerErrorV1>,
+) -> Result<T, CodeIndexSchedulerErrorV1> {
+    result.map_err(map_reconcile_interruption)
 }
 
 fn publication_evidence(

@@ -68,7 +68,7 @@ pub async fn handle_hook_runtime(
             accounting_receipt(cg, required_project_db(session_authorities)?).await?
         }
         "hook_v2_admit" | "hook_v2_guidance_lookup" => {
-            hook_v2_admit(cg, &args, action, required_project_db(session_authorities)?).await?
+            hook_v2_admit(cg, &args, action, session_authorities).await?
         }
         "hook_v2_scout_prepare" => hook_v2_scout_prepare(cg, &args).await?,
         "hook_v2_delivery_receipt" => hook_v2_delivery_receipt(cg, &args).await?,
@@ -185,7 +185,7 @@ pub(crate) async fn handle_projectless_hook_runtime(
         )?,
         "hermes_receipt" => {
             let host_admission_broker =
-                host_admission_broker.map_err(map_host_admission_outcome)?;
+                host_admission_broker.map_err(|outcome| map_host_admission_outcome(&outcome))?;
             hermes_receipt(
                 &args,
                 profile_root,

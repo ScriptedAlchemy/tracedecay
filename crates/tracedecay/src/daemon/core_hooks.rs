@@ -1,23 +1,21 @@
 //! Host hook events: daemon notification over the broker connection.
 //!
 //! The wire metadata and event constructors are pure data and live in
-//! [`tracedecay_hooks::core_events`]; they are re-exported here so the daemon's
-//! existing paths keep resolving. Only delivery — which needs the daemon
+//! [`tracedecay_hooks::core_events`]. Only delivery — which needs the daemon
 //! connection, handshake, and preamble — remains root-coupled.
 
 use std::path::Path;
 
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
-
-pub use tracedecay_hooks::core_events::*;
+use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1};
 
 #[cfg(unix)]
 use tracedecay_daemon_identity::connection_for_socket_path;
 use tracedecay_daemon_identity::{DaemonConnection, current_daemon_connection};
-
 #[cfg(unix)]
-use super::SOCKET_ENV;
+use tracedecay_daemon_protocol::SOCKET_ENV;
+
 use super::{BrokerStream, JsonRpcRequest, write_daemon_preamble};
 
 pub(crate) const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);

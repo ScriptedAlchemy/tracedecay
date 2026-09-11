@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
 use std::time::SystemTime;
 #[cfg(feature = "test-transport")]
-use tracedecay::host_admission::LcmLineageFaultForTest;
+use tracedecay::test_support::host_admission::LcmLineageFaultForTest;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
@@ -690,6 +690,60 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     assert!(!rendered.contains("describe source body"));
     assert!(!rendered.contains("describe external secret"));
     server.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lcm_grep_raw_hit_store_id_expands_byte_exactly() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let content = "grep-to-expand byte identity: café\nsecond line";
+    let projection = seed_temporal_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "lcm-grep-expand-session",
+        "lcm-grep-expand-message",
+        content,
+        1,
+    )
+    .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-grep-expand-session", vec![projection]).await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "codex",
+            "query": "grep-to-expand byte identity",
+            "scope": "session",
+            "session_id": "lcm-grep-expand-session",
+            "limit": 1
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    let store_id = grep_payload["hits"][0]["store_id"]
+        .as_i64()
+        .expect("raw grep hit must expose its LCM store id");
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "codex",
+            "session_id": "lcm-grep-expand-session",
+            "target": {"kind": "raw_message", "store_id": store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["expansion"]["content"], content);
 }
 
 #[cfg(feature = "test-transport")]

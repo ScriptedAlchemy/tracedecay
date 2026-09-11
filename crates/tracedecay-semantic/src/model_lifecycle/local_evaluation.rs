@@ -19,7 +19,7 @@ pub fn open_local_semantic_evaluation_lifecycle(
         .catalog()
         .get(DEFAULT_FASTEMBED_MODEL_ID)
         .ok_or(CatalogErrorV1::MissingDefault)?;
-    let manifest = local_evaluation_manifest(model, resources)?;
+    let manifest = catalog_artifact_manifest(model, resources)?;
     let package_view = tempfile::Builder::new()
         .prefix(".semantic-evaluation-package-")
         .tempdir_in(lifecycle_root)
@@ -73,7 +73,7 @@ fn copy_local_evaluation_member(
         .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)
 }
 
-fn local_evaluation_manifest(
+fn catalog_artifact_manifest(
     model: &CatalogedFastEmbedModelV1,
     resources: SemanticResourceCeilings,
 ) -> Result<ModelArtifactManifestV1, ModelLifecycleErrorV1> {

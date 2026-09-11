@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use tracedecay_application::semantic_runtime::{
+    SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
+    SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
+};
 use tracedecay_graph_db::{
     GraphDbError, GraphWriteBatch, VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
     VerifiedGraphSnapshot,
@@ -11,10 +15,6 @@ use tracedecay_store::{
     SemanticVectorStagePublicationPrepareOutcome, SemanticVectorStagePublishOutcome,
     SemanticVectorStagePublishSettlement, SemanticVectorStageResumeOutcome, StoreRuntimeBindingV1,
     StoreShardIdV1,
-};
-use tracedecay_usecases::semantic_runtime::{
-    SemanticGraphExecutionAuthorityV1, SemanticVectorGraphScopeV1,
-    SemanticVectorRetentionAuthorizationV1, VerifiedSemanticVectorGraphRuntimeV1,
 };
 
 use super::RetainedCodeGraphRuntimeV1;
@@ -182,6 +182,14 @@ impl VerifiedSemanticVectorGraphRuntimeV1 for DaemonVerifiedSemanticVectorGraphR
             authority.cancellation(),
             authority.deadline(),
         )
+    }
+
+    fn project_stage_census(
+        &self,
+        authority: &SemanticGraphExecutionAuthorityV1,
+    ) -> Result<tracedecay_store::SemanticVectorStageCensusPage, GraphDbError> {
+        self.retained
+            .semantic_vector_project_stage_census(authority.cancellation(), authority.deadline())
     }
 
     fn reserve_one_generation(

@@ -33,6 +33,7 @@ pub const MAX_CHUNK_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v1";
+const CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN: &str = "tracedecay.code-source-full-replay.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
 const EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN: &str = "tracedecay.embedding-projection-key.v1";
 const SEMANTIC_SEARCH_INDEX_KEY_DIGEST_DOMAIN: &str = "tracedecay.semantic-search-index-key.v1";
@@ -250,15 +251,64 @@ pub enum ExactTechnicalTermKindV1 {
 
 /// One whole exact technical term extracted as evidence. Extraction
 /// evidence only; protected lexical policy is applied separately.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+///
+/// Wire form: the source bytes travel as `original_text` when they are UTF-8
+/// (every parser-emitted term is a slice of sanitized text, so this is the
+/// production case) and as an `original_bytes` array otherwise. The canonical
+/// bytes are a pure function of `kind` and the original bytes, so they are
+/// derived on read rather than persisted. Readers accept the earlier shape
+/// (`original_bytes` array plus `canonical_bytes` array) unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactTechnicalTermV1 {
     kind: ExactTechnicalTermKindV1,
     original_bytes: Vec<u8>,
     canonical_bytes: Vec<u8>,
     span: SourceSpan,
-    #[serde(skip_serializing_if = "Option::is_none")]
     symbol_occurrence_id: Option<SymbolOccurrenceId>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExactTechnicalTermWireRefV1<'a> {
+    kind: ExactTechnicalTermKindV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_bytes: Option<&'a [u8]>,
+    span: SourceSpan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_occurrence_id: Option<&'a SymbolOccurrenceId>,
+}
+
+impl Serialize for ExactTechnicalTermV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let original_text = std::str::from_utf8(&self.original_bytes).ok();
+        ExactTechnicalTermWireRefV1 {
+            kind: self.kind,
+            original_text,
+            original_bytes: original_text
+                .is_none()
+                .then_some(self.original_bytes.as_slice()),
+            span: self.span,
+            symbol_occurrence_id: self.symbol_occurrence_id.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl ExactTechnicalTermV1 {
+    fn canonical_bytes_for(kind: ExactTechnicalTermKindV1, original_bytes: &[u8]) -> Vec<u8> {
+        match kind {
+            ExactTechnicalTermKindV1::CliFlag
+            | ExactTechnicalTermKindV1::ConfigurationKey
+            | ExactTechnicalTermKindV1::ToolName
+            | ExactTechnicalTermKindV1::CommitIdentifier => original_bytes.to_ascii_lowercase(),
+            _ => original_bytes.to_vec(),
+        }
+    }
 }
 
 impl ExactTechnicalTermV1 {
@@ -322,19 +372,26 @@ impl ExactTechnicalTermV1 {
         Self::from_parts(kind, original_bytes, span, None)
     }
 
+    /// Rebuild a term from the parts an admitted projection persisted. This
+    /// is the binary-storage counterpart of the wire deserializer: the same
+    /// shape validation runs, and the canonical bytes are re-derived rather
+    /// than trusted.
+    pub fn from_persisted_parts(
+        kind: ExactTechnicalTermKindV1,
+        original_bytes: Vec<u8>,
+        span: SourceSpan,
+        symbol_occurrence_id: Option<SymbolOccurrenceId>,
+    ) -> Result<Self, DomainError> {
+        Self::from_parts(kind, original_bytes, span, symbol_occurrence_id)
+    }
+
     fn from_parts(
         kind: ExactTechnicalTermKindV1,
         original_bytes: Vec<u8>,
         span: SourceSpan,
         symbol_occurrence_id: Option<SymbolOccurrenceId>,
     ) -> Result<Self, DomainError> {
-        let canonical_bytes = match kind {
-            ExactTechnicalTermKindV1::CliFlag
-            | ExactTechnicalTermKindV1::ConfigurationKey
-            | ExactTechnicalTermKindV1::ToolName
-            | ExactTechnicalTermKindV1::CommitIdentifier => original_bytes.to_ascii_lowercase(),
-            _ => original_bytes.clone(),
-        };
+        let canonical_bytes = Self::canonical_bytes_for(kind, &original_bytes);
         let term = Self {
             kind,
             original_bytes,
@@ -428,16 +485,7 @@ impl ExactTechnicalTermV1 {
             }
             kind => validate_self_authenticating_technical_term(kind, &self.original_bytes)?,
         }
-        let expected_canonical = match self.kind {
-            ExactTechnicalTermKindV1::CliFlag
-            | ExactTechnicalTermKindV1::ConfigurationKey
-            | ExactTechnicalTermKindV1::ToolName
-            | ExactTechnicalTermKindV1::CommitIdentifier => {
-                self.original_bytes.to_ascii_lowercase()
-            }
-            _ => self.original_bytes.clone(),
-        };
-        if self.canonical_bytes != expected_canonical {
+        if self.canonical_bytes != Self::canonical_bytes_for(self.kind, &self.original_bytes) {
             return Err(DomainError::NonCanonical {
                 field: "exact technical term canonical bytes",
             });
@@ -505,18 +553,42 @@ impl<'de> Deserialize<'de> for ExactTechnicalTermV1 {
         #[serde(deny_unknown_fields)]
         struct Wire {
             kind: ExactTechnicalTermKindV1,
-            original_bytes: Vec<u8>,
-            canonical_bytes: Vec<u8>,
+            #[serde(default)]
+            original_text: Option<String>,
+            #[serde(default)]
+            original_bytes: Option<Vec<u8>>,
+            /// Retained only for terms persisted before the canonical bytes
+            /// became derived; when present it must still recompute.
+            #[serde(default)]
+            canonical_bytes: Option<Vec<u8>>,
             span: SourceSpan,
             #[serde(default)]
             symbol_occurrence_id: Option<SymbolOccurrenceId>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
+        let original_bytes = match (wire.original_text, wire.original_bytes) {
+            (Some(text), None) => text.into_bytes(),
+            (None, Some(bytes)) => bytes,
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(serde::de::Error::custom(
+                    "exact technical term must carry exactly one of original_text or original_bytes",
+                ));
+            }
+        };
+        let canonical_bytes = Self::canonical_bytes_for(wire.kind, &original_bytes);
+        if wire
+            .canonical_bytes
+            .is_some_and(|persisted| persisted != canonical_bytes)
+        {
+            return Err(serde::de::Error::custom(DomainError::NonCanonical {
+                field: "exact technical term canonical bytes",
+            }));
+        }
         let term = Self {
             kind: wire.kind,
-            original_bytes: wire.original_bytes,
-            canonical_bytes: wire.canonical_bytes,
+            original_bytes,
+            canonical_bytes,
             span: wire.span,
             symbol_occurrence_id: wire.symbol_occurrence_id,
         };
@@ -730,6 +802,73 @@ struct ChangedCodeChunkSetDigestInput<'a> {
     added_or_changed: &'a [ChangedCodeChunkV1],
     deleted: &'a [ChangedCodeChunkV1],
     reused: &'a [ChangedCodeChunkV1],
+}
+
+/// The two source identities sealed by one code generation.
+///
+/// The incremental digest authenticates the physical generation transition
+/// and all three change partitions. The full-replay digest authenticates only
+/// the complete ordered chunk corpus, so byte-identical source remains the
+/// same across generation-id churn.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeGenerationSourceCommitmentsV1 {
+    pub incremental_manifest_digest: ManifestDigest,
+    pub full_replay_digest: ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct CodeSourceFullReplayDigestInput<'a> {
+    domain: &'static str,
+    chunks: &'a [(CodeSearchChunkId, ContentDigest)],
+}
+
+/// Digest a complete source corpus in canonical chunk-identity order.
+pub fn code_source_full_replay_digest(
+    chunks: &[(CodeSearchChunkId, ContentDigest)],
+) -> Result<ManifestDigest, DomainError> {
+    for (chunk, digest) in chunks {
+        chunk.validate()?;
+        digest.validate()?;
+    }
+    if chunks.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(DomainError::NonCanonical {
+            field: "full replay source chunk order",
+        });
+    }
+    canonical_sha256(&CodeSourceFullReplayDigestInput {
+        domain: CODE_SOURCE_FULL_REPLAY_DIGEST_DOMAIN,
+        chunks,
+    })
+}
+
+impl CodeGenerationSourceCommitmentsV1 {
+    pub fn from_changed_chunks(
+        changes: &ChangedCodeChunkSetV1,
+        full_source: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<Self, DomainError> {
+        changes.validate()?;
+        Ok(Self {
+            incremental_manifest_digest: changes.manifest_digest.clone(),
+            full_replay_digest: code_source_full_replay_digest(full_source)?,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.incremental_manifest_digest.validate()?;
+        self.full_replay_digest.validate()
+    }
+
+    pub fn validate_for_source(
+        &self,
+        full_source: &[(CodeSearchChunkId, ContentDigest)],
+    ) -> Result<(), DomainError> {
+        self.validate()?;
+        if self.full_replay_digest != code_source_full_replay_digest(full_source)? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl ChangedCodeChunkSetV1 {
@@ -1486,10 +1625,19 @@ pub struct CodeIndexCapabilityManifestV1 {
     pub manifest_digest: ManifestDigest,
 }
 
+/// Capability identity is deliberately generation-independent.
+///
+/// `generation_id` is provenance, not capability: two generations that sealed
+/// the same source under the same runtime revisions, coverage, sanitization
+/// receipts, and privacy identity offer the identical indexing authority, and
+/// a checkout that reseals the same commit must not be refused as
+/// capability-incompatible. The manifest still carries its `generation_id`,
+/// and `CodeIndexPublishedGenerationV1` still refuses a capability manifest
+/// naming a different generation than its own, so the pairing stays bound —
+/// by that invariant rather than by this digest.
 #[derive(Serialize)]
 struct CodeIndexCapabilityManifestDigestInput<'a> {
     domain: &'static str,
-    generation_id: &'a CodeGenerationId,
     chunk_schema_revision: &'a str,
     chunker_revision: &'a ChunkerRevision,
     language_descriptor_revisions: &'a [LanguageDescriptorRevision],
@@ -1507,7 +1655,6 @@ impl CodeIndexCapabilityManifestV1 {
     pub fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&CodeIndexCapabilityManifestDigestInput {
             domain: CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN,
-            generation_id: &self.generation_id,
             chunk_schema_revision: &self.chunk_schema_revision,
             chunker_revision: &self.chunker_revision,
             language_descriptor_revisions: &self.language_descriptor_revisions,
@@ -2045,6 +2192,48 @@ mod tests {
     }
 
     #[test]
+    fn source_commitments_preserve_incremental_and_full_replay_identities() {
+        let incremental = changed_set();
+        let full_source = vec![
+            (id("chunk.added"), id(&digest('a'))),
+            (id("chunk.reused"), id(&digest('c'))),
+        ];
+        let first =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&incremental, &full_source)
+                .expect("source commitments");
+
+        assert_eq!(
+            first.incremental_manifest_digest,
+            incremental.compute_digest().expect("incremental digest")
+        );
+        assert_ne!(
+            first.incremental_manifest_digest, first.full_replay_digest,
+            "the generation-bound changed-set digest is not a full replay identity"
+        );
+
+        let mut republished = incremental;
+        republished.from_generation = Some(id("generation.8"));
+        republished.to_generation = id("generation.9");
+        republished.manifest_digest = republished.compute_digest().expect("republished digest");
+        let second =
+            CodeGenerationSourceCommitmentsV1::from_changed_chunks(&republished, &full_source)
+                .expect("republished source commitments");
+
+        assert_ne!(
+            first.incremental_manifest_digest, second.incremental_manifest_digest,
+            "incremental identity must retain its generation watermarks"
+        );
+        assert_eq!(
+            first.full_replay_digest, second.full_replay_digest,
+            "full replay identity must survive generation-id churn over identical source"
+        );
+
+        let mut tampered = first;
+        tampered.full_replay_digest = id(&digest('f'));
+        assert!(tampered.validate_for_source(&full_source).is_err());
+    }
+
+    #[test]
     fn capability_manifest_requires_canonical_vectors_and_digest() {
         let valid = capability_manifest();
         valid.validate().expect("canonical capability manifest");
@@ -2065,6 +2254,50 @@ mod tests {
             tampered.validate(),
             Err(DomainError::DigestMismatch)
         ));
+    }
+
+    #[test]
+    fn capability_identity_survives_a_new_generation_but_not_a_new_capability() {
+        let sealed = capability_manifest();
+        // The same source resealed under a new generation id — a checkout, a
+        // detached HEAD, a rollback that mints a fresh generation.
+        let mut resealed = sealed.clone();
+        resealed.generation_id = id("generation.v1.0cbc773a.00000002.resealed");
+        resealed.manifest_digest = resealed.compute_digest().expect("digest computable");
+        assert_eq!(
+            sealed.manifest_digest, resealed.manifest_digest,
+            "a new generation id must not change capability identity"
+        );
+
+        // A real capability or coverage change still refuses.
+        for changed in [
+            {
+                let mut changed = sealed.clone();
+                changed.chunker_revision = id("chunker.v2");
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.privacy_key_epoch = 2;
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.source_coverage.files_eligible = 2;
+                changed
+            },
+            {
+                let mut changed = sealed.clone();
+                changed.sanitization_receipts = vec![id("receipt.other")];
+                changed
+            },
+        ] {
+            assert_ne!(
+                sealed.manifest_digest,
+                changed.compute_digest().expect("digest computable"),
+                "a capability, privacy, coverage, or sanitization change must refuse reuse"
+            );
+        }
     }
 
     #[test]

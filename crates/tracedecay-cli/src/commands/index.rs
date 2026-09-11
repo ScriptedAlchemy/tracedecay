@@ -21,7 +21,7 @@ async fn is_fresh_install() -> bool {
 
 /// When invoked with no subcommand, offer to create the index if none exists.
 pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()> {
-    let project_path = tracedecay::config::resolve_path(None);
+    let project_path = tracedecay_configuration::resolve_path(None);
     if TraceDecay::has_initialized_store(&project_path).await {
         // Already initialized — show help via clap
         let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
@@ -78,7 +78,7 @@ pub(crate) async fn handle_init(
     fresh: bool,
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    let project_path = tracedecay::config::resolve_path(path);
+    let project_path = tracedecay_configuration::resolve_path(path);
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     if let Some(message) =
         tracedecay_global_db::ephemeral_root_rejection(&project_path, &profile_root)
@@ -324,9 +324,9 @@ mod init_bootstrap_tests {
 
     impl SocketEnvGuard {
         fn set(value: &Path) -> Self {
-            let previous = std::env::var_os(tracedecay::daemon::SOCKET_ENV);
+            let previous = std::env::var_os(tracedecay_daemon_protocol::SOCKET_ENV);
             unsafe {
-                std::env::set_var(tracedecay::daemon::SOCKET_ENV, value);
+                std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, value);
             }
             Self { previous }
         }
@@ -337,9 +337,9 @@ mod init_bootstrap_tests {
             unsafe {
                 match self.previous.take() {
                     Some(previous) => {
-                        std::env::set_var(tracedecay::daemon::SOCKET_ENV, previous);
+                        std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, previous);
                     }
-                    None => std::env::remove_var(tracedecay::daemon::SOCKET_ENV),
+                    None => std::env::remove_var(tracedecay_daemon_protocol::SOCKET_ENV),
                 }
             }
         }
@@ -497,9 +497,10 @@ pub(crate) async fn handle_sync(
             message: "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first".to_string(),
         });
     }
-    let resolved =
-        super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(path))
-            .await?;
+    let resolved = super::scope::resolve_project_scope(
+        tracedecay_configuration::resolve_path_with_discovery(path),
+    )
+    .await?;
     let handshake = tracedecay::daemon::handshake_for_current_client(
         Some(resolved.project_path.clone()),
         None,
@@ -523,7 +524,7 @@ pub(crate) async fn handle_sync(
         resolved.project_path.display()
     );
     if doctor {
-        tracedecay::doctor::run_doctor().await?;
+        tracedecay::doctor::run_doctor(crate::cloud::doctor_network_probes()).await?;
     }
     Ok(())
 }

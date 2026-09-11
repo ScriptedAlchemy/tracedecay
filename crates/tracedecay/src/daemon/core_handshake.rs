@@ -10,8 +10,6 @@ use std::path::PathBuf;
 use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::errors::Result;
 
-pub use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
-
 /// Handshake for this process's current client identity and binary version.
 pub fn handshake_for_current_client(
     project_path: Option<PathBuf>,

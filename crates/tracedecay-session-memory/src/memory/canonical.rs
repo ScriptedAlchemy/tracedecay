@@ -1,6 +1,6 @@
 //! Root store adapters for canonical memory application use cases.
 
-use tracedecay_application::memory::{
+use tracedecay_contracts::memory::{
     CommitFactPort, CurrentFactsPort, FactAsOfPort, FactCurrentPort, FactLineagePort,
     MemoryApplication as CanonicalMemoryApplication, MemoryApplicationInvariantError,
     MemoryCommitFactCommand, MemoryCommitFactDisposition, MemoryCommitFactPortResult,
@@ -338,7 +338,7 @@ fn commit_proof(
 fn store_error(error: MemoryUseCaseError<FactStoreError>) -> MemoryApplicationError {
     match error {
         MemoryUseCaseError::Invariant(error) => invariant_error(error),
-        MemoryUseCaseError::Authority(error) => MemoryApplicationError::Store(error),
+        MemoryUseCaseError::Authority(error) => MemoryApplicationError::from(error),
     }
 }
 

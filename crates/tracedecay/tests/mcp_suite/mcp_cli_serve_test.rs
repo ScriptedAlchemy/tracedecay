@@ -83,6 +83,7 @@ fn managed_skill_stdio_draft(id: &str, title: &str) -> ManagedSkillDraft {
         id: id.to_string(),
         title: title.to_string(),
         summary: format!("{title} summary."),
+        routing_description: format!("{title} summary."),
         category: "maintenance".to_string(),
         targets:
             tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(
@@ -928,7 +929,7 @@ async fn explicit_read_only_open_reports_and_guards_read_only_store() {
             .is_some_and(|actions| actions.iter().any(|a| a == "retry"))
     );
 
-    let error = match cg.open_project_store_db().await {
+    let error = match cg.open_project_store_db() {
         Ok(_) => panic!("mutating operations should be guarded before SQLite rejects writes"),
         Err(error) => error,
     };

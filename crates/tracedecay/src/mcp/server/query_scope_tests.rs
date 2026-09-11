@@ -2,7 +2,7 @@
 //!
 //! These tests pin that the query-facing MCP entry point
 //! (`resolve_registered_project_route_for_tool`) resolves scope ONCE into the
-//! transport-neutral `tracedecay_application::ResolvedScope` and carries it
+//! transport-neutral `tracedecay_contracts::ResolvedScope` and carries it
 //! on the routed project reader, failing closed exactly as the unrouted
 //! selection already did.
 

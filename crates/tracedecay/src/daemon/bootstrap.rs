@@ -13,8 +13,10 @@ use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+use tracedecay_store_runtime::spawn_semantic_artifact_gc_maintenance;
 
 use super::*;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Slice of the shutdown budget reserved for writing the terminal shutdown
 /// receipts to the daemon log after the coordinator returns.
@@ -91,13 +93,6 @@ async fn run_foreground_loopback(
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let invocation =
         DaemonInvocationState::with_progress_producer_incarnation(authority.record().epoch);
-    store_administration
-        .configure_codex_preparation_resources(
-            invocation.code_index_schedulers.process_resident_memory(),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to configure Codex preparation resources: {error}"),
-        })?;
     invocation.configure_github_read_only_credentials(authority.profile_identity());
     store_administration.install_remote_recovery_project_lifecycle(
         invocation.clone(),
@@ -168,10 +163,12 @@ async fn run_foreground_loopback(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance(
+        store_administration.session_runtime_registry().await?,
+    );
 
     let lifecycle = DaemonLifecycle::default();
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
     let profile_database = store_administration.registered_profile_database().await?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
@@ -307,24 +304,29 @@ async fn run_foreground_loopback(
                     session_refresh.shutdown().await;
                 },
             ),
-            shutdown_coordination::ShutdownOwner::new("host_admission_replay", || {}, async move {
-                replay_join.shutdown_host_admission_replay().await;
-            }),
+            shutdown_coordination::ShutdownOwner::new(
+                "host_admission_replay",
+                {
+                    let replay_cancel = store_administration.clone();
+                    move || replay_cancel.cancel_host_admission_replay()
+                },
+                async move {
+                    replay_join.shutdown_host_admission_replay().await;
+                },
+            ),
         ],
         // Client setup and in-flight requests may create schedulers, project
         // servers, or provider executions. Sweep the invocation registry only
         // after the producer owners settle, so nothing can admit a provider
         // process after the execution registry is emptied and leave it
         // running past shutdown.
-        vec![shutdown_coordination::ShutdownOwner::new(
+        vec![shutdown_coordination::ShutdownOwner::with_deadline_status(
             "invocation",
             {
                 let invocation_cancel = invocation.clone();
                 move || invocation_cancel.cancel_admissions()
             },
-            async move {
-                invocation_join.shutdown().await;
-            },
+            move |_| async move { invocation_join.shutdown().await },
         )],
         vec![shutdown_coordination::ShutdownOwner::new(
             "session_sync",
@@ -452,7 +454,7 @@ fn log_background_shutdown_receipt(receipt: &shutdown_coordination::ShutdownRece
     }
 }
 
-fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskReceipt) {
+fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::ShutdownTaskReceipt) {
     if receipt.is_clean() {
         return;
     }
@@ -466,9 +468,9 @@ fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskRec
     );
     for outcome in &receipt.outcomes {
         let status = match outcome.status {
-            store_shutdown::ShutdownTaskStatus::Clean => continue,
-            store_shutdown::ShutdownTaskStatus::Failed(_) => "failed",
-            store_shutdown::ShutdownTaskStatus::TimedOut => "timed_out",
+            tracedecay_store_runtime::ShutdownTaskStatus::Clean => continue,
+            tracedecay_store_runtime::ShutdownTaskStatus::Failed(_) => "failed",
+            tracedecay_store_runtime::ShutdownTaskStatus::TimedOut => "timed_out",
         };
         log_daemon_event(
             "daemon_shutdown",
@@ -494,6 +496,10 @@ fn hosted_dashboard_shutdown_owner() -> shutdown_coordination::ShutdownOwner {
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Foreground Unix bootstrap is one ordered authority-acquire, engine-wire, and serve sequence."
+)]
 async fn run_foreground_unix(
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
@@ -522,17 +528,6 @@ async fn run_foreground_unix(
         .with_progress_producer_incarnation(authority.record().epoch)
         .with_profile_identity(authority.profile_identity().clone())
         .with_http_application_registry(http_application_registry.clone());
-    engine
-        .store_administration
-        .configure_codex_preparation_resources(
-            engine
-                .invocation
-                .code_index_schedulers
-                .process_resident_memory(),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to configure Codex preparation resources: {error}"),
-        })?;
     engine
         .store_administration
         .install_remote_recovery_project_lifecycle(
@@ -639,8 +634,13 @@ async fn run_foreground_unix(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance(
+        engine
+            .store_administration
+            .session_runtime_registry()
+            .await?,
+    );
+    let sync_config = tracedecay_configuration::SyncConfig::default().with_env_overrides();
     let profile_database = engine
         .store_administration
         .registered_profile_database()
@@ -819,9 +819,11 @@ async fn run_foreground_unix(
 }
 
 /// Install the daemon-wide worker authority from the profile's exact
-/// `ProfileSessions` configuration before publishing a transport endpoint.
-/// Account-deletion-only boots return before this point and never start
-/// projectless capture work.
+/// `ProfileSessions` configuration before publishing a transport endpoint,
+/// then mount the process resources session preparation meters against: the
+/// daemon's resident-memory authority and the background CPU authority the
+/// worker plan just installed. Account-deletion-only boots return before this
+/// point and never start projectless capture work.
 #[hotpath::measure(label = "daemon.bootstrap.worker_plan", future = true)]
 async fn install_profile_worker_plan(
     store_administration: &StoreAdministration,
@@ -835,7 +837,7 @@ async fn install_profile_worker_plan(
         .registered_profile_session_database()
         .await?;
     invocation
-        .install_profile_worker_plan(database, &profile_id)
+        .install_profile_worker_plan(store_administration, database, &profile_id)
         .await?;
     Ok(())
 }

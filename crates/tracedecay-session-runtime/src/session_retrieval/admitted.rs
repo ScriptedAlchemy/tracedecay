@@ -1,10 +1,14 @@
 //! Application-admitted retrieval over one exact mounted session root.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::{CancellationSignal, RequestContext, ResolvedScope};
+use tracedecay_application::work::{
+    WorkTaskSessionAdmittedRetrievalFutureV1, WorkTaskSessionAdmittedRetrievalPortV1,
+};
+use tracedecay_contracts::{CancellationSignal, RequestContext, ResolvedScope};
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
 };
@@ -18,6 +22,7 @@ use tracedecay_session_memory::session::{
     TaskSessionRetrievalOutcomeV1,
 };
 use tracedecay_session_temporal_store::execution::TaskSessionRankSelectorV1;
+use tracedecay_sessions::serving::SessionProjectionServingStatus;
 use tracedecay_store::StoreShardScopeV1;
 
 use super::contract::{
@@ -70,6 +75,17 @@ impl DaemonSessionRetrievalService {
 
 pub type SessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = SessionRetrievalServiceOutcome> + Send + 'a>>;
+pub type LcmRawStoreIdsFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    BTreeMap<(String, String), i64>,
+                    tracedecay_domain::errors::TraceDecayError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
 
 pub(crate) type TaskSessionApplicationRetrievalFutureV1<'a> =
     Pin<Box<dyn Future<Output = TaskSessionRetrievalOutcomeV1> + Send + 'a>>;
@@ -154,6 +170,21 @@ pub trait SessionApplicationRetrievalPortV1: Send + Sync {
             )
         })
     }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        _identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        Box::pin(async { Ok(BTreeMap::new()) })
+    }
+
+    /// The refresh worker's serving state for this root — current, still
+    /// converging history, or without a worker — so diagnostics can name the
+    /// state a pending projection is in. `None` when no worker serves the
+    /// root at all.
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        None
+    }
 }
 
 /// Scope-bound terminal used when a project has no mounted session-retrieval
@@ -209,6 +240,12 @@ impl Drop for SessionRetrievalInFlightObservation {
 }
 
 impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
+    fn projection_serving_status(&self) -> Option<SessionProjectionServingStatus> {
+        self.refresh_status
+            .as_deref()
+            .map(|status| status.serving_status())
+    }
+
     fn retrieve_admitted<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -351,6 +388,23 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                 }
                 outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
             }
+        })
+    }
+
+    fn lcm_raw_store_ids_admitted(
+        &self,
+        identities: Vec<(String, String)>,
+    ) -> LcmRawStoreIdsFutureV1<'_> {
+        Box::pin(async move {
+            let snapshot = self.database.read_snapshot().await?;
+            tracedecay_lcm::raw::load_raw_message_store_ids_by_identity(&snapshot, &identities)
+                .await
+                .map_err(
+                    |error| tracedecay_domain::errors::TraceDecayError::Database {
+                        message: error.to_string(),
+                        operation: "resolve LCM raw-message store ids".to_owned(),
+                    },
+                )
         })
     }
 }
@@ -586,11 +640,67 @@ const fn temporal_store_unavailable_value() -> SessionRetrievalUnavailable {
     )
 }
 
+impl WorkTaskSessionAdmittedRetrievalPortV1 for DaemonSessionRetrievalService {
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> WorkTaskSessionAdmittedRetrievalFutureV1<'a> {
+        SessionApplicationRetrievalPortV1::retrieve_task_session_admitted(
+            self,
+            context,
+            temporal_query,
+            task_binding,
+            retrieval_request,
+            query,
+            retriever_revision,
+            score_domain,
+            policy_revision,
+            selector,
+        )
+    }
+}
+
+impl WorkTaskSessionAdmittedRetrievalPortV1 for dyn SessionApplicationRetrievalPortV1 {
+    fn retrieve_task_session_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        temporal_query: SessionTemporalQuery,
+        task_binding: TaskSessionBindingV1,
+        retrieval_request: RetrievalRequest,
+        query: EphemeralSanitizedQueryViewV1,
+        retriever_revision: ComponentRevision,
+        score_domain: ScoreDomainId,
+        policy_revision: ComponentRevision,
+        selector: &'a dyn TaskSessionRankSelectorV1,
+    ) -> WorkTaskSessionAdmittedRetrievalFutureV1<'a> {
+        SessionApplicationRetrievalPortV1::retrieve_task_session_admitted(
+            self,
+            context,
+            temporal_query,
+            task_binding,
+            retrieval_request,
+            query,
+            retriever_revision,
+            score_domain,
+            policy_revision,
+            selector,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestContext, RequestId,
     };
@@ -727,7 +837,7 @@ mod tests {
         )
     }
 
-    fn request_context_for(scope: tracedecay_application::ResolvedScope) -> RequestContext {
+    fn request_context_for(scope: tracedecay_contracts::ResolvedScope) -> RequestContext {
         let actor = ActorId::new("actor.message-search").expect("actor");
         let grant_digest =
             ManifestDigest::new(format!("sha256:{}", "5".repeat(64))).expect("grant digest");
@@ -772,7 +882,7 @@ mod tests {
             .identity
             .session_request_scope()
             .expect("application scope");
-        let head_scope = tracedecay_application::ResolvedScope::new(
+        let head_scope = tracedecay_contracts::ResolvedScope::new(
             serving_scope.project_id.clone(),
             serving_scope.repository_id.clone(),
             serving_scope.worktree_id.clone(),
@@ -802,7 +912,7 @@ mod tests {
             .identity
             .session_request_scope()
             .expect("application scope");
-        let foreign_scope = tracedecay_application::ResolvedScope::new(
+        let foreign_scope = tracedecay_contracts::ResolvedScope::new(
             serving_scope.project_id.clone(),
             serving_scope.repository_id.clone(),
             WorktreeId::new("worktree.project.other").expect("worktree identity"),

@@ -14,6 +14,7 @@ use super::backend::{
     BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::AutomationConfig;
+use super::host_io::HostIo;
 use super::lifecycle::{
     AgentRunFinalizer, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
     AutomationRunLedgerPublication, AutomationRunResult, BackendTaskRun, SchedulerGate,
@@ -26,15 +27,14 @@ use super::skill_writer::{
     activation_policy as skill_writer_activation_policy, validate_and_apply_skill_proposals,
     validate_skill_proposals,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::ports::project_runtime::ProfileRuntime;
-use crate::ports::project_runtime::TraceDecay;
+use crate::ports::project_runtime::{AutomationProjectContext, ProfileRuntime};
 use crate::ports::session_store::AutomationSessionStore;
-use crate::store::memory::DatabaseFactStore;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_policy::CurationApplyAuthorityV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
-use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
+use tracedecay_session_memory::memory::{MemoryApplication, is_memory_application_cancellation};
 
 mod curation;
 mod evidence;
@@ -51,7 +51,7 @@ use evidence::{
     SkillWriterEvidenceOutcome, build_session_reflector_evidence, build_skill_writer_evidence,
     canonical_evidence_hash,
 };
-use retrieval::{production_project_automation_retrieval, production_user_automation_retrieval};
+use retrieval::{production_user_automation_retrieval, unavailable_automation_retrieval};
 use session_reflector::{
     ProposedAgentOutput, SessionReflectorFinalization, build_session_reflector_prompt,
     finalize_session_reflector_success, validate_session_fact_candidates,
@@ -100,35 +100,24 @@ pub fn user_automation_root(profile_root: &std::path::Path) -> PathBuf {
     profile_root.join(USER_AUTOMATION_DIR)
 }
 
-pub(super) async fn project_automation_sessions(
-    cg: &TraceDecay,
-) -> Result<RegisteredGlobalDbLeaseV1> {
-    let FactOwnerV1::Project { project_id } = cg.project_memory_owner()? else {
-        return Err(TraceDecayError::Config {
-            message: "project automation requires authoritative project session scope".to_string(),
-        });
-    };
-    cg.project_sessions(project_id, vec![cg.store_layout().project_root.clone()])
-        .await
+pub(super) fn project_automation_sessions(
+    context: &AutomationProjectContext,
+) -> RegisteredGlobalDbLeaseV1 {
+    context.project_sessions.clone()
 }
 
 fn project_curation_authority(
-    cg: &TraceDecay,
+    context: &AutomationProjectContext,
     actor: &'static str,
     configuration_revision_id: &ConfigurationRevisionId,
 ) -> Result<CurationApplyAuthorityV1> {
-    let FactOwnerV1::Project { project_id } = cg.project_memory_owner()? else {
-        return Err(TraceDecayError::Config {
-            message: "project curation requires authoritative project scope".to_owned(),
-        });
-    };
     let actor_id = ActorId::new(actor).map_err(|error| TraceDecayError::Config {
         message: format!("invalid curation actor identity: {error}"),
     })?;
     Ok(CurationApplyAuthorityV1 {
         actor_id,
-        project_id: Some(project_id),
-        profile_id: cg.profile_id().clone(),
+        project_id: Some(context.project_id.clone()),
+        profile_id: context.profile_id.clone(),
         configuration_revision_id: configuration_revision_id.clone(),
     })
 }
@@ -184,6 +173,7 @@ struct CombinedReviewPublication<'a> {
 
 #[hotpath::measure(future = true, label = "automation.run.user_session")]
 pub async fn run_user_session_automation_with_backend(
+    host_io: HostIo,
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
@@ -196,6 +186,7 @@ pub async fn run_user_session_automation_with_backend(
     let _duration = super::scheduler_metrics::DurationGuard::run();
     let retrieval = production_user_automation_retrieval(profile_root).await;
     run_user_session_automation_with_backend_and_retrieval(
+        host_io,
         profile_root,
         session_registry,
         config,
@@ -211,6 +202,7 @@ pub async fn run_user_session_automation_with_backend(
 }
 
 pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
+    host_io: HostIo,
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
@@ -240,6 +232,7 @@ pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
     )
     .await?;
     let skill_writer = run_user_skill_writer_with_backend_and_retrieval(
+        host_io,
         profile_root,
         session_registry,
         config,
@@ -418,14 +411,14 @@ impl RetainedCombinedReviewRun {
 /// `prompt_version` set to the combined contract's version.
 #[hotpath::measure(label = "automation.run.combined_review", future = true)]
 pub async fn run_combined_review_with_backend(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: CombinedReviewAutomationOptions,
     run_control: &AutomationRunControl,
 ) -> Result<CombinedReviewDispatch> {
-    let retrieval = production_project_automation_retrieval(cg).await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_combined_review_for_retrieval(
         cg,
         config,
@@ -446,7 +439,7 @@ pub async fn run_combined_review_with_backend(
 }
 
 pub async fn run_combined_review_with_backend_and_retrieval(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -471,14 +464,14 @@ pub async fn run_combined_review_with_backend_and_retrieval(
 }
 
 pub async fn run_combined_review_with_backend_for_retained_settlement(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: CombinedReviewAutomationOptions,
     run_control: &AutomationRunControl,
 ) -> RetainedCombinedReviewRun {
-    let retrieval = production_project_automation_retrieval(cg).await;
+    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
     run_combined_review_with_backend_and_retrieval_for_retained_settlement(
         cg,
         config,
@@ -493,7 +486,7 @@ pub async fn run_combined_review_with_backend_for_retained_settlement(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -580,7 +573,7 @@ fn combined_skill_writer_evidence_or_not_combined(
 
 #[hotpath::measure(future = true, label = "automation.run.combined_review.inner")]
 async fn run_combined_review_for_retrieval(
-    cg: &TraceDecay,
+    cg: &AutomationProjectContext,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     io: AutomationTaskIo<'_>,
@@ -605,7 +598,7 @@ async fn run_combined_review_for_retrieval(
 /// rather than the inlined review state machine.
 #[allow(clippy::too_many_arguments)]
 fn run_combined_review_for_retrieval_inner<'a>(
-    cg: &'a TraceDecay,
+    cg: &'a AutomationProjectContext,
     config: &'a AutomationConfig,
     configuration_revision_id: &'a ConfigurationRevisionId,
     io: AutomationTaskIo<'a>,
@@ -635,8 +628,8 @@ fn run_combined_review_for_retrieval_inner<'a>(
                 reason: "combined_mode_disabled",
             });
         }
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
-        let sessions_db = project_automation_sessions(cg).await?;
+        let dashboard_root = cg.dashboard_root.clone();
+        let sessions_db = project_automation_sessions(cg);
         let _reflector_lock = match acquire_combined_task_lock(
             config,
             &dashboard_root,
@@ -665,10 +658,11 @@ fn run_combined_review_for_retrieval_inner<'a>(
             Ok(lock) => lock,
             Err(dispatch) => return Ok(dispatch),
         };
-        let project_memory_db = cg.open_project_store_db().await?;
         let memory = MemoryApplication::new(
-            cg.project_memory_owner()?,
-            DatabaseFactStore::new(&project_memory_db),
+            FactOwnerV1::Project {
+                project_id: cg.project_id.clone(),
+            },
+            DatabaseFactStore::new(&cg.project_memory_database),
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("could not initialize combined review memory authority: {error}"),
@@ -684,8 +678,8 @@ fn run_combined_review_for_retrieval_inner<'a>(
         let skill_bundle = match combined_skill_writer_evidence_or_not_combined(
             build_skill_writer_evidence(
                 retrieval,
-                Some(cg.project_root()),
-                Some(cg.profile_database().as_ref()),
+                Some(&cg.project_root),
+                Some(cg.profile_database.as_ref()),
                 options.skill_writer,
             )
             .await?,
@@ -705,6 +699,9 @@ fn run_combined_review_for_retrieval_inner<'a>(
         )
         .await
         {
+            if is_memory_application_cancellation(&err) {
+                return Err(err);
+            }
             tracing::warn!(error = %err, "failed to refresh fact outcomes");
         }
 
@@ -836,9 +833,12 @@ fn run_combined_review_for_retrieval_inner<'a>(
                 &reflector_bundle.evidence,
             )
             .await?;
-            let skill_errors =
+            let mut skill_errors =
                 validate_skill_proposals(&skill_bundle.profile_root, &skill_run_id, &skills)
                     .await?;
+            if let Err(error) = skill_writer::validate_skill_writer_decision(&output, &skills) {
+                skill_errors.push(json!({"reason": error.to_string()}));
+            }
             if fact_errors.is_empty() && skill_errors.is_empty() {
                 break;
             }
@@ -1031,9 +1031,10 @@ fn run_combined_review_for_retrieval_inner<'a>(
 
         let (skill_report, skill_record, skill_committed_receipt) =
             match finalize_skill_writer_success(
+                &cg.host_io,
                 &skill_finalizer,
                 &skill_bundle.profile_root,
-                Some(cg.store_layout().project_root.as_path()),
+                Some(&cg.project_root),
                 config,
                 &skill_authority,
                 activation_policy,
@@ -1300,13 +1301,15 @@ fn combined_reflector_failure_projection(output: &Value) -> Value {
 }
 
 fn combined_skill_failure_projection(output: &Value) -> Value {
-    json!({
-        "skills": output
-            .get("skills")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-    })
+    let mut projection = json!({
+        "skills": output.get("skills").and_then(Value::as_array).cloned().unwrap_or_default(),
+    });
+    for field in ["outcome", "decision"] {
+        if let Some(value) = output.get(field) {
+            projection[field] = value.clone();
+        }
+    }
+    projection
 }
 
 fn build_combined_review_prompt(reflector_evidence: &Value, skill_evidence: &Value) -> String {

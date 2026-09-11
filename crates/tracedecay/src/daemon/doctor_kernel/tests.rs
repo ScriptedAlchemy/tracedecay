@@ -1,16 +1,14 @@
-//! Daemon-owned Doctor signal-mapper tests.
+//! Daemon-owned Doctor signal-mapper and composition tests.
 //!
-//! Adapter structs, [`DaemonRuntimeHealthSignalV1`], and
-//! [`compose_doctor_report`] live in `tracedecay-application::doctor` and are
-//! covered there. This module keeps the mappers that still read daemon,
-//! global-db, LSP, and host-bundle types.
+//! Read mappers and [`DaemonRuntimeHealthSignalV1`] live in
+//! `tracedecay-contracts::doctor`. Composition from resolved kernel reads is
+//! owned here at the composition root.
 
-use tracedecay_application::doctor::{
-    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1,
-    IngestRefusalCensusReadV1, IngestRefusalCountV1, LanguageServerReadV1, LanguageServerStateV1,
-    ObservabilityReadV1, ObservabilityStateV1,
+use tracedecay_contracts::doctor::{
+    DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1, IngestRefusalCountV1,
+    LanguageServerReadV1, LanguageServerStateV1, ObservabilityReadV1, ObservabilityStateV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
     storage::StoreSizeSampleV1,
 };
@@ -80,7 +78,8 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
 
 #[test]
 fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
-    let checked_in = crate::agents::host_bundle_v2::HostBundleDoctorReportV1::default();
+    let checked_in =
+        tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleDoctorReportV1::default();
     assert_eq!(
         host_integration_read_from_report(&checked_in),
         HostIntegrationReadV1::Absent
@@ -88,13 +87,13 @@ fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
 
     let mut drifted = checked_in;
     drifted.components.push(
-        crate::agents::host_bundle_v2::HostBundleComponentDoctorResultV1 {
+        tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorResultV1 {
             receipt_path: std::path::PathBuf::from("receipt.fixture.json"),
-            host: Some(crate::agents::host_bundle_v2::HostKindV1::Codex),
-            component: Some(crate::agents::host_bundle_v2::HostBundleComponentV1::Core),
-            state: crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1::Repairable,
+            host: Some(tracedecay_agent_hosts::agents::host_bundle_v2::HostKindV1::Codex),
+            component: Some(tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentV1::Core),
+            state: tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorStateV1::Repairable,
             registration: Some(
-                crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable,
+                tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable,
             ),
             artifacts: Vec::new(),
             repair_action: "repair fixture".to_owned(),
@@ -135,37 +134,6 @@ fn synchronous_table_growth_is_bounded_by_observed_store_size() {
 }
 
 #[test]
-fn synchronous_exhaustive_scans_are_bounded_before_work_starts() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let small = tmp.path().join("small");
-    std::fs::create_dir(&small).unwrap();
-    std::fs::write(small.join("payload"), b"small").unwrap();
-    assert!(permits_synchronous_exhaustive_scan(&small));
-
-    let large = tmp.path().join("large");
-    std::fs::create_dir(&large).unwrap();
-    std::fs::File::create(large.join("payload"))
-        .unwrap()
-        .set_len(MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES + 1)
-        .unwrap();
-    assert!(!permits_synchronous_exhaustive_scan(&large));
-}
-
-#[test]
-fn synchronous_session_retention_includes_sqlite_sidecars() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let database = tmp.path().join("sessions.db");
-    std::fs::write(&database, b"small").unwrap();
-    assert!(permits_synchronous_session_retention_backlog(&database));
-
-    std::fs::File::create(tmp.path().join("sessions.db-wal"))
-        .unwrap()
-        .set_len(MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES + 1)
-        .unwrap();
-    assert!(!permits_synchronous_session_retention_backlog(&database));
-}
-
-#[test]
 fn language_server_engine_states_preserve_live_degradation() {
     use tracedecay_lsp::analyzer::broker::EngineState;
 
@@ -192,7 +160,7 @@ fn language_server_engine_states_preserve_live_degradation() {
 #[test]
 fn empty_observation_projection_is_absent() {
     let model =
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
             .expect("empty projection");
     assert_eq!(
         observability_read_from_model(Ok(model)),
@@ -203,7 +171,7 @@ fn empty_observation_projection_is_absent() {
 #[test]
 fn retained_or_unreported_observation_history_is_not_absent() {
     let model =
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
             &[],
             1,
             0,
@@ -220,7 +188,7 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     );
 
     let unknown =
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project_with_accounting(
             &[],
             0,
             1,
@@ -237,9 +205,9 @@ fn retained_or_unreported_observation_history_is_not_absent() {
     );
 
     let mut active =
-        tracedecay_usecases::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+        tracedecay_application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
             .expect("active empty projection");
-    active.coverage = tracedecay_application::feedback::observations::FeedbackCoverageV1::Known;
+    active.coverage = tracedecay_contracts::feedback::observations::FeedbackCoverageV1::Known;
     active.watermark.producer_boot_id =
         Some(tracedecay_domain::canonical_sha256(&"active-observation-boot").unwrap());
     assert_eq!(
@@ -252,72 +220,204 @@ fn retained_or_unreported_observation_history_is_not_absent() {
         }
     );
 }
+#[tokio::test]
+async fn composed_report_carries_real_states_and_enumerates_coverage() {
+    use std::collections::BTreeSet;
 
-#[test]
-fn refusal_censuses_merge_by_provider_and_reason() {
-    use tracedecay_global_db::observation::{
-        ObservationRefusalCensusV1, ObservationRefusalCountV1,
+    use tracedecay_contracts::doctor::{
+        AdvisoryFeedbackReadV1, CodeIndexMountReadV1, CodeIndexMountStateV1,
+        ConfigurationAuthorityReadV1, ConfigurationDriftV1, DoctorCoverageCompletenessV1,
+        DoctorCoverageStatementV1, DoctorEvidenceRefV1, DoctorEvidenceReferenceV1,
+        DoctorEvidenceStateV1, DoctorFamilyConsultationV1, DoctorFamilyCoverageV1,
+        DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorFindingV1,
+        DoctorKernelInputsV1, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
+        DoctorStorageFindingV1, OperationalAuditReadV1, ProfileAuthorityReadV1,
+        RemoteOperationalReadV1, SemanticOwnerReadV1, SemanticOwnerStateV1,
     };
+    use tracedecay_contracts::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestContext, RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::{
+        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    };
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-    let merged = ingest_refusal_read_from_censuses(&[
-        ObservationRefusalCensusV1::Observed {
-            refusals: vec![ObservationRefusalCountV1 {
-                provider: "cursor".to_owned(),
-                reason: "admission_refused".to_owned(),
-                count: 100,
-            }],
-        },
-        ObservationRefusalCensusV1::Observed {
-            refusals: vec![
-                ObservationRefusalCountV1 {
-                    provider: "cursor".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 60,
-                },
-                ObservationRefusalCountV1 {
-                    provider: "codex".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 27,
-                },
-            ],
-        },
-    ]);
+    let actor = ActorId::new("actor.doctor-kernel-compose-test").unwrap();
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.doctor-kernel-compose-test").unwrap(),
+        RepositoryId::new("repository.doctor-kernel-compose-test").unwrap(),
+        WorktreeId::new("worktree.doctor-kernel-compose-test").unwrap(),
+        None,
+    )
+    .unwrap();
+    let capability = CapabilityId::new("capability.doctor-kernel-compose-test").unwrap();
+    let use_case = UseCaseId::new("use-case.doctor-kernel-compose-test").unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.doctor-kernel-compose-test").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "11".repeat(32))).unwrap(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(10_000),
+        scope.clone(),
+        BTreeSet::from([capability]),
+        BTreeSet::from([use_case]),
+        DisclosureClass::Evidence,
+    )
+    .unwrap();
+    let ctx = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.doctor-kernel-compose-test").unwrap(),
+        Deadline::new(UtcMicros(9_000)).unwrap(),
+        CancellationContext::active("cancel.doctor-kernel-compose-test").unwrap(),
+    )
+    .unwrap();
 
-    assert_eq!(
-        merged,
-        IngestRefusalCensusReadV1::Observed {
-            refusals: vec![
-                IngestRefusalCountV1 {
-                    provider: "codex".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 27,
-                },
-                IngestRefusalCountV1 {
-                    provider: "cursor".to_owned(),
-                    reason: "admission_refused".to_owned(),
-                    count: 160,
-                },
-            ],
-        }
+    let orphan_evidence = DoctorEvidenceRefV1::new(
+        DoctorFindingFamilyV1::Storage,
+        DoctorEvidenceReferenceV1::new("storage.orphan_store.fixture.age-42d").unwrap(),
     );
-}
+    let orphan_coverage = DoctorCoverageStatementV1::new(
+        DoctorCoverageCompletenessV1::Complete,
+        "orphan store identity no longer resolves",
+    )
+    .unwrap();
+    let orphan_finding = DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Storage,
+        DoctorEvidenceStateV1::Degraded,
+        vec![orphan_evidence],
+        orphan_coverage,
+    )
+    .unwrap();
+    let orphan_storage =
+        DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, orphan_finding)
+            .unwrap();
 
-#[test]
-fn one_unavailable_refusal_census_makes_the_merged_read_unknown() {
-    use tracedecay_global_db::observation::{
-        ObservationRefusalCensusV1, ObservationRefusalCountV1,
-    };
-
-    let merged = ingest_refusal_read_from_censuses(&[
-        ObservationRefusalCensusV1::Observed {
-            refusals: vec![ObservationRefusalCountV1 {
+    let inputs = DoctorKernelInputsV1 {
+        configuration: ConfigurationAuthorityReadV1::Resolved {
+            drift: ConfigurationDriftV1::InSync,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
+            serving: true,
+            startup_converged: false,
+            ..DaemonRuntimeHealthSignalV1::default()
+        }),
+        operational_audit: OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
+            profile_authority: ProfileAuthorityReadV1::Unavailable,
+        },
+        host: HostIntegrationReadV1::Denied,
+        advisory_feedback: AdvisoryFeedbackReadV1::Absent,
+        language_server: LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Ready,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        code_index: CodeIndexMountReadV1::Observed {
+            state: CodeIndexMountStateV1::Mounted,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        semantic_owner: SemanticOwnerReadV1::Observed {
+            state: SemanticOwnerStateV1::Ready,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
+        observability: ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 7,
+            last_observed_at_micros: Some(42),
+            coverage: DoctorCoverageCompletenessV1::Partial,
+        },
+        ingest_refusals: IngestRefusalCensusReadV1::Observed {
+            refusals: vec![IngestRefusalCountV1 {
                 provider: "cursor".to_owned(),
                 reason: "admission_refused".to_owned(),
-                count: 1,
+                count: 160,
             }],
         },
-        ObservationRefusalCensusV1::Unavailable,
-    ]);
+        storage: merge_storage_reads(
+            storage_family_read(vec![orphan_storage]),
+            DoctorStorageFamilyReadV1::Unknown,
+        ),
+    };
 
-    assert_eq!(merged, IngestRefusalCensusReadV1::Unknown);
+    let report = compose_doctor_report(&ctx, &inputs).await.expect("report");
+
+    assert_eq!(report.coverage().families().len(), 7);
+
+    let family_state = |family: DoctorFindingFamilyV1| {
+        report
+            .findings()
+            .find(|finding| finding.family() == family)
+            .map(DoctorFindingV1::state)
+    };
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Configuration),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::StorageRuntime),
+        Some(DoctorEvidenceStateV1::Degraded)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Advisory),
+        Some(DoctorEvidenceStateV1::Denied)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::SemanticIndex),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Storage),
+        Some(DoctorEvidenceStateV1::Degraded)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::LanguageServer),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Observability),
+        Some(DoctorEvidenceStateV1::Partial)
+    );
+
+    assert!(!report.is_healthy_complete());
+    assert_ne!(
+        report.coverage().completeness(),
+        DoctorCoverageCompletenessV1::Complete
+    );
+
+    let consultation = |family: DoctorFindingFamilyV1| {
+        report
+            .coverage()
+            .families()
+            .iter()
+            .find(|record| record.family() == family)
+            .map(DoctorFamilyCoverageV1::consultation)
+    };
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::LanguageServer),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Observability),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Advisory),
+        Some(DoctorFamilyConsultationV1::Unavailable {
+            reason: DoctorFamilyUnavailableReasonV1::Denied,
+        })
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Configuration),
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Storage),
+        Some(DoctorFamilyConsultationV1::Unavailable {
+            reason: DoctorFamilyUnavailableReasonV1::Unknown,
+        })
+    );
 }

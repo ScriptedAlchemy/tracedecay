@@ -12,18 +12,21 @@ use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest, CallableCodeSurfaceMeta,
-    CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest, parse_application_surface_request,
-    resolve_http_application_surface,
-};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
-use tracedecay_application::retrieval::SymbolGraphScope;
-use tracedecay_application::{
+use tracedecay_contracts::retrieval::SymbolGraphScope;
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
     ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
 };
+use tracedecay_daemon_protocol::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
+    parse_application_surface_request,
+};
 use tracedecay_daemon_protocol::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay_daemon_service::application_surface::{
+    CallableCodeSurfaceMeta, CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest,
+    resolve_http_application_surface,
+};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Every surface pins its page size to ten rows, so a query with more matches
@@ -86,7 +89,9 @@ async fn production_fixture() -> ProductionFixture {
         &project,
         &["commit", "-qm", "application reachability fixture"],
     );
-    let daemon = common::spawn_tracedecay_daemon(environment.home());
+    let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
+        environment.apply_toolchain_env(command);
+    });
     let initialized = common::tracedecay_command_with_home(environment.home())
         .arg("init")
         .current_dir(&project)
@@ -220,6 +225,55 @@ fn seed_managed_test_run(home: &Path, project: &Path) {
         .output()
         .expect("seed a managed test run");
     assert_command_success("tracedecay_run_affected_tests", &seeded);
+}
+
+/// Runs the installed compiler against a retained fixture file, then admits its
+/// actual output through the same diagnostic publisher used by agent hosts.
+fn publish_compiler_diagnostics(fixture: &ProductionFixture, compiler: &Path) {
+    let output_directory = tempfile::TempDir::new().expect("compiler output directory");
+    let compiled = std::process::Command::new(compiler)
+        .current_dir(&fixture.project)
+        .args([
+            "--crate-type=lib",
+            "--edition=2024",
+            "--emit=metadata",
+            "--color=never",
+            "src/application_pagination_types.rs",
+            "--out-dir",
+        ])
+        .arg(output_directory.path())
+        .output()
+        .expect("run the real compiler for diagnostic publication");
+    assert_command_success("compile diagnostic fixture", &compiled);
+    let cargo_output = String::from_utf8(compiled.stderr).expect("compiler diagnostic text");
+    assert!(
+        cargo_output.contains("unused variable"),
+        "the existing unused type-anchor parameters must produce real warnings: {cargo_output}"
+    );
+    let arguments = serde_json::json!({
+        "cargo_output": cargo_output,
+        "include_callers": false,
+        "format": "json",
+    });
+    let published = common::tracedecay_command_with_home(fixture.home())
+        .current_dir(&fixture.project)
+        .args(["tool", "diagnose", "--json", "--args"])
+        .arg(arguments.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .expect("publish real compiler diagnostics through diagnose");
+    assert_command_success("publish compiler diagnostics", &published);
+    let published: Value =
+        serde_json::from_slice(&published.stdout).expect("diagnose publication JSON");
+    let published = tracedecay::daemon::tool_json_payload(&published, "tracedecay_diagnose")
+        .expect("canonical diagnose publication payload");
+    assert_eq!(published["published"]["status"], "published", "{published}");
+    assert!(
+        published["published"]["inserted"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "compiler warnings must reach the canonical diagnostic store: {published}"
+    );
 }
 
 fn probe_symbol_source() -> String {
@@ -500,7 +554,7 @@ const READINESS_RETRY_FLOOR_MILLIS: u64 = 250;
 /// carries the LAST problem record verbatim, so a never-resolving admission
 /// (for example a defective initial identity capture) stays diagnostic
 /// instead of collapsing into an opaque timeout.
-async fn admitted_mcp_invocation(
+pub(super) async fn admitted_mcp_invocation(
     client: &DaemonInvocationClient,
     operation: ApplicationSurfaceOperation,
     request_id: &str,
@@ -746,6 +800,15 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
 #[tokio::test(flavor = "multi_thread")]
 async fn operation_family_executes_through_cli_mcp_and_http() {
     let fixture = production_fixture().await;
+    let mut compiler = std::process::Command::new("rustup");
+    fixture._environment.apply_toolchain_env(&mut compiler);
+    let compiler = compiler
+        .args(["which", "rustc"])
+        .output()
+        .expect("resolve the installed fixture compiler");
+    assert_command_success("resolve fixture compiler", &compiler);
+    let compiler = String::from_utf8(compiler.stdout).expect("compiler path");
+    publish_compiler_diagnostics(&fixture, Path::new(compiler.trim()));
     let cases = [
         (
             ApplicationSurfaceOperation::FeedbackImpact,
@@ -1049,7 +1112,7 @@ fn callable_code_meta(cursor: Option<&str>) -> Value {
 /// the freshness-resolved latest complete generation.
 fn code_query_scope() -> Value {
     serde_json::json!({
-        "generation": tracedecay_application::UNPINNED_LATEST_GENERATION_SENTINEL,
+        "generation": tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL,
         "path_prefix": Value::Null,
     })
 }
@@ -1145,7 +1208,6 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                 serde_json::json!({
                     "node_id": anchors.sink,
                     "maximum_depth": 1,
-                    "resolve_trait_dispatch": false,
                     "scope": symbol_graph_scope(),
                     "meta": callable_code_meta(cursor),
                 })

@@ -41,9 +41,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
@@ -66,10 +67,12 @@ struct TestProfileInner {
 /// Cloning is cheap and shares the isolated environment, so a
 /// [`RegisteredProject`] keeps the throwaway `HOME` and the process-wide env
 /// lock alive for as long as any handle to it exists. A fixture therefore
-/// cannot drop its environment guard while still using a store.
+/// cannot drop its environment guard while still using a store. The
+/// environment pins process-global state from the test's own thread (its
+/// env lock guard must be released there), so handles are shared with `Rc`.
 #[derive(Clone)]
 pub struct TestProfile {
-    inner: Arc<TestProfileInner>,
+    inner: Rc<TestProfileInner>,
 }
 
 impl TestProfile {
@@ -96,7 +99,7 @@ impl TestProfile {
         });
         let global_db_path = root.join("global.db");
         Self {
-            inner: Arc::new(TestProfileInner {
+            inner: Rc::new(TestProfileInner {
                 env,
                 root,
                 global_db_path,
@@ -482,9 +485,13 @@ impl UnenrolledProject {
 impl RegisteredProject {
     /// This project's runtime, promoted to the project scope that project-graph
     /// and project-session seams require.
-    pub fn project_scoped_runtime(&self) -> tracedecay::host_admission::ProjectScopedTestRuntimeV1 {
-        tracedecay::host_admission::ProjectScopedTestRuntimeV1::new(Arc::clone(&self.registry))
-            .unwrap_or_else(|err| panic!("fixture project runtime must be project-scoped: {err}"))
+    pub fn project_scoped_runtime(
+        &self,
+    ) -> tracedecay::test_support::host_admission::ProjectScopedTestRuntimeV1 {
+        tracedecay::test_support::host_admission::ProjectScopedTestRuntimeV1::new(Arc::clone(
+            &self.registry,
+        ))
+        .unwrap_or_else(|err| panic!("fixture project runtime must be project-scoped: {err}"))
     }
 
     /// An MCP server for this project with its registry database, retained

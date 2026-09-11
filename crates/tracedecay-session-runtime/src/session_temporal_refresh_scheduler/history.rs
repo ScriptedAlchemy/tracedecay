@@ -3,10 +3,12 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 
-use tracedecay_application::ProfileIdentityReadPort;
+use tracedecay_application::observation::ObservationCancellation;
+use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_usecases::observation::ObservationCancellation;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 pub type SessionHistoricalIngestPass<'a> =
     Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + 'a>>;
@@ -54,9 +56,19 @@ impl SessionHistoricalIngestOutcome {
 pub trait SessionHistoricalIngestor: Send + Sync {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_>;
     fn cancel(&self);
+
+    fn take_progress(&self) -> SessionHistoricalIngestProgress {
+        SessionHistoricalIngestProgress::default()
+    }
 }
 
 pub type SharedSessionHistoricalIngestor = Arc<dyn SessionHistoricalIngestor>;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SessionHistoricalIngestProgress {
+    pub stats: tracedecay_sessions::TranscriptIngestStats,
+    pub committed: bool,
+}
 
 pub struct ProjectSessionHistoricalIngestor {
     database: RegisteredGlobalDbLeaseV1,
@@ -66,8 +78,10 @@ pub struct ProjectSessionHistoricalIngestor {
     transcript_source_home: Option<PathBuf>,
     cancellation: ObservationCancellation,
     codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
     codex_consumer: String,
     codex_registered: AtomicBool,
+    progress: Mutex<SessionHistoricalIngestProgress>,
 }
 
 impl ProjectSessionHistoricalIngestor {
@@ -78,6 +92,7 @@ impl ProjectSessionHistoricalIngestor {
         project_id: tracedecay_domain::ProjectId,
         transcript_source_home: Option<PathBuf>,
         codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+        background_cpu: Arc<ProcessBackgroundCpuV1>,
     ) -> Self {
         let source_home = transcript_source_home
             .as_deref()
@@ -98,8 +113,10 @@ impl ProjectSessionHistoricalIngestor {
             transcript_source_home,
             cancellation: ObservationCancellation::default(),
             codex_discovery,
+            background_cpu,
             codex_consumer,
             codex_registered: AtomicBool::new(true),
+            progress: Mutex::new(SessionHistoricalIngestProgress::default()),
         }
     }
 
@@ -114,7 +131,8 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let authority =
-                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone());
+                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone())
+                    .with_background_cpu(Arc::clone(&self.background_cpu));
             let pass = Box::pin(
                 tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation_and_codex_state(
                     self.profile_identity.brain_id(),
@@ -135,13 +153,23 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
                 }
                 None => pass.await,
             };
-            classify_transcript_ingest_outcome(outcome, &self.cancellation)
+            let progress = SessionHistoricalIngestProgress {
+                stats: outcome.stats,
+                committed: outcome.scheduling_state_written || outcome.made_progress(),
+            };
+            let classified = classify_transcript_ingest_outcome(outcome, &self.cancellation);
+            *self.progress.lock().unwrap_or_else(PoisonError::into_inner) = progress;
+            classified
         })
     }
 
     fn cancel(&self) {
         self.cancellation.cancel();
         self.deregister_codex_once();
+    }
+
+    fn take_progress(&self) -> SessionHistoricalIngestProgress {
+        std::mem::take(&mut *self.progress.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
 
@@ -158,8 +186,10 @@ pub struct ProfileSessionHistoricalIngestor {
     transcript_source_home: Option<PathBuf>,
     cancellation: ObservationCancellation,
     codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
     codex_consumer: String,
     codex_registered: AtomicBool,
+    progress: Mutex<SessionHistoricalIngestProgress>,
 }
 
 impl ProfileSessionHistoricalIngestor {
@@ -169,6 +199,7 @@ impl ProfileSessionHistoricalIngestor {
         profile_identity: Arc<dyn ProfileIdentityReadPort>,
         transcript_source_home: Option<PathBuf>,
         codex_discovery: Arc<tracedecay_sessions::runtime::codex::CodexDiscoveryHub>,
+        background_cpu: Arc<ProcessBackgroundCpuV1>,
     ) -> Self {
         let source_home = transcript_source_home
             .as_deref()
@@ -188,8 +219,10 @@ impl ProfileSessionHistoricalIngestor {
             transcript_source_home,
             cancellation: ObservationCancellation::default(),
             codex_discovery,
+            background_cpu,
             codex_consumer,
             codex_registered: AtomicBool::new(true),
+            progress: Mutex::new(SessionHistoricalIngestProgress::default()),
         }
     }
 
@@ -222,9 +255,11 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let authority =
-                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone());
+                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone())
+                    .with_background_cpu(Arc::clone(&self.background_cpu));
             let registry_authority =
-                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone());
+                tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone())
+                    .with_background_cpu(Arc::clone(&self.background_cpu));
             let pass = Box::pin(
                 tracedecay_sessions::runtime::ingest_user_global_sources_for_startup_with_db_and_codex_state(
                     self.profile_identity.brain_id(),
@@ -242,13 +277,23 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
                 }
                 None => pass.await,
             };
-            classify_transcript_ingest_outcome(outcome, &self.cancellation)
+            let progress = SessionHistoricalIngestProgress {
+                stats: outcome.stats,
+                committed: outcome.scheduling_state_written || outcome.made_progress(),
+            };
+            let classified = classify_transcript_ingest_outcome(outcome, &self.cancellation);
+            *self.progress.lock().unwrap_or_else(PoisonError::into_inner) = progress;
+            classified
         })
     }
 
     fn cancel(&self) {
         self.cancellation.cancel();
         self.deregister_codex_once();
+    }
+
+    fn take_progress(&self) -> SessionHistoricalIngestProgress {
+        std::mem::take(&mut *self.progress.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
 
@@ -287,10 +332,10 @@ fn classify_transcript_ingest_outcome(
 #[cfg(test)]
 mod tests {
     use super::{SessionHistoricalIngestOutcome, classify_transcript_ingest_outcome};
+    use tracedecay_application::observation::ObservationCancellation;
     use tracedecay_sessions::runtime::{
         IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestOutcome,
     };
-    use tracedecay_usecases::observation::ObservationCancellation;
 
     fn ingest_outcome_with_failure(
         reason_code: &'static str,

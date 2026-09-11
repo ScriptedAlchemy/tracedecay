@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::File;
 #[cfg(not(windows))]
 use std::fs::OpenOptions;
@@ -55,7 +56,7 @@ where
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub struct DaemonAuthorityRecord {
     pub pid: u32,
     pub process_run_id: String,
@@ -74,6 +75,28 @@ pub struct DaemonAuthorityRecord {
     pub brain_id: Option<BrainId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<UserProfileId>,
+}
+
+/// The persisted JSON keeps the live bearer token; diagnostics never do. The
+/// enclosing [`DaemonAuthority`] derives `Debug` through this redaction.
+impl fmt::Debug for DaemonAuthorityRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DaemonAuthorityRecord")
+            .field("pid", &self.pid)
+            .field("process_run_id", &self.process_run_id)
+            .field("started_at_unix_secs", &self.started_at_unix_secs)
+            .field("epoch", &self.epoch)
+            .field("version", &self.version)
+            .field("endpoint", &self.endpoint)
+            .field("http_application_endpoint", &self.http_application_endpoint)
+            .field("remote_brain_tls_endpoint", &self.remote_brain_tls_endpoint)
+            .field("auth_token", &"[REDACTED]")
+            .field("profile_root", &self.profile_root)
+            .field("brain_id", &self.brain_id)
+            .field("profile_id", &self.profile_id)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -102,7 +125,7 @@ impl DaemonAuthority {
         let lock_path = authority_root.join(LOCK_FILE);
         let mut lock = open_private_lock(&lock_path)?;
         if let Err(error) = lock.try_lock_exclusive() {
-            if !is_lock_contended(&error) {
+            if !tracedecay_private_fs::is_lock_contended(&error) {
                 return Err(config_io("lock", &lock_path, &error));
             }
             let record = read_record_if_present(&authority_root.join(RECORD_FILE))
@@ -353,23 +376,48 @@ fn canonical_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonEndpoint> {
     }
 }
 
+/// The record is one pretty-printed JSON object: identifiers, two socket
+/// addresses, a 64-hex token, and two filesystem paths, so 16 KiB is generous.
+const MAX_RECORD_BYTES: u64 = 16 * 1024;
+
+/// Opens the record exactly once through the owner-private reader (no symlink
+/// following; kind, mode, and ownership validated on the opened handle), then
+/// bounds the read by that same handle's length.
 fn read_record_if_present(path: &Path) -> Result<Option<DaemonAuthorityRecord>> {
     #[cfg(windows)]
-    let mut file = match windows_acl::open_private_file(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(config_io("secure before reading", path, &error)),
-    };
+    let opened = windows_acl::open_private_file(path);
     #[cfg(not(windows))]
-    let mut file = match File::open(path) {
+    let opened = tracedecay_private_fs::open_private_file(path);
+    let file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(config_io("open", path, &error)),
+        Err(error) => return Err(config_io("open private", path, &error)),
     };
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)
+    let length = file
+        .metadata()
+        .map_err(|error| config_io("inspect", path, &error))?
+        .len();
+    if length > MAX_RECORD_BYTES {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "daemon authority record '{}' is {length} bytes; the limit is {MAX_RECORD_BYTES}",
+                path.display()
+            ),
+        });
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| config_io("read", path, &error))?;
-    serde_json::from_str(&contents)
+    if u64::try_from(bytes.len()).ok() != Some(length) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "daemon authority record '{}' changed while it was being read",
+                path.display()
+            ),
+        });
+    }
+    serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|error| TraceDecayError::Config {
             message: format!(
@@ -457,18 +505,6 @@ fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn is_lock_contended(error: &std::io::Error) -> bool {
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        error.raw_os_error() == Some(33)
-    }
-    #[cfg(not(windows))]
-    false
-}
-
 fn new_auth_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::getrandom(&mut bytes).map_err(|error| TraceDecayError::Config {
@@ -535,6 +571,29 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
         );
+    }
+
+    #[test]
+    fn debug_output_redacts_the_auth_token_but_the_record_still_persists_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        let token = authority.auth_token().to_string();
+        assert_eq!(token.len(), 64);
+
+        let record_debug = format!("{:?}", authority.record());
+        let authority_debug = format!("{authority:?}");
+
+        assert!(!record_debug.contains(&token), "{record_debug}");
+        assert!(!authority_debug.contains(&token), "{authority_debug}");
+        assert!(record_debug.contains("[REDACTED]"));
+        assert!(record_debug.contains(&format!("epoch: {}", authority.record().epoch)));
+        assert_eq!(
+            serde_json::to_value(authority.record()).unwrap()["auth_token"],
+            token
+        );
+        assert_eq!(current_record(&profile).unwrap().unwrap().auth_token, token);
     }
 
     #[test]
@@ -767,10 +826,71 @@ mod tests {
             profile_root: profile_root.clone(),
         };
         std::fs::write(&record_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        restrict_file(&record_path).unwrap();
 
         let decoded = read_record_if_present(&record_path).unwrap().unwrap();
         assert_eq!(decoded.endpoint, DaemonEndpoint::Unix(socket_path));
         assert_eq!(decoded.auth_token, "a".repeat(64));
+    }
+
+    #[test]
+    fn oversized_record_is_refused_before_decoding() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        let mut oversized = serde_json::to_vec_pretty(authority.record()).unwrap();
+        oversized.truncate(oversized.len() - 1);
+        oversized.extend_from_slice(b",\"padding\":\"");
+        oversized.resize(usize::try_from(MAX_RECORD_BYTES).unwrap() + 1, b'p');
+        oversized.extend_from_slice(b"\"}");
+        std::fs::write(&authority.record_path, &oversized).unwrap();
+        restrict_file(&authority.record_path).unwrap();
+
+        let error = read_record_if_present(&authority.record_path).unwrap_err();
+
+        assert!(error.to_string().contains("the limit is"), "{error}");
+        assert!(authority.ensure_current().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_record_is_refused_even_when_its_target_is_private() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        let substitute = temp.path().join("substitute.json");
+        write_record(&substitute, authority.record()).unwrap();
+        assert!(read_record_if_present(&substitute).unwrap().is_some());
+        std::fs::remove_file(&authority.record_path).unwrap();
+        std::os::unix::fs::symlink(&substitute, &authority.record_path).unwrap();
+
+        let error = read_record_if_present(&authority.record_path).unwrap_err();
+
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert!(current_record(&profile).is_err());
+        assert!(authority.ensure_current().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_readable_record_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        std::fs::set_permissions(
+            &authority.record_path,
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        let error = read_record_if_present(&authority.record_path).unwrap_err();
+
+        assert!(error.to_string().contains("not private"), "{error}");
     }
 
     #[test]

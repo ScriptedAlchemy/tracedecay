@@ -9,7 +9,7 @@ use std::{
 };
 
 use rusqlite::{Connection, Transaction};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
     storage::{
@@ -679,6 +679,10 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
         ),
         "the first read must report baseline establishment, got {baseline:?}"
     );
+    assert!(
+        pool.wait_until_quiescent(Duration::from_secs(3)),
+        "the baseline snapshot must settle before mutating the store"
+    );
     let connection = Connection::open(&store.path).unwrap();
     for value in 0..256 {
         connection
@@ -725,6 +729,10 @@ fn application_telemetry_port_marks_new_table_baseline_pending() {
         baseline,
         TableGrowthTelemetryReadV1::BaselineEstablished { .. }
     ));
+    assert!(
+        pool.wait_until_quiescent(Duration::from_secs(3)),
+        "the baseline snapshot must settle before mutating the store"
+    );
 
     let connection = Connection::open(&store.path).unwrap();
     connection

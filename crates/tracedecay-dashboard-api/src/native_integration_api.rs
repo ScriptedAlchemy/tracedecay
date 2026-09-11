@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
-use tracedecay_application::{
+use tracedecay_contracts::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
 };
 use tracedecay_domain::NativeIntegrationTransactionId;

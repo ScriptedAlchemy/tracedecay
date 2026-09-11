@@ -161,7 +161,7 @@ async fn context_eval_fixture_scores_real_queries() {
 }
 
 /// Ranked qualified names from the live `ContextResultV1` envelope
-/// (`crates/tracedecay-application/src/retrieval/primitive_surface.rs`).
+/// (`crates/tracedecay-contracts/src/retrieval/primitive_surface.rs`).
 /// Context races primary search against the verified graph with
 /// `require_graph_for_empty_result = false`
 /// (`race_primary_search_with_graph` in

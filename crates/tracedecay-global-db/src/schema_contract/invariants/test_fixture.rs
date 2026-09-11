@@ -37,7 +37,7 @@ pub(super) async fn open_registered() -> (TempDir, RegisteredGlobalDbTestFixture
 }
 
 /// A committed observation and the source cursor its commit implies.
-pub(super) fn authority_fixture(
+pub(crate) fn authority_fixture(
     index: u64,
     label: &str,
 ) -> (DurableObservationV1, ObservationSourceCursorV1) {

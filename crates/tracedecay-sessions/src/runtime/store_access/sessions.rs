@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::path::Path;
 
 use serde_json::Value as JsonValue;
 
@@ -8,11 +9,13 @@ use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
+use crate::runtime::codex::codex_cursor_key;
 use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
+use super::super::shared::{durable_project_path_key, path_identity_key};
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -36,6 +39,28 @@ pub(crate) const EXISTING_SESSION_MESSAGE_IDS_SQL: &str = "SELECT messages.messa
      WHERE requested.type = 'text'
        AND messages.provider = ?1
        AND messages.message_id = requested.value";
+
+/// Appends the project-scope predicate.
+///
+/// `project_key` is an opaque authority and stays byte-exact. `project_path`
+/// may retain its opened spelling in observation projection or its canonical
+/// OS identity in transcript persistence. Scoped reads accept both spellings.
+fn push_project_identity_predicate(
+    sql: &mut String,
+    query_params: &mut Vec<Value>,
+    project_selector: &str,
+) {
+    query_params.push(Value::Text(project_selector.to_owned()));
+    let key_parameter = query_params.len();
+    query_params.push(Value::Text(durable_project_path_key(project_selector)));
+    let path_parameter = query_params.len();
+    query_params.push(Value::Text(path_identity_key(project_selector)));
+    let opened_parameter = query_params.len();
+    let _ = write!(
+        sql,
+        " AND (s.project_key = ?{key_parameter} OR s.project_path IN (?{path_parameter}, ?{opened_parameter}))"
+    );
+}
 
 fn session_db_operation_error(
     operation: &'static str,
@@ -199,22 +224,15 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         loop {
             let mut rows = reader
                 .query(
-                    "SELECT paths.transcript_path,
-                            COALESCE(offsets.byte_offset, 0),
-                            COALESCE(offsets.mtime, 0)
-                     FROM (
-                         SELECT DISTINCT transcript_path
-                         FROM sessions
-                         WHERE (?1 IS NULL OR provider = ?1)
-                           AND transcript_path IS NOT NULL
-                           AND transcript_path != ''
-                           AND transcript_path > ?2
-                         ORDER BY transcript_path
-                         LIMIT ?3
-                     ) AS paths
-                     LEFT JOIN parse_offsets AS offsets
-                       ON offsets.file_path = paths.transcript_path
-                     ORDER BY paths.transcript_path",
+                    "SELECT transcript_path, json_group_array(DISTINCT provider)
+                     FROM sessions
+                     WHERE (?1 IS NULL OR provider = ?1)
+                       AND transcript_path IS NOT NULL
+                       AND transcript_path != ''
+                       AND transcript_path > ?2
+                     GROUP BY transcript_path
+                     ORDER BY transcript_path
+                     LIMIT ?3",
                     tracedecay_runtime_core::db::engine::params![
                         provider,
                         after_path.as_str(),
@@ -232,6 +250,57 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 let path = row
                     .get::<String>(0)
                     .map_err(|error| format!("failed to decode transcript path: {error}"))?;
+                let providers_json = row
+                    .get::<String>(1)
+                    .map_err(|error| format!("failed to decode transcript providers: {error}"))?;
+                let providers: Vec<String> = serde_json::from_str(&providers_json)
+                    .map_err(|error| format!("invalid transcript providers: {error}"))?;
+                page.push((path, providers));
+            }
+            drop(rows);
+            if page.is_empty() {
+                break;
+            }
+            // Locations identify files to stat; provider cursor keys identify
+            // checkpoints. Resolve the page in one query without treating an
+            // opaque checkpoint as a filesystem path or reimplementing its hash.
+            let keys: Vec<JsonValue> = page
+                .iter()
+                .flat_map(|(path, providers)| {
+                    providers.iter().map(move |provider| {
+                        let key = if provider == "codex" {
+                            codex_cursor_key(Path::new(path)).durable_text()
+                        } else {
+                            path.clone()
+                        };
+                        serde_json::json!({ "path": path, "key": key })
+                    })
+                })
+                .collect();
+            let keys_json = serde_json::to_string(&keys)
+                .map_err(|error| format!("failed to encode transcript checkpoint keys: {error}"))?;
+            let mut offsets = reader
+                .query(
+                    "SELECT json_extract(requested.value, '$.path'),
+                            COALESCE(MAX(offsets.byte_offset), 0),
+                            COALESCE(MAX(offsets.mtime), 0)
+                     FROM json_each(?1) AS requested
+                     LEFT JOIN parse_offsets AS offsets
+                       ON offsets.file_path = json_extract(requested.value, '$.key')
+                     GROUP BY json_extract(requested.value, '$.path')",
+                    tracedecay_runtime_core::db::engine::params![keys_json],
+                )
+                .await
+                .map_err(|error| format!("failed to query transcript checkpoints: {error}"))?;
+            let mut checkpoints = Vec::with_capacity(page.len());
+            while let Some(row) = offsets
+                .next()
+                .await
+                .map_err(|error| format!("failed to read transcript checkpoint: {error}"))?
+            {
+                let path = row
+                    .get::<String>(0)
+                    .map_err(|error| format!("failed to decode transcript location: {error}"))?;
                 let byte_offset = u64::try_from(
                     row.get::<i64>(1)
                         .map_err(|error| format!("failed to decode transcript offset: {error}"))?,
@@ -242,13 +311,12 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                         .map_err(|error| format!("failed to decode transcript mtime: {error}"))?,
                 )
                 .map_err(|error| format!("invalid transcript mtime: {error}"))?;
-                page.push((path, byte_offset, mtime));
+                checkpoints.push((path, byte_offset, mtime));
             }
-            drop(rows);
-            if page.is_empty() {
-                break;
-            }
-            for (path, byte_offset, mtime) in &page {
+            drop(offsets);
+            for (path, byte_offset, mtime) in &checkpoints {
+                // Opaque non-Unicode locations cannot be resolved from this
+                // display field; like missing files, they remain untracked.
                 let Ok(metadata) = hotpath::measure_block!(
                     "global_db.registered_sessions.ingest_stat",
                     std::fs::metadata(path)
@@ -274,7 +342,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             }
             after_path = page
                 .last()
-                .map(|(path, _, _)| path.clone())
+                .map(|(path, _)| path.clone())
                 .ok_or_else(|| "session ingest health page unexpectedly empty".to_owned())?;
             if page.len() < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
                 break;
@@ -372,15 +440,16 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         &self,
         project_key: &str,
     ) -> Result<i64, String> {
-        let mut rows = self
-            .read_connection()
-            .query(
-                "SELECT COUNT(*)
+        let mut sql = "SELECT COUNT(*)
                  FROM session_messages m
                  JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-                 WHERE s.project_key = ?1",
-                tracedecay_runtime_core::db::engine::params![project_key],
-            )
+                 WHERE 1 = 1"
+            .to_owned();
+        let mut query_params = Vec::with_capacity(2);
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
+        let mut rows = self
+            .read_connection()
+            .query(sql.as_str(), query_params)
             .await
             .map_err(|error| format!("failed to count project session messages: {error}"))?;
         let row = rows
@@ -572,12 +641,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         let mut query_params = vec![Value::Text(fts_query), Value::Text(provider.to_owned())];
         let _ = write!(sql, " AND m.provider = ?{}", query_params.len());
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                query_params.len()
-            );
+            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         }
         for term in &literal_terms {
             query_params.push(Value::Text(term.clone()));
@@ -679,12 +743,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .to_owned();
         let mut query_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
-            query_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                query_params.len()
-            );
+            push_project_identity_predicate(&mut sql, &mut query_params, project_key);
         }
         query_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
@@ -741,12 +800,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         .to_owned();
         let mut legacy_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
         if let Some(project_key) = project_key {
-            legacy_params.push(Value::Text(project_key.to_owned()));
-            let _ = write!(
-                legacy_sql,
-                " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-                legacy_params.len()
-            );
+            push_project_identity_predicate(&mut legacy_sql, &mut legacy_params, project_key);
         }
         legacy_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         let _ = write!(
@@ -881,12 +935,7 @@ async fn search_workflow_facts(
     ];
     let _ = write!(sql, " AND w.provider = ?{}", query_params.len());
     if let Some(project_key) = project_key {
-        query_params.push(Value::Text(project_key.to_owned()));
-        let _ = write!(
-            sql,
-            " AND (s.project_key = ?{0} OR s.project_path = ?{0})",
-            query_params.len()
-        );
+        push_project_identity_predicate(&mut sql, &mut query_params, project_key);
     }
     let mut term_predicates = Vec::with_capacity(terms.len());
     for term in terms {
@@ -1156,4 +1205,48 @@ fn row_to_workflow_message(
         source_offset: None,
         metadata_json: Some(JsonValue::Object(metadata).to_string()),
     })
+}
+
+#[cfg(all(test, unix))]
+mod identity_tests {
+    use super::{Value, durable_project_path_key, push_project_identity_predicate};
+
+    #[test]
+    fn project_identity_reads_opened_and_canonical_paths_without_aliasing_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let opened = alias.to_str().unwrap();
+        let canonical = durable_project_path_key(opened);
+        assert_ne!(opened, canonical);
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions (project_key TEXT, project_path TEXT);")
+            .unwrap();
+        for (key, path) in [
+            ("typed-project-a", opened),
+            ("typed-project-a", canonical.as_str()),
+            (opened, "user"),
+            (canonical.as_str(), "user"),
+            ("unrelated", "unknown"),
+        ] {
+            db.execute("INSERT INTO sessions VALUES (?1, ?2)", [key, path])
+                .unwrap();
+        }
+        let mut sql = "SELECT count(*) FROM sessions s WHERE 1 = 1".to_owned();
+        let mut params = Vec::new();
+        push_project_identity_predicate(&mut sql, &mut params, opened);
+        let params = params.iter().map(|value| match value {
+            Value::Text(text) => text.as_str(),
+            _ => panic!("project identity parameters must be text"),
+        });
+        let count: i64 = db
+            .query_row(&sql, rusqlite::params_from_iter(params), |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 3,
+            "both path forms and only the byte-exact opaque key match"
+        );
+    }
 }

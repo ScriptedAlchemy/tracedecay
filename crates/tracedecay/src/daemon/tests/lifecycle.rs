@@ -494,6 +494,7 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "reserved-doctor-test");
+    prewarm_test_profile_runtime(&store_administration).await;
 
     let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
     let general = match admission.try_admit() {
@@ -614,6 +615,7 @@ async fn tools_list_answers_under_general_saturation() {
     let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "tools-list-saturation");
+    prewarm_test_profile_runtime(&store_administration).await;
 
     let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
     let general = match admission.try_admit() {
@@ -828,6 +830,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     // the process-wide worker-plan `OnceLock` first.
     super::super::DaemonInvocationState::default()
         .install_worker_selection(
+            &store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install portable broker profile worker plan");
@@ -1221,7 +1224,7 @@ async fn persistent_idle_client_closes_on_draining_without_timeout() {
             super::super::shutdown_orchestration::DaemonShutdownPlan::new(
                 clients,
                 Vec::new(),
-                |_| async { super::super::store_shutdown::ShutdownTaskReceipt::default() },
+                |_| async { tracedecay_store_runtime::ShutdownTaskReceipt::default() },
             )
         },
     )

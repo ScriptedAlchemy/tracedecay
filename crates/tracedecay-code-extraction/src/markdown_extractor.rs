@@ -17,8 +17,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Parser, Range, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 /// Separator between path elements in a heading's qualified name. Markdown
@@ -121,8 +123,7 @@ impl<'s> ExtractionState<'s> {
         }
         let parser = self.inline_parser.get_or_insert_with(|| {
             let mut p = Parser::new();
-            let _ =
-                p.set_language(&tracedecay_large_treesitters::markdown::inline::LANGUAGE.into());
+            let _ = p.set_language(&crate::ts_provider::markdown_grammar::INLINE_LANGUAGE.into());
             p
         });
         let range = Range {
@@ -142,9 +143,14 @@ impl MarkdownExtractor {
     pub fn extract_markdown(file_path: &str, source: &str) -> ExtractionResult {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source, true);
-        Self::add_file_node(&mut state, file_path, source);
+        let tree = Self::parse(source);
+        let end_line = match &tree {
+            Ok(tree) => crate::common::file_end_line(source, tree),
+            Err(_) => crate::common::unparsed_file_end_line(source),
+        };
+        Self::add_file_node(&mut state, file_path, end_line);
 
-        if let Ok(tree) = Self::parse(source) {
+        if let Ok(tree) = tree {
             crate::hotpath_observe::measure_query(|| Self::visit(&mut state, tree.root_node()));
         }
 
@@ -159,7 +165,11 @@ impl MarkdownExtractor {
     ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source, false);
-        Self::add_file_node(&mut state, file_path, source);
+        Self::add_file_node(
+            &mut state,
+            file_path,
+            crate::common::file_end_line(source, tree),
+        );
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit(&mut state, child);
@@ -177,7 +187,7 @@ impl MarkdownExtractor {
         }
     }
 
-    fn add_file_node(state: &mut ExtractionState, file_path: &str, source: &str) {
+    fn add_file_node(state: &mut ExtractionState, file_path: &str, end_line: u32) {
         let file_node = Node {
             id: generate_node_id(file_path, &NodeKind::File, file_path, 0),
             kind: NodeKind::File,
@@ -186,7 +196,7 @@ impl MarkdownExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -200,6 +210,7 @@ impl MarkdownExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -346,12 +357,7 @@ impl MarkdownExtractor {
             .chain(std::iter::once(title.as_str()))
             .collect::<Vec<_>>()
             .join(HEADING_PATH_SEPARATOR);
-        let id = generate_node_id(
-            &state.file_path,
-            &kind,
-            &title,
-            node.start_position().row as u32,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &title, node);
 
         let node_obj = Node {
             id: id.clone(),
@@ -375,6 +381,7 @@ impl MarkdownExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

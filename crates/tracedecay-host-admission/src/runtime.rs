@@ -13,12 +13,12 @@ use tracedecay_sessions::admission::HostAdmissionOutcome;
 #[cfg(test)]
 use tracedecay_sessions::admission::HostAdmissionStatus;
 
+#[cfg(test)]
+use super::take_cloned_payload_bytes;
 use super::{
     FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler, HostAdmissionSpool, SpoolBounds,
     SpoolError, SpoolIntegrity, SpoolOpenReport, SpoolRecord, TerminalReason,
 };
-
-pub(crate) const DEFAULT_MAX_REPLAY_RECORDS_PER_PASS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DurableHostAdmission {
@@ -33,8 +33,6 @@ pub struct HostAdmissionRuntime {
     queued: BTreeSet<u64>,
     leased: BTreeSet<u64>,
     completed: BTreeSet<u64>,
-    #[cfg(test)]
-    max_replay_records_per_pass: usize,
 }
 
 impl HostAdmissionRuntime {
@@ -58,17 +56,6 @@ impl HostAdmissionRuntime {
         dir: impl Into<PathBuf>,
         bounds: SpoolBounds,
     ) -> Result<(Self, SpoolOpenReport), TraceDecayError> {
-        Self::open_with_replay_limit(dir, bounds, DEFAULT_MAX_REPLAY_RECORDS_PER_PASS)
-    }
-
-    fn open_with_replay_limit(
-        dir: impl Into<PathBuf>,
-        bounds: SpoolBounds,
-        max_replay_records_per_pass: usize,
-    ) -> Result<(Self, SpoolOpenReport), TraceDecayError> {
-        if max_replay_records_per_pass == 0 {
-            return Err(SpoolError::MetadataCorrupted.to_open_error());
-        }
         let (spool, report) = hotpath::measure_block!("usecases.admission.open", {
             HostAdmissionSpool::open(dir, bounds)
         })
@@ -82,8 +69,6 @@ impl HostAdmissionRuntime {
             queued: BTreeSet::new(),
             leased: BTreeSet::new(),
             completed: BTreeSet::new(),
-            #[cfg(test)]
-            max_replay_records_per_pass,
         };
         runtime.schedule_missing().map_err(open_outcome_error)?;
         Ok((runtime, report))
@@ -137,11 +122,16 @@ impl HostAdmissionRuntime {
         if !self.leased.contains(&seq) {
             return Err(HostAdmissionOutcome::spool_ack_conflict());
         }
-        let Some(record) = self.spool.pending_record(seq).cloned() else {
+        let Some(record) = self.spool.pending_record(seq) else {
             return Err(HostAdmissionOutcome::spool_ack_conflict());
         };
         self.leased.remove(&seq);
-        self.schedule_record_front(&record)
+        let outcome = self.scheduler.requeue_front_reference(
+            &record.source,
+            record.seq,
+            record.payload.len(),
+        );
+        finish_schedule(&mut self.queued, seq, outcome)
     }
 
     /// Requeue leases abandoned when a replay task was cancelled or dropped.
@@ -218,72 +208,25 @@ impl HostAdmissionRuntime {
         Ok(committed)
     }
 
-    /// Produces one bounded, deterministic round-robin replay pass.
+    /// Enqueue every retained record the scheduler does not yet track.
     ///
-    /// The spool remains authoritative: scheduler pops select work but never
-    /// remove durable records. A failed source therefore cannot prevent another
-    /// source from making canonical progress, while acknowledgement still
-    /// respects the spool's global commit watermark.
-    #[cfg(test)]
-    pub(crate) fn fair_replay_batch(&self) -> Result<Vec<SpoolRecord>, HostAdmissionOutcome> {
-        self.spool
-            .ensure_replay_allowed()
-            .map_err(|error| error.to_outcome())?;
-        let pending = self.spool.pending_records();
-        if pending.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let total = pending.len();
-        let bounds = self.spool.bounds();
-        let mut scheduler = FairSourceScheduler::new(FairScheduleBounds::with_byte_bounds(
-            total,
-            bounds.max_records_per_source,
-            bounds.max_record_bytes,
-            bounds.max_source_bytes,
-            bounds.max_spool_bytes,
-            bounds.max_spool_bytes_per_source,
-        ));
-        for record in pending {
-            match scheduler.try_enqueue_reference(&record.source, record.seq, record.payload.len())
-            {
-                FairEnqueueOutcome::Accepted { .. } => {}
-                FairEnqueueOutcome::RecordTooLarge | FairEnqueueOutcome::SourceTooLarge => {
-                    return Err(HostAdmissionOutcome::spool_corrupted());
-                }
-                FairEnqueueOutcome::Backpressured => {
-                    return Err(HostAdmissionOutcome::spool_overflow());
-                }
-            }
-        }
-
-        let mut selected = Vec::with_capacity(total.min(self.max_replay_records_per_pass));
-        while selected.len() < self.max_replay_records_per_pass {
-            let Some(next) = scheduler.pop_next() else {
-                break;
-            };
-            let Some(record) = pending.iter().find(|record| record.seq == next.seq) else {
-                return Err(HostAdmissionOutcome::spool_corrupted());
-            };
-            selected.push(record.clone());
-        }
-        Ok(selected)
-    }
-
+    /// The spool already owns the pending payloads and the scheduler stores only
+    /// `(source, seq, len)`, so this reads the spool's records in place rather
+    /// than copying the pending byte volume a second time.
     fn schedule_missing(&mut self) -> Result<(), HostAdmissionOutcome> {
-        let missing = self
-            .spool
-            .pending_records()
-            .iter()
-            .filter(|record| {
-                !self.queued.contains(&record.seq)
-                    && !self.leased.contains(&record.seq)
-                    && !self.completed.contains(&record.seq)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for record in missing {
-            self.schedule_record(&record)?;
+        for record in self.spool.pending_records() {
+            if self.queued.contains(&record.seq)
+                || self.leased.contains(&record.seq)
+                || self.completed.contains(&record.seq)
+            {
+                continue;
+            }
+            let outcome = self.scheduler.try_enqueue_reference(
+                &record.source,
+                record.seq,
+                record.payload.len(),
+            );
+            finish_schedule(&mut self.queued, record.seq, outcome)?;
         }
         Ok(())
     }
@@ -298,33 +241,7 @@ impl HostAdmissionRuntime {
         let outcome =
             self.scheduler
                 .try_enqueue_reference(&record.source, record.seq, record.payload.len());
-        self.finish_schedule(record.seq, outcome)
-    }
-
-    fn schedule_record_front(&mut self, record: &SpoolRecord) -> Result<(), HostAdmissionOutcome> {
-        let outcome = self.scheduler.requeue_front_reference(
-            &record.source,
-            record.seq,
-            record.payload.len(),
-        );
-        self.finish_schedule(record.seq, outcome)
-    }
-
-    fn finish_schedule(
-        &mut self,
-        seq: u64,
-        outcome: FairEnqueueOutcome,
-    ) -> Result<(), HostAdmissionOutcome> {
-        match outcome {
-            FairEnqueueOutcome::Accepted { .. } => {
-                self.queued.insert(seq);
-                Ok(())
-            }
-            FairEnqueueOutcome::RecordTooLarge | FairEnqueueOutcome::SourceTooLarge => {
-                Err(HostAdmissionOutcome::spool_corrupted())
-            }
-            FairEnqueueOutcome::Backpressured => Err(HostAdmissionOutcome::spool_overflow()),
-        }
+        finish_schedule(&mut self.queued, record.seq, outcome)
     }
 
     /// Deletes a record only after canonical commit or exact duplicate.
@@ -355,6 +272,23 @@ impl HostAdmissionRuntime {
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub(super) fn quarantine_count(&self) -> usize {
         self.spool.quarantine_count()
+    }
+}
+
+fn finish_schedule(
+    queued: &mut BTreeSet<u64>,
+    seq: u64,
+    outcome: FairEnqueueOutcome,
+) -> Result<(), HostAdmissionOutcome> {
+    match outcome {
+        FairEnqueueOutcome::Accepted { .. } => {
+            queued.insert(seq);
+            Ok(())
+        }
+        FairEnqueueOutcome::RecordTooLarge | FairEnqueueOutcome::SourceTooLarge => {
+            Err(HostAdmissionOutcome::spool_corrupted())
+        }
+        FairEnqueueOutcome::Backpressured => Err(HostAdmissionOutcome::spool_overflow()),
     }
 }
 
@@ -416,16 +350,14 @@ mod tests {
         assert_eq!(runtime.pending_count(), 1);
         assert!(temp.path().join("records.bin").metadata().unwrap().len() > 0);
 
-        let attempted = runtime.fair_replay_batch().unwrap();
-        assert_eq!(attempted.len(), 1);
-        assert_eq!(attempted[0].seq, admitted.seq);
+        let leased = runtime.lease_next().unwrap();
+        assert_eq!(leased.seq, admitted.seq);
         assert_eq!(
-            runtime.acknowledge(
-                admitted.seq,
-                HostAdmissionOutcome::replay_completed(true, false),
-            ),
-            HostAdmissionOutcome::replay_completed(true, false),
+            leased.payload, b"event-one",
+            "the lease carries the real spool payload"
         );
+        assert!(runtime.lease_next().is_none());
+        assert_eq!(runtime.commit(admitted.seq).unwrap(), 1);
         assert_eq!(runtime.pending_count(), 0);
         assert_eq!(
             HostAdmissionRuntime::open(temp.path(), bounds())
@@ -446,15 +378,9 @@ mod tests {
 
         assert_ne!(first.seq, second.seq);
         assert_eq!(runtime.pending_count(), 2);
-        assert_eq!(
-            runtime
-                .fair_replay_batch()
-                .unwrap()
-                .iter()
-                .map(|record| record.seq)
-                .collect::<Vec<_>>(),
-            [first.seq, second.seq]
-        );
+        assert_eq!(runtime.lease_next().unwrap().seq, first.seq);
+        assert_eq!(runtime.lease_next().unwrap().seq, second.seq);
+        assert!(runtime.lease_next().is_none());
     }
 
     #[test]
@@ -473,9 +399,9 @@ mod tests {
         }
 
         drop(runtime);
-        let reopened = open(&temp);
+        let mut reopened = open(&temp);
         assert_eq!(reopened.pending_count(), 1);
-        assert_eq!(reopened.fair_replay_batch().unwrap()[0].seq, admitted.seq);
+        assert_eq!(reopened.lease_next().unwrap().seq, admitted.seq);
     }
 
     #[test]
@@ -487,28 +413,20 @@ mod tests {
         };
 
         let mut restarted = open(&temp);
-        let recovered = restarted.fair_replay_batch().unwrap();
-        assert_eq!(
-            recovered
-                .iter()
-                .map(|record| record.seq)
-                .collect::<Vec<_>>(),
-            [seq]
-        );
+        assert_eq!(restarted.lease_next().unwrap().seq, seq);
+        assert!(restarted.lease_next().is_none());
         assert_eq!(
             restarted.acknowledge(seq, HostAdmissionOutcome::replay_completed(false, true),),
             HostAdmissionOutcome::replay_completed(false, true),
         );
         assert_eq!(restarted.pending_count(), 0);
-        assert!(open(&temp).fair_replay_batch().unwrap().is_empty());
+        assert!(open(&temp).lease_next().is_none());
     }
 
     #[test]
-    fn fair_replay_is_bounded_and_rotates_sources() {
+    fn leases_rotate_sources_and_carry_the_spool_payload() {
         let temp = TempDir::new().unwrap();
-        let mut runtime = HostAdmissionRuntime::open_with_replay_limit(temp.path(), bounds(), 3)
-            .unwrap()
-            .0;
+        let mut runtime = open(&temp);
         for (source, payload) in [
             ("a", b"a1".as_slice()),
             ("b", b"b1".as_slice()),
@@ -518,17 +436,17 @@ mod tests {
             runtime.admit(source, payload).unwrap();
         }
 
-        let batch = runtime.fair_replay_batch().unwrap();
-        assert_eq!(batch.len(), 3);
+        let leased: Vec<SpoolRecord> = std::iter::from_fn(|| runtime.lease_next()).collect();
         assert_eq!(
-            batch
+            leased
                 .iter()
                 .map(|record| (record.source.as_str(), record.payload.as_slice()))
                 .collect::<Vec<_>>(),
             [
                 ("a", b"a1".as_slice()),
                 ("b", b"b1".as_slice()),
-                ("a", b"a2".as_slice())
+                ("a", b"a2".as_slice()),
+                ("b", b"b2".as_slice()),
             ]
         );
     }
@@ -592,6 +510,129 @@ mod tests {
         assert_eq!(runtime.lease_next().unwrap().seq, second.seq);
         assert_eq!(runtime.lease_next().unwrap().seq, third.seq);
         assert_eq!(runtime.pending_count(), 3);
+    }
+
+    fn large_record_bounds() -> SpoolBounds {
+        SpoolBounds::new(64 * 1024, 32, 1024 * 1024, 64)
+    }
+
+    const LARGE_PAYLOAD_LEN: usize = 8 * 1024;
+
+    /// Uneven source mix so fair order differs from sequence order:
+    /// `a` owns six records, `b` and `c` three each.
+    const LARGE_RECORD_SOURCES: [&str; 12] =
+        ["a", "a", "a", "b", "b", "c", "a", "c", "b", "a", "c", "a"];
+
+    /// Fresh round-robin over first-seen sources, as indices into the admitted
+    /// sequences: a b c a b c a b c a a a.
+    const FRESH_FAIR_ORDER: [usize; 12] = [0, 3, 5, 1, 4, 7, 2, 8, 10, 6, 9, 11];
+
+    fn admit_large_records(runtime: &mut HostAdmissionRuntime) -> Vec<u64> {
+        let payload = vec![0xA5u8; LARGE_PAYLOAD_LEN];
+        LARGE_RECORD_SOURCES
+            .iter()
+            .map(|source| runtime.admit(source, &payload).unwrap().seq)
+            .collect()
+    }
+
+    fn lease_all(runtime: &mut HostAdmissionRuntime) -> Vec<u64> {
+        std::iter::from_fn(|| runtime.lease_next())
+            .map(|record| record.seq)
+            .collect()
+    }
+
+    #[test]
+    fn opening_and_rebuilding_fair_queues_copies_no_payload_bytes() {
+        let temp = TempDir::new().unwrap();
+        let seqs = {
+            let mut runtime = HostAdmissionRuntime::open(temp.path(), large_record_bounds())
+                .unwrap()
+                .0;
+            admit_large_records(&mut runtime)
+        };
+        let retained_bytes = LARGE_PAYLOAD_LEN * seqs.len();
+        let fair_order = FRESH_FAIR_ORDER.map(|index| seqs[index]);
+
+        take_cloned_payload_bytes();
+        let mut runtime = HostAdmissionRuntime::open(temp.path(), large_record_bounds())
+            .unwrap()
+            .0;
+        assert_eq!(runtime.pending_count(), seqs.len());
+        assert_eq!(
+            take_cloned_payload_bytes(),
+            0,
+            "open must schedule {retained_bytes} retained payload bytes by reference"
+        );
+
+        assert_eq!(lease_all(&mut runtime), fair_order);
+        assert_eq!(
+            take_cloned_payload_bytes(),
+            retained_bytes,
+            "each lease materializes exactly its own payload"
+        );
+
+        assert_eq!(runtime.recover_leases().unwrap(), seqs.len());
+        assert_eq!(
+            take_cloned_payload_bytes(),
+            0,
+            "abandoned-lease recovery must rebuild {} references without payload copies",
+            seqs.len()
+        );
+        assert_eq!(lease_all(&mut runtime), fair_order);
+        assert_eq!(runtime.recover_leases().unwrap(), seqs.len());
+
+        let head = runtime.lease_next().unwrap();
+        assert_eq!(head.seq, fair_order[0]);
+        take_cloned_payload_bytes();
+        assert_eq!(
+            runtime
+                .quarantine(head.seq, TerminalReason::MalformedPayload)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            take_cloned_payload_bytes(),
+            0,
+            "quarantine must republish the frame and rebuild {} references without payload copies",
+            seqs.len() - 1
+        );
+        assert_eq!(runtime.quarantine_count(), 1);
+        // A rebuild restarts rotation over the remaining records: a b c a b c a b c a a.
+        let remaining = [1, 3, 5, 2, 4, 7, 6, 8, 10, 9, 11].map(|index| seqs[index]);
+        assert_eq!(lease_all(&mut runtime), remaining);
+    }
+
+    #[test]
+    fn deferring_a_large_lease_copies_no_payload_bytes() {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = HostAdmissionRuntime::open(temp.path(), large_record_bounds())
+            .unwrap()
+            .0;
+        let payload = vec![0x5Au8; LARGE_PAYLOAD_LEN];
+        let first = runtime.admit("a", &payload).unwrap().seq;
+        let second = runtime.admit("a", &payload).unwrap().seq;
+
+        take_cloned_payload_bytes();
+        let leased = runtime.lease_next().unwrap();
+        assert_eq!((leased.seq, leased.payload), (first, payload.clone()));
+        assert_eq!(
+            take_cloned_payload_bytes(),
+            LARGE_PAYLOAD_LEN,
+            "a lease owns exactly one payload copy"
+        );
+
+        runtime.defer(first).unwrap();
+        assert_eq!(
+            take_cloned_payload_bytes(),
+            0,
+            "defer must requeue the lease by reference"
+        );
+        assert_eq!(
+            runtime.lease_next().unwrap().seq,
+            first,
+            "the deferred head stays ahead of its source's later record"
+        );
+        assert_eq!(runtime.lease_next().unwrap().seq, second);
     }
 
     #[test]

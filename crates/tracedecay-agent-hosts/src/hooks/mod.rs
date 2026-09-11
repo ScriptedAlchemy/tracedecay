@@ -6,10 +6,12 @@
 use std::future::Future;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tracedecay_hooks::{DaemonHookEvent, HookRouteMetadata};
+use tracedecay_hooks::DaemonHookEvent;
+
+use crate::ports::hook_runtime::HookRuntimeV1;
 
 mod analytics;
 mod claude;
@@ -38,28 +40,21 @@ pub use dispatch::publish_daemon_bindings as publish_hook_bindings;
 
 pub use claude::{
     evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
-    hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
-    hook_stop,
+    hook_claude_session_start, hook_stop,
 };
 pub use codex::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
     codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
     codex_workspace_status_from_event, evaluate_codex_subagent_start, hook_codex_post_compact,
-    hook_codex_post_tool_use, hook_codex_session_start, hook_codex_stop, hook_codex_subagent_start,
-    hook_codex_user_prompt_submit, record_codex_subagent_start,
+    hook_codex_post_tool_use, hook_codex_session_start, hook_codex_user_prompt_submit,
+    record_codex_subagent_start,
 };
 pub use cursor::{
     CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
-    evaluate_cursor_subagent_start, hook_cursor_after_file_edit, hook_cursor_after_shell,
-    hook_cursor_post_tool_use, hook_cursor_pre_compact, hook_cursor_session_end,
-    hook_cursor_session_start, hook_cursor_stop, hook_cursor_subagent_start,
-    hook_cursor_workspace_open,
+    evaluate_cursor_subagent_start, hook_cursor_post_tool_use, hook_cursor_session_start,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
-pub use kiro::{
-    evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
-    hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
-};
+pub use kiro::{evaluate_kiro_pre_tool_use, hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths};
 pub use steering::{
     CODEX_SESSION_CONTEXT_BUDGET, CURSOR_PLUGIN_SKILLS, CURSOR_SESSION_CONTEXT_BUDGET,
     HookWorkspaceStatus, build_codex_session_context, build_codex_session_context_for_workspace,
@@ -97,6 +92,7 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
 /// event name (Claude's `TOOL_INPUT`-driven `preToolUse`).
 #[hotpath::measure(label = "agent_hosts.hooks.record_native_capture")]
 pub fn record_native_capture_invoked(
+    runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
     host: tracedecay_hooks::HookHostV1,
     hook_name: Option<&str>,
@@ -114,10 +110,17 @@ pub fn record_native_capture_invoked(
         .unwrap_or("nativeCallback");
     match native_capture_agent(host) {
         Some(agent) => {
-            record_hook_invoked_parsed(project_root, agent, hook_name, event_json, &parsed);
+            record_hook_invoked_parsed(
+                runtime,
+                project_root,
+                agent,
+                hook_name,
+                event_json,
+                &parsed,
+            );
         }
         None => {
-            record_other_hook_invoked(project_root, hook_name, event_json);
+            record_other_hook_invoked(runtime, project_root, hook_name, event_json);
         }
     }
 }
@@ -146,13 +149,21 @@ use tool_hints::{HintAgent, ToolHint};
 use tracedecay_policy::hint_delivery::HintDeliveryDecisionV1;
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_kimi_event")]
-pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry = record_other_hook_invoked(Some(project_root), "kimi_event", event_json);
+pub async fn dispatch_kimi_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    started: Instant,
+) -> Option<String> {
+    let telemetry =
+        record_other_hook_invoked(runtime, Some(project_root), "kimi_event", event_json);
     dispatch::dispatch(
+        runtime,
         tracedecay_hooks::HookHostV1::KimiCode,
         event_json,
         project_root,
         Some(&telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&telemetry)
@@ -160,16 +171,25 @@ pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Optio
 }
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_opencode_event")]
-pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry = record_other_hook_invoked(Some(project_root), "opencode_event", event_json);
+pub async fn dispatch_opencode_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    started: Instant,
+) -> Option<String> {
+    let telemetry =
+        record_other_hook_invoked(runtime, Some(project_root), "opencode_event", event_json);
     let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
-        dispatch::dispatch_opencode_lsp_updated(event_json, project_root, Some(&telemetry)).await
+        dispatch::dispatch_opencode_lsp_updated(runtime, event_json, project_root, Some(&telemetry))
+            .await
     } else {
         dispatch::dispatch(
+            runtime,
             tracedecay_hooks::HookHostV1::OpenCode,
             event_json,
             project_root,
             Some(&telemetry),
+            started,
         )
         .await
     };
@@ -180,22 +200,45 @@ pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> O
     future = true,
     label = "agent_hosts.hooks.dispatch_opencode_tool_after"
 )]
-pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry =
-        record_other_hook_invoked(Some(project_root), "opencode_tool_after", event_json);
-    dispatch::dispatch_opencode_tool_after(event_json, project_root, Some(&telemetry))
-        .await
-        .into_recorded_guidance(&telemetry)
-        .flatten()
+pub async fn dispatch_opencode_tool_after(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    started: Instant,
+) -> Option<String> {
+    let telemetry = record_other_hook_invoked(
+        runtime,
+        Some(project_root),
+        "opencode_tool_after",
+        event_json,
+    );
+    dispatch::dispatch_opencode_tool_after(
+        runtime,
+        event_json,
+        project_root,
+        Some(&telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(&telemetry)
+    .flatten()
 }
 
+/// Deliver a response hook's output and retain its delivery receipt.
+///
+/// The receipt spool's writer lock is shared with the daemon's replay
+/// consumer, so admission waits for it, bounded by one synchronous hook budget
+/// measured from this write. The budget is not anchored at hook start: the
+/// body that produced `output` may legitimately have spent longer than one
+/// synchronous budget (a bounded transcript catch-up, a daemon compaction
+/// call), and an already-expired deadline would refuse even an uncontended
+/// lock and fail the hook without delivering anything to the host.
 #[hotpath::measure(future = true, label = "hosts.hooks.write_output")]
 pub(crate) async fn write_hook_output(
     project_root: Option<&Path>,
     host: tracedecay_hooks::HookHostV1,
     event_json: &str,
     output: &str,
-    telemetry: Option<&analytics::HookTimingSpan>,
 ) -> bool {
     let delivery_writer = match project_root {
         None => None,
@@ -207,8 +250,9 @@ pub(crate) async fn write_hook_output(
                 );
                 return false;
             };
-            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open(
+            match tracedecay_hooks::HookDeliveryReceiptSpoolV1::open_within(
                 tracedecay_hooks::hook_delivery_receipt_spool_root(&layout.data_root, host),
+                tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
             ) {
                 Ok(writer) => Some(writer),
                 Err(error) => {
@@ -218,10 +262,6 @@ pub(crate) async fn write_hook_output(
             }
         }
     };
-    // Scoped so both the stdout handle and its lock guard (neither of which is
-    // `Send`) are fully dropped before the delivery-settlement await below;
-    // otherwise the compiler must treat this future as holding a `!Send`
-    // guard across that suspend point.
     let written = {
         let stdout = std::io::stdout();
         let mut stdout = stdout.lock();
@@ -234,7 +274,7 @@ pub(crate) async fn write_hook_output(
         eprintln!("tracedecay hook: failed to flush host output: {error}");
         return false;
     }
-    let Some(project_root) = project_root else {
+    let Some(_) = project_root else {
         return true;
     };
     let Some(delivery_writer) = delivery_writer else {
@@ -293,29 +333,15 @@ pub(crate) async fn write_hook_output(
             return false;
         }
     };
-    let receipt = match delivery_writer.append_or_replay(&receipt) {
-        Ok(receipt) => receipt,
+    match delivery_writer.append_or_replay(&receipt) {
+        Ok(_) => {}
         Err(error) => {
             tracing::warn!(%error, "Hook output delivery receipt could not be persisted");
             return false;
         }
-    };
-    let settlement = receipt.settlement;
-    drop(delivery_writer);
-    if let Err(error) = daemon_hook_action(
-        Some(project_root),
-        serde_json::json!({
-            "action": "delivery_settlement",
-            "settlement": settlement,
-        }),
-        telemetry,
-    )
-    .await
-    {
-        // The source receipt is durable and the daemon replay lane will retry
-        // the exact retained settlement after a transport or daemon failure.
-        tracing::warn!(%error, "Hook output delivery receipt could not be reported; retained for replay");
     }
+    // The daemon replay lane settles and acknowledges this durable source
+    // receipt, including when the callback runs while the daemon is offline.
     true
 }
 
@@ -360,15 +386,17 @@ pub(crate) use read_hook_event;
 /// Shared native-event handler body: read the bounded event, resolve the
 /// project root, dispatch, and deliver any guidance for `host`.
 async fn hook_native_event(
+    runtime: &HookRuntimeV1,
     host: tracedecay_hooks::HookHostV1,
-    dispatch: impl AsyncFnOnce(&str, &Path) -> Option<String>,
+    dispatch: impl AsyncFnOnce(&HookRuntimeV1, &str, &Path, Instant) -> Option<String>,
 ) -> i32 {
+    let started = Instant::now();
     let event = read_hook_event!();
-    let Some(root) = native_event_project_root(&event).await else {
+    let Some(root) = native_event_project_root(runtime, &event).await else {
         return 0;
     };
-    if let Some(guidance) = dispatch(&event, &root).await
-        && !write_hook_output(Some(&root), host, &event, &guidance, None).await
+    if let Some(guidance) = dispatch(runtime, &event, &root, started).await
+        && !write_hook_output(Some(&root), host, &event, &guidance).await
     {
         return 1;
     }
@@ -376,13 +404,19 @@ async fn hook_native_event(
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.kimi_event")]
-pub async fn hook_kimi_event() -> i32 {
-    hook_native_event(tracedecay_hooks::HookHostV1::KimiCode, dispatch_kimi_event).await
+pub async fn hook_kimi_event(runtime: &HookRuntimeV1) -> i32 {
+    hook_native_event(
+        runtime,
+        tracedecay_hooks::HookHostV1::KimiCode,
+        dispatch_kimi_event,
+    )
+    .await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode_event")]
-pub async fn hook_opencode_event() -> i32 {
+pub async fn hook_opencode_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
+        runtime,
         tracedecay_hooks::HookHostV1::OpenCode,
         dispatch_opencode_event,
     )
@@ -390,8 +424,9 @@ pub async fn hook_opencode_event() -> i32 {
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode_tool_after")]
-pub async fn hook_opencode_tool_after() -> i32 {
+pub async fn hook_opencode_tool_after(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(
+        runtime,
         tracedecay_hooks::HookHostV1::OpenCode,
         dispatch_opencode_tool_after,
     )
@@ -399,7 +434,7 @@ pub async fn hook_opencode_tool_after() -> i32 {
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.native_resolve_root")]
-async fn native_event_project_root(event: &str) -> Option<PathBuf> {
+async fn native_event_project_root(runtime: &HookRuntimeV1, event: &str) -> Option<PathBuf> {
     let parsed = serde_json::from_str::<Value>(event).ok();
     let start = parsed
         .as_ref()
@@ -407,23 +442,16 @@ async fn native_event_project_root(event: &str) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
-    crate::ports::hook_runtime::resolve_project_root_with_identity(&start).await
-}
-
-pub(crate) async fn daemon_tool_json(
-    project_root: Option<&Path>,
-    tool_name: &str,
-    arguments: Value,
-) -> crate::errors::Result<Value> {
-    crate::ports::hook_runtime::daemon_tool_json(project_root, tool_name, arguments, false).await
+    (runtime.project_root_resolver)(&start).await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.daemon_action")]
 pub(crate) async fn daemon_hook_action(
+    runtime: &HookRuntimeV1,
     project_root: Option<&Path>,
     mut arguments: Value,
     telemetry: Option<&analytics::HookTimingSpan>,
-) -> crate::errors::Result<Value> {
+) -> tracedecay_domain::errors::Result<Value> {
     arguments["format"] = serde_json::json!("json");
     let payload_bytes = analytics::measure_json_payload_bytes(&arguments);
     #[cfg(test)]
@@ -434,7 +462,7 @@ pub(crate) async fn daemon_hook_action(
         return result;
     }
     let started = std::time::Instant::now();
-    let result = crate::ports::hook_runtime::daemon_tool_json(
+    let result = (runtime.daemon_tool)(
         project_root,
         "tracedecay_hook_runtime",
         arguments,
@@ -453,6 +481,7 @@ pub(crate) async fn daemon_hook_action(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.ingest_user_session")]
 pub(crate) async fn ingest_user_session(
+    runtime: &HookRuntimeV1,
     provider: &str,
     session_id: Option<String>,
     telemetry: Option<&analytics::HookTimingSpan>,
@@ -461,6 +490,7 @@ pub(crate) async fn ingest_user_session(
         return false;
     }
     match daemon_hook_action(
+        runtime,
         None,
         serde_json::json!({
             "action": "ingest_transcript",
@@ -563,6 +593,7 @@ pub(crate) async fn await_within_stop_budget<T>(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.ingest_transcript")]
 pub(crate) async fn ingest_transcript_for_event(
+    runtime: &HookRuntimeV1,
     provider: &str,
     event_json: &str,
     project_root: Option<&Path>,
@@ -582,7 +613,7 @@ pub(crate) async fn ingest_transcript_for_event(
     args["timeout_budget_ms"] = serde_json::json!(budget.as_millis() as u64);
     match await_within_stop_budget(
         async {
-            match daemon_hook_action(project_root, args, telemetry).await {
+            match daemon_hook_action(runtime, project_root, args, telemetry).await {
                 Ok(result) => IngestAttempt::Succeeded(result),
                 Err(error) => {
                     tracing::warn!(provider, %error, "transcript ingest daemon call failed");
@@ -606,10 +637,12 @@ pub(crate) async fn ingest_transcript_for_event(
 }
 
 pub(crate) async fn reset_counter_for_project(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     telemetry: Option<&analytics::HookTimingSpan>,
 ) {
     if let Err(error) = daemon_hook_action(
+        runtime,
         Some(project_root),
         serde_json::json!({ "action": "reset_counter" }),
         telemetry,
@@ -653,32 +686,19 @@ pub(crate) fn compact_daemon_args(
 
 #[hotpath::measure(future = true, label = "hosts.hooks.notify_event")]
 pub(crate) async fn notify_hook_event_with_telemetry(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     event: DaemonHookEvent,
     telemetry: &analytics::HookTimingSpan,
 ) {
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
-    crate::ports::hook_runtime::notify_hook_event(project_root, event).await;
+    (runtime.event_notifier)(project_root, event).await;
     telemetry.note_completed_daemon_notification(payload_bytes);
 }
 
-pub(crate) async fn notify_hook_event_with_optional_telemetry(
-    project_root: &Path,
-    event: DaemonHookEvent,
-    telemetry: Option<&analytics::HookTimingSpan>,
-) {
-    match telemetry {
-        Some(telemetry) => {
-            notify_hook_event_with_telemetry(project_root, event, telemetry).await;
-        }
-        None => {
-            crate::ports::hook_runtime::notify_hook_event(project_root, event).await;
-        }
-    }
-}
-
 #[hotpath::measure(future = true, label = "hosts.hooks.hermes_terminal_receipt")]
-pub async fn hook_hermes_terminal_receipt() -> i32 {
+pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
+    let started = Instant::now();
     let event_json = read_hook_event!();
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event_json) else {
         return 0;
@@ -697,12 +717,7 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
             })
         });
     let project_root = match cwd {
-        Some(cwd) => {
-            crate::ports::hook_runtime::resolve_project_root_with_identity(std::path::Path::new(
-                &cwd,
-            ))
-            .await
-        }
+        Some(cwd) => (runtime.project_root_resolver)(std::path::Path::new(&cwd)).await,
         None => None,
     };
     let hook_name = parsed
@@ -711,16 +726,19 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("nativeCallback");
     let hook_telemetry = record_hook_invoked(
+        runtime,
         project_root.as_deref(),
         HintAgent::Hermes,
         hook_name,
         &event_json,
     );
     let guidance = dispatch::dispatch_for_scope(
+        runtime,
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
         project_root.as_deref(),
         Some(&hook_telemetry),
+        started,
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
@@ -735,8 +753,9 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         && event.receipt.is_some()
     {
         if let Some(project_root) = project_root.as_ref() {
-            notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
+            notify_hook_event_with_telemetry(runtime, project_root, event, &hook_telemetry).await;
         } else if let Err(error) = daemon_hook_action(
+            runtime,
             None,
             serde_json::json!({ "action": "hermes_receipt", "event": event }),
             Some(&hook_telemetry),
@@ -755,7 +774,6 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
         &output,
-        Some(&hook_telemetry),
     )
     .await
     {
@@ -764,8 +782,13 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     0
 }
 
-pub async fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
+pub async fn schedule_user_session_review(
+    runtime: &HookRuntimeV1,
+    provider: &str,
+    session_id: Option<&str>,
+) {
     let hint = daemon_hook_action(
+        runtime,
         None,
         serde_json::json!({
             "action": "user_review",
@@ -827,7 +850,7 @@ impl Drop for EnvGuard {
 
 #[cfg(test)]
 pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
-    crate::config::lock_user_data_dir_test_env()
+    tracedecay_runtime_core::config::lock_user_data_dir_test_env()
 }
 
 #[cfg(test)]
@@ -913,7 +936,7 @@ impl Drop for TestDaemonHookActionGuard {
 fn take_test_daemon_hook_action(
     project_root: Option<&Path>,
     arguments: &Value,
-) -> Option<crate::errors::Result<Value>> {
+) -> Option<tracedecay_domain::errors::Result<Value>> {
     let mut state = TEST_DAEMON_HOOK_ACTION
         .state
         .lock()
@@ -924,40 +947,11 @@ fn take_test_daemon_hook_action(
     state
         .calls
         .push((project_root.map(Path::to_path_buf), arguments.clone()));
-    Some(
-        state
-            .responses
-            .pop_front()
-            .ok_or_else(|| crate::errors::TraceDecayError::Config {
-                message: "daemon hook test responder has no response".to_string(),
-            }),
-    )
-}
-
-pub(crate) fn hook_route_metadata_from_parsed(
-    parsed: &Value,
-    project_root: &Path,
-) -> HookRouteMetadata {
-    let cwd = event_cwd_from_parsed(parsed);
-    let route_root = cwd.as_deref().unwrap_or(project_root);
-    let worktree = crate::worktree::git_worktree_root(route_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
-    let branch = crate::branch::current_branch(&worktree);
-    HookRouteMetadata {
-        session_id: hook_route_session_id(parsed),
-        thread_id: text_field(
-            parsed,
-            &[
-                "thread_id",
-                "threadId",
-                "conversation_thread_id",
-                "conversationThreadId",
-            ],
-        ),
-        cwd,
-        worktree: Some(worktree),
-        branch,
-    }
+    Some(state.responses.pop_front().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon hook test responder has no response".to_string(),
+        }
+    }))
 }
 
 const HOOK_SESSION_ID_KEYS: &[&str] = &[
@@ -993,7 +987,7 @@ fn deduped_project_hint_with_id(
         .filter(|layout| layout.data_root.is_dir())
         .map(|layout| layout.data_root.join("tool_hints_seen.json"));
     let path = project_path.or_else(|| {
-        crate::storage::default_profile_root()
+        tracedecay_runtime_core::storage::default_profile_root()
             .ok()
             .map(|profile| profile.join("tool_hints_seen.json"))
     });
@@ -1025,7 +1019,7 @@ fn deduped_project_hint_with_id(
 }
 
 fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
-    if let Some(root) = crate::worktree::git_worktree_root(start) {
+    if let Some(root) = tracedecay_runtime_core::worktree::git_worktree_root(start) {
         return Some(root);
     }
     let mut dir = start.to_path_buf();
@@ -1118,7 +1112,7 @@ fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
 /// event-field readers rather than in any one host's module.
 fn event_project_root(parsed: &Value) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    crate::config::discover_project_root(&cwd)
+    tracedecay_runtime_core::config::discover_project_root(&cwd)
 }
 
 /// [`event_project_root`] for callers that hold only the raw event JSON.
@@ -1131,7 +1125,7 @@ fn event_project_root_from_json(event_json: &str) -> Option<PathBuf> {
 /// surfaces whose payload carries no `cwd` at all.
 fn process_cwd_project_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    crate::config::discover_project_root(&cwd)
+    tracedecay_runtime_core::config::discover_project_root(&cwd)
 }
 
 /// Resolves the project root from the event `cwd`, falling back to the hook
@@ -1141,7 +1135,7 @@ fn process_cwd_project_root() -> Option<PathBuf> {
 /// event into an unrelated project.
 fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
     match event_cwd_from_parsed(parsed) {
-        Some(cwd) => crate::config::discover_project_root(&cwd),
+        Some(cwd) => tracedecay_runtime_core::config::discover_project_root(&cwd),
         None => process_cwd_project_root(),
     }
 }
@@ -1150,9 +1144,12 @@ fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
 /// global-store-only checkout still resolves. Shared by every host whose session
 /// events carry `cwd`.
 #[hotpath::measure(future = true, label = "hosts.hooks.resolve_root")]
-async fn event_project_root_with_identity(parsed: &Value) -> Option<PathBuf> {
+async fn event_project_root_with_identity(
+    runtime: &HookRuntimeV1,
+    parsed: &Value,
+) -> Option<PathBuf> {
     let cwd = event_cwd_from_parsed(parsed)?;
-    crate::ports::hook_runtime::resolve_project_root_with_identity(&cwd).await
+    (runtime.project_root_resolver)(&cwd).await
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {

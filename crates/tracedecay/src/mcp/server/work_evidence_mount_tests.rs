@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use tracedecay_application::{RequestContext, ResolvedScope};
+use tracedecay_application::work::{
+    WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
+};
+use tracedecay_contracts::{RequestContext, ResolvedScope};
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 use tracedecay_session_memory::context::{
     BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
@@ -28,13 +31,11 @@ impl tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalP
 
 struct MissingFederatedAuthority;
 
-impl crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1
-    for MissingFederatedAuthority
-{
+impl WorkFederatedQueryAuthorityPortV1 for MissingFederatedAuthority {
     fn authority_for<'a>(
         &'a self,
         _scope: &'a ResolvedScope,
-    ) -> crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityFutureV1<'a> {
+    ) -> WorkFederatedQueryAuthorityFutureV1<'a> {
         Box::pin(async { None })
     }
 }
@@ -66,13 +67,12 @@ fn concrete_work_evidence_mount_accepts_only_its_exact_project_scope() {
     let (mounted, exact_scope) = mounted_scope("project.work-evidence-mount");
     let federated = Arc::new(MissingFederatedAuthority);
 
-    let first = mounted
+    mounted
         .work_evidence_retrieval(&exact_scope, federated.clone())
         .expect("exact project scope must bind the concrete evidence adapter");
-    let second = mounted
+    mounted
         .work_evidence_retrieval(&exact_scope, federated)
-        .expect("the same concrete authority must be reusable");
-    assert!(first.same_authority(&second));
+        .expect("the same mounted authority must keep binding new adapters");
 
     let (_, foreign_scope) = mounted_scope("project.work-evidence-foreign");
     assert!(
@@ -80,47 +80,6 @@ fn concrete_work_evidence_mount_accepts_only_its_exact_project_scope() {
             .work_evidence_retrieval(&foreign_scope, Arc::new(MissingFederatedAuthority))
             .is_err(),
         "a different project scope must not receive the mounted session authority",
-    );
-}
-
-/// A reopen mounts a fresh retrieval service over the same session store and
-/// root; that is the same Work evidence authority. A mount over a different
-/// store under the same project scope is not.
-#[test]
-fn work_evidence_authority_is_the_mounted_store_not_the_service_object() {
-    let federated = Arc::new(MissingFederatedAuthority);
-    let (first_mount, scope) = mounted_scope("project.work-evidence-mount");
-    let (reopened_mount, _) = mounted_scope("project.work-evidence-mount");
-    assert!(!Arc::ptr_eq(&first_mount.service, &reopened_mount.service));
-    let first = first_mount
-        .work_evidence_retrieval(&scope, federated.clone())
-        .expect("first open binds the adapter");
-    let reopened = reopened_mount
-        .work_evidence_retrieval(&scope, federated.clone())
-        .expect("reopen binds a fresh adapter");
-    assert!(
-        first.same_authority(&reopened),
-        "a fresh service over the same store and root is the same authority"
-    );
-
-    let mut foreign_identity_mount = reopened_mount.clone();
-    foreign_identity_mount.identity = ResolvedSessionIdentity::for_project(
-        ProfileId::new("profile.work-evidence-mount").unwrap(),
-        ProjectId::new("project.work-evidence-mount").unwrap(),
-        SessionStoreId::new("store.work-evidence-foreign").unwrap(),
-        SessionRootId::new("root.work-evidence-mount").unwrap(),
-        ResolvedGitRoute::new(
-            RepositoryId::new("repository.work-evidence-mount").unwrap(),
-            WorktreeId::new("worktree.work-evidence-mount").unwrap(),
-            BranchId::new("branch.work-evidence-mount").unwrap(),
-        ),
-    );
-    let foreign = foreign_identity_mount
-        .work_evidence_retrieval(&scope, federated)
-        .expect("the foreign store still identifies the same checkout scope");
-    assert!(
-        !first.same_authority(&foreign),
-        "a different session store under the same project scope is a different authority"
     );
 }
 

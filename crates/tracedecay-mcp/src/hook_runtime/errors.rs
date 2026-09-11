@@ -49,7 +49,7 @@ pub fn map_claude_observation_ingest_error(
     )
 }
 
-pub fn map_host_admission_outcome(outcome: HostAdmissionOutcome) -> TraceDecayError {
+pub fn map_host_admission_outcome(outcome: &HostAdmissionOutcome) -> TraceDecayError {
     hook_admission_error(
         outcome.status,
         outcome.reason_code.unwrap_or("canonical_admission_failed"),

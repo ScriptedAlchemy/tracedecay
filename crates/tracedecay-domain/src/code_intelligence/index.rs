@@ -26,6 +26,7 @@ use super::identity::{
     SymbolOccurrenceId,
 };
 use super::language::EdgeAuthorityV1;
+use super::search::CodeGenerationSourceCommitmentsV1;
 
 /// One receipt-bound sanitized repository snapshot — the only legal intake.
 /// Carries repository, checkout, worktree, ref, source revision,
@@ -196,6 +197,11 @@ pub struct CodeGenerationManifestV1 {
     pub privacy_domain: PrivacyDomainId,
     pub privacy_key_epoch: u64,
     pub parent_generation: Option<CodeGenerationId>,
+    /// Source identities computed after canonical chunk materialization and
+    /// authenticated by `seal.expected_digest`. `None` exists only while the
+    /// production planner is materializing that source or when historical
+    /// bytes predate source commitments; published readers reject it typed.
+    pub source_commitments: Option<CodeGenerationSourceCommitmentsV1>,
     pub seal: GenerationSealV1,
 }
 
@@ -218,6 +224,7 @@ struct CodeGenerationManifestWireV1 {
     privacy_domain: PrivacyDomainId,
     privacy_key_epoch: u64,
     parent_generation: Option<CodeGenerationId>,
+    source_commitments: Option<CodeGenerationSourceCommitmentsV1>,
     seal: GenerationSealV1,
 }
 
@@ -244,6 +251,7 @@ impl<'de> Deserialize<'de> for CodeGenerationManifestV1 {
             privacy_domain: wire.privacy_domain,
             privacy_key_epoch: wire.privacy_key_epoch,
             parent_generation: wire.parent_generation,
+            source_commitments: wire.source_commitments,
             seal: wire.seal,
         };
         if needs_legacy_migration {
@@ -299,6 +307,24 @@ pub enum RelationEdgeKindV1 {
     Annotates,
     Returns,
     Receives,
+}
+
+impl RelationEdgeKindV1 {
+    /// The `snake_case` serde spelling as a borrowed string, for read models
+    /// that carry the kind as text without allocating through `serde_json`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Calls => "calls",
+            Self::Uses => "uses",
+            Self::TypeOf => "type_of",
+            Self::Contains => "contains",
+            Self::Implements => "implements",
+            Self::Extends => "extends",
+            Self::Annotates => "annotates",
+            Self::Returns => "returns",
+            Self::Receives => "receives",
+        }
+    }
 }
 
 /// A typed reference to the generation-bound diagnostic contract. The
@@ -381,6 +407,9 @@ impl CodeGenerationManifestV1 {
         self.sanitizer_revision.validate()?;
         self.chunker_revision.validate()?;
         self.privacy_domain.validate()?;
+        if let Some(commitments) = &self.source_commitments {
+            commitments.validate()?;
+        }
         self.seal.expected_digest.validate()?;
         self.seal.planner.validate()?;
         match generation_identity_kind(&self.generation_id)? {
@@ -550,6 +579,7 @@ mod tests {
             privacy_domain: id("privacy.fixture"),
             privacy_key_epoch: 1,
             parent_generation: Some(id("generation.v1.aaaaaaaa.00000001")),
+            source_commitments: None,
             seal: GenerationSealV1 {
                 expected_digest: id(&digest('d')),
                 sealed_at: UtcMicros(20),
@@ -560,6 +590,28 @@ mod tests {
             .expected_legacy_invalidation_digest()
             .expect("legacy invalidation digest");
         manifest
+    }
+
+    #[test]
+    fn relation_edge_kind_as_str_matches_its_serde_spelling() {
+        assert_eq!(RelationEdgeKindV1::TypeOf.as_str(), "type_of");
+        for kind in [
+            RelationEdgeKindV1::Calls,
+            RelationEdgeKindV1::Uses,
+            RelationEdgeKindV1::TypeOf,
+            RelationEdgeKindV1::Contains,
+            RelationEdgeKindV1::Implements,
+            RelationEdgeKindV1::Extends,
+            RelationEdgeKindV1::Annotates,
+            RelationEdgeKindV1::Returns,
+            RelationEdgeKindV1::Receives,
+        ] {
+            assert_eq!(
+                serde_json::to_value(kind).expect("serialize"),
+                serde_json::Value::String(kind.as_str().to_owned()),
+                "{kind:?} as_str diverged from its serde spelling"
+            );
+        }
     }
 
     #[test]

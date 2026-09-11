@@ -48,7 +48,7 @@ impl AutomationSessionRetrieval for CountingAutomationSessionRetrieval {
 struct CombinedBudgetRefusalRetrieval {
     inner: FixtureAutomationSessionRetrieval,
     refusal_call: usize,
-    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
     calls: AtomicUsize,
 }
 
@@ -56,7 +56,7 @@ impl CombinedBudgetRefusalRetrieval {
     fn new(
         cg: &TraceDecay,
         refusal_call: usize,
-        stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+        stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
     ) -> Self {
         Self {
             inner: FixtureAutomationSessionRetrieval::new(cg),
@@ -84,7 +84,7 @@ impl AutomationSessionRetrieval for CombinedBudgetRefusalRetrieval {
             let stage = self.stage;
             return Box::pin(async move {
                 AutomationTemporalRetrieval::StructuralRefusal(
-                    tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                    tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                         stage,
                     },
                 )
@@ -110,6 +110,8 @@ fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
 
 fn combined_output_fixture() -> Value {
     json!({
+        "outcome": "skills_proposed",
+        "decision": null,
         "facts": [
             {
                 "content": "TraceDecay automation should manage durable session reflection facts directly",
@@ -126,6 +128,8 @@ fn combined_output_fixture() -> Value {
                 "id": "automation-run-review",
                 "title": "Automation run review",
                 "summary": "Review self-improvement automation run ledgers and apply policies.",
+                "routing_description": "Review self-improvement automation run ledgers and apply policies.",
+                "routing_validation": skill_routing_validation("automation-run-review"),
                 "category": "workflow",
                 "body_markdown": "Use when reviewing TraceDecay self-improvement runs.",
                 "reason": "Session evidence repeats automation workflow outcome review."
@@ -144,12 +148,12 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -179,7 +183,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(reflector.status, AutomationRunStatus::Succeeded);
     assert_eq!(
         reflector.prompt_version.as_deref(),
-        Some("combined_review:v1")
+        Some("combined_review:v2")
     );
     assert_eq!(reflector.accepted_count, 0);
 
@@ -189,7 +193,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(skill.task_key.as_deref(), Some("skill_writer"));
     assert_eq!(skill.trigger, AutomationTrigger::Scheduler);
     assert_eq!(skill.status, AutomationRunStatus::Succeeded);
-    assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v1"));
+    assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v2"));
     assert_eq!(skill.accepted_count, 0);
 
     // Both halves share the combined request's input hash and correlate
@@ -205,7 +209,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     // Empty combined effects leave no automatic fact receipts behind.
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -250,12 +254,12 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
 
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -316,7 +320,7 @@ async fn retained_combined_review_defers_recorded_failures_until_settlement() {
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
 
     let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -378,7 +382,7 @@ async fn combined_review_commits_atomic_terminal_effects() {
     );
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -430,7 +434,7 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -479,7 +483,7 @@ async fn combined_review_not_dispatched_when_skill_writer_is_not_due() {
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -519,7 +523,7 @@ async fn combined_review_task_configuration_skips_before_retrieval_or_backend() 
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
         let dispatch = run_combined_review_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -572,7 +576,7 @@ async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
         let dispatch = run_combined_review_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -613,7 +617,7 @@ async fn combined_review_respects_escape_hatch_flag() {
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -654,7 +658,7 @@ async fn combined_review_falls_back_when_evidence_is_unavailable() {
 
     let dispatch =
         tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -687,12 +691,12 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         let cg = init_project(temp.path()).await;
         seed_project_session_activity(&cg).await;
         let config = scheduler_config(Some(3600), None);
-        let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+        let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
 
         let dispatch =
             tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-                &cg,
+                &automation_project_context(&cg),
                 &config,
                 &test_configuration_revision(),
                 &backend,
@@ -725,11 +729,11 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     let cg = init_project(temp.path()).await;
     seed_project_session_activity(&cg).await;
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let retrieval = EmptyAutomationSessionRetrieval::new();
     let dispatch =
         tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -761,15 +765,15 @@ async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
     let cg = init_project(temp.path()).await;
     seed_project_session_activity(&cg).await;
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let retrieval = CombinedBudgetRefusalRetrieval::new(
         &cg,
         0,
-        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
     );
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -805,15 +809,15 @@ async fn combined_review_preserves_skill_budget_stage_for_fallback() {
     let cg = init_project(temp.path()).await;
     seed_project_session_activity(&cg).await;
     let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let retrieval = CombinedBudgetRefusalRetrieval::new(
         &cg,
         1,
-        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
     );
 
     let dispatch = run_combined_review_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -871,7 +875,7 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     let error = failure.error;
     let err = error.to_string();
     assert!(
-        err.contains("must include facts and skills arrays"),
+        err.contains("combined review output must include a skills array"),
         "unexpected error: {err}"
     );
     let records = load_run_records(&cg.store_layout().dashboard_root, 50)
@@ -881,13 +885,10 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     for record in &records {
         assert_eq!(record.status, AutomationRunStatus::Failed);
         assert_eq!(record.trigger, AutomationTrigger::Scheduler);
-        assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v1"));
-        assert!(
-            record
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("facts and skills arrays"))
-        );
+        assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v2"));
+        assert!(record.error.as_deref().is_some_and(|error| {
+            error.contains("combined review output must include a skills array")
+        }));
     }
     let mut tasks: Vec<AgentTaskKind> = records.iter().map(|record| record.task).collect();
     tasks.sort_by_key(|task| format!("{task:?}"));
@@ -907,7 +908,7 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn combined_skill_failure_preserves_the_completed_memory_authority() {
+async fn combined_skill_validation_exhaustion_preserves_atomic_no_write() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
@@ -915,6 +916,8 @@ async fn combined_skill_failure_preserves_the_completed_memory_authority() {
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let backend = CombinedJsonBackend::new(json!({
+        "outcome": "skills_proposed",
+        "decision": null,
         "facts": combined_output_fixture()["facts"].clone(),
         "skills": [{"id": "missing-required-skill-fields"}]
     }));
@@ -930,28 +933,19 @@ async fn combined_skill_failure_preserves_the_completed_memory_authority() {
     .await
     .unwrap();
 
-    let CombinedReviewDispatch::MemoryCompletedSkillFailure(failure) = dispatch else {
-        panic!("skill failure must not become a memory partial effect: {dispatch:?}");
+    let CombinedReviewDispatch::RecordedFailure(failure) = dispatch else {
+        panic!("invalid skill output must fail both combined effects: {dispatch:?}");
     };
+    assert_eq!(backend.calls(), 2);
     assert!(
-        failure.skill_writer_record_error.is_none(),
-        "a published failed skill terminal must not report a second publication failure"
-    );
-    let session_reflector = failure.session_reflector;
-    let skill_writer_record = failure.skill_writer_record;
-    assert_eq!(
-        session_reflector.ledger_record.status,
-        AutomationRunStatus::Succeeded
-    );
-    assert_eq!(session_reflector.run_id, "combined-run-1");
-    assert!(session_reflector.committed_receipt.is_some());
-    assert_eq!(
-        skill_writer_record.expect("skill failure ledger").status,
-        AutomationRunStatus::Failed
+        failure
+            .error
+            .to_string()
+            .contains("repair budget exhausted")
     );
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -962,8 +956,10 @@ async fn combined_skill_failure_preserves_the_completed_memory_authority() {
     )
     .await
     .unwrap();
-    assert_eq!(receipts.len(), 1);
-    assert_eq!(receipts[0].run_id, "combined-run-1");
+    assert!(
+        receipts.is_empty(),
+        "combined validation failure must commit neither half"
+    );
 }
 
 #[cfg(feature = "test-transport")]
@@ -1056,7 +1052,7 @@ async fn combined_review_interruption_reaches_validation_before_any_automatic_wr
     interrupted.store(false, Ordering::Release);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(

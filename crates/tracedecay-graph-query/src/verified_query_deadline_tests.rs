@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_application::{CancellationSignal, Deadline, RequestId, ResolvedScope, now_micros};
+use tracedecay_contracts::{CancellationSignal, Deadline, RequestId, ResolvedScope, now_micros};
 use tracedecay_domain::UtcMicros;
 
 use super::verified_query_test_support::{

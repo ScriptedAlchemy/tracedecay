@@ -7,10 +7,10 @@ pub use tracedecay_automation::config::{
     DEFAULT_SCHEDULER_TICK_SECS, RetentionConfig, parse_schedule,
 };
 
-use crate::errors::{Result, TraceDecayError};
 use tracedecay_domain::configuration::{
     AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub fn from_configuration_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<AutomationConfig> {
     snapshot

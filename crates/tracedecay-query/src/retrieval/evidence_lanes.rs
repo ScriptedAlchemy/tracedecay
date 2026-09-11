@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, DiagnosticProviderResult, DiagnosticProviderState, FreshnessState,
     ProviderSourceIdentity,
 };

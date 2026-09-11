@@ -55,9 +55,11 @@ pub(super) async fn cleanup_connection_lsp_sessions(
 }
 
 pub(super) fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<AdmittedRoot> {
-    url::Url::from_file_path(project_path)
+    // The root published to clients and the root document containment strips
+    // against have to be the same string, so both come from one authority.
+    tracedecay_application::primitives::admitted_root_uri_for_project(project_path)
         .ok()
-        .map(|uri| AdmittedRoot::new(uri.to_string()))
+        .map(AdmittedRoot::new)
 }
 
 pub(super) async fn admitted_lsp_workspace_for_request(
@@ -137,15 +139,26 @@ async fn authorize_lsp_workspace_for_uris(
             return None;
         }
         let requested_path = uri.to_file_path().ok()?.canonicalize().ok()?;
-        if single_root && requested_path != active_project_path {
+        if single_root
+            && !tracedecay_runtime_core::path_safety::same_canonical_path(
+                &requested_path,
+                &active_project_path,
+            )
+        {
             return None;
         }
-        if requested_path == active_project_path {
+        if tracedecay_runtime_core::path_safety::same_canonical_path(
+            &requested_path,
+            &active_project_path,
+        ) {
             admits_active_project = true;
         }
         let mut candidates = Vec::new();
         for graph in &graphs {
-            if graph.project_root() != requested_path {
+            if !tracedecay_runtime_core::path_safety::same_canonical_path(
+                graph.project_root(),
+                &requested_path,
+            ) {
                 continue;
             }
             let Some(raw_project_id) = graph.store_layout().identity.project_id.as_deref() else {
@@ -163,7 +176,7 @@ async fn authorize_lsp_workspace_for_uris(
             return None;
         };
         selectors.push(
-            tracedecay_application::RegisteredRootSelectorV1::new(
+            tracedecay_contracts::RegisteredRootSelectorV1::new(
                 project_id.clone(),
                 requested_path.clone(),
             )
@@ -190,6 +203,6 @@ async fn authorize_lsp_workspace_for_uris(
         })
         .collect::<Option<Vec<_>>>()?;
     service
-        .authorize_lsp_workspace(resolved_roots, tracedecay_application::clock::now_micros())
+        .authorize_lsp_workspace(resolved_roots, tracedecay_contracts::clock::now_micros())
         .await
 }

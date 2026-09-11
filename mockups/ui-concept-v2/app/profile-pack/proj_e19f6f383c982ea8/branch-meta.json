@@ -1,0 +1,11 @@
+{
+  "default_branch": "feat/sftp-object-store",
+  "branches": {
+    "feat/sftp-object-store": {
+      "db_file": "tracedecay.db",
+      "created_at": "1787705521",
+      "last_synced_at": "1787705521",
+      "gc_protected": false
+    }
+  }
+}

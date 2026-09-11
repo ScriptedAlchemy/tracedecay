@@ -6,11 +6,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::{clean_c_doc_comment, docstring_from_preceding_comments};
+use crate::common::{clean_c_doc_comment, docstring_from_preceding_comments, local_node_id};
 use crate::complexity::{OBJC_COMPLEXITY, count_complexity};
 use crate::traversal::{find_descendant_by_kind, find_direct_child_by_kind};
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from Objective-C source files using tree-sitter.
@@ -124,7 +125,7 @@ impl ObjcExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -138,6 +139,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -197,7 +199,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), path);
-        let id = generate_node_id(&state.file_path, &NodeKind::Include, &path, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Include,
+            &path,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -221,6 +229,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -249,11 +258,12 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::PreprocessorDef,
             &name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -278,6 +288,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -351,7 +362,13 @@ impl ObjcExtractor {
                 text.find('{').map(|pos| text[..pos].trim().to_string())
             });
         let qualified_name = format!("{}::{}", state.qualified_prefix(), enum_name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Enum, &enum_name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Enum,
+            &enum_name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -375,6 +392,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -437,7 +455,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::EnumVariant, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::EnumVariant,
+            name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -461,6 +485,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -488,7 +513,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Typedef, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Typedef,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -512,6 +543,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -562,7 +594,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Interface, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Interface,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -586,6 +624,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -674,7 +713,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -698,6 +743,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -797,7 +843,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Property, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Property,
+            &name,
+            node,
+        );
 
         let visibility = Visibility::Pub;
 
@@ -823,6 +875,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -877,7 +930,7 @@ impl ObjcExtractor {
 
         let kind = NodeKind::Method;
 
-        let id = generate_node_id(&state.file_path, &kind, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -901,6 +954,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -933,7 +987,7 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Impl, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Impl, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -957,6 +1011,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1027,7 +1082,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Method, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Method,
+            &name,
+            node,
+        );
         let metrics = count_complexity(node, &OBJC_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -1052,6 +1113,7 @@ impl ObjcExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1082,7 +1144,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
         let metrics = count_complexity(node, &OBJC_COMPLEXITY, state.source);
 
         let graph_node = Node {
@@ -1107,6 +1175,7 @@ impl ObjcExtractor {
             unsafe_blocks: metrics.unsafe_blocks,
             unchecked_calls: metrics.unchecked_calls,
             assertions: metrics.assertions,
+            complexity_analysis: metrics.analysis,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -1146,7 +1215,13 @@ impl ObjcExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -1170,6 +1245,7 @@ impl ObjcExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

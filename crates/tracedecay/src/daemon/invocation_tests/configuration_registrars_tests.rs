@@ -48,7 +48,7 @@ async fn read_only_project_configuration_requires_the_bootstrap_profile_plan() {
         .await
         .expect("profile sessions authority");
     invocation
-        .install_profile_worker_plan(profile_sessions, profile_identity.profile_id())
+        .install_profile_worker_plan_for_test(profile_identity, profile_sessions)
         .await
         .expect("daemon bootstrap worker plan");
     invocation

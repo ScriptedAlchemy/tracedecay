@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::agents::{
     host_cli, load_json_file, record_host_config_observation_bytes, safe_write_text_file,

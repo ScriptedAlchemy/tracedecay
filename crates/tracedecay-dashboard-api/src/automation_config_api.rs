@@ -14,7 +14,7 @@ use tracedecay_api::configuration::{
     DashboardConfigurationRouteErrorV1, configuration_authority_unavailable_error,
     configuration_revision_conflict_error, settings_validation_error,
 };
-use tracedecay_application::ApplicationOutcome;
+use tracedecay_contracts::ApplicationOutcome;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
@@ -152,8 +152,8 @@ pub(crate) fn effective_automation_config(
     state: &DashboardState,
 ) -> tracedecay_domain::errors::Result<(ConfigurationRevisionId, AutomationConfig)> {
     let pinned = crate::config::cached_runtime_configuration(&state.project_root)?;
-    let config = from_configuration_snapshot(&pinned.snapshot)?;
-    Ok((pinned.revision_id, config))
+    let config = from_configuration_snapshot(pinned.snapshot())?;
+    Ok((pinned.revision_id().clone(), config))
 }
 
 fn config_payload(

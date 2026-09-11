@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
     RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
@@ -8,7 +8,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 fn retained_contract_error(
     context: &'static str,
-    error: tracedecay_application::ApplicationContractError,
+    error: &tracedecay_contracts::ApplicationContractError,
 ) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("{context}: {error}"),
@@ -20,7 +20,7 @@ pub fn retained_safe_diagnostic(
     message: &'static str,
 ) -> Result<SafeDiagnostic> {
     SafeDiagnostic::new(code, message)
-        .map_err(|error| retained_contract_error("invalid retained application diagnostic", error))
+        .map_err(|error| retained_contract_error("invalid retained application diagnostic", &error))
 }
 
 pub fn retained_problem_envelope(
@@ -29,20 +29,20 @@ pub fn retained_problem_envelope(
     problem: ApplicationProblem,
 ) -> Result<ApplicationProblemEnvelope> {
     ApplicationProblemEnvelope::new(contract, request_id, problem).map_err(|error| {
-        retained_contract_error("invalid retained application problem envelope", error)
+        retained_contract_error("invalid retained application problem envelope", &error)
     })
 }
 
 #[hotpath::measure(label = "mcp.retained.response_validate")]
 pub fn validated_retained_response(
     outcome: DaemonInvocationOutcome,
-    operation: tracedecay_application::RetainedSurfaceOperation,
+    operation: tracedecay_contracts::RetainedSurfaceOperation,
     request_id: &RequestId,
     result_contract: &ResultContractRef,
-) -> Result<ApplicationResult<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>> {
+) -> Result<ApplicationResult<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1>> {
     match outcome {
         DaemonInvocationOutcome::RetainedApplication { scope, outcome }
-            if tracedecay_application::retained_surface_outcome_matches_terminal(
+            if tracedecay_contracts::retained_surface_outcome_matches_terminal(
                 operation, request_id, &scope, &outcome,
             ) =>
         {
@@ -54,7 +54,7 @@ pub fn validated_retained_response(
             }))
         }
         DaemonInvocationOutcome::RetainedApplicationProblem { scope, problem }
-            if tracedecay_application::retained_surface_problem_matches_terminal(
+            if tracedecay_contracts::retained_surface_problem_matches_terminal(
                 operation,
                 request_id,
                 Some(&scope),
@@ -68,7 +68,7 @@ pub fn validated_retained_response(
             )?))
         }
         DaemonInvocationOutcome::ApplicationProblem { problem }
-            if tracedecay_application::retained_surface_problem_matches_terminal(
+            if tracedecay_contracts::retained_surface_problem_matches_terminal(
                 operation, request_id, None, &problem,
             ) =>
         {

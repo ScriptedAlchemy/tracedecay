@@ -1,16 +1,20 @@
 use crate::support::*;
+#[cfg(feature = "test-transport")]
+use sha2::{Digest, Sha256};
 use tracedecay_domain::SessionId;
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 
 #[path = "session_reflector/automatic_fact_receipts.rs"]
 mod automatic_fact_receipts;
 
 struct StructuralBudgetRefusalRetrieval {
     anchor_session_id: SessionId,
-    stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1,
+    stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1,
 }
 
 impl StructuralBudgetRefusalRetrieval {
-    fn new(stage: tracedecay_application::retrieval::SessionRetrievalBudgetStageV1) -> Self {
+    fn new(stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1) -> Self {
         Self {
             anchor_session_id: SessionId::new("session.structural-budget-refusal").unwrap(),
             stage,
@@ -30,7 +34,7 @@ impl AutomationSessionRetrieval for StructuralBudgetRefusalRetrieval {
         let stage = self.stage;
         Box::pin(async move {
             AutomationTemporalRetrieval::StructuralRefusal(
-                tracedecay_application::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
+                tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                     stage,
                 },
             )
@@ -67,7 +71,7 @@ async fn retained_session_reflector_preserves_retrieval_and_defers_ledger_public
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
     let backend = SessionJsonBackend::new(json!({"facts": []}));
     let retained = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &scheduler_config(Some(3600), None),
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -195,7 +199,7 @@ async fn session_reflector_interrupts_validation_before_near_match_or_apply() {
     interrupted.store(false, Ordering::Release);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(
@@ -229,7 +233,7 @@ async fn session_reflector_fails_closed_on_stale_temporal_evidence() {
     };
 
     let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -268,7 +272,10 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
-    let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+    let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+        "Session reflection does not warrant a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -289,14 +296,14 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
         ..AutomationConfig::default()
     };
     let reflector_retrieval = StructuralBudgetRefusalRetrieval::new(
-        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
     );
     let skill_retrieval = StructuralBudgetRefusalRetrieval::new(
-        tracedecay_application::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+        tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
     );
 
     let reflector = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -307,7 +314,7 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
     .await
     .unwrap();
     let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &skill_backend,
@@ -364,7 +371,10 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         let cg = init_project(temp.path()).await;
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
         let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
-        let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+        let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+            "Rejected evidence must not produce a managed skill mutation.",
+            "no_action",
+        ));
         let config = AutomationConfig {
             enabled: true,
             backend: AutomationBackend::CodexAppServer,
@@ -387,7 +397,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
 
         let reflector =
             tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-                &cg,
+                &automation_project_context(&cg),
                 &config,
                 &test_automation_run_control(Arc::new(AtomicBool::new(false))),
                 &test_configuration_revision(),
@@ -398,7 +408,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
             .await
             .unwrap();
         let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &skill_backend,
@@ -429,7 +439,10 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
     let cg = init_project(temp.path()).await;
     let retrieval = EmptyAutomationSessionRetrieval::new();
     let reflector_backend = SessionJsonBackend::new(json!({"facts": []}));
-    let skill_backend = SkillJsonBackend::new(json!({"skills": []}));
+    let skill_backend = SkillJsonBackend::new(no_skill_needed_output(
+        "No retained evidence supports a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -451,7 +464,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
     };
     let reflector =
         tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_automation_run_control(Arc::new(AtomicBool::new(false))),
             &test_configuration_revision(),
@@ -463,7 +476,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         .unwrap();
     let skill =
         tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &skill_backend,
@@ -500,7 +513,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     seed_session_evidence(&cg).await;
     let seed_memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let seeded = record_session_automatic_facts(
@@ -538,7 +551,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             },
             {
                 "content": "Use the fact-store workflow only when the user explicitly asks to memorize or remember a subject",
-                "category": "tool_guidance",
+                "category": "tool",
                 "tags": ["memory", "workflow"],
                 "entities": ["TraceDecay"],
                 "trust": 0.74,
@@ -705,7 +718,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     ));
     assert!(has_quarantine_reason("reason is required"));
     assert!(has_quarantine_reason(
-        "confidence is not supported; use trust"
+        "fact proposal contains an unsupported field"
     ));
     assert_eq!(
         run.report["accepted_facts"][2]["add_fact_request"]["trust"],
@@ -713,7 +726,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     );
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts: Vec<_> = list_automatic_fact_receipts(
@@ -794,7 +807,11 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     );
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["task"], json!("session_reflector"));
-    assert_eq!(eval_payload["summary"]["eval_count"], json!(11));
+    assert_eq!(
+        eval_payload["summary"]["eval_count"],
+        json!(4),
+        "evals come from applied receipt ids plus the sanitized rejection summary"
+    );
     assert!(
         eval_payload["eval_definitions"]
             .as_array()
@@ -927,7 +944,7 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
 
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let receipts = list_automatic_fact_receipts(
@@ -1112,7 +1129,7 @@ async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact(
 
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         project_memory_owner(&cg),
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     assert!(
@@ -1135,7 +1152,7 @@ async fn session_automatic_facts_replay_same_run_idempotently() {
     let owner = project_memory_owner(&cg);
     let memory = tracedecay_session_memory::memory::MemoryApplication::new(
         owner,
-        tracedecay_runtime_core::store::memory::DatabaseFactStore::new(cg.db()),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -1234,14 +1251,28 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
     let _global_db = isolate_global_db(&cg);
 
     let backend = InspectSessionEvidenceBackend;
-    for (host_mode, query) in [
-        (AutomationHostMode::Standalone, "active project banana"),
-        (AutomationHostMode::DelegatedHost, "project banana evidence"),
-    ] {
-        let config = AutomationConfig {
+    let unsupported_filter_options = SessionReflectorAutomationOptions {
+        trigger: AutomationTrigger::ManualCli,
+        provider: "cursor".to_string(),
+        query: "active project banana".to_string(),
+        scope: LcmScope::Session,
+        session_id: Some("project-reflect-1".to_string()),
+        include_summaries: false,
+        evidence_limit: 5,
+        sort: LcmGrepSort::Relevance,
+        source: Some("project_lcm".to_string()),
+        role: Some("assistant".to_string()),
+        start_time: Some(1_715_100_000),
+        end_time: Some(1_715_100_010),
+        run_id: None,
+        ..SessionReflectorAutomationOptions::default()
+    };
+    let standalone = run_session_reflector_with_backend(
+        &cg,
+        &AutomationConfig {
             enabled: true,
             backend: AutomationBackend::CodexAppServer,
-            host_mode,
+            host_mode: AutomationHostMode::Standalone,
             tasks: AutomationTaskSet {
                 session_reflector: AutomationTaskConfig {
                     enabled: true,
@@ -1251,44 +1282,79 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
                 ..AutomationTaskSet::default()
             },
             ..AutomationConfig::default()
-        };
+        },
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &backend,
+        unsupported_filter_options.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        standalone.ledger_record.status,
+        AutomationRunStatus::Skipped
+    );
+    assert_eq!(
+        standalone.ledger_record.error.as_deref(),
+        Some("session_evidence_filter_unavailable")
+    );
 
-        let run = run_session_reflector_with_backend(
-            &cg,
-            &config,
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-            &backend,
-            SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::ManualCli,
-                provider: "cursor".to_string(),
-                query: query.to_string(),
-                scope: LcmScope::Session,
-                session_id: Some("project-reflect-1".to_string()),
-                include_summaries: false,
-                evidence_limit: 5,
-                sort: LcmGrepSort::Relevance,
-                source: Some("project_lcm".to_string()),
-                role: Some("assistant".to_string()),
-                start_time: Some(1_715_100_000),
-                end_time: Some(1_715_100_010),
-                run_id: None,
-                ..SessionReflectorAutomationOptions::default()
+    let delegated = run_session_reflector_with_backend(
+        &cg,
+        &AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            host_mode: AutomationHostMode::DelegatedHost,
+            tasks: AutomationTaskSet {
+                session_reflector: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("manual".to_string()),
+                    ..AutomationTaskConfig::default()
+                },
+                ..AutomationTaskSet::default()
             },
-        )
-        .await
-        .unwrap();
+            ..AutomationConfig::default()
+        },
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &backend,
+        SessionReflectorAutomationOptions {
+            query: "project banana evidence".to_string(),
+            ..unsupported_filter_options
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(delegated.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        delegated.ledger_record.error.as_deref(),
+        Some("delegated_host_mode")
+    );
 
-        assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-        assert_eq!(
-            run.ledger_record.error.as_deref(),
-            Some("session_evidence_filter_unavailable")
-        );
-    }
+    let memory = tracedecay_session_memory::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
+        list_automatic_fact_receipts(&memory, None, 10, run_control.read_control())
             .await
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "filter and host-mode refusals must not write automatic facts"
+    );
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        records.len(),
+        1,
+        "only the delegated host gate persists a skip record: {records:?}"
+    );
+    assert!(
+        records.iter().all(|record| {
+            record.status == AutomationRunStatus::Skipped && record.proposed_ops.is_none()
+        }),
+        "refusals must not persist an applied run: {records:?}"
     );
 }
 
@@ -1355,7 +1421,7 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
     };
 
     let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -1454,7 +1520,7 @@ async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
     };
 
     let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -1572,7 +1638,7 @@ async fn session_reflector_replay_respects_include_summaries_false() {
     );
 
     let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &test_configuration_revision(),
@@ -1710,7 +1776,19 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
     assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
     assert!(records[0].evidence_hash.is_some());
     assert!(records[0].input_hash.is_some());
-    assert_eq!(records[0].proposed_ops.as_ref(), Some(&output));
+    let expected_sha256 = encode_tagged_lowercase_hex(
+        "sha256:",
+        &Sha256::digest(serde_json::to_vec(&output).unwrap()),
+    );
+    assert_eq!(
+        records[0].proposed_ops.as_ref(),
+        Some(&json!({
+            "schema_version": 1,
+            "expected_field": "facts",
+            "output_sha256": expected_sha256,
+            "output_kind": "object",
+        }))
+    );
     assert!(records[0].error.as_deref().is_some_and(|error| {
         error.contains("session reflector output must include a facts array")
     }));

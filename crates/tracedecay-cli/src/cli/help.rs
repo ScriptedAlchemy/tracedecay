@@ -484,32 +484,33 @@ admission through the daemon-owned canonical observation path and returns \
 without waiting for historical convergence. It owns no parallel temporal writer \
 and is never invoked by a read. `sessions refresh` \
 is the separate explicit, daemon-owned path for one exact temporal session scope; it \
-never defaults to the current directory. Refresh maps `--provider` to the \
-source scope, `--source`/`--target` to committed/observed frontiers, and uses \
-the application defaults temporal mode=current and grain=logical_message.";
+never defaults to the current directory. `--project-id`/`--project-path` bind the \
+refresh to that registered project's session store; `--profile-id` binds it to the \
+profile's own user-scope store and never consults a project. Refresh maps \
+`--provider` to the source scope, `--source`/`--target` to committed/observed \
+frontiers, and uses the application defaults temporal mode=current and \
+grain=logical_message.";
 
 pub(crate) const SESSIONS_AFTER_HELP: &str = "\
 Examples:
   tracedecay sessions import                     Schedule native host transcript import
+  tracedecay sessions sync-status --idempotency-key session-sync.abc --project-path /path/to/repo
   tracedecay sessions git-sync --dry-run          Preview session/Git convergence
   tracedecay sessions search \"auth refactor\"     Full-text transcript search
   tracedecay sessions search \"bug\" --limit 5 --provider cursor
   tracedecay sessions search \"plan\" --project-path /path/to/repo
-  tracedecay sessions refresh start --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
-  tracedecay sessions refresh join --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
-  tracedecay sessions refresh resume --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
   tracedecay sessions refresh begin --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
-  tracedecay sessions refresh status --profile-id profile.id --session-id session.id --provider cursor --source 4 --target 9 --handle opaque.handle
+  tracedecay sessions refresh begin --profile-id profile.id --session-id session.id --provider claude --source 4 --target 9
+  tracedecay sessions refresh status --profile-id profile.id --session-id session.id --provider claude --source 4 --target 9 --handle opaque.handle
   tracedecay sessions refresh cancel --project-path /path/to/repo --session-id session.id --provider cursor --source 4 --target 9 --handle opaque.handle --json
 
-`--handle` is the opaque daemon-local capability returned by start, join, \
-resume, or begin. status is read-only and never requests durable cancellation; \
-request abort or deadline outcomes also never imply durable cancellation. The \
-deprecated `--operation-id` alias is accepted for migration only; an internal \
-operation id is not a refresh capability.
+`--handle` is the opaque daemon-local capability returned by begin; an internal \
+operation id is not a refresh capability. begin is idempotent and joins a \
+running refresh. status is read-only and never requests durable cancellation; \
+request abort or deadline outcomes also never imply durable cancellation.
 
 Related: tracedecay tool message_search (MCP twin), tracedecay tool
-lcm_grep (scoped/time-filtered recall), tracedecay tool session_refresh,
+lcm_grep (scoped/time-filtered recall), tracedecay tool session_refresh_begin,
 tracedecay memory.";
 
 pub(crate) const ANALYTICS_LONG_ABOUT: &str = "\

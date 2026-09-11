@@ -40,6 +40,8 @@ fn map_graph_error(context: &str, path: &Path, error: GraphDbError) -> ProfileBa
         | GraphDbError::BudgetExhausted { .. }
         | GraphDbError::DeadlineExceeded
         | GraphDbError::Unavailable { .. }
+        | GraphDbError::SourceCommitmentsUnavailable { .. }
+        | GraphDbError::SealedRevisionIncompatible { .. }
         | GraphDbError::SealedStoreImmutable { .. }
         | GraphDbError::Closed => ProfileBackupError::unavailable(message),
     }
@@ -80,14 +82,7 @@ pub(super) fn snapshot_artifact(
     )? {
         snapshot_sqlite(source, destination)?;
     } else {
-        fs::copy(source, destination).map_err(|error| {
-            ProfileBackupError::unavailable(format!(
-                "copy backup file '{}' to '{}': {error}",
-                source.display(),
-                destination.display()
-            ))
-        })?;
-        sync_file(destination)?;
+        super::copy_private_file(source, destination)?;
     }
     super::sync_directory(parent)
 }

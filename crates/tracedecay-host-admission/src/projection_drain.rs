@@ -329,12 +329,13 @@ mod tests {
                 backfill: tracedecay_sessions::runtime::git_correlation::BackfillStats {
                     skipped_no_window: 1,
                     skipped_not_worktree: 1,
-                    // An unborn repository is deterministic, not retryable: a
-                    // pass that only saw those must still settle.
-                    skipped_no_history: 1,
+                    // Verified unborn history advances the frontier without
+                    // writing evidence or recording a retryable Git error.
+                    frontier_advanced: true,
                     ..Default::default()
                 },
                 backfill_page_saturated: false,
+                reprojected_legacy_head: false,
             },
         );
 
@@ -349,6 +350,7 @@ mod tests {
                     ..Default::default()
                 },
                 backfill_page_saturated: false,
+                reprojected_legacy_head: false,
             },
         );
         assert!(git_evidence_convergence_deferred(&transient));

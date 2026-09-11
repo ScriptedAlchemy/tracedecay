@@ -26,9 +26,7 @@ impl TestConnection {
         Self::open_inner(path, Some(Arc::new(AllowTestWrites)))
     }
 
-    // Only the in-crate engine tests drive this constructor; under
-    // `feature = "test-helpers"` alone it is an unused crate-private item.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn open_without_write_authority(path: &Path) -> Self {
         Self::open_inner(path, None)
     }
@@ -165,24 +163,5 @@ impl ReaderQueryExecutor for NoReads {
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
         unreachable!("engine test SQL does not use the product read contract")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn distinct_database_roots_receive_distinct_fixture_identities() {
-        let first_directory = tempfile::tempdir().expect("first fixture root");
-        let second_directory = tempfile::tempdir().expect("second fixture root");
-        let first = TestConnection::open(&first_directory.path().join("fixture.db"));
-        let second = TestConnection::open(&second_directory.path().join("fixture.db"));
-
-        assert_ne!(
-            first._writer.binding().shard_id,
-            second._writer.binding().shard_id,
-            "independent database roots must not share one fixture shard identity"
-        );
     }
 }

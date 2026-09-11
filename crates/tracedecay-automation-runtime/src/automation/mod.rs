@@ -9,23 +9,29 @@ pub mod artifacts;
 pub mod automatic_facts;
 pub mod backend;
 pub mod backend_identity;
+pub mod combined_effect;
 pub mod config;
+pub mod effect_recovery;
 pub mod effect_runtime;
+pub mod executable_lookup;
 pub mod hermes_skill_bridge;
 pub mod host_io;
 pub mod host_receipts;
 mod job_webhook;
 pub mod jobs;
 mod lifecycle;
+pub mod maintenance_termination;
 mod managed_skill_model;
 mod managed_skill_validation;
 pub mod managed_skills;
 pub mod memory_curator;
+pub mod observation;
 pub mod outcomes;
 pub mod run_ledger;
 pub mod runner;
 pub mod scheduler;
 mod scheduler_metrics;
+pub mod scheduler_stop;
 pub mod session_reflector;
 pub mod skill_frontmatter;
 pub mod skill_materialization;
@@ -46,8 +52,8 @@ pub use lifecycle::{
 /// Canonical home for the `config_error` helper duplicated across the
 /// automation module tree; other automation submodules should call this
 /// instead of re-declaring their own copy.
-pub fn config_error(message: impl Into<String>) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Config {
+pub fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
+    tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
     }
 }

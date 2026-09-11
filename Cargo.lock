@@ -610,12 +610,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
-name = "byteorder-lite"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1406,7 +1400,7 @@ checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1500,7 +1494,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1593,15 +1587,6 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
-
-[[package]]
-name = "fdeflate"
-version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
-dependencies = [
- "simd-adler32",
-]
 
 [[package]]
 name = "filetime"
@@ -2238,7 +2223,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a791e6620676a875f362f3156ed213e73ca099a09bf992c18812abe65cc37b1"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -2728,7 +2713,7 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -2743,7 +2728,7 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2763,7 +2748,7 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -2788,7 +2773,7 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "arcstr",
  "bincode",
@@ -2810,7 +2795,7 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=38654a67ec9e8c4fdab43c00b41f04aa696b52ed#38654a67ec9e8c4fdab43c00b41f04aa696b52ed"
+source = "git+https://github.com/ScriptedAlchemy/grafeo.git?rev=4dc04db299bb63269a2c216c66aa94fab40d9819#4dc04db299bb63269a2c216c66aa94fab40d9819"
 dependencies = [
  "bincode",
  "byteorder",
@@ -3015,8 +3000,6 @@ dependencies = [
 [[package]]
 name = "hotpath-macros"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89a3d3cdf9b0d4d3d4f6d4a29798f3b9170401ba500eaa58dd8f890f926af0f1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3302,19 +3285,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "image"
-version = "0.25.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
-dependencies = [
- "bytemuck",
- "byteorder-lite",
- "moxcms",
- "num-traits",
- "png",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3422,7 +3392,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3687,15 +3657,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
-name = "logo-art"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c27d2cfa07917f81be6eb1b57456ce22b528c3361654a112e3ad72d6489af4b2"
-dependencies = [
- "image",
-]
-
-[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3873,16 +3834,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "moxcms"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
-dependencies = [
- "num-traits",
- "pxfm",
 ]
 
 [[package]]
@@ -4247,19 +4198,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "png"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
-dependencies = [
- "bitflags 2.13.1",
- "crc32fast",
- "fdeflate",
- "flate2",
- "miniz_oxide",
-]
-
-[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4368,12 +4306,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pxfm"
-version = "0.1.30"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
-
-[[package]]
 name = "quanta"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4441,7 +4373,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4897,7 +4829,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5444,10 +5376,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5664,8 +5596,7 @@ dependencies = [
 [[package]]
 name = "tokensave-large-treesitters"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e12f9884955f347b1c7323f263020af2a097811fe1994e5d974ac46411b971b0"
+source = "git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=102d0103b6fd093c1e5989cceede1ed9f08fe6a9#102d0103b6fd093c1e5989cceede1ed9f08fe6a9"
 dependencies = [
  "arborium-kotlin",
  "arborium-lean",
@@ -5795,6 +5726,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
@@ -5917,8 +5849,6 @@ dependencies = [
  "glob",
  "hex",
  "hotpath",
- "hyper",
- "hyper-util",
  "ignore",
  "jsonschema",
  "keyring",
@@ -5930,10 +5860,8 @@ dependencies = [
  "rustls",
  "same-file",
  "schemars",
- "semver",
  "serde",
  "serde_json",
- "serde_path_to_error",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
@@ -5954,6 +5882,7 @@ dependencies = [
  "tracedecay-code-index-retention",
  "tracedecay-code-index-runtime",
  "tracedecay-configuration",
+ "tracedecay-contracts",
  "tracedecay-daemon-control",
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
@@ -5971,6 +5900,7 @@ dependencies = [
  "tracedecay-maintenance",
  "tracedecay-mcp",
  "tracedecay-policy",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
@@ -5988,7 +5918,6 @@ dependencies = [
  "tracedecay-store-runtime",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
@@ -6024,6 +5953,8 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-automation-runtime",
+ "tracedecay-code-index-runtime",
+ "tracedecay-contracts",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-framing",
@@ -6036,13 +5967,13 @@ dependencies = [
  "tracedecay-mcp",
  "tracedecay-policy",
  "tracedecay-private-fs",
+ "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-session-memory",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
  "tracing",
  "url",
  "xattr",
@@ -6062,7 +5993,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tower",
- "tracedecay-application",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-tool-catalog",
 ]
@@ -6071,20 +6002,58 @@ dependencies = [
 name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
+ "cap-std",
+ "criterion",
+ "fs2",
  "getrandom 0.2.17",
  "gix",
+ "glob",
  "hex",
+ "hmac 0.13.0",
  "hotpath",
+ "libc",
+ "same-file",
  "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "static_assertions",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-stream",
+ "tracedecay-automation",
+ "tracedecay-code-extraction",
+ "tracedecay-code-index",
+ "tracedecay-configuration",
+ "tracedecay-contracts",
+ "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-graph-db",
+ "tracedecay-graph-query",
+ "tracedecay-hooks",
+ "tracedecay-host-integration",
+ "tracedecay-lcm",
+ "tracedecay-lsp",
  "tracedecay-policy",
+ "tracedecay-privacy",
+ "tracedecay-private-fs",
+ "tracedecay-query",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-semantic",
+ "tracedecay-semantic-contracts",
+ "tracedecay-session-memory",
+ "tracedecay-session-temporal-store",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
+ "tracing",
+ "ureq",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -6119,14 +6088,15 @@ dependencies = [
  "tokio",
  "toml",
  "tracedecay-agent-hosts",
- "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-hooks",
  "tracedecay-lcm",
  "tracedecay-policy",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
@@ -6167,16 +6137,18 @@ dependencies = [
  "futures-util",
  "hex",
  "hotpath",
- "logo-art",
+ "libc",
  "mimalloc",
  "open",
  "rayon",
  "regex",
  "rusqlite",
  "self-replace",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shell-words",
  "tar",
  "tempfile",
  "tikv-jemallocator",
@@ -6189,9 +6161,12 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-configuration",
+ "tracedecay-contracts",
  "tracedecay-daemon-control",
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
+ "tracedecay-daemon-service",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -6209,8 +6184,8 @@ dependencies = [
  "tracedecay-session-memory",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
+ "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
  "tracing",
  "ureq",
  "url",
@@ -6234,6 +6209,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-hlsl",
  "tree-sitter-language",
+ "tree-sitter-md",
  "tree-sitter-rust",
 ]
 
@@ -6254,11 +6230,12 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
- "tracedecay-application",
  "tracedecay-code-extraction",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-graph-db",
- "tracedecay-private-fs",
+ "tracedecay-privacy",
+ "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tree-sitter",
@@ -6271,6 +6248,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "fs2",
+ "gix",
  "hotpath",
  "libc",
  "serde",
@@ -6281,6 +6259,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-private-fs",
+ "tracedecay-runtime-core",
  "tracedecay-store",
 ]
 
@@ -6308,12 +6287,15 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-code-index-retention",
+ "tracedecay-contracts",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-graph-query",
  "tracedecay-lsp",
  "tracedecay-policy",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
@@ -6324,7 +6306,6 @@ dependencies = [
  "tracedecay-session-temporal-store",
  "tracedecay-store",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
  "tracing",
  "url",
  "walkdir",
@@ -6334,21 +6315,42 @@ dependencies = [
 name = "tracedecay-configuration"
 version = "0.1.0"
 dependencies = [
+ "glob",
  "hex",
  "hotpath",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-lcm",
  "tracedecay-policy",
  "tracedecay-runtime-core",
  "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
+]
+
+[[package]]
+name = "tracedecay-contracts"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "hex",
+ "hotpath",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracedecay-domain",
+ "tracedecay-policy",
+ "tracedecay-tool-catalog",
 ]
 
 [[package]]
@@ -6366,6 +6368,8 @@ dependencies = [
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-runtime-core",
+ "tracing",
+ "tracing-subscriber",
  "windows 0.62.2",
 ]
 
@@ -6380,9 +6384,10 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tracedecay-application",
+ "tracedecay-contracts",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-private-fs",
  "tracedecay-runtime-core",
 ]
 
@@ -6399,7 +6404,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-application",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-framing",
  "tracedecay-private-fs",
@@ -6410,23 +6415,35 @@ dependencies = [
 name = "tracedecay-daemon-service"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
  "hotpath",
+ "hyper",
+ "hyper-util",
  "libc",
+ "rustls",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-code-index",
  "tracedecay-code-index-runtime",
  "tracedecay-configuration",
+ "tracedecay-contracts",
+ "tracedecay-daemon-control",
+ "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
  "tracedecay-dashboard-api",
  "tracedecay-domain",
@@ -6434,18 +6451,23 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-graph-query",
  "tracedecay-hooks",
+ "tracedecay-host-admission",
  "tracedecay-lsp",
  "tracedecay-policy",
+ "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-search-eval",
  "tracedecay-semantic",
  "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
+ "tracedecay-session-temporal-store",
  "tracedecay-sessions",
+ "tracedecay-source-edit",
  "tracedecay-store",
+ "tracedecay-store-runtime",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -6459,6 +6481,7 @@ dependencies = [
  "clru",
  "hotpath",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6473,19 +6496,20 @@ dependencies = [
  "tracedecay-automation-runtime",
  "tracedecay-code-index",
  "tracedecay-configuration",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
  "tracedecay-graph-query",
  "tracedecay-hooks",
  "tracedecay-lsp",
+ "tracedecay-privacy",
  "tracedecay-runtime-core",
  "tracedecay-semantic-contracts",
  "tracedecay-session-memory",
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
  "tracing",
 ]
 
@@ -6529,10 +6553,11 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-application",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-lcm",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -6567,7 +6592,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tracedecay-domain",
  "tracedecay-private-fs",
- "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracing",
@@ -6578,16 +6602,18 @@ name = "tracedecay-graph-query"
 version = "0.1.0"
 dependencies = [
  "hotpath",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-privacy",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
  "tracedecay-tool-catalog",
@@ -6603,8 +6629,10 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.19",
+ "tokio",
  "tracedecay-domain",
  "tracedecay-private-fs",
+ "tracing",
 ]
 
 [[package]]
@@ -6619,6 +6647,7 @@ dependencies = [
  "tokio",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
@@ -6652,8 +6681,9 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
- "tracedecay-application",
+ "tracedecay-contracts",
  "tracedecay-domain",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -6676,8 +6706,8 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "tracedecay-application",
  "tracedecay-code-extraction",
+ "tracedecay-contracts",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-runtime-core",
@@ -6704,42 +6734,65 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-code-index-retention",
+ "tracedecay-code-index-runtime",
+ "tracedecay-configuration",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
+ "tracedecay-lcm",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-semantic-contracts",
+ "tracedecay-session-memory",
+ "tracedecay-store",
+ "tracedecay-store-runtime",
+ "tracedecay-tool-catalog",
 ]
 
 [[package]]
 name = "tracedecay-mcp"
 version = "0.1.0"
 dependencies = [
+ "gix",
  "glob",
  "hotpath",
  "ignore",
  "libc",
+ "rmcp 3.1.1",
  "schemars",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "toml",
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-code-index-runtime",
+ "tracedecay-configuration",
+ "tracedecay-contracts",
+ "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
+ "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-framing",
+ "tracedecay-global-db",
  "tracedecay-graph-query",
  "tracedecay-hooks",
+ "tracedecay-privacy",
+ "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-session-memory",
+ "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
+ "tracedecay-store-runtime",
+ "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
  "tracing",
  "tree-sitter",
@@ -6754,6 +6807,34 @@ dependencies = [
  "serde",
  "serde_json",
  "tracedecay-domain",
+]
+
+[[package]]
+name = "tracedecay-privacy"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "hex",
+ "hotpath",
+ "percent-encoding",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "tracedecay-capture",
+ "tracedecay-daemon-identity",
+ "tracedecay-domain",
+ "tracedecay-runtime-core",
+ "tracedecay-session-memory",
+ "tracedecay-store",
+ "tracedecay-store-runtime",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -6789,13 +6870,14 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror 2.0.19",
- "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-private-fs",
  "tracedecay-temporal-query",
+ "tracing",
  "zeroize",
 ]
 
@@ -6803,8 +6885,6 @@ dependencies = [
 name = "tracedecay-runtime-core"
 version = "0.1.0"
 dependencies = [
- "aho-corasick",
- "amari-holographic",
  "chrono",
  "criterion",
  "dirs",
@@ -6814,21 +6894,16 @@ dependencies = [
  "hex",
  "hotpath",
  "libc",
- "memmap2",
- "percent-encoding",
  "reflink-copy",
- "regex",
  "rusqlite",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "sha2 0.11.0",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "toml",
  "tracedecay-capture",
  "tracedecay-domain",
  "tracedecay-graph-db",
@@ -6836,7 +6911,6 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracing",
- "url",
  "windows-sys 0.61.2",
 ]
 
@@ -6855,7 +6929,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-application",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-store",
  "tracedecay-tool-catalog",
@@ -6873,7 +6947,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracedecay-api",
- "tracedecay-application",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-tool-catalog",
 ]
@@ -6892,9 +6966,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-application",
  "tracedecay-capture",
  "tracedecay-code-index",
+ "tracedecay-contracts",
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
@@ -6903,6 +6977,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-search-eval",
  "tracedecay-sessions",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6932,7 +7007,6 @@ dependencies = [
  "tokio",
  "tracedecay-code-index",
  "tracedecay-domain",
- "tracedecay-private-fs",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-semantic-contracts",
@@ -6954,9 +7028,13 @@ dependencies = [
 name = "tracedecay-session-memory"
 version = "0.1.0"
 dependencies = [
+ "amari-holographic",
  "fs2",
  "hex",
  "hotpath",
+ "memmap2",
+ "regex",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",
@@ -6966,11 +7044,13 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml",
- "tracedecay-application",
  "tracedecay-automation",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-graph-db",
  "tracedecay-lcm",
+ "tracedecay-privacy",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-session-temporal-store",
@@ -6978,6 +7058,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
@@ -6995,6 +7076,8 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-code-index",
  "tracedecay-code-index-runtime",
+ "tracedecay-contracts",
+ "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -7008,9 +7091,9 @@ dependencies = [
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
+ "tracedecay-store-runtime",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
  "tracing",
 ]
 
@@ -7027,8 +7110,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-application",
  "tracedecay-capture",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-graph-db",
@@ -7063,12 +7146,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracedecay-application",
  "tracedecay-capture",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-framing",
  "tracedecay-graph-db",
  "tracedecay-lcm",
+ "tracedecay-privacy",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -7082,22 +7166,27 @@ dependencies = [
 name = "tracedecay-source-edit"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "gix",
  "hotpath",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "tokio",
- "tracedecay-application",
+ "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-graph-query",
  "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracedecay-tool-catalog",
- "tracedecay-usecases",
  "tracing",
+ "tree-sitter",
 ]
 
 [[package]]
@@ -7132,6 +7221,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-code-index-retention",
  "tracedecay-code-index-runtime",
+ "tracedecay-contracts",
  "tracedecay-daemon-identity",
  "tracedecay-domain",
  "tracedecay-global-db",
@@ -7145,8 +7235,9 @@ dependencies = [
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
  "tracedecay-store",
- "tracedecay-usecases",
+ "tracedecay-tool-catalog",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7174,63 +7265,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "tracedecay-usecases"
-version = "0.1.0"
-dependencies = [
- "cap-fs-ext",
- "cap-std",
- "criterion",
- "fs2",
- "getrandom 0.2.17",
- "gix",
- "glob",
- "hex",
- "hmac 0.13.0",
- "hotpath",
- "libc",
- "same-file",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "static_assertions",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-stream",
- "tracedecay-application",
- "tracedecay-automation",
- "tracedecay-code-extraction",
- "tracedecay-code-index",
- "tracedecay-configuration",
- "tracedecay-domain",
- "tracedecay-global-db",
- "tracedecay-graph-db",
- "tracedecay-graph-query",
- "tracedecay-hooks",
- "tracedecay-host-integration",
- "tracedecay-lcm",
- "tracedecay-lsp",
- "tracedecay-policy",
- "tracedecay-private-fs",
- "tracedecay-query",
- "tracedecay-runtime-core",
- "tracedecay-rusqlite-runtime",
- "tracedecay-semantic",
- "tracedecay-semantic-contracts",
- "tracedecay-session-memory",
- "tracedecay-session-temporal-store",
- "tracedecay-sessions",
- "tracedecay-store",
- "tracedecay-temporal-query",
- "tracedecay-tool-catalog",
- "tracing",
- "ureq",
- "url",
- "zeroize",
 ]
 
 [[package]]
@@ -7501,6 +7535,16 @@ name = "tree-sitter-lua"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-md"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2efd398be546456c814598ee56c0f51769a77241511b4a58077815d120afa882"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -8093,7 +8137,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

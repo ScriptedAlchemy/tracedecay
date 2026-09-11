@@ -23,50 +23,13 @@ const MAX_RESULTS_CAP: usize = 200;
 /// Default `max_results` when the caller omits it.
 const DEFAULT_MAX_RESULTS: usize = 50;
 
-#[hotpath::measure(future = true, label = "mcp.search.ast_grep.scan")]
-async fn search_tree_off_thread(
-    project_root: std::path::PathBuf,
-    pattern: String,
-    lang: Option<String>,
-    path_glob: Option<String>,
-    max_results: usize,
-    scope_prefix: Option<String>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Result<AstGrepSearchResult> {
-    let query = pattern.clone();
-    run_bounded_search(
-        "tracedecay_ast_grep_search",
-        query,
-        deadline,
-        cancellation,
-        move |cancelled, transport_cancellation| {
-            search_tree_scoped_with_cancel(
-                &project_root,
-                &pattern,
-                lang.as_deref(),
-                path_glob.as_deref(),
-                max_results,
-                scope_prefix.as_deref(),
-                || {
-                    cancelled.load(std::sync::atomic::Ordering::Acquire)
-                        || transport_cancellation
-                            .as_ref()
-                            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
-                },
-            )
-        },
-    )
-    .await
-}
-
 #[hotpath::measure(future = true, label = "mcp.search.ast_grep.total")]
 pub async fn handle_ast_grep_search(
     project_root: &Path,
     args: Value,
     scope_prefix: Option<&str>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
 ) -> Result<ToolResult> {
     let pattern =
         args.get("pattern")
@@ -90,15 +53,35 @@ pub async fn handle_ast_grep_search(
         .map_or(DEFAULT_MAX_RESULTS, |v| (v as usize).min(MAX_RESULTS_CAP))
         .max(1);
 
-    let search = search_tree_off_thread(
-        project_root.to_path_buf(),
-        pattern.to_string(),
-        lang.map(str::to_owned),
-        path_glob.map(str::to_owned),
-        max_results,
-        scope_prefix.map(str::to_owned),
-        deadline,
-        cancellation,
+    let project_root_buf = project_root.to_path_buf();
+    let query = pattern.to_owned();
+    let lang = lang.map(str::to_owned);
+    let path_glob = path_glob.map(str::to_owned);
+    let scope_prefix = scope_prefix.map(str::to_owned);
+    let search: AstGrepSearchResult = hotpath::future!(
+        run_bounded_search(
+            "tracedecay_ast_grep_search",
+            pattern.to_owned(),
+            deadline,
+            cancellation,
+            move |cancelled, transport_cancellation| {
+                search_tree_scoped_with_cancel(
+                    &project_root_buf,
+                    &query,
+                    lang.as_deref(),
+                    path_glob.as_deref(),
+                    max_results,
+                    scope_prefix.as_deref(),
+                    || {
+                        cancelled.load(std::sync::atomic::Ordering::Acquire)
+                            || transport_cancellation
+                                .as_ref()
+                                .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
+                    },
+                )
+            },
+        ),
+        label = "mcp.search.ast_grep.scan"
     )
     .await?;
 
@@ -178,17 +161,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn blocking_search_wrapper_finds_match() {
+    async fn bounded_search_finds_match() {
         let temp = tempfile::tempdir().expect("temp project");
         std::fs::write(temp.path().join("lib.rs"), "fn f() { target(1); }\n")
             .expect("write fixture");
 
-        let result = search_tree_off_thread(
-            temp.path().to_path_buf(),
-            "target($A)".to_string(),
-            Some("rust".to_string()),
-            None,
-            10,
+        let result = handle_ast_grep_search(
+            temp.path(),
+            json!({"pattern": "target($A)", "lang": "rust", "max_results": 10}),
             None,
             None,
             None,
@@ -196,6 +176,6 @@ mod tests {
         .await
         .expect("structural search");
 
-        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.touched_files, vec!["lib.rs".to_owned()]);
     }
 }

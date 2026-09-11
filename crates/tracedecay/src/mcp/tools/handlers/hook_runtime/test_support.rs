@@ -1,6 +1,6 @@
-use crate::agents::context_scout_v2::ContextScoutEvidenceEnvelopeExt;
 use serde_json::{Value, json};
-use tracedecay_application::context_scout::{
+use tracedecay_agent_hosts::agents::context_scout_v2::ContextScoutEvidenceEnvelopeExt;
+use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
     ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
@@ -8,7 +8,7 @@ use tracedecay_application::context_scout::{
     ContextScoutRedactionReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
     ContextScoutWorkV1,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
     TemporalState,

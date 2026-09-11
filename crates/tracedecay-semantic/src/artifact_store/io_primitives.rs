@@ -1,9 +1,9 @@
 //! I/O and validation primitives for the model artifact store.
 
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_semantic_contracts::ArtifactMemberRoleV1;
 use tracedecay_semantic_contracts::{
-    ArtifactMemberRoleV1, ArtifactPackageMemberV1, ResourceCeilingV1, RuntimeCompatibilityV1,
-    Sha256DigestHex,
+    ArtifactPackageMemberV1, ResourceCeilingV1, RuntimeCompatibilityV1, Sha256DigestHex,
 };
 
 use super::*;
@@ -117,7 +117,6 @@ pub(super) fn stream_local_member(
     session: &mut ImportSession,
     member: &ArtifactPackageMemberV1,
     path: &Path,
-    now_unix: u64,
 ) -> Result<(), ArtifactImportErrorV1> {
     let metadata =
         fs::symlink_metadata(path).map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?;
@@ -133,18 +132,25 @@ pub(super) fn stream_local_member(
     if metadata.len() != member.byte_length {
         return Err(ArtifactImportErrorV1::LengthMismatch);
     }
-    let mut file = File::open(path).map_err(|_| ArtifactImportErrorV1::SourceInterrupted)?;
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|_| ArtifactImportErrorV1::SourceInterrupted)?;
-        if read == 0 {
-            break;
-        }
-        store.stage_member_chunk(session, member.role, &buffer[..read], now_unix)?;
+    let parent = path
+        .parent()
+        .ok_or(ArtifactImportErrorV1::UnsafePackageEntry)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(ArtifactImportErrorV1::UnsafePackageEntry)?;
+    let source = Dir::open_ambient_dir(parent, ambient_authority())
+        .map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?;
+    let mut file = open_cap_file(&source, name, true, false, false, false, false)
+        .map_err(|_| ArtifactImportErrorV1::UnsafePackageEntry)?
+        .into_std();
+    let opened = file
+        .metadata()
+        .map_err(|_| ArtifactImportErrorV1::SourceInterrupted)?;
+    if !opened.is_file() || metadata_has_multiple_links(&opened) {
+        return Err(ArtifactImportErrorV1::UnsafePackageEntry);
     }
-    Ok(())
+    store.stage_local_member(session, member, &mut file)
 }
 
 pub(super) fn sha256_open_file(
@@ -370,8 +376,20 @@ pub(super) fn open_or_create_component_dir(
     }
 }
 
-pub(super) fn member_file_name(role: ArtifactMemberRoleV1) -> &'static str {
+/// Physical layout is role-owned, independent of portable source paths.
+/// Historical records without a manifest retain their established ONNX layout.
+pub(super) fn member_file_name(
+    role: ArtifactMemberRoleV1,
+    runtime: Option<&RuntimeCompatibilityV1>,
+) -> &'static str {
     match role {
+        ArtifactMemberRoleV1::Model
+            if runtime.is_some_and(|runtime| {
+                runtime.runtime == EmbeddingRuntimeFamilyV1::Model2VecStatic.runtime_family()
+            }) =>
+        {
+            "model.safetensors"
+        }
         ArtifactMemberRoleV1::Model => "model.onnx",
         ArtifactMemberRoleV1::Tokenizer => "tokenizer.json",
         ArtifactMemberRoleV1::Config => "config.json",

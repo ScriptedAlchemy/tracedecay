@@ -4,16 +4,16 @@
 
 use std::sync::Arc;
 
+use tracedecay_application::observability::{
+    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, emit_index,
+    emit_retrieval_pipeline,
+};
 use tracedecay_domain::{
     CoverageStateV1, IndexObservationKindV1, IndexObservedV1, IndexOutcomeV1, QueueDepthBucketV1,
     RetrievalBudget,
 };
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::observation::observe_composition;
-use tracedecay_usecases::observability::{
-    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1, emit_index,
-    emit_retrieval_pipeline,
-};
 
 use super::CodeIndexReconcileOutcomeV1;
 

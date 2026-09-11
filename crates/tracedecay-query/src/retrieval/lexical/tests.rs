@@ -12,18 +12,50 @@ use tracedecay_domain::{
     CompactCandidate, EphemeralSanitizedQueryViewV1, EvidenceRole, ExactAdmissionProof,
     ExactAdmissionRuleRevision, ExactFieldV1, FixedPointScore, FreshnessCompatibilityV1,
     PrincipalId, QueryNormalizationRevision, RetrievalBudget, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverBatch, RetrieverKind, RetrieverOutcome, SanitizerRevision,
-    SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros, VectorWatermark,
-    split_subtokens, technical_tokens,
+    RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SanitizerRevision, SingleRootScopeV1, SourceFreshness, TemporalModeV1, UtcMicros,
+    VectorWatermark, split_subtokens, technical_tokens,
 };
 
 use super::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever, lexical_query_parts,
+    LexicalLaneRetriever, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, admit_candidate_sources,
+    lexical_query_parts,
 };
+use crate::retrieval::graph::GraphExecutionControl;
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, LexicalPostingReadPort, RetrievalPortError,
 };
+
+/// A request authority that never cancels: the lane must not observe it.
+struct ActiveControl;
+
+impl GraphExecutionControl for ActiveControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
+
+static ACTIVE_CONTROL: ActiveControl = ActiveControl;
+
+/// A request authority that is already cancelled when the lane consults it.
+struct CancelledControl;
+
+impl GraphExecutionControl for CancelledControl {
+    fn is_cancelled(&self) -> bool {
+        true
+    }
+
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+}
+
+static CANCELLED_CONTROL: CancelledControl = CancelledControl;
 
 fn id<T>(value: &str) -> T
 where
@@ -39,6 +71,84 @@ where
     <T as TryFrom<String>>::Error: fmt::Debug,
 {
     T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("valid fixture digest")
+}
+
+#[test]
+fn candidate_sources_admit_rarest_first_within_the_document_budget() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    let mut pruned = Vec::new();
+    let admitted = admit_candidate_sources(
+        vec![
+            (budget * 3, "the"),
+            (10, "pendingtoolkind"),
+            (budget - 100, "pending"),
+            (budget * 2, "tool"),
+            (200, "kind"),
+        ],
+        |frequency, term| pruned.push((term.to_string(), frequency as u64)),
+    );
+    assert_eq!(
+        admitted,
+        ["pendingtoolkind", "kind"],
+        "`pending` would push the admitted total past the budget, and every later \
+         (more common) source is pruned with it"
+    );
+    assert_eq!(
+        pruned,
+        [
+            ("pending".to_owned(), (budget - 100) as u64),
+            ("tool".to_owned(), (budget * 2) as u64),
+            ("the".to_owned(), (budget * 3) as u64)
+        ]
+    );
+    let outcome = super::candidate_admission_outcome(
+        RetrieverBatch::<()> {
+            candidates: Vec::new(),
+            evidence_by_occurrence: BTreeMap::new(),
+            coverage: RetrieverCoverage::default(),
+            continuation: None,
+        },
+        pruned.clone(),
+    );
+    assert!(
+        matches!(outcome, RetrieverOutcome::Partial { value, reason: tracedecay_domain::RetrievalFailure::CandidateSourcesPruned { term_sources, document_frequency_budget } } if value.candidates.is_empty() && term_sources == pruned && document_frequency_budget == budget as u64)
+    );
+}
+
+#[test]
+fn candidate_sources_always_admit_the_most_selective_term() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    assert_eq!(
+        admit_candidate_sources(
+            vec![(budget * 20, "tracedecay"), (budget * 30, "the")],
+            |_, _| {}
+        ),
+        ["tracedecay"]
+    );
+    assert!(admit_candidate_sources(Vec::<(usize, &str)>::new(), |_, _| {}).is_empty());
+}
+
+#[test]
+fn candidate_sources_ignore_empty_sources_before_admitting_a_common_term() {
+    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
+    assert_eq!(
+        admit_candidate_sources(
+            vec![(0, "missing"), (budget + 1, "common"), (0, "absent")],
+            |_, _| {}
+        ),
+        ["common"],
+        "empty sources must not consume the first nonempty source exception"
+    );
+    assert!(admit_candidate_sources(vec![(0, "missing"), (0, "absent")], |_, _| {}).is_empty());
+}
+
+#[test]
+fn candidate_sources_keep_request_order_across_equal_frequencies() {
+    let half = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / 2;
+    assert_eq!(
+        admit_candidate_sources(vec![(half, "b"), (half, "a"), (half, "c")], |_, _| {}),
+        ["b", "a"]
+    );
 }
 
 #[test]
@@ -175,6 +285,7 @@ fn lexical_request(max_candidates: u32) -> LexicalLaneRequest<'static> {
         lexical_profile_revision: id("lexical-profile.v1"),
         score_domain: id(crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1),
         budget: budget(max_candidates),
+        control: &ACTIVE_CONTROL,
     }
 }
 
@@ -597,6 +708,20 @@ fn lexical_lane_reports_unavailable_when_authority_is_missing() {
             tracedecay_domain::RetrievalFailure::AuthorityUnavailable { .. }
         )
     ));
+}
+
+/// A settled request never reaches the posting port: the lane unwinds with the
+/// typed cancellation error even when the port would have answered completely.
+#[test]
+fn lexical_lane_unwinds_a_cancelled_request_before_reading_postings() {
+    let mut request = lexical_request(8);
+    request.control = &CANCELLED_CONTROL;
+    let lane = LexicalLane::new(FakeLexicalPort::complete(three_pairs(&request)));
+
+    assert_eq!(
+        lane.retrieve_lexical(&request),
+        Err(RetrievalPortError::Cancelled)
+    );
 }
 
 #[test]

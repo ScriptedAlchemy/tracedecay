@@ -513,9 +513,11 @@ fail, and restoring the source makes it pass.
   `FastEmbedEmbeddingRuntime::open_session` uses FastEmbed's user-defined local
   byte constructor. Native model execution and resource evidence remain
   pending.
-- **Default equals all features:** delivered in the root feature manifest.
-  Normal Linux/macOS/Windows CI builds and tests that default-feature product
-  posture.
+- **Default production posture:** delivered in the root feature manifest.
+  FastEmbed/ORT is available on Linux and macOS. Windows production builds keep
+  the daemon, hosts, exact/lexical/graph retrieval, and the ORT-free Model2Vec
+  backend; selecting a FastEmbed model reports the typed unavailable runtime
+  state and never silently substitutes another embedding backend.
 - **Daemon-owned immutable acquisition:** delivered. Startup queues the
   selected catalog revision without blocking startup or query paths; the
   lifecycle-root source cache is explicit, and verification plus atomic install

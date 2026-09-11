@@ -21,8 +21,8 @@ use tracedecay_store::{
 
 use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_private_fs::background_cpu::process_background_cpu;
-use tracedecay_runtime_core::privacy::{PrivacySanitizerError, RecordSanitizerV1};
+use tracedecay_privacy::{PrivacySanitizerError, RecordSanitizerV1};
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_session_memory::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
 };
@@ -194,6 +194,8 @@ impl HostAdmissionReplay<'_> {
 }
 
 pub(crate) use schedule::{FairEnqueueOutcome, FairScheduleBounds, FairSourceScheduler};
+#[cfg(test)]
+pub(crate) use spool::take_cloned_payload_bytes;
 pub(crate) use spool::{HostAdmissionSpool, SpoolError, SpoolIntegrity};
 pub use spool::{SpoolBounds, SpoolOpenReport, SpoolRecord, TerminalReason};
 
@@ -231,6 +233,11 @@ pub struct HostAdmissionAuthorities<'a> {
     profile_id: Option<UserProfileId>,
     profile_registered: Option<&'a RegisteredGlobalDb>,
     repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
+    /// The process background CPU authority observation-capture preparation
+    /// is admitted through. The composition root injects the one authority its
+    /// worker plan installed; capture without it is refused as
+    /// `background_cpu_unavailable`.
+    background_cpu: Option<Arc<ProcessBackgroundCpuV1>>,
 }
 
 impl<'a> HostAdmissionAuthorities<'a> {
@@ -247,6 +254,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: Some(profile_id),
             profile_registered: None,
             repository_provenance: None,
+            background_cpu: None,
         }
     }
 
@@ -262,7 +270,16 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: Some(profile_id),
             profile_registered: Some(registered),
             repository_provenance: None,
+            background_cpu: None,
         }
+    }
+
+    /// Mounts the process background CPU authority that observation-capture
+    /// preparation runs under.
+    #[must_use]
+    pub fn with_background_cpu(mut self, background_cpu: Arc<ProcessBackgroundCpuV1>) -> Self {
+        self.background_cpu = Some(background_cpu);
+        self
     }
 
     pub fn for_project(
@@ -309,6 +326,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: None,
             profile_registered: None,
             repository_provenance: None,
+            background_cpu: None,
         }
     }
 
@@ -322,6 +340,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: None,
             profile_registered: None,
             repository_provenance: None,
+            background_cpu: None,
         }
     }
 
@@ -337,6 +356,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: Some(profile_id),
             profile_registered: None,
             repository_provenance: None,
+            background_cpu: None,
         }
     }
 
@@ -348,6 +368,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
             profile_id: Some(profile_id),
             profile_registered: None,
             repository_provenance: None,
+            background_cpu: None,
         }
     }
 
@@ -875,7 +896,7 @@ impl<'a> HostAdmissionFacade<'a> {
                 Some("sanitizer_unavailable"),
             )
         })?;
-        let background_cpu = process_background_cpu().ok_or_else(|| {
+        let background_cpu = self.authorities.background_cpu.clone().ok_or_else(|| {
             admission_outcome(
                 HostAdmissionStatus::Unavailable,
                 false,
@@ -1139,8 +1160,12 @@ fn classify_external_source_error(
 ) -> HostAdmissionOutcome {
     tracing::warn!(%error, "registered external-source commit failed");
     match error {
-        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
+        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::Dispatch { .. }
+        | tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::ReadUnavailable { .. } => {
             HostAdmissionOutcome::retained_unavailable("external_source_runtime_unavailable")
+        }
+        tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1::SubmitRejected { .. } => {
+            HostAdmissionOutcome::retained_unavailable("external_source_runtime_rejected")
         }
         _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
     }

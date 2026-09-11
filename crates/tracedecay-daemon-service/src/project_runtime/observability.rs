@@ -1,11 +1,11 @@
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
-use tracedecay_application::ApplicationContractError;
-use tracedecay_usecases::observability::{
+use tracedecay_application::observability::{
     BoundedDeliverySettlementRecorderV1, BoundedObservabilityProducerV1,
     DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1, WorkOwnerObservationRecoveryV1,
 };
+use tracedecay_contracts::ApplicationContractError;
 
 /// The live observability owners for one registered project-session store.
 ///
@@ -54,7 +54,7 @@ impl StoreObservabilityCoreV1 {
     }
 
     #[hotpath::skip]
-    async fn shutdown(&self) -> Result<(), tracedecay_application::ApplicationContractError> {
+    async fn shutdown(&self) -> Result<(), tracedecay_contracts::ApplicationContractError> {
         let mut first_error = None;
         if let Err(error) = self.work_observations.shutdown().await {
             tracing::warn!(%error, "registered Work owner-observation recovery was incomplete");
@@ -239,6 +239,17 @@ impl StoreObservabilityRegistryV1 {
                     if incumbent.authorized_scope_ref != mount.authorized_scope_ref
                         || incumbent.producer_revision != mount.producer_revision
                     {
+                        tracing::warn!(
+                            event = "store_observability_mount_refused",
+                            reason = "incumbent_identity_mismatch",
+                            authorized_scope_mismatch =
+                                incumbent.authorized_scope_ref != mount.authorized_scope_ref,
+                            producer_revision_mismatch =
+                                incumbent.producer_revision != mount.producer_revision,
+                            configuration_revision_mismatch =
+                                incumbent.configuration_revision != mount.configuration_revision,
+                            "observability mount conflicts with the registered store owner"
+                        );
                         return Err(StoreObservabilityMountErrorV1::Busy);
                     }
                     // The alias joins the incumbent's boot stream and stamps
@@ -478,7 +489,7 @@ impl RegisteredObservabilityProducerV1 {
 
     pub(crate) fn delivery_settlement_authority(
         &self,
-    ) -> Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1> {
+    ) -> Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1> {
         Arc::clone(&self.delivery_settlement_authority)
     }
 

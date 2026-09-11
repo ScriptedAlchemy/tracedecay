@@ -8,6 +8,6 @@ description: Fix build and type errors by running or parsing diagnostics, mappin
 Use `tracedecay:fixing-build-and-type-errors`.
 
 - **Args:** if `$ARGUMENTS` contains pasted `cargo`/`clippy` output, route it to `tracedecay_diagnose`; otherwise run `tracedecay_diagnostics` (scoped to a directory if one was given).
-- Prefer pasted output when available. `tracedecay_diagnostics` runs the toolchain, so respect Cursor approval/run-mode.
+- Prefer pasted output when available. `tracedecay_diagnostics` reads retained evidence; after fixing, run the applicable native build/typecheck and relevant behavioral checks, respecting Cursor approval/run-mode.
 
 Output: grouped diagnostics with enclosing symbols + callers, the applied fix, and a clean re-check.

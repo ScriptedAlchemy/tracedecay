@@ -10,7 +10,7 @@ use tracedecay_domain::{
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+use tracedecay_privacy::parse_normalized_observation_record_v1;
 use tracedecay_store::ParseOffset;
 
 use crate::admission::HostAdmission;
@@ -24,8 +24,8 @@ use crate::runtime::opencode_frontier::{
 use crate::runtime::opencode_snapshot::MAX_SNAPSHOT_DATABASE_IO_BYTES;
 use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionRecord, SnapshotAdmissionRunner,
-    SnapshotCaptureOutcome,
+    MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionBatch, SnapshotAdmissionRecord,
+    SnapshotAdmissionRunner, SnapshotCaptureOutcome,
 };
 use crate::runtime::source::{
     HostProviderCoverage, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
@@ -400,7 +400,12 @@ pub(crate) async fn capture_opencode_observations(
                         materialized.input_bytes,
                         &scope,
                         cancellation,
-                        || Ok(Some((snapshot.generation, materialized.records))),
+                        || {
+                            Ok(Some(vec![SnapshotAdmissionBatch::new(
+                                snapshot.generation,
+                                materialized.records,
+                            )]))
+                        },
                     )
                     .await?;
             }

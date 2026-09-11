@@ -14,8 +14,8 @@ pub use ports::{
 };
 pub use refresh::{
     SessionRefreshConfiguration, SessionRefreshDigest, SessionRefreshHandle, SessionRefreshOutcome,
-    SessionRefreshRequestError, SessionRefreshSchedulerError, SessionRefreshSchedulerPort,
-    SessionRefreshService, SessionRefreshTarget,
+    SessionRefreshRequestError, SessionRefreshSchedulerError, SessionRefreshService,
+    SessionRefreshTarget,
 };
 pub use refresh_service::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
@@ -27,7 +27,7 @@ pub use retrieval::{
     SessionRetrievalConfiguration, SessionRetrievalService, SessionTemporalQuery,
     SessionTemporalQueryError, TaskSessionRetrievalOutcomeV1,
 };
-pub use tracedecay_application::retrieval::SessionRetrievalBudgetStageV1;
+pub use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 pub use types::{
     AuthorizationGrantId, AuthorizedSessionScope, SessionAccess, SessionAuthorizationError,
     SessionAuthorizationGrant, SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,

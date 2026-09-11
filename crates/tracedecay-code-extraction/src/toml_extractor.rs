@@ -8,8 +8,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 
 pub struct TomlExtractor;
@@ -51,7 +53,11 @@ impl TomlExtractor {
             Ok(tree) => tree,
             Err(_msg) => {
                 return Self::build_result(
-                    Self::initialize_state(file_path, source),
+                    Self::initialize_state(
+                        file_path,
+                        source,
+                        crate::common::unparsed_file_end_line(source),
+                    ),
                     Instant::now(),
                 );
             }
@@ -72,7 +78,11 @@ impl TomlExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         let start = Instant::now();
-        let mut state = Self::initialize_state(file_path, source);
+        let mut state = Self::initialize_state(
+            file_path,
+            source,
+            crate::common::file_end_line(source, tree),
+        );
 
         let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
             Self::visit_node(&mut state, child);
@@ -85,7 +95,11 @@ impl TomlExtractor {
         )
     }
 
-    fn initialize_state<'s>(file_path: &str, source: &'s str) -> ExtractionState<'s> {
+    fn initialize_state<'s>(
+        file_path: &str,
+        source: &'s str,
+        end_line: u32,
+    ) -> ExtractionState<'s> {
         let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -95,7 +109,7 @@ impl TomlExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line,
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -109,6 +123,7 @@ impl TomlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -147,7 +162,13 @@ impl TomlExtractor {
         let start_line = table_node.start_position().row as u32;
         let end_line = table_node.end_position().row as u32;
         let qualified_name = format!("{}::{}", state.file_path, name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            table_node,
+        );
 
         let module = Node {
             id: id.clone(),
@@ -171,6 +192,7 @@ impl TomlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -229,7 +251,13 @@ impl TomlExtractor {
         let start_line = pair_node.start_position().row as u32;
         let end_line = pair_node.end_position().row as u32;
         let qualified_name = format!("{parent_qn}::{name}");
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            name,
+            pair_node,
+        );
 
         let pair = Node {
             id: id.clone(),
@@ -260,6 +288,7 @@ impl TomlExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

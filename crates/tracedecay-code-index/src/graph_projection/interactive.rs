@@ -31,11 +31,12 @@ use tracedecay_graph_db::{
 };
 
 use super::{
-    CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation, EDGE_LABEL,
-    EDGE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND, compare_edges,
-    deserialize_property, edge_entity_id, has_label, load_symbol_record, symbol_entity_id,
-    validate_edge,
+    CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation,
+    CodeGraphSymbolBindingV1, EDGE_LABEL, EDGE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SymbolRecordV1,
+    TARGET_EDGE_KIND, compare_edges, deserialize_property, edge_entity_id, has_label,
+    load_symbol_record, symbol_entity_id, validate_edge,
 };
+use crate::lineage::LineageSymbolRecordV1;
 
 mod artifact;
 mod catalog;
@@ -54,6 +55,13 @@ pub use self::models::{
 /// Symbols measured per bulk degree read while ranking a generation. Bounds
 /// the batch-wide relation budget each measurement charges.
 const DEGREE_RANKING_BATCH_SYMBOLS: usize = 256;
+
+pub type CodeGraphSymbolPredicate<'a> = dyn Fn(
+        &SymbolOccurrenceId,
+        Option<&CodeGraphSymbolBindingV1>,
+        Option<&LineageSymbolRecordV1>,
+    ) -> bool
+    + 'a;
 
 enum InteractiveCatalogState {
     Cold,
@@ -126,7 +134,7 @@ impl CodeGraphProjectionStore {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
-            return cancel_unowned_catalog_warm(&self.interactive_catalog);
+            return Err(CodeGraphProjectionError::Cancelled);
         }
         let reader =
             self.interactive_reader_with_cancellation(&self.generation, Arc::clone(&cancellation))?;
@@ -418,6 +426,42 @@ impl CodeGraphInteractiveReader {
             });
         }
         Ok(CodeGraphSymbolPageV1 { symbols, has_more })
+    }
+
+    /// Finds symbols in canonical occurrence order without hydrating
+    /// non-matching catalog records.
+    pub fn find_symbols(
+        &self,
+        predicate: &CodeGraphSymbolPredicate<'_>,
+        limit: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>, CodeGraphProjectionError> {
+        const CANCELLATION_INTERVAL: usize = 4_096;
+
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        require_positive(limit, "code graph symbol find limit")?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let mut symbols = Vec::new();
+        for (index, (occurrence, record)) in catalog.symbols.iter().enumerate() {
+            if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
+                return Err(CodeGraphProjectionError::Cancelled);
+            }
+            if predicate(
+                occurrence,
+                record.binding.as_ref(),
+                record.metadata.as_ref(),
+            ) {
+                symbols.push(CodeGraphSymbolSummaryV1 {
+                    occurrence: occurrence.clone(),
+                    binding: record.binding.clone(),
+                    metadata: record.metadata.clone(),
+                });
+                if symbols.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(symbols)
     }
 
     /// Per-seed outgoing semantic edges (callees when filtered to call
@@ -897,7 +941,7 @@ impl CodeGraphInteractiveReader {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<(), CodeGraphProjectionError> {
         if cancellation.is_cancelled() {
-            return cancel_unowned_catalog_warm(&self.catalog);
+            return Err(CodeGraphProjectionError::Cancelled);
         }
         let _build = self
             .catalog
@@ -905,10 +949,10 @@ impl CodeGraphInteractiveReader {
             .lock()
             .map_err(|_| catalog_lock_poisoned())?;
         if cancellation.is_cancelled() {
-            return cancel_unowned_catalog_warm(&self.catalog);
+            return Err(CodeGraphProjectionError::Cancelled);
         }
         let build_lease = Arc::new(InteractiveCatalogBuildLease);
-        {
+        let background_owned = {
             let mut state = self
                 .catalog
                 .state
@@ -922,11 +966,17 @@ impl CodeGraphInteractiveReader {
                     return Ok(());
                 }
                 InteractiveCatalogState::Failed(error) => return Err(error.clone()),
-                InteractiveCatalogState::Cold
-                | InteractiveCatalogState::Warming { owner: None } => {
+                InteractiveCatalogState::Cold => {
                     *state = InteractiveCatalogState::Warming {
                         owner: Some(Arc::clone(&build_lease)),
                     };
+                    false
+                }
+                InteractiveCatalogState::Warming { owner: None } => {
+                    *state = InteractiveCatalogState::Warming {
+                        owner: Some(Arc::clone(&build_lease)),
+                    };
+                    true
                 }
                 InteractiveCatalogState::Warming { owner: Some(_) } => {
                     return Err(CodeGraphProjectionError::Unavailable(
@@ -934,7 +984,7 @@ impl CodeGraphInteractiveReader {
                     ));
                 }
             }
-        }
+        };
         self.catalog
             .scan_builds
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -974,7 +1024,13 @@ impl CodeGraphInteractiveReader {
                 Ok(())
             }
             Err(CodeGraphProjectionError::Cancelled) => {
-                *state = InteractiveCatalogState::Cold;
+                // A background-marked build remains background-owned after
+                // cancellation, so a request cannot take over its full scan.
+                *state = if background_owned {
+                    InteractiveCatalogState::Warming { owner: None }
+                } else {
+                    InteractiveCatalogState::Cold
+                };
                 Err(CodeGraphProjectionError::Cancelled)
             }
             Err(error) => {
@@ -1242,16 +1298,6 @@ fn catalog_lock_poisoned() -> CodeGraphProjectionError {
     CodeGraphProjectionError::Unavailable(
         "code graph interactive catalog lock is poisoned".to_owned(),
     )
-}
-
-fn cancel_unowned_catalog_warm(
-    catalog: &InteractiveCatalogCache,
-) -> Result<(), CodeGraphProjectionError> {
-    let mut state = catalog.state.write().map_err(|_| catalog_lock_poisoned())?;
-    if matches!(*state, InteractiveCatalogState::Warming { owner: None }) {
-        *state = InteractiveCatalogState::Cold;
-    }
-    Err(CodeGraphProjectionError::Cancelled)
 }
 
 #[cfg(test)]

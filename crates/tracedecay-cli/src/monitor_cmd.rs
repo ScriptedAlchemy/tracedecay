@@ -2,10 +2,10 @@
 
 use std::io::Write;
 
-use tracedecay_runtime_core::monitor_ring::{
+use tracedecay_runtime_core::text::format_number;
+use tracedecay_session_memory::monitor_ring::{
     FILE_SIZE, LOCK_FILENAME, MMAP_FILENAME, MmapReader, MonitorEntry, RING_CAPACITY,
 };
-use tracedecay_runtime_core::text::format_number;
 
 mod cost;
 

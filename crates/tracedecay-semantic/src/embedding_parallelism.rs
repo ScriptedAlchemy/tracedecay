@@ -22,9 +22,16 @@
 //! width is separately bounded by the process authority before a session is
 //! opened.
 
+use tracedecay_semantic_contracts::{DEFAULT_SEMANTIC_RESIDENT_BYTES, MAX_SEMANTIC_RESIDENT_BYTES};
+
 /// Operator override for concurrently embedding sessions, for hosts where
 /// memory rather than CPU binds. Values below 1 are ignored.
 const EMBED_SESSIONS_ENV: &str = "TRACEDECAY_EMBED_SESSIONS";
+
+/// Share of process resident admission reserved for semantic sessions by
+/// default. The remainder stays available to graph/text generations, queries,
+/// and model-load transients.
+const DEFAULT_RESIDENT_FRACTION_DENOMINATOR: u64 = 8;
 
 /// Intra-op width at which independent sessions remain the preferred way to
 /// fill the shared CPU authority. The execution planner only widens a session
@@ -237,6 +244,32 @@ pub fn default_max_concurrent_sessions_for(total_cores: usize) -> u32 {
     u32::try_from(width.max(1)).unwrap_or(1)
 }
 
+/// Host-derived semantic resident ceiling for an unconfigured runtime.
+#[must_use]
+pub fn default_resident_ceiling_for(admitted_process_bytes: u64) -> u64 {
+    let admitted_process_bytes = admitted_process_bytes.max(1);
+    (admitted_process_bytes / DEFAULT_RESIDENT_FRACTION_DENOMINATOR)
+        .max(DEFAULT_SEMANTIC_RESIDENT_BYTES.min(admitted_process_bytes))
+        .min(MAX_SEMANTIC_RESIDENT_BYTES)
+}
+
+/// Preserve an explicit `semantic.runtime.v1` ceiling; otherwise derive it
+/// from the process resident-memory authority.
+#[must_use]
+pub fn effective_resident_ceiling(
+    admitted_process_bytes: u64,
+    configured_ceiling: Option<u64>,
+) -> u64 {
+    let (ceiling, source) = configured_ceiling.map_or_else(
+        || (default_resident_ceiling_for(admitted_process_bytes), 1_u8),
+        |ceiling| (ceiling, 2_u8),
+    );
+    hotpath::gauge!("semantic_embedding_resident_admitted_bytes").set(admitted_process_bytes);
+    hotpath::gauge!("semantic_embedding_resident_ceiling_bytes").set(ceiling);
+    hotpath::gauge!("semantic_embedding_resident_ceiling_source").set(source);
+    ceiling
+}
+
 /// Run `operation` on the shared, canonically bounded code-index pool.
 pub fn install<R, F>(operation: F) -> Result<R, String>
 where
@@ -254,7 +287,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
-    use tracedecay_private_fs::background_cpu::install_process_background_cpu;
+    use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
     use super::*;
 
@@ -335,6 +368,22 @@ mod tests {
     }
 
     #[test]
+    fn default_resident_ceiling_scales_with_admitted_host_memory() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        assert_eq!(default_resident_ceiling_for(6 * GIB), 2 * GIB);
+        assert_eq!(default_resident_ceiling_for(96 * GIB), 12 * GIB);
+        assert_eq!(default_resident_ceiling_for(256 * GIB), 16 * GIB);
+    }
+
+    #[test]
+    fn configured_resident_ceiling_wins_over_host_derivation() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        assert_eq!(effective_resident_ceiling(96 * GIB, Some(3 * GIB)), 3 * GIB);
+    }
+
+    #[test]
     fn configured_thread_and_session_ceilings_remain_authoritative() {
         assert_eq!(
             embedding_execution_plan_for(48, 8, 3, 12, None),
@@ -376,11 +425,14 @@ mod tests {
         );
     }
 
+    /// Weighted semantic units and one-unit index work meter against one
+    /// authority from inside their pools. The authority is local to this
+    /// test, so nothing process-wide is installed.
     #[test]
     fn concurrent_index_and_semantic_units_share_width_and_both_progress() {
-        let authority =
-            install_process_background_cpu(NonZeroUsize::new(4).expect("nonzero background width"))
-                .expect("background CPU authority");
+        let authority = Arc::new(ProcessBackgroundCpuV1::new(
+            NonZeroUsize::new(4).expect("nonzero background width"),
+        ));
         let maximum = Arc::new(AtomicUsize::new(0));
         let index_completed = Arc::new(AtomicUsize::new(0));
         let semantic_completed = Arc::new(AtomicUsize::new(0));
@@ -404,15 +456,12 @@ mod tests {
                 };
                 if semantic {
                     install(|| {
-                        tracedecay_code_index::parallelism::with_background_cpu_permits(
-                            DEFAULT_INTRA_THREADS as usize,
-                            operation,
-                        );
+                        authority.with_permits(DEFAULT_INTRA_THREADS as usize, operation);
                     })
                     .expect("semantic shared operation");
                 } else {
                     tracedecay_code_index::parallelism::install(|| {
-                        tracedecay_code_index::parallelism::with_background_cpu_permit(operation);
+                        authority.with_permit(operation);
                     })
                     .expect("code-index shared operation");
                 }

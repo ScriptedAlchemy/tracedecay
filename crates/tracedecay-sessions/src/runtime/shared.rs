@@ -166,6 +166,82 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The one canonical stored form of a path-shaped durable key.
+///
+/// Applied on write and read for `parse_offsets.file_path`, and on write for
+/// `sessions.project_path`, so each path-shaped authority has one stored form
+/// and the ingest cursor hot path needs one indexed equality lookup.
+///
+/// Only syntactically absolute Windows drive and UNC display forms are folded:
+/// the extended-length prefix, slash direction, and drive-letter case. Unix
+/// paths containing literal backslashes and opaque keys stay byte-exact. The
+/// result never depends on the compiling platform: the same input produces the
+/// same stored bytes on Windows and Unix.
+#[must_use]
+pub fn path_identity_key(path: &str) -> String {
+    if let Some(body) = path
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| path.strip_prefix("//?/UNC/"))
+    {
+        return canonical_unc_path(body).unwrap_or_else(|| path.to_owned());
+    }
+
+    if let Some(stripped) = path
+        .strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+    {
+        return canonical_drive_path(stripped).unwrap_or_else(|| path.to_owned());
+    }
+
+    if let Some(normalized) = canonical_drive_path(path) {
+        return normalized;
+    }
+    path.strip_prefix(r"\\")
+        .or_else(|| path.strip_prefix("//"))
+        .and_then(canonical_unc_path)
+        .unwrap_or_else(|| path.to_owned())
+}
+
+/// Stored form of a live filesystem project path.
+///
+/// [`path_identity_key`] folds Windows display syntax only; it leaves Unix
+/// symlink aliases byte-exact. Session rows and dashboard reads must agree on
+/// one OS identity (`/var` vs `/private/var`, `/tmp/link` vs `/tmp/real`) or a
+/// scoped session query silently returns zero rows.
+#[must_use]
+pub fn durable_project_path_key(path: &str) -> String {
+    // Relative values include profile-scoped sentinels and opaque project IDs;
+    // their identity must not depend on directories in the daemon working directory.
+    if !Path::new(path).is_absolute() {
+        return path_identity_key(path);
+    }
+    let canonical =
+        tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(Path::new(path));
+    path_identity_key(&canonical.to_string_lossy())
+}
+
+fn canonical_drive_path(path: &str) -> Option<String> {
+    let head = path.as_bytes();
+    if head.len() >= 3
+        && head[0].is_ascii_alphabetic()
+        && head[1] == b':'
+        && matches!(head[2], b'/' | b'\\')
+    {
+        let mut normalized = path.replace('\\', "/");
+        normalized[..1].make_ascii_lowercase();
+        return Some(normalized);
+    }
+    None
+}
+
+fn canonical_unc_path(body: &str) -> Option<String> {
+    let normalized = body.replace('\\', "/");
+    let mut components = normalized.split('/');
+    let server = components.next()?;
+    let share = components.next()?;
+    (!server.is_empty() && !share.is_empty()).then(|| format!("//{normalized}"))
+}
+
 pub fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool {
     ProjectRootMatcher::new(project_root).contains(path)
 }
@@ -1014,9 +1090,90 @@ mod tests {
     use super::TranscriptLocationMetadataKeys;
     use super::append_location_metadata_cached;
     use super::one_line_truncated;
+    use super::path_identity_key;
     use super::usage_counters_from;
 
     static MATCHER_CACHE_RESOLVER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn durable_path_identity_folds_only_absolute_windows_display_forms() {
+        assert_eq!(
+            path_identity_key(r"\\?\C:\Repo\Case\transcript.jsonl"),
+            "c:/Repo/Case/transcript.jsonl"
+        );
+        assert_eq!(
+            path_identity_key(r"\\?\UNC\server\Share\transcript.jsonl"),
+            "//server/Share/transcript.jsonl"
+        );
+        assert_eq!(
+            path_identity_key(r"\\server\Share\transcript.jsonl"),
+            "//server/Share/transcript.jsonl"
+        );
+
+        assert_eq!(path_identity_key(r"/repo/a\b"), r"/repo/a\b");
+        assert_ne!(
+            path_identity_key(r"/repo/a\b"),
+            path_identity_key("/repo/a/b")
+        );
+        assert_ne!(
+            path_identity_key("/repo/Case/transcript.jsonl"),
+            path_identity_key("/repo/case/transcript.jsonl")
+        );
+        assert_eq!(
+            path_identity_key(r"opaque\project-key"),
+            r"opaque\project-key"
+        );
+        assert_eq!(path_identity_key(r"\\server"), r"\\server");
+    }
+
+    #[test]
+    fn durable_project_path_preserves_non_path_identity() {
+        const CHILD: &str = "TD_SESSION_PATH_SENTINEL_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            for sentinel in ["user", "unknown", "opaque-project-id"] {
+                assert!(Path::new(sentinel).is_dir());
+                assert_eq!(super::durable_project_path_key(sentinel), sentinel);
+            }
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        for sentinel in ["user", "unknown", "opaque-project-id"] {
+            std::fs::create_dir(temp.path().join(sentinel)).unwrap();
+        }
+        // Isolate cwd in a child process so parallel tests retain their own paths.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "durable_project_path_preserves_non_path_identity",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .current_dir(temp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_project_path_collapses_a_symlink_alias() {
+        let temp = tempfile::TempDir::new().expect("temporary root");
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).expect("real project root");
+        std::os::unix::fs::symlink(&real, &link).expect("directory alias");
+
+        let via_link = super::durable_project_path_key(link.to_str().expect("utf-8 link"));
+        let via_real = super::durable_project_path_key(real.to_str().expect("utf-8 real"));
+        assert_eq!(
+            via_link, via_real,
+            "one directory reached through a symlink alias is one stored project path"
+        );
+        assert_ne!(
+            link.to_string_lossy().as_ref(),
+            via_link.as_str(),
+            "fixture must keep the caller spelling distinct from the stored identity"
+        );
+    }
 
     fn unknown_then_resolved_identity(path: &Path) -> GitRepositoryIdentityOutcome {
         if MATCHER_CACHE_RESOLVER_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {

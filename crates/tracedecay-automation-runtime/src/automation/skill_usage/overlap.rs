@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::managed_skills::{ManagedSkill, ManagedSkillState};
-use crate::memory::similarity::lexical_overlap;
+use tracedecay_session_memory::memory::similarity::lexical_overlap;
 
 /// Minimum content (title+summary+body) token Jaccard for a pair to count as
 /// a consolidation candidate on its own.
@@ -183,6 +183,8 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             summary: summary.to_string(),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "workflow".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: body.to_string(),

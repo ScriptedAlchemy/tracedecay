@@ -93,9 +93,7 @@ fn bounded_lookup_identifier(value: Option<&str>) -> Option<String> {
                 && value.len() <= LOOKUP_IDENTIFIER_MAX_BYTES
                 && !value.chars().any(char::is_control)
         })
-        .and_then(|value| {
-            tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value).ok()
-        })
+        .and_then(|value| tracedecay_privacy::protect_sensitive_structural_id(value).ok())
 }
 
 /// One durable spool sequence represents one admitted host event. Identical

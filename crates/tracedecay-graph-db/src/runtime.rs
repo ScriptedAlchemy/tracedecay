@@ -95,6 +95,11 @@ struct OpenedGraphState {
     database: GrafeoDB,
     state: FormatState,
     quarantined_projections: BTreeSet<(GraphNamespace, GraphProjectionId)>,
+    /// The container the engine loaded, as its own handle reported it the
+    /// moment the open returned -- before this crate collapses a replayed WAL
+    /// or initializes the format, either of which may checkpoint and move the
+    /// header away from the one the marker was written against.
+    identity: Option<ContainerIdentity>,
 }
 
 impl Inner {
@@ -155,17 +160,9 @@ impl GraphDb {
         persistent_store_state: Option<PersistentGraphStoreState>,
     ) -> Result<Arc<Self>, GraphDbError> {
         let validated = options.validate(persistent_store_state)?;
-        // The container's identity has to be read *before* grafeo opens it: an
-        // open may replay and checkpoint the WAL, which moves the modification
-        // time and length before any later caller could observe the identity
-        // the marker was written against.
-        let markers = match validated.config.path.as_deref() {
-            Some(container) => {
-                GenerationMarkers::open(container, ContainerIdentity::read(container))
-            }
-            None => GenerationMarkers::detached(),
-        };
+        let markers = GenerationMarkers::new(validated.config.path.as_deref());
         let opened = open_validated_graph(&validated, GraphEngineOpenSite::Eager)?;
+        markers.bind(opened.identity);
         let graph = Arc::new(Self {
             inner: Arc::new(Inner {
                 database: RwLock::new(Some(opened.database)),
@@ -201,12 +198,9 @@ impl GraphDb {
         persistent_store_state: PersistentGraphStoreState,
     ) -> Result<Arc<Self>, GraphDbError> {
         let validated = options.validate(Some(persistent_store_state))?;
-        let markers = match validated.config.path.as_deref() {
-            Some(container) => {
-                GenerationMarkers::open(container, ContainerIdentity::read(container))
-            }
-            None => GenerationMarkers::detached(),
-        };
+        // No engine is resident yet, so no marker is admitted: `ensure_opened`
+        // binds the proofs to the container the engine actually opens.
+        let markers = GenerationMarkers::new(validated.config.path.as_deref());
         Ok(Arc::new(Self {
             inner: Arc::new(Inner {
                 database: RwLock::new(None),
@@ -1071,16 +1065,27 @@ impl GraphDb {
             });
         }
         self.log_engine_released("close");
-        // The container is closed and synced, so its identity is now the one
-        // the next open will observe. Publishing the marker here -- and only
-        // here -- is what makes the record bind the final bytes rather than
-        // some intermediate state a later write would have invalidated.
+        #[cfg(test)]
+        test_seams::fire(test_seams::Seam::MarkerPublish);
+        // The container is closed and synced, so the identity the engine's own
+        // handle reports now is the one the next open will read from the same
+        // bytes. Publishing the marker here -- and only here, under that
+        // identity -- is what makes the record bind the final bytes rather
+        // than some intermediate state a later write would have invalidated,
+        // and bind them to this container rather than to whatever file the
+        // path names by the time a stat could run.
         //
         // A failure to publish is not a failure to close. The marker is a
         // cache of completed proofs; losing it costs the next open a full
         // re-derivation and nothing else, so it must never turn a durable
         // close into a reported durability fault.
-        if !was_uncertain && let Err(error) = self.inner.markers.publish() {
+        let closed = if was_uncertain {
+            None
+        } else {
+            ContainerIdentity::from_engine(&database)
+        };
+        drop(database);
+        if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
         // Sealed per-generation readers are separate databases with their own
@@ -1209,7 +1214,11 @@ impl GraphDb {
             });
         }
         self.log_engine_released("hibernate");
-        if let Err(error) = self.inner.markers.publish() {
+        #[cfg(test)]
+        test_seams::fire(test_seams::Seam::MarkerPublish);
+        let closed = ContainerIdentity::from_engine(&database_to_close);
+        drop(database_to_close);
+        if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
         *self
@@ -1367,37 +1376,6 @@ impl GraphDb {
         .inspect_err(|_| {
             self.inner.poisoned.store(true, Ordering::Release);
         })?;
-        if self.inner.durability == GraphDurability::WalSync
-            && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
-        {
-            self.inner.poisoned.store(true, Ordering::Release);
-            return Err(error);
-        }
-        Ok(commit)
-    }
-
-    /// Commits a persistence-only batch without creating or refreshing any
-    /// HNSW index. Callers that serve vector search from the written rows
-    /// use [`Self::apply_locked`] instead, which keeps the persisted index
-    /// aligned with every committed vector row.
-    pub(crate) fn apply_locked_without_vector_index_maintenance(
-        &self,
-        database: &GrafeoDB,
-        state: &mut FormatState,
-        batch: GraphWriteBatch,
-        metadata: mutation::CommitMetadata,
-        endpoint_namespaces: &mutation::RelationEndpointNamespaces,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphCommit, GraphDbError> {
-        let commit = mutation::apply(
-            database,
-            state,
-            batch,
-            metadata,
-            endpoint_namespaces,
-            &self.inner.poisoned,
-            check,
-        )?;
         if self.inner.durability == GraphDurability::WalSync
             && let Err(error) = hotpath::measure_block!("graph_db.wal.sync", sync_wal(database))
         {
@@ -1673,30 +1651,6 @@ impl GraphDb {
             .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
     }
 
-    /// Freezes this database's live store into a columnar `CompactStore` base
-    /// plus a fresh overlay. Production path for a **single-generation sealed
-    /// store only** — the whole-database scope of `GrafeoDB::compact()` then
-    /// coincides exactly with the one immutable generation the store holds.
-    /// The multi-generation staging database is never compacted.
-    #[cfg(feature = "graph-sealed-store")]
-    #[hotpath::measure(label = "graph_db.sealed_store.compact", impl_type = "GraphDb")]
-    pub(crate) fn compact_for_seal(&self) -> Result<(), GraphDbError> {
-        let mut guard = self.write_guard()?;
-        let database = guard.as_mut().ok_or(GraphDbError::Closed)?;
-        database
-            .compact()
-            .map_err(|error| GraphDbError::unavailable(format!("grafeo compact failed: {error}")))
-    }
-
-    /// Feature-off stub: the sealed-store lane is compiled out, so nothing
-    /// can reach a compaction request; a call is a wiring bug, not a state.
-    #[cfg(not(feature = "graph-sealed-store"))]
-    pub(crate) fn compact_for_seal(&self) -> Result<(), GraphDbError> {
-        Err(GraphDbError::unavailable(
-            "sealed generation compaction requires the graph-sealed-store feature",
-        ))
-    }
-
     /// Marks this handle as a reopened sealed store: every later write
     /// attempt through [`Self::write_guard`] is refused with the typed
     /// [`GraphDbError::SealedStoreImmutable`]. Physical close stays allowed.
@@ -1765,7 +1719,6 @@ impl GraphDb {
                     crate::store_quarantine::CorruptStoreRecovery::Quarantined {
                         quarantine_directory,
                     } => {
-                        self.inner.markers.mark_container_mutated();
                         let mut fresh = validated.clone();
                         fresh.preexisting_store = false;
                         let opened =
@@ -1795,6 +1748,10 @@ impl GraphDb {
             .write()
             .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))? =
             opened.quarantined_projections;
+        // Bound while the database write lock is still held, so no reader can
+        // consult a proof before it is tied to the container this engine
+        // opened.
+        self.inner.markers.bind(opened.identity);
         *database = Some(opened.database);
         *self
             .inner
@@ -1918,6 +1875,8 @@ fn open_validated_graph(
         .as_deref()
         .and_then(|path| std::fs::metadata(path).ok())
         .map(|metadata| metadata.len());
+    #[cfg(test)]
+    test_seams::fire(test_seams::Seam::EngineOpen(site));
     let engine_started = std::time::Instant::now();
     let database = hotpath::measure_block!(
         "graph_db.generation.open.engine",
@@ -1925,6 +1884,7 @@ fn open_validated_graph(
             .map_err(|error| map_open_error(error, validated.preexisting_store))
     )?;
     let engine_elapsed_ms = engine_started.elapsed().as_millis();
+    let identity = ContainerIdentity::from_engine(&database);
     crate::recovery::record_open_corpus_gauges(&database);
     tracing::info!(
         event = "graph_engine_opened",
@@ -1946,6 +1906,7 @@ fn open_validated_graph(
         database,
         state,
         quarantined_projections,
+        identity,
     })
 }
 
@@ -2177,5 +2138,63 @@ pub(crate) fn sync_wal(database: &GrafeoDB) -> Result<(), GraphDbError> {
 
 pub(crate) use crate::schema::vector_property_key;
 
+/// Deterministic barriers on the engine lifecycle, for tests that must act
+/// between two runtime steps -- replace the container between marker admission
+/// and the engine open, or between the engine close and the marker publish --
+/// without sleeping or racing a second thread.
+///
+/// Hooks are thread-local, like the verification counters: every engine open
+/// and close runs synchronously on the calling thread, so a hook sees exactly
+/// the lifecycle steps its own test drives.
+#[cfg(test)]
+pub(crate) mod test_seams {
+    use std::cell::RefCell;
+
+    use super::GraphEngineOpenSite;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum Seam {
+        /// Immediately before grafeo opens the container at `site`.
+        EngineOpen(GraphEngineOpenSite),
+        /// After the engine has closed and synced the container, immediately
+        /// before the verified-generation marker is published.
+        MarkerPublish,
+    }
+
+    type Hook = Box<dyn FnMut(Seam)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Clears the hook when dropped, so a test that returns early or panics
+    /// never leaves its barrier installed for a later test on this thread.
+    pub(crate) struct Installed;
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            HOOK.with(|hook| hook.borrow_mut().take());
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn install(hook: impl FnMut(Seam) + 'static) -> Installed {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Installed
+    }
+
+    /// Runs the installed hook, if any. The hook is taken out for the call so
+    /// a runtime step it triggers cannot re-enter it.
+    pub(crate) fn fire(seam: Seam) {
+        let Some(mut hook) = HOOK.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        hook(seam);
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+#[cfg(test)]
+mod marker_binding_tests;
 #[cfg(test)]
 mod tests;

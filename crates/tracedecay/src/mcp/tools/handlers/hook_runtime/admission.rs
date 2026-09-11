@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
+use super::super::SessionAuthorities;
 use super::context_scout::{
     admit_native_context_scout_lifecycle, hook_v2_context_scout_lifecycle_for_session,
     hook_v2_native_context_scout_lifecycle, lookup_hook_v2_delivery_claim,
@@ -17,6 +19,7 @@ use super::envelope::{
     daemon_mint_hook_v2_envelope, hook_now, hook_v2_envelope, hook_v2_family_label,
     hook_v2_lifecycle_range, hook_v2_native_session_id, hook_v2_requires_producer_work,
 };
+use super::required_project_db;
 
 pub(super) enum HookV2BindingAdmission {
     Bound(tracedecay_hooks::HookConfigurationSnapshotV1),
@@ -240,6 +243,8 @@ fn forget_hook_v2_admission_ledger_for_test(data_root: &Path, host: tracedecay_h
 pub(crate) enum HookV2AdmissionOutcomeV1 {
     Admitted {
         orchestration: tracedecay_daemon_service::HookOrchestrationAdmissionV1,
+        context_scout_address:
+            Option<Box<tracedecay_contracts::context_scout::ContextScoutAddressV1>>,
         ready_guidance: Value,
         feedback_notice: Value,
         github_stack_signal_available: bool,
@@ -268,16 +273,22 @@ pub(crate) async fn admit_hook_v2_envelope(
     native_session_id: Option<SessionId>,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {
-    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, None, now).await
+    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, None, None, now)
+        .await
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.admit")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Hook v2 admission is one envelope validate, lifecycle bind, and receipt."
+)]
 async fn admit_hook_v2_envelope_with_lifecycle(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     native_session_id: Option<SessionId>,
     native_lifecycle: Option<tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1>,
     project_sessions: Option<&RegisteredGlobalDb>,
+    background_cpu: Option<&std::sync::Arc<ProcessBackgroundCpuV1>>,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {
     let provider_envelope = envelope;
@@ -315,6 +326,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         };
         if !admit_native_context_scout_lifecycle(
             project_sessions,
+            background_cpu,
             provider,
             native_lifecycle,
             range,
@@ -377,7 +389,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     }
     let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
     let claim_authority = match (
-        crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
+        tracedecay_agent_hosts::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
             envelope.clone(),
             &snapshot.binding,
         ),
@@ -389,6 +401,9 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         }
         _ => None,
     };
+    let context_scout_address = claim_authority
+        .as_ref()
+        .map(|(address, _)| Box::new(*address));
     let ready_guidance = match (first_admission, cg.context_scout_owner(), claim_authority) {
         (true, Some(owner), Some((address, input_watermark))) => match owner
             .claim_ready_guidance_exact(envelope, address, input_watermark, snapshot.revision, now)
@@ -428,7 +443,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         completion,
     );
     let feedback_notice = if first_admission {
-        tracedecay_usecases::advisory::peek_advisory_hook_notice(
+        tracedecay_application::advisory::peek_advisory_hook_notice(
             envelope.project_id,
             envelope.worktree_id,
         )
@@ -462,6 +477,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         };
     HookV2AdmissionOutcomeV1::Admitted {
         orchestration,
+        context_scout_address,
         ready_guidance,
         feedback_notice,
         github_stack_signal_available,
@@ -472,8 +488,9 @@ pub(super) async fn hook_v2_admit(
     cg: &TraceDecay,
     args: &Value,
     action: &str,
-    project_sessions: &RegisteredGlobalDb,
+    session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
+    let project_sessions = required_project_db(session_authorities.clone())?;
     let envelope = hook_v2_envelope(args, action)?;
     let now = hook_now();
     let native_session_id = hook_v2_native_session_id(args, &envelope);
@@ -485,12 +502,14 @@ pub(super) async fn hook_v2_admit(
             native_session_id,
             native_lifecycle,
             Some(project_sessions),
+            session_authorities.background_cpu.as_ref(),
             now,
         )
         .await
         {
             HookV2AdmissionOutcomeV1::Admitted {
                 orchestration,
+                context_scout_address,
                 ready_guidance,
                 feedback_notice,
                 github_stack_signal_available,
@@ -499,6 +518,7 @@ pub(super) async fn hook_v2_admit(
                 "status": "accepted",
                 "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
                 "orchestration": orchestration,
+                "context_scout_address": context_scout_address,
                 "ready_guidance": ready_guidance,
                 "feedback_notice": feedback_notice,
                 "github_stack_signal_available": github_stack_signal_available,
@@ -535,7 +555,7 @@ pub(super) fn hook_v2_profile_admit(
     args: &Value,
     action: &str,
     profile_root: &Path,
-    profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+    profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
 ) -> Result<Value> {
     let routed_profile_root = std::fs::canonicalize(profile_root).map_err(|error| {
         tracedecay_automation_runtime::automation::config_error(format!(
@@ -600,7 +620,7 @@ pub(super) fn hook_v2_profile_admit(
 }
 
 fn profile_hook_v2_binding(
-    profile_identity: &dyn tracedecay_application::ProfileIdentityReadPort,
+    profile_identity: &dyn tracedecay_contracts::ProfileIdentityReadPort,
     host: tracedecay_hooks::HookHostV1,
 ) -> tracedecay_hooks::HookScopeBindingV1 {
     let profile_key = format!(

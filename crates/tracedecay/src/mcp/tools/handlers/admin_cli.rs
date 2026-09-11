@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay_application::session_sync::{
+use tracedecay_contracts::session_sync::{
     SessionGitSyncV1, SessionSyncCommandV1, SessionSyncControlV1, SessionSyncOutcomeV1,
     SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncServicePort, SessionTranscriptImportV1,
 };
-use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
+use tracedecay_contracts::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::tracedecay::TraceDecay;
@@ -51,6 +51,7 @@ enum AdminCliAction {
     RegistryList {
         limit: usize,
         query: Option<String>,
+        project_arg: Option<PathBuf>,
     },
     RegistryContext {
         project_arg: Option<PathBuf>,
@@ -89,7 +90,7 @@ struct AdminCliContext<'a> {
     project: Option<&'a TraceDecay>,
     registered_project_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
     registered_user_session_db: Option<&'a RegisteredGlobalDbLeaseV1>,
-    profile_identity: Option<std::sync::Arc<dyn tracedecay_application::ProfileIdentityReadPort>>,
+    profile_identity: Option<std::sync::Arc<dyn tracedecay_contracts::ProfileIdentityReadPort>>,
     session_sync: Option<&'a dyn SessionSyncServicePort>,
     request_id: Option<RequestId>,
     deadline: Option<Deadline>,
@@ -97,6 +98,10 @@ struct AdminCliContext<'a> {
 }
 
 impl<'a> AdminCliContext<'a> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Binds independently admitted project, profile, session, and request authorities at the CLI composition boundary"
+    )]
     fn with_project(
         cg: &'a TraceDecay,
         global_db: &'a RegisteredGlobalDbLeaseV1,
@@ -113,8 +118,8 @@ impl<'a> AdminCliContext<'a> {
             accounting_db,
             profile_root,
             project: Some(cg),
-            registered_project_session_db: session_authorities.project_registered,
-            registered_user_session_db: session_authorities.profile_registered,
+            registered_project_session_db: session_authorities.project,
+            registered_user_session_db: session_authorities.user,
             profile_identity: session_authorities.profile_identity,
             session_sync,
             request_id,
@@ -210,7 +215,7 @@ impl<'a> AdminCliContext<'a> {
 
     fn require_profile_identity(
         &self,
-    ) -> Result<&dyn tracedecay_application::ProfileIdentityReadPort> {
+    ) -> Result<&dyn tracedecay_contracts::ProfileIdentityReadPort> {
         self.profile_identity
             .as_deref()
             .ok_or_else(|| TraceDecayError::Config {
@@ -219,6 +224,10 @@ impl<'a> AdminCliContext<'a> {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "CLI dispatch carries independently admitted store and sync authorities plus protocol request identity and controls"
+)]
 pub(super) async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
@@ -273,6 +282,10 @@ fn parse_admin_cli_action(args: Value) -> Result<AdminCliAction> {
 }
 
 #[hotpath::measure(label = "mcp.admin.cli.total")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Admin CLI dispatch is one subcommand match onto the owning composition-root action."
+)]
 async fn dispatch_admin_cli(
     context: AdminCliContext<'_>,
     action: AdminCliAction,
@@ -326,14 +339,14 @@ async fn dispatch_admin_cli(
             sessions_unfinished(&database, limit).await?
         }
         AdminCliAction::AnalyticsSync => {
-            tracedecay_usecases::analytics_bridge::analytics_sync_with_db(
+            tracedecay_application::analytics_bridge::analytics_sync_with_db(
                 context.require_accounting_db()?,
                 context.project_root(),
             )
             .await
         }
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
-            tracedecay_usecases::analytics_bridge::analytics_diagnostics_with_db(
+            tracedecay_application::analytics_bridge::analytics_diagnostics_with_db(
                 context.require_accounting_db()?,
                 context
                     .registered_project_session_db
@@ -365,8 +378,19 @@ async fn dispatch_admin_cli(
                 }),
             }
         }
-        AdminCliAction::RegistryList { limit, query } => {
-            registry_list(context.project, global_db, limit, query.as_deref()).await?
+        AdminCliAction::RegistryList {
+            limit,
+            query,
+            project_arg,
+        } => {
+            registry_list(
+                context.project,
+                global_db,
+                limit,
+                query.as_deref(),
+                project_arg.as_deref(),
+            )
+            .await?
         }
         AdminCliAction::RegistryContext { project_arg } => {
             registry_context(context.project, global_db, project_arg.as_deref()).await?
@@ -503,6 +527,7 @@ async fn registry_list(
     global_db: &RegisteredGlobalDb,
     limit: usize,
     query: Option<&str>,
+    project_arg: Option<&Path>,
 ) -> Result<Value> {
     use tracedecay_dashboard_api::project_registry::{
         build_project_registry_view, public_code_project_from_record,
@@ -515,8 +540,8 @@ async fn registry_list(
     };
     let truncated = projects.len() > limit;
     projects.truncate(limit);
-    let active_id = match cg {
-        Some(cg) => active_project_id(cg, global_db).await?,
+    let active_id = match cg.map(TraceDecay::project_root).or(project_arg) {
+        Some(project_root) => active_project_id(project_root, global_db).await?,
         None => None,
     };
     let contexts = global_db
@@ -539,12 +564,12 @@ async fn registry_list(
 }
 
 async fn active_project_id(
-    cg: &TraceDecay,
+    project_root: &Path,
     global_db: &RegisteredGlobalDb,
 ) -> Result<Option<String>> {
-    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(cg.project_root());
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(project_root);
     Ok(global_db
-        .project_registry_context_by_identity(cg.project_root(), git_common_dir.as_deref())
+        .project_registry_context_by_identity(project_root, git_common_dir.as_deref())
         .await?
         .map(|context| context.project.project_id))
 }
@@ -566,7 +591,7 @@ async fn registry_context(
         return Ok(json!({ "status": "not_found", "project": null }));
     };
     let active_id = match cg {
-        Some(cg) => active_project_id(cg, global_db).await?,
+        Some(cg) => active_project_id(cg.project_root(), global_db).await?,
         None => None,
     };
     let public = PublicProjectRegistryContext::new(&context, active_id.as_deref());
@@ -854,10 +879,10 @@ mod tests {
         project_id: &str,
     ) -> (
         TraceDecay,
-        crate::host_admission::HostAdmissionTestRuntimeV1,
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(root).unwrap();
-        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
             profile,
             root,
             ProjectId::new(project_id).unwrap(),

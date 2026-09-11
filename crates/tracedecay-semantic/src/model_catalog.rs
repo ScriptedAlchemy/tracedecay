@@ -120,6 +120,17 @@ pub fn production_fastembed_catalog() -> FastEmbedModelCatalogV1 {
     FastEmbedModelCatalogV1::production()
 }
 
+/// Admit a configured `selected_model` against the production catalog.
+///
+/// The composition-boundary complement to `SemanticConfig::validate`: a
+/// structurally valid but unknown id is refused here, before it is persisted,
+/// with the same typed catalog error the lifecycle owner raises on selection.
+pub fn admit_production_model_selection(
+    selected_model: Option<&str>,
+) -> Result<(), CatalogErrorV1> {
+    FastEmbedModelCatalogV1::production().admit_selected_model(selected_model)
+}
+
 impl FastEmbedModelCatalogV1 {
     pub fn production() -> Self {
         Self {
@@ -134,6 +145,17 @@ impl FastEmbedModelCatalogV1 {
 
     pub fn model_ids(&self) -> impl Iterator<Item = &str> {
         self.models.iter().map(|model| model.model_id.as_str())
+    }
+
+    /// Admit a settings `selected_model` against this catalog. `None`
+    /// disables semantics and needs no entry. `SemanticConfig::validate`
+    /// checks only the id's shape; membership is decided here so adding a
+    /// model edits one declaration.
+    pub fn admit_selected_model(&self, selected_model: Option<&str>) -> Result<(), CatalogErrorV1> {
+        match selected_model {
+            Some(model_id) if self.get(model_id).is_none() => Err(CatalogErrorV1::UnknownModel),
+            _ => Ok(()),
+        }
     }
 
     pub fn validate(&self) -> Result<(), CatalogErrorV1> {
@@ -452,8 +474,12 @@ mod tests {
         );
     }
 
+    /// The production boundary: every cataloged id is admitted, a
+    /// structurally valid unknown id is refused with the typed catalog error,
+    /// `None` disables semantics without needing an entry, and the default
+    /// selection resolves to a real production entry.
     #[test]
-    fn every_production_model_id_is_a_valid_settings_selection() {
+    fn production_catalog_admits_exactly_its_own_model_ids() {
         let catalog = FastEmbedModelCatalogV1::production();
         for model_id in catalog.model_ids() {
             let config = SemanticConfig {
@@ -462,13 +488,26 @@ mod tests {
             };
             config
                 .validate()
-                .unwrap_or_else(|error| panic!("{model_id} must be selectable: {error}"));
+                .unwrap_or_else(|error| panic!("{model_id} must be structurally valid: {error}"));
+            admit_production_model_selection(config.selected_model.as_deref())
+                .unwrap_or_else(|error| panic!("{model_id} must be admitted: {error}"));
         }
         let unknown = SemanticConfig {
             selected_model: Some("NotARealModel".to_owned()),
             ..SemanticConfig::default()
         };
-        assert!(unknown.validate().is_err());
+        unknown
+            .validate()
+            .expect("an unknown id is structurally valid; only the catalog can refuse it");
+        assert_eq!(
+            admit_production_model_selection(unknown.selected_model.as_deref()),
+            Err(CatalogErrorV1::UnknownModel)
+        );
+        assert_eq!(admit_production_model_selection(None), Ok(()));
+        assert_eq!(
+            admit_production_model_selection(SemanticConfig::default().selected_model.as_deref()),
+            Ok(())
+        );
     }
 
     #[test]

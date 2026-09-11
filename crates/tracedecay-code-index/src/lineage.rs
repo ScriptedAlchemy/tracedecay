@@ -23,8 +23,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, FileIdentityDigest, ManifestDigest, SymbolIdentityDigest,
-    SymbolOccurrenceId, canonical_sha256,
+    CodeGenerationId, ComplexityAnalysisV1, ContentDigest, FileIdentityDigest, ManifestDigest,
+    SymbolIdentityDigest, SymbolOccurrenceId, canonical_sha256,
 };
 
 /// One lineage candidate for a symbol across generations. Record rename,
@@ -139,15 +139,69 @@ pub struct LineageSymbolRecordV1 {
     pub branches: u32,
     pub loops: u32,
     pub max_nesting: u32,
+    /// Whether `branches`, `loops`, and `max_nesting` cover the whole body.
+    /// Omitted on the wire when complete, so sealed records without it are
+    /// exact.
+    #[serde(default, skip_serializing_if = "ComplexityAnalysisV1::is_complete")]
+    pub complexity_analysis: ComplexityAnalysisV1,
     pub line_span: u32,
     pub start_line: u32,
     pub signature: Option<String>,
+    /// Extracted documentation. The key is required even when absent so an
+    /// older sealed generation cannot be mistaken for negative evidence.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub docstring: Option<String>,
+    /// Parser-attested async state. This field is required so an older sealed
+    /// row cannot be mistaken for synchronous evidence.
+    pub is_async: bool,
+    /// Exact derive names attached to this declaration. The list is sorted
+    /// and deduplicated during chunking; an empty list is negative evidence.
+    pub derives: Vec<String>,
     pub skip_test_coverage: bool,
     pub file_identity: FileIdentityDigest,
     pub content_digest: ContentDigest,
 }
 
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
+/// The complexity counters of a symbol whose bounded walk covered its whole
+/// body. Surfaces obtain this through
+/// [`LineageSymbolRecordV1::exact_complexity`], so a symbol with an incomplete
+/// walk can only ever be rendered as its analysis state, never as a number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExactComplexityV1 {
+    pub branches: u32,
+    pub loops: u32,
+    pub max_nesting: u32,
+}
+
+impl ExactComplexityV1 {
+    /// `branches + 1`, or `None` when the count does not fit.
+    pub fn cyclomatic(&self) -> Option<u32> {
+        self.branches.checked_add(1)
+    }
+}
+
 impl LineageSymbolRecordV1 {
+    /// The counters as exact facts, or `None` when the bounded walk stopped
+    /// before covering the body and the stored counters are lower bounds.
+    pub fn exact_complexity(&self) -> Option<ExactComplexityV1> {
+        match self.complexity_analysis {
+            ComplexityAnalysisV1::Complete => Some(ExactComplexityV1 {
+                branches: self.branches,
+                loops: self.loops,
+                max_nesting: self.max_nesting,
+            }),
+            ComplexityAnalysisV1::TraversalBudgetExhausted => None,
+        }
+    }
+
     /// The qualified-structure group key: identity minus the same-name
     /// occurrence index.
     fn group_key(&self) -> (&str, &str, &str) {
@@ -622,9 +676,13 @@ mod tests {
             branches: 0,
             loops: 0,
             max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             line_span: 1,
             start_line: 0,
             signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: file_identity(file_byte),
             content_digest: digest(content_byte),
@@ -641,6 +699,21 @@ mod tests {
 
     fn resolver() -> SymbolLineageResolver {
         SymbolLineageResolver::new()
+    }
+
+    #[test]
+    fn lineage_record_requires_documentation_evidence() {
+        let record = record("sym.c1", 'a', "crate::alpha", "function", 'f', '0');
+        let mut value = serde_json::to_value(record).expect("serialize lineage record");
+        assert_eq!(value["docstring"], serde_json::Value::Null);
+        value
+            .as_object_mut()
+            .expect("lineage record object")
+            .remove("docstring");
+
+        let error = serde_json::from_value::<LineageSymbolRecordV1>(value)
+            .expect_err("records without documentation evidence must require reindexing");
+        assert!(error.to_string().contains("missing field `docstring`"));
     }
 
     #[test]

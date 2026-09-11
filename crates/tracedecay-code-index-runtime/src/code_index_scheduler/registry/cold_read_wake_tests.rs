@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 
 use super::super::{DaemonCodeIndexControlV1, ReconcilePassGuard};
 use super::CodeIndexSchedulerRegistryV1;

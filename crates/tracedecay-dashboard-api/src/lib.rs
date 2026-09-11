@@ -16,10 +16,10 @@
 #[global_allocator]
 static HOTPATH_ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
-pub use tracedecay_application::request_identity;
+pub use tracedecay_application as application;
+pub use tracedecay_application::git_query;
+pub use tracedecay_contracts::request_identity;
 pub(crate) use tracedecay_graph_query as graph;
-pub use tracedecay_usecases as application;
-pub use tracedecay_usecases::git_query;
 pub mod tracedecay;
 // Crate-root re-exports the composition root reaches through its
 // `crate::dashboard::*` shim: the application-surface injection contract and
@@ -29,7 +29,7 @@ pub use application_surface::{
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
     DashboardNativeIntegrationStatusFuture, DashboardScopeSetReadFuture,
 };
-pub use tracedecay::DashboardProjectRuntime;
+pub use tracedecay::DashboardProjectContext;
 
 /// Installs the registered global/session schema into the kernel's fail-closed
 /// port for this crate's test process.
@@ -49,6 +49,55 @@ pub use tracedecay::DashboardProjectRuntime;
 #[cfg(test)]
 pub(crate) fn register_test_schema_installer() {
     tracedecay_global_db::register_test_schema_installer();
+}
+
+/// Fixtures for states this crate's tests build without a project runtime.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::Path;
+
+    use tracedecay_automation_runtime::automation::host_io::{
+        HostIo, ManagedSkillExportReport, PluginFile,
+    };
+    use tracedecay_domain::errors::Result;
+
+    /// A host I/O bundle with no agent hosts behind it: writes land on disk
+    /// plainly, export sweeps report nothing, and the managed-agent bundle is
+    /// empty.
+    pub(crate) fn fixture_host_io() -> HostIo {
+        fn export_to_agents(_: &Path, _: &Path) -> Vec<ManagedSkillExportReport> {
+            Vec::new()
+        }
+
+        fn export_to_agent_hosts(_: &Path, _: &Path, _: &Path) -> Vec<ManagedSkillExportReport> {
+            Vec::new()
+        }
+
+        fn write_text(path: &Path, contents: &str, _: Option<&Path>) -> Result<()> {
+            Ok(std::fs::write(path, contents)?)
+        }
+
+        fn write_json(path: &Path, value: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+            Ok(std::fs::write(path, serde_json::to_vec_pretty(value)?)?)
+        }
+
+        fn remove_host_file(path: &Path) -> std::io::Result<()> {
+            std::fs::remove_file(path)
+        }
+
+        fn codex_agent_files() -> &'static [PluginFile] {
+            &[]
+        }
+
+        HostIo {
+            export_to_agents,
+            export_to_agent_hosts,
+            write_text,
+            write_json,
+            remove_host_file,
+            codex_agent_files,
+        }
+    }
 }
 
 pub mod analytics_api;
@@ -128,9 +177,8 @@ mod settings_api;
 pub use settings_api::{
     DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
     DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
-    DashboardCodeIndexWorkerSettingsFuture, DashboardPrAutoTrackEntryV1,
-    DashboardPrAutoTrackReadPort, DashboardProfileCodeIndexWorkerSettingsPort,
-    install_dashboard_pr_autotrack_read_port,
+    DashboardCodeIndexWorkerSettingsFuture, DashboardProfileCodeIndexWorkerSettingsPort,
+    PrAutoTrackManagedSummaryEntryV1, PrAutoTrackManagedSummaryReader,
 };
 mod storage_findings_api;
 mod storage_telemetry_api;
@@ -158,9 +206,9 @@ use tower::ServiceExt;
 
 use tracedecay_api::{WorkOperation, WorkflowOperation};
 
-use crate::tracedecay::TraceDecay;
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -232,26 +280,19 @@ pub type DashboardAutomationObservationFuture = Pin<
             + 'static,
     >,
 >;
-pub type DashboardAutomationObservationPortV1 =
-    Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>;
 pub type DoctorReportReadFuture = Pin<
     Box<
         dyn Future<
                 Output = std::result::Result<
                     AdmittedDoctorReportV1,
-                    tracedecay_application::ApplicationContractError,
+                    tracedecay_contracts::ApplicationContractError,
                 >,
             > + Send
             + 'static,
     >,
 >;
 pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
-pub type RemoteOperationalStatusReader = Arc<
-    dyn Fn() -> tracedecay_application::remote::status::RemoteOperationalStatusReadV1
-        + Send
-        + Sync
-        + 'static,
->;
+pub type RemoteOperationalStatusReader = tracedecay_contracts::RemoteOperationalStatusReaderV1;
 
 /// Runtime authorities retained by one daemon-managed dashboard state.
 ///
@@ -293,7 +334,9 @@ pub struct DashboardStateCompositionV1 {
     /// managed-skill materialization capabilities. Standalone states leave it
     /// absent and automation mutation routes report typed unavailable.
     pub automation_authority: Option<DashboardAutomationAuthorityV1>,
-    pub automation_observation: Option<DashboardAutomationObservationPortV1>,
+    pub automation_observation: Option<
+        Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>,
+    >,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
@@ -306,23 +349,27 @@ pub struct DashboardStateCompositionV1 {
     /// it absent and the source reports typed `unsupported`.
     pub explorer_semantic_reader: Option<ExplorerSemanticReader>,
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
+    /// Root-addressed read over the daemon-owned PR-autotrack state sidecar.
+    /// Selected projects reuse the resolver but resolve their own exact store
+    /// root on every call.
+    pub pr_autotrack_reader: Option<settings_api::PrAutoTrackManagedSummaryReader>,
     pub code_diagnostics_broker:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
     pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
     /// Daemon-owned canonical authority for browser-confirmed SSE delivery.
     /// Standalone dashboards leave this absent and emit no receipt token.
     pub delivery_settlement_authority:
-        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
+        Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>>,
 }
 
 #[derive(Clone)]
 pub struct AdmittedDoctorReportV1 {
-    pub report: tracedecay_application::doctor::DoctorReportV1,
-    pub table_growth_evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
+    pub report: tracedecay_contracts::doctor::DoctorReportV1,
+    pub table_growth_evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
 }
 
 impl AdmittedDoctorReportV1 {
-    pub fn new(report: tracedecay_application::doctor::DoctorReportV1) -> Self {
+    pub fn new(report: tracedecay_contracts::doctor::DoctorReportV1) -> Self {
         Self {
             report,
             table_growth_evidence: Vec::new(),
@@ -331,7 +378,7 @@ impl AdmittedDoctorReportV1 {
 
     pub fn with_table_growth_evidence(
         mut self,
-        evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
+        evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
     ) -> Self {
         self.table_growth_evidence = evidence;
         self
@@ -346,6 +393,9 @@ impl AdmittedDoctorReportV1 {
 pub struct DashboardState {
     /// The owning binary's composed build version, from the composition.
     pub build_version: &'static str,
+    /// Host-install I/O from the project runtime; analytics reads the embedded
+    /// managed-agent bundle through it to label subagent sessions.
+    pub host_io: HostIo,
     /// Registered project id for profile-backed stores, when known.
     pub project_id: Option<String>,
     /// Exact application scope resolved ONCE when this state was constructed.
@@ -353,7 +403,7 @@ pub struct DashboardState {
     /// project id, or unresolvable exact root): handlers report their typed
     /// unavailable states from it and never re-resolve scope from paths or
     /// the CWD per request.
-    pub resolved_scope: Option<tracedecay_application::ResolvedScope>,
+    pub resolved_scope: Option<tracedecay_contracts::ResolvedScope>,
     /// Canonical per-request admission for the verified code graph.
     pub code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
     /// Canonical exact-project verified projection resolver.
@@ -361,7 +411,7 @@ pub struct DashboardState {
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.
-    pub project_graph: Option<Arc<TraceDecay>>,
+    pub project_graph: Option<Arc<DashboardProjectContext>>,
     /// Resolves other registered projects only when their graph is already
     /// mounted by the daemon.
     pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
@@ -415,6 +465,8 @@ pub struct DashboardState {
     /// observation owner. Selected projects reuse the resolver but resolve
     /// their own exact project root on every call.
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
+    /// Daemon-owned read over PR-autotrack managed branches for settings.
+    pub pr_autotrack_reader: Option<settings_api::PrAutoTrackManagedSummaryReader>,
     /// Storage mode resolved for the active project store.
     pub storage_mode: String,
     /// Resolved active project store root.
@@ -425,7 +477,7 @@ pub struct DashboardState {
     pub dashboard_root: PathBuf,
     /// Retention policy resolved with the owning runtime configuration.
     /// Dashboard reads must not re-open mutable config input per request.
-    pub retention_config: crate::config::RetentionConfig,
+    pub retention_config: tracedecay_configuration::RetentionConfig,
     /// Daemon-owned user-profile settings authority. Dashboard routes never
     /// load or mutate `config.toml` directly.
     pub user_settings: Arc<dyn tracedecay_configuration::UserSettingsDaemonClient>,
@@ -436,6 +488,10 @@ pub struct DashboardState {
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     /// Process-local derived BPE token-count cache for the Savings & Cost tab.
     pub token_counts: Arc<token_count::TokenCountCache>,
+    /// Derived snapshots (PCA projection, similarity pairs, dependency strata)
+    /// computed from this state's own stores. Owned here, shared by clones,
+    /// and released with the state instead of accumulating process-wide.
+    pub(crate) derived_snapshots: Arc<snapshot_cache::DerivedSnapshotCaches>,
     /// Admitted daemon/application diagnostics authority. `None` keeps all
     /// diagnostics controls typed unavailable; the dashboard never constructs
     /// a broker or analyzer runtime.
@@ -444,7 +500,9 @@ pub struct DashboardState {
     /// Daemon-selected profile and canonical automation mutation authority.
     /// HTTP handlers never reconstruct this capability from the environment.
     pub automation_authority: Option<DashboardAutomationAuthorityV1>,
-    pub automation_observation: Option<DashboardAutomationObservationPortV1>,
+    pub automation_observation: Option<
+        Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>,
+    >,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub automation_writer: DashboardAutomationWriter,
@@ -479,6 +537,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     profile_code_index_worker_settings:
         Option<Arc<dyn DashboardProfileCodeIndexWorkerSettingsPort>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
+    pr_autotrack_reader: Option<PrAutoTrackManagedSummaryReader>,
 }
 
 #[cfg(feature = "test-transport")]
@@ -504,7 +563,13 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             delivery_read_authority: None,
             profile_code_index_worker_settings: None,
             application_invocation_executor: None,
+            pr_autotrack_reader: None,
         }
+    }
+
+    pub fn with_pr_autotrack_reader(mut self, reader: PrAutoTrackManagedSummaryReader) -> Self {
+        self.pr_autotrack_reader = Some(reader);
+        self
     }
 
     /// Attaches the daemon-owned application runtime used by mutating
@@ -583,16 +648,17 @@ impl DashboardHostAdmissionTestAuthorityV1 {
 #[cfg(feature = "test-transport")]
 #[derive(Clone, Default)]
 pub struct DashboardTestProjectGraphsV1 {
-    graphs: Arc<std::sync::RwLock<std::collections::HashMap<PathBuf, Arc<TraceDecay>>>>,
+    graphs:
+        Arc<std::sync::RwLock<std::collections::HashMap<PathBuf, Arc<DashboardProjectContext>>>>,
 }
 
 #[cfg(feature = "test-transport")]
 impl DashboardTestProjectGraphsV1 {
-    pub fn register(&self, graph: Arc<TraceDecay>) {
+    pub fn register(&self, graph: Arc<DashboardProjectContext>) {
         self.graphs
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(graph.project_root().to_path_buf(), graph);
+            .insert(graph.store_layout.project_root.clone(), graph);
     }
 
     fn resolver(&self) -> crate::project_graph::RetainedProjectGraphResolver {
@@ -640,10 +706,10 @@ pub struct LcmStoreSelection {
 }
 
 pub async fn resolve_lcm_store(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
 ) -> LcmStoreSelection {
-    resolve_lcm_store_for_layout(cg.store_layout(), registered_project_session_db)
+    resolve_lcm_store_for_layout(&cg.store_layout, registered_project_session_db)
 }
 
 fn resolve_lcm_store_for_layout(
@@ -671,10 +737,10 @@ pub fn storage_mode_label(mode: &StorageMode) -> &'static str {
     }
 }
 
-pub fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) {
+pub fn resolve_project_memory_store(cg: &DashboardProjectContext) -> (String, Arc<Database>) {
     (
-        cg.dashboard_db_path().display().to_string(),
-        cg.dashboard_database_guard(),
+        cg.dashboard_db_path.display().to_string(),
+        Arc::clone(&cg.dashboard_database),
     )
 }
 
@@ -682,8 +748,8 @@ pub fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) 
 ///
 /// Dashboard routes must never infer ownership from a path, label, or
 /// optional display field after construction.
-pub fn project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
-    project_memory_owner_for_layout(cg.store_layout())
+pub fn project_memory_owner(cg: &DashboardProjectContext) -> Result<FactOwnerV1> {
+    project_memory_owner_for_layout(&cg.store_layout)
 }
 
 fn project_memory_owner_for_layout(layout: &StoreLayout) -> Result<FactOwnerV1> {
@@ -699,8 +765,8 @@ fn project_memory_owner_for_layout(layout: &StoreLayout) -> Result<FactOwnerV1> 
 }
 
 async fn build_state_inner(
-    cg: &TraceDecay,
-    project_graph: Option<Arc<TraceDecay>>,
+    cg: &DashboardProjectContext,
+    project_graph: Option<Arc<DashboardProjectContext>>,
     warm_token_counts: bool,
     composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
@@ -724,6 +790,7 @@ async fn build_state_inner(
         code_index_freshness_reader,
         explorer_semantic_reader,
         feedback_status_reader,
+        pr_autotrack_reader,
         code_diagnostics_broker,
         application_invocation_executor,
         delivery_settlement_authority,
@@ -731,10 +798,10 @@ async fn build_state_inner(
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
     let lcm = resolve_lcm_store(cg, registered_project_session_db).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let store_root = cg.store_layout().data_root.clone();
-    let config_path = cg.store_layout().config_path.clone();
-    let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
+    let dashboard_root = cg.store_layout.dashboard_root.clone();
+    let store_root = cg.store_layout.data_root.clone();
+    let config_path = cg.store_layout.config_path.clone();
+    let storage_mode = storage_mode_label(&cg.store_layout.storage_mode).to_string();
     let code_diagnostics_authority = match (
         code_diagnostics_broker,
         code_graph_read_admission.as_ref(),
@@ -742,7 +809,7 @@ async fn build_state_inner(
     ) {
         (Some(broker), Some(graph_admission), Some(graph_projection)) => Some(
             crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
-                cg.project_root().to_path_buf(),
+                cg.store_layout.project_root.clone(),
                 dashboard_root.clone(),
                 Arc::clone(graph_admission),
                 Arc::clone(graph_projection),
@@ -764,10 +831,11 @@ async fn build_state_inner(
     );
     let mut state = DashboardState {
         build_version,
-        project_id: cg.store_layout().identity.project_id.clone(),
+        host_io: cg.host_io,
+        project_id: cg.store_layout.identity.project_id.clone(),
         resolved_scope: scope::resolve_dashboard_scope(
-            cg.project_root(),
-            cg.store_layout().identity.project_id.as_deref(),
+            &cg.store_layout.project_root,
+            cg.store_layout.identity.project_id.as_deref(),
         ),
         code_graph_read_admission,
         code_graph_projection_read_port,
@@ -776,11 +844,8 @@ async fn build_state_inner(
         memory_owner,
         graph_conn: mem_db.read_connection(),
         _database_guards: vec![mem_db.clone()],
-        graph_telemetry_handle: cg
-            .dashboard_database_guard()
-            .storage_telemetry_handle()
-            .ok(),
-        graph_db_path: cg.dashboard_db_path().display().to_string(),
+        graph_telemetry_handle: cg.dashboard_database.storage_telemetry_handle().ok(),
+        graph_db_path: cg.dashboard_db_path.display().to_string(),
         mem_db,
         mem_db_path,
         lcm_db: lcm.lcm_db,
@@ -791,18 +856,20 @@ async fn build_state_inner(
         delivery_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
-        project_root: cg.project_root().to_path_buf(),
+        project_root: cg.store_layout.project_root.clone(),
         code_index_freshness_reader,
         explorer_semantic_reader,
         feedback_status_reader,
+        pr_autotrack_reader,
         storage_mode,
         store_root,
         config_path,
         dashboard_root,
-        retention_config: cg.retention_config(),
-        user_settings: cg.user_settings_client(),
+        retention_config: cg.retention_config.clone(),
+        user_settings: Arc::clone(&cg.user_settings_client),
         profile_code_index_worker_settings,
         token_counts: Arc::new(token_count::TokenCountCache::new()),
+        derived_snapshots: Arc::new(snapshot_cache::DerivedSnapshotCaches::new()),
         code_diagnostics_authority: None,
         automation_authority,
         automation_observation,
@@ -827,7 +894,7 @@ async fn build_state_inner(
 }
 
 pub async fn build_state_with_automation_reconciler(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
     build_state_inner(cg.as_ref(), Some(Arc::clone(&cg)), true, composition).await
@@ -837,7 +904,7 @@ pub async fn build_state_with_automation_reconciler(
 /// dashboard project picker. Automation authority is inherited from the active
 /// dashboard state so daemon-selected projects cannot fall back to direct open.
 pub async fn build_selected_project_state(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     active: &DashboardState,
 ) -> Result<DashboardState> {
     build_state_inner(
@@ -879,6 +946,7 @@ pub async fn build_selected_project_state(
             // resolves the selected state's exact root on every call.
             explorer_semantic_reader: active.explorer_semantic_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
+            pr_autotrack_reader: active.pr_autotrack_reader.clone(),
             code_diagnostics_broker: None,
             // Rebinding an application transport is required only for the
             // selected project's application routes. Ordinary read routes
@@ -916,7 +984,7 @@ pub struct DashboardTestEndpointV1<'a> {
 #[doc(hidden)]
 #[cfg(feature = "test-transport")]
 pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
-    cg: Arc<TraceDecay>,
+    cg: Arc<DashboardProjectContext>,
     authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
     endpoint: DashboardTestEndpointV1<'_>,
@@ -954,12 +1022,12 @@ struct DashboardRunRequest<'a> {
     spa_routes: Router,
     test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
     test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
-    test_project_graph: Option<Arc<TraceDecay>>,
+    test_project_graph: Option<Arc<DashboardProjectContext>>,
 }
 
 #[cfg(feature = "test-transport")]
 async fn run_until_shutdown_inner<F>(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     request: DashboardRunRequest<'_>,
     shutdown: F,
 ) -> Result<()>
@@ -981,8 +1049,8 @@ where
     // entry point started the dashboard.
     let code_diagnostics_broker =
         crate::application::dashboard_diagnostics::open_diagnostic_broker(
-            cg.project_root().to_path_buf(),
-            &cg.store_layout().dashboard_root,
+            cg.store_layout.project_root.clone(),
+            &cg.store_layout.dashboard_root,
         )
         .await;
     let state = build_state_inner(
@@ -1023,6 +1091,8 @@ where
             code_index_freshness_reader: None,
             explorer_semantic_reader: None,
             feedback_status_reader: None,
+            pr_autotrack_reader: test_authority
+                .and_then(|authority| authority.pr_autotrack_reader.clone()),
             code_diagnostics_broker: Some(code_diagnostics_broker),
             application_invocation_executor: test_authority
                 .and_then(|authority| authority.application_invocation_executor.clone()),
@@ -1037,7 +1107,7 @@ where
     let url = format!("http://{addr}/");
     // Stable, parseable line for wrappers (the Hermes plugin reads this).
     println!("tracedecay dashboard listening on {url}");
-    eprintln!("Serving project {}", cg.project_root().display());
+    eprintln!("Serving project {}", cg.store_layout.project_root.display());
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -1086,18 +1156,18 @@ static DASHBOARD_HTTP_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// they never manufacture an actor, grant, scope, or projection generation.
 #[derive(Clone, Debug)]
 pub struct DashboardHttpRequestControlV1 {
-    request_id: tracedecay_application::RequestId,
-    deadline: tracedecay_application::Deadline,
-    cancellation: tracedecay_application::CancellationSignal,
+    request_id: tracedecay_contracts::RequestId,
+    deadline: tracedecay_contracts::Deadline,
+    cancellation: tracedecay_contracts::CancellationSignal,
     observed_at: tracedecay_domain::UtcMicros,
 }
 
 impl DashboardHttpRequestControlV1 {
     #[cfg(feature = "test-transport")]
     pub fn from_parts_for_test(
-        request_id: tracedecay_application::RequestId,
-        deadline: tracedecay_application::Deadline,
-        cancellation: tracedecay_application::CancellationSignal,
+        request_id: tracedecay_contracts::RequestId,
+        deadline: tracedecay_contracts::Deadline,
+        cancellation: tracedecay_contracts::CancellationSignal,
         observed_at: tracedecay_domain::UtcMicros,
     ) -> Self {
         Self {
@@ -1108,15 +1178,15 @@ impl DashboardHttpRequestControlV1 {
         }
     }
 
-    pub fn request_id(&self) -> tracedecay_application::RequestId {
+    pub fn request_id(&self) -> tracedecay_contracts::RequestId {
         self.request_id.clone()
     }
 
-    pub fn deadline(&self) -> tracedecay_application::Deadline {
+    pub fn deadline(&self) -> tracedecay_contracts::Deadline {
         self.deadline.clone()
     }
 
-    pub fn cancellation(&self) -> &tracedecay_application::CancellationSignal {
+    pub fn cancellation(&self) -> &tracedecay_contracts::CancellationSignal {
         &self.cancellation
     }
 
@@ -1126,7 +1196,7 @@ impl DashboardHttpRequestControlV1 {
 }
 
 struct DashboardHttpCancellationGuard {
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
     completed: bool,
 }
 
@@ -1228,19 +1298,19 @@ fn admit_dashboard_http_control(
     let observed_at = tracedecay_session_memory::context::application_observed_at();
     let sequence = DASHBOARD_HTTP_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let identity = format!("dashboard.http.{}.{}", observed_at.0, sequence);
-    let request_id = match tracedecay_application::RequestId::new(format!("request.{identity}")) {
+    let request_id = match tracedecay_contracts::RequestId::new(format!("request.{identity}")) {
         Ok(request_id) => request_id,
         Err(error) => return Err(Box::new(internal_error_response(error))),
     };
     let cancellation =
-        match tracedecay_application::CancellationSignal::active(format!("cancel.{identity}")) {
+        match tracedecay_contracts::CancellationSignal::active(format!("cancel.{identity}")) {
             Ok(cancellation) => cancellation,
             Err(error) => return Err(Box::new(internal_error_response(error))),
         };
     let request_deadline_micros = dashboard_http_request_deadline_micros(request.uri().path());
     let deadline_at =
         tracedecay_domain::UtcMicros(observed_at.0.saturating_add(request_deadline_micros));
-    let deadline = match tracedecay_application::Deadline::new(deadline_at) {
+    let deadline = match tracedecay_contracts::Deadline::new(deadline_at) {
         Ok(deadline) => deadline,
         Err(error) => return Err(Box::new(internal_error_response(error))),
     };
@@ -1299,7 +1369,7 @@ struct ActiveProjectApplicationRoutes {
 
 impl ActiveProjectApplicationRoutes {
     fn for_active_project(
-        cg: &TraceDecay,
+        cg: &DashboardProjectContext,
         executor: Option<Arc<dyn DashboardApplicationRuntime>>,
     ) -> Result<Self> {
         let executor = executor
@@ -1337,7 +1407,7 @@ impl ActiveProjectApplicationRoutes {
 /// panics on overlapping paths. Pass `Router::new()` to serve the JSON API
 /// with no UI.
 pub async fn router(
-    cg: &TraceDecay,
+    cg: &DashboardProjectContext,
     mut state: DashboardState,
     spa_routes: Router,
 ) -> Result<Router> {
@@ -1731,7 +1801,7 @@ async fn project_scoped_api_gateway(
                     .active_state()
                     .application_invocation_executor
                     .as_ref(),
-                project_graph.project_root(),
+                &project_graph.store_layout.project_root,
             ) {
                 Ok(application_runtime) => application_runtime,
                 Err(err) => {
@@ -2031,10 +2101,8 @@ mod authority_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     use tracedecay_domain::{Confidence, FactCategoryV1, ProvenanceId};
-    use tracedecay_runtime_core::privacy::{
-        MemoryFactSanitizationV1, sanitize_memory_fact_payload,
-    };
-    use tracedecay_runtime_core::store::DatabaseFactStore;
+    use tracedecay_privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_store::{
         FactWriteControl, ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddMaterialV1,
         ProjectMemoryFactStore,
@@ -2194,11 +2262,11 @@ mod authority_tests {
 
     fn dashboard_lcm_test_control() -> DashboardHttpRequestControlV1 {
         DashboardHttpRequestControlV1 {
-            request_id: tracedecay_application::RequestId::new("request.dashboard-lcm-test")
+            request_id: tracedecay_contracts::RequestId::new("request.dashboard-lcm-test")
                 .expect("dashboard LCM test request"),
-            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
+            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
                 .expect("dashboard LCM test deadline"),
-            cancellation: tracedecay_application::CancellationSignal::active(
+            cancellation: tracedecay_contracts::CancellationSignal::active(
                 "cancel.dashboard-lcm-test",
             )
             .expect("dashboard LCM test cancellation"),
@@ -2310,6 +2378,7 @@ mod authority_tests {
                 project_memory_owner_for_layout(&layout).expect("dashboard project memory owner");
             let state = DashboardState {
                 build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                host_io: crate::test_support::fixture_host_io(),
                 project_id: layout.identity.project_id.clone(),
                 resolved_scope: scope::resolve_dashboard_scope(
                     &project_root,
@@ -2338,16 +2407,18 @@ mod authority_tests {
                 code_index_freshness_reader: None,
                 explorer_semantic_reader: None,
                 feedback_status_reader: None,
+                pr_autotrack_reader: None,
                 storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),
                 store_root: layout.data_root.clone(),
                 config_path: layout.config_path.clone(),
                 dashboard_root: layout.dashboard_root.clone(),
-                retention_config: crate::config::RetentionConfig::default(),
+                retention_config: tracedecay_configuration::RetentionConfig::default(),
                 user_settings: Arc::new(
                     tracedecay_configuration::ProductionUserSettingsDaemonClient::default(),
                 ),
                 profile_code_index_worker_settings: None,
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
+                derived_snapshots: Arc::new(snapshot_cache::DerivedSnapshotCaches::new()),
                 code_diagnostics_authority: None,
                 automation_authority: None,
                 automation_observation: None,
@@ -2536,6 +2607,45 @@ mod authority_tests {
         assert_eq!(projection_warm["scan"]["vector_rows_read"], 0);
         assert_eq!(similarity_warm["scan"]["cache_state"], "hit");
         assert_eq!(similarity_warm["scan"]["vector_rows_read"], 0);
+    }
+
+    #[tokio::test]
+    async fn retiring_the_dashboard_state_releases_its_derived_snapshots() {
+        let fixture = DashboardStateFixture::open("project.dashboard-derived-retirement").await;
+        let control = tracedecay_store::FactReadControl::new(Arc::new(|| false));
+        fixture.add_vector_facts(3).await;
+
+        let projection =
+            memory_service::projection_payload(&fixture.state, "", 2_000, &control).await;
+        let similarity =
+            memory_service::similarity_payload(&fixture.state, 0.5, 100, &control).await;
+        assert_eq!(projection["scan"]["cache_state"], "miss");
+        assert_eq!(projection["points"].as_array().unwrap().len(), 3);
+        assert_eq!(similarity["scan"]["cache_state"], "miss");
+        assert_eq!(similarity["count"], 3);
+
+        // The populated caches are owned by the state (and its clones), not by
+        // the process: once the last handle to this store's dashboard state is
+        // gone, the derived snapshots are gone with it.
+        let DashboardStateFixture {
+            state,
+            layout: _,
+            _database_authority,
+            _temporary,
+        } = fixture;
+        let retained = Arc::downgrade(&state.derived_snapshots);
+        let clone = state.clone();
+        drop(state);
+        assert!(
+            retained.upgrade().is_some(),
+            "a live clone of the state still owns the derived snapshots"
+        );
+        drop(clone);
+        assert!(
+            retained.upgrade().is_none(),
+            "retiring the last dashboard state must release its derived snapshots"
+        );
+        drop((_database_authority, _temporary));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2831,15 +2941,15 @@ mod authority_tests {
     /// native-integration status result.
     #[derive(Clone)]
     struct SingleCollectionRuntime {
-        scope_set: tracedecay_application::AuthorizedScopeSet,
-        native_integration_status: Option<tracedecay_application::NativeIntegrationSurfaceResultV1>,
+        scope_set: tracedecay_contracts::AuthorizedScopeSet,
+        native_integration_status: Option<tracedecay_contracts::NativeIntegrationSurfaceResultV1>,
         rebound_roots: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     }
 
     impl SingleCollectionRuntime {
         fn with_native_integration_status(
             mut self,
-            result: tracedecay_application::NativeIntegrationSurfaceResultV1,
+            result: tracedecay_contracts::NativeIntegrationSurfaceResultV1,
         ) -> Self {
             self.native_integration_status = Some(result);
             self
@@ -2850,7 +2960,7 @@ mod authority_tests {
 
             let capability = "capability.multi-root.query";
             let use_case = "use-case.multi-root.query";
-            let scope = tracedecay_application::ResolvedScope::new(
+            let scope = tracedecay_contracts::ResolvedScope::new(
                 ProjectId::new("project.dashboard-collection").expect("project"),
                 tracedecay_domain::RepositoryId::new("repository.dashboard-collection")
                     .expect("repository"),
@@ -2858,7 +2968,7 @@ mod authority_tests {
                 Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
             )
             .expect("scope");
-            let grant = tracedecay_application::CapabilityGrantSnapshot::new(
+            let grant = tracedecay_contracts::CapabilityGrantSnapshot::new(
                 "grant.dashboard-collection"
                     .to_owned()
                     .try_into()
@@ -2876,22 +2986,22 @@ mod authority_tests {
                 BTreeSet::from([
                     tracedecay_tool_catalog::UseCaseId::new(use_case).expect("use case")
                 ]),
-                tracedecay_application::DisclosureClass::Evidence,
+                tracedecay_contracts::DisclosureClass::Evidence,
             )
             .expect("grant");
-            let context = tracedecay_application::RequestContext::new(
+            let context = tracedecay_contracts::RequestContext::new(
                 tracedecay_domain::ActorId::new("actor.requester").expect("actor"),
                 scope,
                 grant,
-                tracedecay_application::RequestId::new("request.dashboard-collection")
+                tracedecay_contracts::RequestId::new("request.dashboard-collection")
                     .expect("request id"),
-                tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(900))
+                tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(900))
                     .expect("deadline"),
-                tracedecay_application::CancellationContext::active("cancel.dashboard-collection")
+                tracedecay_contracts::CancellationContext::active("cancel.dashboard-collection")
                     .expect("cancellation"),
             )
             .expect("context");
-            let scope_set = tracedecay_application::AuthorizedScopeSetAuthority::authorize(
+            let scope_set = tracedecay_contracts::AuthorizedScopeSetAuthority::authorize(
                 tracedecay_domain::ScopeSetId::new(collection).expect("collection id"),
                 tracedecay_domain::ScopeSetRevision::new(1).expect("revision"),
                 vec![context],
@@ -2933,7 +3043,7 @@ mod authority_tests {
 
         fn apply_configuration_batch(
             &self,
-            _request_id: tracedecay_application::RequestId,
+            _request_id: tracedecay_contracts::RequestId,
             _mutations: Vec<tracedecay_configuration::DirectConfigurationMutation>,
             _expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
             _idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey,
@@ -2941,7 +3051,7 @@ mod authority_tests {
             Box::pin(async {
                 Err(
                     DashboardConfigurationApplyError::ApplicationContractViolation(
-                        tracedecay_application::ApplicationContractError::Inconsistent {
+                        tracedecay_contracts::ApplicationContractError::Inconsistent {
                             field: "single-collection test runtime configuration",
                         },
                     ),
@@ -3070,7 +3180,7 @@ mod authority_tests {
     async fn dashboard_serves_the_native_integration_status_application_result() {
         let fixture = DashboardStateFixture::open("project.dashboard-native-status").await;
         let mut state = fixture.state;
-        let projection = tracedecay_application::NativeIntegrationStatusProjectionV1 {
+        let projection = tracedecay_contracts::NativeIntegrationStatusProjectionV1 {
             transaction_id: tracedecay_domain::NativeIntegrationTransactionId::new(
                 "transaction.dashboard.native",
             )
@@ -3098,7 +3208,7 @@ mod authority_tests {
         state.application_invocation_executor = Some(Arc::new(
             SingleCollectionRuntime::persisted("scope-set.dashboard-native")
                 .with_native_integration_status(
-                    tracedecay_application::NativeIntegrationSurfaceResultV1::Status(
+                    tracedecay_contracts::NativeIntegrationSurfaceResultV1::Status(
                         projection.clone(),
                     ),
                 ),
@@ -3148,7 +3258,7 @@ mod authority_tests {
         let doctor_reader: DoctorReportReader = Arc::new(|| {
             Box::pin(async {
                 Err(
-                    tracedecay_application::ApplicationContractError::Inconsistent {
+                    tracedecay_contracts::ApplicationContractError::Inconsistent {
                         field: "dashboard authority test reader",
                     },
                 )

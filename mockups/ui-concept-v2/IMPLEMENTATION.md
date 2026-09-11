@@ -14,6 +14,13 @@ browser product. It does not authorize loading the concept PNGs into the
 shipping application, reproducing their sample values, or presenting a fixture
 as production evidence.
 
+The [concept application](app/README.md) is the complete imported React/Rsbuild
+implementation formerly maintained in `td-brain-demo`. Its existing screens,
+interactions, fixtures and recorded data remain the starting point for refinements.
+The briefs in this folder own design intent; apply changes to that app rather than
+creating independent replacement screen applications. Neither fixture behavior nor
+recorded snapshot coverage proves live production availability.
+
 The implementation is deliberately hybrid:
 
 - React and the DOM own navigation, scope, filters, inspectors, transcripts,
@@ -298,6 +305,11 @@ scene runtime with Loom and Delivery, but its measured registry coordinates and
 evidenced code topology remain separate layout modes. Hover, focus, selection,
 scope, and admitted activity are independent inputs.
 
+The measured structural atlas/treemap remains a retained Brain view option. Its
+stable source-containment geometry and named structural evidence layers are a
+peer to the neural registry field, not a temporary fallback or a substitute for
+project-scoped semantic topology.
+
 | Plate | DOM authority | Layout and scene | Overlay and worker | Backend/evidence |
 |---|---|---|---|---|
 | `01-registry-overview.png` | canonical project scope, registry ledger, field toolbar, source/state legend and exact accessible project table | measured recency-by-X and indexed-mass-by-Y project bodies render as a luminous orthographic registry field; repository hubs use named relations rather than force proximity | worker performs bounded label priority and density clustering without changing measured coordinates; overlay owns axes, counts, selection and minimap | project registry, project identity, repository/worktree membership, index mass/recency and graph availability from the project-scoped generated contracts |
@@ -347,10 +359,11 @@ All files below are under `03-loom/final/`.
 | `05-selected-event-evidence.png` | full selected-event workspace with hook/transcript/diff/task/code/evidence modes | causal neighborhood is context, not a tiny inspector | selected path and event anchors; scene yields room to exact evidence | stable event ID links exact source, affected artifacts, provenance and typed gaps |
 | `06-feedback-continuation.png` | local comment/challenge/task feedback composer and status | feedback node links to later observed revision/test continuation | causal continuation is drawn only after a real linked later record | local TraceDecay feedback authority only; provider/GitHub unchanged without a real write path |
 | `07-evidence-gaps.png` | missing/ambiguous/stale source ledger, candidate navigation and local adjudication | gaps remain spatially visible and selectable | dashed/gapped paths, stale pattern and non-color state | record resolution appends an adjudication; it never rewrites source facts or fabricates attribution |
+| `08-work-proximity.png` | many-thread proximity overview plus selected encounter inspector and exact pair pivots | candidate encounters bend or beacon within the normal execution weave; selection retains global context | worker derives only the declared similarity basis; overlay distinguishes candidate, conflict, shared work, delegation, and causality | path/range access intervals, worktree/head identity, symbol neighborhood, source coverage, observation/expiry time, and exact source event; no production threshold is chosen by the concept |
 
 ## Remaining workspace final-state implementation map
 
-These eleven final plates complete the 35-plate implementation reference.
+The remaining workspace plates complete the implementation reference.
 `DOM-only` means the exact interactive product is intentionally implemented in
 semantic DOM rather than forcing a scene renderer into a ledger or form. Small
 SVG or ECharts views remain subordinate to the DOM authority and their exact
@@ -362,6 +375,7 @@ accessible fallback.
 | Sessions — `01-session-provenance-inspector.png` | provider-qualified session list, search, pagination, transcript/summary inspector, token provenance and exact text | DOM-only list/inspector; a bounded timeline/density strip may use accessible SVG or Canvas with the same selection | virtualized session/message rows and optional density aggregation; no scene-only session identity | `SessionsPage.tsx`, `SessionInspector.tsx`, Hermes LCM overview/timeline/search/session reads and canonical paged session store |
 | Agents — `01-delegation-topology.png` | agent/task list, handoff ledger, token/tool/failure details and synchronized exact tree | deterministic parent/child/dependency DAG in small accessible SVG; dense fan-out graduates to the shared clustering/layout model rather than one row per agent | overlay owns handoff/frontier labels; worker clusters large agent groups by task/workstream and preserves path-to-root/outcome | `AgentsPage.tsx`, subagent tree/handoff/failure models, analytics agent/subagent reads, Work graph and handoff application authority |
 | Code — `01-semantic-cortex.png` | symbol search, node evidence, call/path/strata controls, diagnostics, freshness, inspector and exact code | Graphology remains the topology model; the winning shared scene runtime renders Cortex depth/curves/picking, while the specialized Trace view may retain its truthful renderer | worker handles graph layout/clustering/semantic zoom; overlay owns labels, camera, path selection and renderer state | `CodePage.tsx`, graph/structure/evidence/call-chain/diagnostics/freshness APIs and generated code-index contracts |
+| Code — `02-structural-comparison.png` | revision/scope selection, synchronized region selection, named layer controls, source-class filters, and exact source/table pivots | retain the structural atlas/treemap with stable landmarks across structure, dependency, change, cycle, forwarding, churn, exact-blob duplicate, and coverage layers; compare explicit revisions without reproducing illustrative geometry | shared deterministic union layout keeps pan/zoom and region identity synchronized; every measure exposes source and coverage | Git revision identity plus Code structure/dependency evidence; churn and exact blobs remain measured signals, while semantic duplication, dead facades, and general coupling require separate evidence |
 | Knowledge — `01-fact-provenance-cameras.png` | fact ledger/detail, trust history, curation controls, oplog and source coverage | DOM-first cameras; bounded geometry may use accessible SVG and real quantitative history may use the single ECharts host; no decorative neural scene | virtualized facts/oplog and bounded geometry aggregation; charts retain DOM summaries | `KnowledgePage.tsx`, knowledge views, memory queries, holographic fact/detail/trust/projection/similarity/oplog routes and real curator authority |
 | Automations — `01-scheduler-run-ledger.png` | scheduler status and real pause/resume gate, job/skill/fact-receipt/run/artifact ledgers and exact failure detail | DOM-only ledger; no signature scene runtime | virtualized histories and bounded filters only; artifact integrity/state patterns remain DOM | `AutomationsPage.tsx`, `RunHistory.tsx`, scheduler/jobs/skills/fact-receipts/runs/artifacts/outcomes routes and daemon automation authorities |
 | Observatory — `01-system-evidence-overview.png` | independent evidence sections for storage, code index, budgets, findings, hooks, adoption and topology; exact reasons and source times | DOM-first evidence stack; ECharts is limited to named measured time series and never becomes a global-health radial scene | optional time-series downsampling worker; no aggregation may collapse independent authorities into nominal health | `ObservatoryPage.tsx` and its inspector/evidence models, storage telemetry/findings, freshness, observatory, analytics, doctor and Work topology reads |

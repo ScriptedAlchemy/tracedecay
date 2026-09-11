@@ -9,7 +9,9 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod settlement;
 
-use settlement::{configuration_effect, reconcile_configuration_runtime};
+use settlement::{
+    configuration_effect, reconcile_configuration_runtime, refresh_live_configuration_runtime,
+};
 
 #[hotpath::measure(label = "daemon.service.configuration.execute", future = true)]
 pub(super) async fn execute_configuration(
@@ -58,16 +60,6 @@ pub(super) async fn execute_configuration(
                 ConfigurationWireRequestV1::List(_),
             ) => configuration_evidence(
                 serde_json::to_value(Box::pin(client.list(actor)).await?)
-                    .map_err(|_| ConfigurationError::Unavailable)?,
-                authority,
-                observed_at,
-                deadline,
-            ),
-            (
-                ApplicationSurfaceOperation::ConfigurationExplain,
-                ConfigurationWireRequestV1::Explain(request),
-            ) => configuration_evidence(
-                serde_json::to_value(Box::pin(client.explain(actor, request.key)).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
                 authority,
                 observed_at,
@@ -202,12 +194,12 @@ pub(super) async fn execute_configuration(
                     .mutations
                     .into_iter()
                     .map(|mutation| match mutation {
-                        tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
+                        tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
                             layer,
                             key,
                             value,
                         } => DirectConfigurationMutation::Set { layer, key, value },
-                        tracedecay_application::ConfigurationDirectMutationRequestV1::Unset {
+                        tracedecay_contracts::ConfigurationDirectMutationRequestV1::Unset {
                             layer,
                             key,
                         } => DirectConfigurationMutation::Unset { layer, key },
@@ -243,49 +235,6 @@ pub(super) async fn execute_configuration(
                     receipt.settlement_authority,
                     receipt.created_at,
                     receipt.effective_deadline_at,
-                )
-            }
-            (
-                ApplicationSurfaceOperation::ConfigurationWriteCredential,
-                ConfigurationWireRequestV1::WriteCredential(request),
-            ) => {
-                let idempotency_key = request.idempotency_key;
-                let mutation_authority = issue_configuration_mutation_authority(
-                    &registered,
-                    &wire_request_id,
-                    Some(idempotency_key.clone()),
-                    ConfigurationMutationOperationV1::CredentialWrite,
-                    registered.scope.scope_digest.clone(),
-                    request.expected_revision.clone(),
-                    ConfigurationMutationSinkV1::CredentialStore,
-                    ConfigurationMutationEffectV1::WriteCredentialReference,
-                    deadline.expires_at,
-                    observed_at,
-                )?;
-                let metadata = Box::pin(client.write_credential(
-                    mutation_authority,
-                    WriteOnlyCredentialMutation {
-                        expected_reference_id: request.expected_reference_id,
-                        kind: request.kind,
-                        write_handle: CredentialWriteHandleV1::new(request.write_handle)?,
-                    },
-                    request.expected_revision.clone(),
-                ))
-                .await?;
-                let payload =
-                    serde_json::to_value(&metadata).map_err(|_| ConfigurationError::Unavailable)?;
-                configuration_effect(
-                    payload,
-                    authority,
-                    &registered.actor,
-                    &registered.scope,
-                    surface_operation,
-                    &idempotency_key,
-                    &request.expected_revision,
-                    metadata.operation_digest,
-                    metadata.settlement_authority,
-                    metadata.created_at,
-                    metadata.effective_deadline_at,
                 )
             }
             (
@@ -378,7 +327,7 @@ pub(super) async fn execute_configuration(
                     None,
                     ConfigurationMutationOperationV1::RollbackDryRun,
                     registered.scope.scope_digest.clone(),
-                    current.revision_id.clone(),
+                    current.revision_id().clone(),
                     ConfigurationMutationSinkV1::ConfigurationStore,
                     ConfigurationMutationEffectV1::CreateProtectedChangePlan,
                     deadline.expires_at,
@@ -397,7 +346,7 @@ pub(super) async fn execute_configuration(
                     authority,
                     plan.plan_id.as_str(),
                     plan.operation_digest,
-                    &current.revision_id,
+                    current.revision_id(),
                     observed_at,
                     deadline,
                 )
@@ -480,13 +429,13 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     let current = Box::pin(registered.runtime.client().current()).await?;
     let semantic_profile = requested_semantic_profile.filter(|requested| {
         requires_coordinated_semantic_profile_transition(
-            current.config.semantic.active_profile.is_some(),
+            current.config().semantic.active_profile.is_some(),
             requested.is_some(),
         )
     });
     let coordinated_semantic_transition = semantic_profile.is_some();
     let receipt =
-        if current.revision_id != expected_revision {
+        if current.revision_id() != &expected_revision {
             Box::pin(registered.runtime.client().mutate_direct(
                 authority,
                 mutation,
@@ -532,6 +481,34 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     if !coordinated_semantic_transition {
         Box::pin(reconcile_configuration_runtime(registered, &receipt, now)).await;
     } else {
+        let refresh = match Box::pin(registered.runtime.client().current()).await {
+            Ok(current) => {
+                refresh_live_configuration_runtime(
+                    registered,
+                    tracedecay_configuration::ConfigurationCurrentStateV1 {
+                        revision_id: current.revision_id().clone(),
+                        snapshot: current.snapshot().clone(),
+                    },
+                )
+                .await
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = refresh {
+            tracing::warn!(
+                receipt_id = %receipt.receipt_id,
+                error,
+                "semantic configuration committed; live runtime refresh remains pending"
+            );
+            let _ = registered
+                .runtime
+                .record_runtime_activation(
+                    None,
+                    Some("runtime_configuration_activation_failed".to_owned()),
+                    now,
+                )
+                .await;
+        }
         notify_committed_semantic_activation(&registered.semantic_activation_committed);
     }
     Ok(receipt)
@@ -548,7 +525,7 @@ pub(super) fn requires_coordinated_semantic_profile_transition(
     current_active || requested_active
 }
 
-fn semantic_profile_transition(
+pub(super) fn semantic_profile_transition(
     mutation: &DirectConfigurationMutation,
 ) -> Result<Option<Option<SemanticProfileSelection>>, ConfigurationError> {
     match mutation {
@@ -567,6 +544,17 @@ fn semantic_profile_transition(
             })?;
             semantic.validate().map_err(|_| {
                 ConfigurationError::validation_message("semantic runtime configuration is invalid")
+            })?;
+            // Structural validation above is provider-free; catalog membership
+            // of the selected model is admitted here, at the write boundary,
+            // so an unknown id never reaches the durable configuration.
+            tracedecay_semantic::admit_production_model_selection(
+                semantic.selected_model.as_deref(),
+            )
+            .map_err(|error| {
+                ConfigurationError::validation_message(format!(
+                    "semantic runtime configuration is invalid: {error}"
+                ))
             })?;
             Ok(Some(semantic.active_profile))
         }
@@ -687,7 +675,7 @@ fn configuration_request_authority(
         ));
     }
     let application_operation =
-        tracedecay_application::configuration::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration::configuration_surface_operation(operation.as_str())
             .map_err(|_| invalid_configuration_request())?
             .ok_or_else(invalid_configuration_request)?;
     let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
@@ -736,23 +724,51 @@ fn configuration_request_authority(
     .map_err(|_| invalid_configuration_request())
 }
 
+pub(super) struct ContextScoutRequestAuthorityV1 {
+    pub receipt: AuthorityReceipt,
+    pub use_case: UseCaseId,
+    pub configuration_digest: ManifestDigest,
+    pub catalog_digest: ManifestDigest,
+    pub privacy_digest: ManifestDigest,
+}
+
 pub(super) fn context_scout_request_authority(
     registered: &RegisteredConfigurationRuntime,
+    current: &tracedecay_configuration::ConfigurationCurrentStateV1,
     request_id: &str,
     operation: ApplicationSurfaceOperation,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
-) -> Result<AuthorityReceipt, ApplicationProblem> {
+) -> Result<ContextScoutRequestAuthorityV1, ApplicationProblem> {
     if observed_at >= registered.grants.expires_at {
         return Err(ApplicationProblem::not_found_or_not_authorized(
             RetryDirective::Never,
         ));
     }
     let application_operation =
-        tracedecay_application::context_scout::context_scout_surface_operation(operation.as_str())
+        tracedecay_contracts::context_scout::context_scout_surface_operation(operation.as_str())
             .map_err(|_| invalid_configuration_request())?
             .ok_or_else(invalid_configuration_request)?;
+    let catalog = crate::application_surface::application_surface_catalog_ref()
+        .map_err(|_| invalid_configuration_request())?;
+    let manifest = catalog
+        .capability(application_operation.capability_id())
+        .ok_or_else(invalid_configuration_request)?;
+    let catalog_digest = ManifestDigest::new(catalog.digest().to_string())
+        .map_err(|_| invalid_configuration_request())?;
+    let configuration_digest = current.snapshot.effective_behavior_digest.clone();
+    let privacy_digest = canonical_sha256(&(
+        "tracedecay.daemon.context-scout-privacy.v1",
+        manifest.privacy(),
+        manifest.denied_disclosure(),
+        manifest.scope(),
+        &registered.scope,
+        &current.revision_id,
+        &configuration_digest,
+        DisclosureClass::Sensitive,
+    ))
+    .map_err(|_| invalid_configuration_request())?;
     let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new(format!("grant.daemon.context-scout.{request_id}"))
@@ -784,7 +800,7 @@ pub(super) fn context_scout_request_authority(
     .map_err(|_| invalid_configuration_request())?;
     let policy_digest = ManifestDigest::new(registered.grants.policy_digest.as_str().to_owned())
         .map_err(|_| invalid_configuration_request())?;
-    AuthorityReceipt::from_context(
+    let receipt = AuthorityReceipt::from_context(
         &context,
         PolicyDecisionRef::new(
             "policy.daemon.context-scout.v1",
@@ -796,7 +812,14 @@ pub(super) fn context_scout_request_authority(
         .map_err(|_| invalid_configuration_request())?,
         observed_at,
     )
-    .map_err(|_| invalid_configuration_request())
+    .map_err(|_| invalid_configuration_request())?;
+    Ok(ContextScoutRequestAuthorityV1 {
+        receipt,
+        use_case: application_operation.use_case_id().clone(),
+        configuration_digest,
+        catalog_digest,
+        privacy_digest,
+    })
 }
 
 pub(super) fn configuration_evidence(
@@ -934,7 +957,7 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
                     message: "The configuration request conflicts with current state".to_owned(),
                 },
                 retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![tracedecay_application::LegalAction::Refresh],
+                legal_actions: vec![tracedecay_contracts::LegalAction::Refresh],
             }
         }
         ConfigurationError::PlanExpired | ConfigurationError::PlanStale => {
@@ -1035,7 +1058,7 @@ impl DaemonSemanticRuntimeRegistrar {
         // This separate process-wide projection has no reservation rollback
         // authority. Join it only after the owning project slot commits, in
         // the same poll that observes commit success.
-        tracedecay_usecases::semantic_runtime::register_project_semantic_runtime(
+        tracedecay_application::semantic_runtime::register_project_semantic_runtime(
             project_root,
             handle,
         );
@@ -1097,7 +1120,7 @@ mod terminal_problem_tests {
         assert_eq!(retry, RetryDirective::Never);
         assert_eq!(
             legal_actions,
-            vec![tracedecay_application::LegalAction::Reset]
+            vec![tracedecay_contracts::LegalAction::Reset]
         );
     }
 

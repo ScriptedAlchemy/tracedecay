@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{
     CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, RequestContext, RequestId,
 };

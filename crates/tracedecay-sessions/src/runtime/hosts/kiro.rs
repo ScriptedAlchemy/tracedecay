@@ -40,9 +40,9 @@ use crate::runtime::shared::{
     title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotCaptureOutcome,
-    bounded_snapshot_input_len, capture_snapshot_observations, non_durable_snapshot_record,
-    read_snapshot_text_bounded,
+    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionBatch,
+    SnapshotCaptureOutcome, bounded_snapshot_input_len, capture_snapshot_observations,
+    non_durable_snapshot_record, read_snapshot_text_bounded,
 };
 #[cfg(test)]
 use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
@@ -55,7 +55,7 @@ use serde_json::{Map, Value};
 use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 #[cfg(test)]
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+use tracedecay_privacy::parse_normalized_observation_record_v1;
 
 mod observation;
 pub use observation::KiroSnapshotObservationRecord;
@@ -334,7 +334,7 @@ pub async fn capture_kiro_snapshot_observations(
             };
             let generation = ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
             let records = normalize_kiro_snapshot_observations(&parsed.messages)?;
-            Ok(Some((generation, records)))
+            Ok(Some(vec![SnapshotAdmissionBatch::new(generation, records)]))
         },
     )
     .await

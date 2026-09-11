@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, CancellationContext, Deadline, RequestContext, RequestId,
 };
 use tracedecay_domain::UtcMicros;
@@ -22,7 +22,7 @@ pub(crate) fn reconcile_active_workflow_fan_out(
     attempt_processes: Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
     project_root: &Path,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
 ) -> Result<(), DaemonInvocationProblem> {
     reconcile_active_workflow_fan_out_page(
@@ -40,14 +40,12 @@ fn reconcile_active_workflow_fan_out_page(
     attempt_processes: Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
     project_root: &Path,
     observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
-    cursor: Option<&tracedecay_application::WorkflowActiveRunRecoveryCursorV1>,
-) -> Result<
-    Option<tracedecay_application::WorkflowActiveRunRecoveryCursorV1>,
-    DaemonInvocationProblem,
-> {
-    let services = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
+    cursor: Option<&tracedecay_contracts::WorkflowActiveRunRecoveryCursorV1>,
+) -> Result<Option<tracedecay_contracts::WorkflowActiveRunRecoveryCursorV1>, DaemonInvocationProblem>
+{
+    let services = tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
         &registered.database,
     )
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
@@ -59,7 +57,7 @@ fn reconcile_active_workflow_fan_out_page(
         registered.grant.digest.clone(),
     )
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
-    let page = tracedecay_application::WorkflowRunStoragePort::active_projection_page(
+    let page = tracedecay_contracts::WorkflowRunStoragePort::active_projection_page(
         services.effects(),
         &registered_authority,
         cursor,
@@ -89,7 +87,7 @@ fn reconcile_active_workflow_fan_out_page(
         )?;
     }
     let census_page =
-        tracedecay_application::WorkflowFanOutCensusStoragePort::census_backfill_projection_page(
+        tracedecay_contracts::WorkflowFanOutCensusStoragePort::census_backfill_projection_page(
             services.effects(),
             &registered_authority,
             cursor,
@@ -124,15 +122,9 @@ fn reconcile_active_workflow_fan_out_page(
 
 fn resume_work_attempts_for_workflow_recovery(
     registered: &RegisteredWorkRuntime,
-    workflows: &tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
-    attempt_processes: &Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
-    project_root: &Path,
-    observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
-    >,
 ) -> Result<(), DaemonInvocationProblem> {
-    let work = tracedecay_usecases::work::RegisteredWorkApplicationServicesV1::attach(
+    let work = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
         &registered.database,
     )
     .map_err(|error| {
@@ -143,11 +135,12 @@ fn resume_work_attempts_for_workflow_recovery(
         );
         DaemonInvocationProblem::Unavailable
     })?;
-    let recovery = work
-        .attempts()
+    // Restart recovery fences open attempts and retains their uncertain
+    // outcome. It does not authorize dispatching an existing identity again.
+    work.attempts()
         .resume(
             context,
-            &tracedecay_application::ResumeWorkAttemptsCommand {
+            &tracedecay_contracts::ResumeWorkAttemptsCommand {
                 occurred_at: current_micros(),
             },
         )
@@ -159,57 +152,12 @@ fn resume_work_attempts_for_workflow_recovery(
             );
             DaemonInvocationProblem::Unavailable
         })?;
-    for attempt in recovery.recovery_required {
-        let binding = tracedecay_application::WorkflowRunStoragePort::fan_out_binding(
-            workflows.effects(),
-            attempt.identity(),
-        )
-        .map_err(workflow_run_storage_problem)?;
-        let paused = match binding {
-            Some(binding) => {
-                tracedecay_application::WorkflowRunStoragePort::projection(
-                    workflows.effects(),
-                    &binding.run_id,
-                )
-                .map_err(workflow_run_storage_problem)?
-                .status()
-                    == tracedecay_domain::WorkflowRunStatus::Paused
-            }
-            None => false,
-        };
-        if paused {
-            continue;
-        }
-        super::super::super::work_attempt_exec::spawn_attempt_execution(
-            registered.clone(),
-            Arc::clone(attempt_processes),
-            project_root.to_path_buf(),
-            attempt,
-            observability_producer.clone(),
-        );
-    }
     Ok(())
 }
 
 fn recover_workflow_fan_out_startup(
     registered: &RegisteredWorkRuntime,
-    attempt_processes: &Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
-    project_root: &Path,
-    observability_producer: Option<
-        Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
-    >,
 ) -> Result<(), DaemonInvocationProblem> {
-    let workflows = tracedecay_usecases::work::RegisteredWorkflowApplicationServicesV1::attach(
-        &registered.database,
-    )
-    .map_err(|error| {
-        tracing::error!(
-            ?error,
-            stage = "workflow_application_services",
-            "workflow fan-out startup recovery authority failed"
-        );
-        DaemonInvocationProblem::Unavailable
-    })?;
     let context = workflow_fan_out_recovery_context(registered).map_err(|error| {
         tracing::error!(
             ?error,
@@ -218,14 +166,7 @@ fn recover_workflow_fan_out_startup(
         );
         DaemonInvocationProblem::Unavailable
     })?;
-    resume_work_attempts_for_workflow_recovery(
-        registered,
-        &workflows,
-        &context,
-        attempt_processes,
-        project_root,
-        observability_producer,
-    )
+    resume_work_attempts_for_workflow_recovery(registered, &context)
 }
 
 fn workflow_fan_out_recovery_context(
@@ -265,7 +206,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         >,
         project_root: PathBuf,
         observability_producer: Option<
-            Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+            Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
         >,
         holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
     ) -> Result<Self, DaemonInvocationProblem> {
@@ -302,16 +243,8 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    let resume_attempt_processes = Arc::clone(&attempt_processes);
-                    let resume_project_root = project_root.clone();
-                    let resume_producer = observability_producer.clone();
                     let mut resume = tokio::task::spawn_blocking(move || {
-                        recover_workflow_fan_out_startup(
-                            &resume_registered,
-                            &resume_attempt_processes,
-                            &resume_project_root,
-                            resume_producer,
-                        )
+                        recover_workflow_fan_out_startup(&resume_registered)
                     });
                     let resumed = tokio::select! {
                         biased;
@@ -415,7 +348,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         })
     }
 
-    pub(crate) fn refresh_grant(&self, grant: tracedecay_application::CapabilityGrantSnapshot) {
+    pub(crate) fn refresh_grant(&self, grant: tracedecay_contracts::CapabilityGrantSnapshot) {
         self.inner
             .registered
             .lock()

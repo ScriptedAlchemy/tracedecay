@@ -37,3 +37,6 @@ mockups/**/shots/
 # standalone lockfiles cargo writes when a vendored grafeo crate is tested
 # from inside its own directory; the workspace lock is the one that matters
 vendor/grafeo/*/Cargo.lock
+
+# Generated-SDK codegen crate builds in its own target dir when run bare.
+sdks/codegen/target/

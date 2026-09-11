@@ -1,15 +1,17 @@
 //! Per-generation sealed compact stores.
 //!
-//! `GrafeoDB::compact()` freezes a whole database, while TraceDecay
+//! Grafeo's columnar `CompactStore` is immutable per *store*, while TraceDecay
 //! immutability is per *generation*: one staging database holds every
 //! generation in physical namespaces, so compacting it at a seal would freeze
 //! the store the next generation stages into. This module aligns the two
 //! scopes instead of fighting them: at seal time the just-verified
-//! generation's rows are streamed into their own single-generation Grafeo
-//! database, that database is compacted (its whole-store scope now covers
-//! exactly one immutable generation), closed, reopened from its columnar
-//! `CompactStore` section, and proven against the generation's recovered
-//! digest before it serves a single read.
+//! generation's rows are streamed from the staging database straight into a
+//! `CompactStore` of their own (`IncrementalCompactStoreBuilder`), written as
+//! a single-generation Grafeo container in one durable pass
+//! (`GrafeoDB::write_compact_container`), reopened read-only, and proven
+//! against the generation's recovered digest before it serves a single read.
+//! No live LPG, sidecar WAL, or second checkpoint stands between the verified
+//! rows and the sealed bytes.
 //!
 //! Every sealed store is digest-verified after durable reopen before
 //! installation. Once a dependency-free generation's relational head is
@@ -29,7 +31,7 @@
 //! graph.grafeo                  <- mutable staging database
 //! graph.sealed/
 //!   <physical-namespace-hex>/
-//!     generation.grafeo         <- compacted single-generation store
+//!     generation.grafeo         <- compact single-generation store
 //!     sealed.json               <- receipt binding the recovered digest
 //! ```
 //!
@@ -44,28 +46,33 @@
 //! through [`GraphDb::open_sealed_generation_store_if_present`], which
 //! re-proves the digest before the store serves a read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
+use grafeo_core::graph::compact::IncrementalCompactStoreBuilder;
+use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
-use crate::generation::{
-    physical_namespace_projection_map, recovered_entity_ref, verify_sealed_copy_generation,
-};
+use crate::generation::{physical_namespace_projection_map, verify_sealed_copy_generation};
 use crate::lease::GenerationLocator;
 use crate::location::PersistentGraphStoreState;
-use crate::projection::graph_properties_live_bytes;
+use crate::schema::{
+    FINAL_SCHEMA, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, INDEXED_PROPERTIES, PROJECTION_LABEL,
+    SCHEMA_PROPERTY, SEQUENCE_PROPERTY, decode_entity, edge_properties, entity_labels,
+    entity_properties, projection_properties, relation_locator_labels, relation_properties,
+    relation_type_for_kind,
+};
 use crate::state::{
-    EndpointIdentityCache, latest_projection, load_entity, load_relation_by_locator_cached,
+    EndpointIdentityCache, latest_projection, load_relation_by_locator_cached,
     projection_entity_nodes_sorted_checked, projection_relation_nodes_sorted_checked,
 };
 use crate::{
-    GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity,
-    GraphEntityId, GraphFormatVersion, GraphGenerationManifestIdentity, GraphGenerationRelation,
-    GraphMutation, GraphNamespace, GraphProjectionIdentity, GraphWriteBatch, NeverCancelled,
-    mutation,
+    GraphCommit, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
+    GraphEntity, GraphFormatVersion, GraphGenerationManifest, GraphGenerationManifestIdentity,
+    GraphNamespace, GraphProjectionId, GraphRelation, GraphWriteBatch, NeverCancelled,
 };
 
 /// Opens and verifies one dependency-free sealed generation without opening
@@ -113,7 +120,7 @@ pub(crate) fn open_direct_sealed_generation(
     // lease. The identity read below reopens it immediately; the release
     // happens when the last operation lease goes away.
     let database = GraphDb::open_lazy_with_store_state(
-        sealed_database_options(sealed_path),
+        sealed_artifact_database_options(sealed_path),
         PersistentGraphStoreState::Existing,
     )
     .map_err(|error| match error {
@@ -140,8 +147,8 @@ pub(crate) fn open_direct_sealed_generation(
         )
     };
     // Same marker-aware proof as registry adoption: a boot that reopens the
-    // exact bytes an earlier open already proved resolves by stat, and a
-    // fresh or moved container pays the full row proof and files the marker.
+    // exact bytes an earlier open already proved resolves by marker, and a
+    // fresh or changed container pays the full row proof and files the marker.
     if let Err(error) = sealed_copy_proof(&database, &identity, expected, check) {
         let _ = database.close();
         return Err(match error {
@@ -155,13 +162,8 @@ pub(crate) fn open_direct_sealed_generation(
     Ok(Some((lease, identity)))
 }
 
-/// One mutation page applied while copying rows into a sealed store. The
-/// bounds mirror native staging so a copy can never exceed the canonical
-/// batch budget the staging path already proves out.
-const MAX_SEALED_COPY_MUTATIONS: usize = crate::limits::MAX_NATIVE_GENERATION_STAGE_MUTATIONS;
-const MAX_SEALED_COPY_LIVE_BYTES: usize = 96 * 1024 * 1024;
 /// Rows loaded from the shared staging database per read-guard hold while a
-/// sealed copy streams. Small enough that a queued writer (and the readers
+/// sealed build streams. Small enough that a queued writer (and the readers
 /// that pile up behind it under `std::sync::RwLock`'s writer preference)
 /// waits milliseconds, large enough that lock churn stays negligible against
 /// row decode cost.
@@ -172,44 +174,25 @@ const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
+/// The one form a sealed store is built in. Every value TraceDecay persists
+/// round-trips through the columnar codecs: scalars natively, Bytes through
+/// the dictionary's marked entries, and vectors through the `Float32Vector`
+/// codec — [`crate::schema::vector_property_key`] carries the dimension in
+/// the column name, so no column ever mixes dimensions, and
+/// [`crate::limits::MAX_GRAPH_VECTOR_DIMENSION`] sits inside the codec's
+/// `u16` stride. The post-reopen digest proof re-checks every row regardless.
 const SEALED_STORE_FORM_COMPACT: &str = "compact";
-const SEALED_STORE_FORM_REPLAY: &str = "replay";
-
-/// Whether Bytes-carrying generations may seal in compact columnar form on
-/// the pinned grafeo revision.
-///
-/// The pinned rev (`0c4f93a584e9`) carries both compact Bytes dictionary
-/// markers and stable preserved-edge ordering: equal-source edge IDs stay in
-/// the same order as the native CSR topology. A 45,000-entity /
-/// 51,428-relation Bytes generation passed the full post-reopen recovered
-/// digest proof in compact form before this contract was enabled.
-///
-/// Vector-carrying generations never compact regardless of this constant
-/// (`saw_vector_property` in [`seal_generation_store`]): the sealed lane
-/// never serves vector search, so the columnar base buys them nothing, and
-/// mixed-dimension vector columns fall back to the dictionary codec's
-/// `Display` encoding, which does not round-trip.
-const COMPACT_ROUND_TRIPS_BYTES: bool = true;
-
-/// Minimum code-generation row count that may pay eager compact construction.
-///
-/// The first production-shaped comparison (45,000 entities + 51,428
-/// relations) grew from 192.4 MiB in replay form to 204.5 MiB in compact form,
-/// while eager construction added 42% to seal-to-activation time. The next
-/// power of two keeps that measured no-win class on the replay path without
-/// disabling compact Bytes correctness or large-generation eligibility.
-const MIN_EAGER_COMPACT_BYTES_GENERATION_ROWS: usize = 128 * 1024;
 
 /// Receipt binding a sealed store directory to the exact generation and
-/// recovered digest it was built from. Written after the compacted database
-/// is durably closed; an open that finds a receipt for a different digest
+/// recovered digest it was built from. Written after the compact container
+/// is durably on disk; an open that finds a receipt for a different digest
 /// discards the artifact instead of serving it.
 #[derive(Debug, Deserialize, Serialize)]
 struct SealedStoreReceiptV1 {
     version: u32,
-    /// `"compact"` when the store serves from a columnar `CompactStore`
-    /// base, `"replay"` when it stayed in LPG replay form (see
-    /// [`COMPACT_ROUND_TRIPS_BYTES`]).
+    /// Always [`SEALED_STORE_FORM_COMPACT`] for stores this revision builds;
+    /// receipts written by earlier revisions may name a replay-form store,
+    /// which reopens and proves exactly like a compact one.
     form: String,
     namespace: String,
     projection: String,
@@ -223,7 +206,7 @@ struct SealedStoreReceiptV1 {
 /// How [`GraphDb::ensure_sealed_generation_store`] satisfied a publication's
 /// request for a sealed per-generation store.
 pub(crate) enum SealedStoreInstall {
-    /// The sealed-store lane cannot serve this database (feature off,
+    /// The sealed-store lane cannot serve this database (kill-switch set,
     /// memory-backed, or no reopen configuration); publication keeps the
     /// staging close/reopen proof.
     Unavailable,
@@ -320,9 +303,6 @@ impl SealedGenerationStore {
 /// Sealed stores are on by default: `TRACEDECAY_GRAPH_SEALED_STORE=off`
 /// (or `0`/`false`/`disabled`) is the operational kill-switch.
 fn sealed_store_disabled() -> bool {
-    if cfg!(not(feature = "graph-sealed-store")) {
-        return true;
-    }
     match std::env::var(SEALED_STORE_DISABLE_ENV) {
         Ok(value) => matches!(
             value.trim().to_ascii_lowercase().as_str(),
@@ -358,11 +338,16 @@ fn remove_sealed_directory(directory: &Path) {
     }
 }
 
-fn sealed_database_options(path: PathBuf) -> GraphDbOpenOptions {
+/// Open options for a sealed artifact: read-only, so a reopen for proof,
+/// adoption, or serving never re-serializes the immutable container on close
+/// and never moves the identity its marker binds. A sealed container is only
+/// ever opened this way — its bytes are written once, by
+/// [`GrafeoDB::write_compact_container`], before any engine opens them.
+fn sealed_artifact_database_options(path: PathBuf) -> GraphDbOpenOptions {
     GraphDbOpenOptions {
         location: GraphDbLocation::Persistent(path),
         expected_format: GraphFormatVersion::current(),
-        durability: GraphDurability::WalSync,
+        durability: GraphDurability::SealedReadOnly,
         cancellation: Arc::new(NeverCancelled),
     }
 }
@@ -375,108 +360,183 @@ fn sealed_store_io_failure(context: &str, error: std::io::Error) -> GraphDbError
     GraphDbError::unavailable(format!("sealed generation store {context}: {error}"))
 }
 
-/// One copy page staged for application into the sealed store.
-struct SealedCopyPager {
-    namespace: GraphNamespace,
-    projection: crate::GraphProjectionId,
-    source_generation: crate::SourceGeneration,
-    watermark: crate::GraphWatermark,
-    mutations: Vec<GraphMutation>,
-    endpoint_namespaces: mutation::RelationEndpointNamespaces,
-    live_bytes: usize,
+/// Rows of one generation streamed into a columnar [`IncrementalCompactStoreBuilder`]
+/// in exactly the node and edge shape `mutation::apply` gives a live store:
+/// entity nodes, one native edge plus one locator node per relation, a
+/// projection-state node per written namespace, and the format marker.
+///
+/// Node and edge ids are dense and assigned in push order, so identical row
+/// streams build byte-identical containers whichever [`SealedRowSource`]
+/// supplied them. The caller keeps its own map from source row to the sealed
+/// [`NodeId`] `push_entity` returns, which is how edges find their endpoints
+/// without re-resolving identities through an index.
+struct SealedCompactRows {
+    builder: IncrementalCompactStoreBuilder,
+    next_node: u64,
+    next_edge: u64,
 }
 
-impl SealedCopyPager {
-    fn new(
-        namespace: GraphNamespace,
-        projection: crate::GraphProjectionId,
-        identity: &GraphGenerationManifestIdentity,
-    ) -> Self {
+impl SealedCompactRows {
+    fn new() -> Self {
         Self {
-            namespace,
-            projection,
-            source_generation: identity.source_generation.clone(),
-            watermark: identity.watermark.clone(),
-            mutations: Vec::new(),
-            endpoint_namespaces: mutation::RelationEndpointNamespaces::new(),
-            live_bytes: 0,
+            builder: IncrementalCompactStoreBuilder::new(),
+            next_node: 0,
+            next_edge: 0,
         }
     }
 
-    fn push(
+    fn push_node(
         &mut self,
-        sealed: &GraphDb,
-        mutation_row: GraphMutation,
-        endpoints: Option<(crate::GraphRelationId, (GraphNamespace, GraphNamespace))>,
-        live_bytes: usize,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
+        labels: &[String],
+        properties: Vec<(String, Value)>,
+    ) -> Result<NodeId, GraphDbError> {
+        let id = NodeId::new(self.next_node);
+        let properties: Vec<(PropertyKey, Value)> = properties
+            .into_iter()
+            .map(|(key, value)| (PropertyKey::new(&key), value))
+            .collect();
+        self.builder
+            .push_node(
+                id,
+                labels.iter().map(String::as_str),
+                properties.iter().map(|(key, value)| (key, value)),
+            )
+            .map_err(|error| sealed_build_failure("node", error))?;
+        self.next_node += 1;
+        Ok(id)
+    }
+
+    /// Writes one entity as it is stored under `namespace`/`projection` and
+    /// returns its sealed node so relations can reach it.
+    fn push_entity(
+        &mut self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        entity: &GraphEntity,
+    ) -> Result<NodeId, GraphDbError> {
+        let labels = entity_labels(namespace, projection, &entity.labels);
+        let properties = entity_properties(namespace, projection, entity);
+        self.push_node(&labels, properties)
+    }
+
+    /// Writes one relation: the native edge between two already-written
+    /// endpoints, then the locator node that names that edge.
+    fn push_relation(
+        &mut self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        relation: &GraphRelation,
+        from: NodeId,
+        to: NodeId,
     ) -> Result<(), GraphDbError> {
-        let page_is_full = self.mutations.len() >= MAX_SEALED_COPY_MUTATIONS
-            || (!self.mutations.is_empty()
-                && self.live_bytes.saturating_add(live_bytes) > MAX_SEALED_COPY_LIVE_BYTES);
-        if page_is_full {
-            self.flush(sealed, check)?;
-        }
-        if let Some((relation, namespaces)) = endpoints {
-            self.endpoint_namespaces.insert(relation, namespaces);
-        }
-        self.mutations.push(mutation_row);
-        self.live_bytes = self.live_bytes.saturating_add(live_bytes);
+        let edge = EdgeId::new(self.next_edge);
+        let properties: Vec<(PropertyKey, Value)> =
+            edge_properties(namespace, projection, relation)
+                .into_iter()
+                .map(|(key, value)| (PropertyKey::new(&key), value))
+                .collect();
+        self.builder
+            .push_edge(
+                edge,
+                &relation_type_for_kind(&relation.kind),
+                from,
+                to,
+                properties.iter().map(|(key, value)| (key, value)),
+            )
+            .map_err(|error| sealed_build_failure("edge", error))?;
+        self.next_edge += 1;
+        let locator_labels = relation_locator_labels(namespace, projection);
+        let locator_properties = relation_properties(namespace, projection, relation, edge)?;
+        self.push_node(&locator_labels, locator_properties)?;
         Ok(())
     }
 
-    fn flush(
+    fn push_projection_commit(
         &mut self,
-        sealed: &GraphDb,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        commit: &GraphCommit,
     ) -> Result<(), GraphDbError> {
-        if self.mutations.is_empty() {
-            return Ok(());
-        }
-        let batch = GraphWriteBatch::new_canonical_checked(
-            self.namespace.clone(),
-            self.projection.clone(),
-            self.source_generation.clone(),
-            self.watermark.clone(),
-            std::mem::take(&mut self.mutations),
-            check,
-        )?;
-        let endpoint_namespaces = std::mem::take(&mut self.endpoint_namespaces);
-        self.live_bytes = 0;
-        sealed.apply_sealed_copy_batch(batch, &endpoint_namespaces, None, check)?;
+        let properties = projection_properties(namespace, projection, commit)?;
+        self.push_node(&[PROJECTION_LABEL.to_owned()], properties)?;
         Ok(())
+    }
+
+    /// The format marker every open validates, carrying the store's final
+    /// commit sequence exactly as the last `mutation::apply` would leave it.
+    fn push_format_marker(&mut self, sequence: u64) -> Result<(), GraphDbError> {
+        let sequence = i64::try_from(sequence)
+            .map_err(|_| GraphDbError::unavailable("graph commit sequence exceeds i64"))?;
+        let properties = vec![
+            (
+                FORMAT_VERSION_PROPERTY.to_owned(),
+                Value::from(i64::from(GraphFormatVersion::current().get())),
+            ),
+            (SCHEMA_PROPERTY.to_owned(), Value::from(FINAL_SCHEMA)),
+            (SEQUENCE_PROPERTY.to_owned(), Value::from(sequence)),
+        ];
+        self.push_node(&[FORMAT_LABEL.to_owned()], properties)?;
+        Ok(())
+    }
+
+    /// Encodes every pushed row and writes the sealed container at `path`
+    /// in one durable pass. The container holds the compact store, an empty
+    /// LPG overlay whose id allocators start past the written ids, and a
+    /// catalog naming the unique-key property indexes.
+    fn write_container(self, path: &Path) -> Result<(), GraphDbError> {
+        let store = hotpath::measure_block!("graph_db.sealed_store.encode", self.builder.finish())
+            .map_err(|error| sealed_build_failure("encode", error))?;
+        hotpath::measure_block!(
+            "graph_db.sealed_store.write_container",
+            GrafeoDB::write_compact_container(
+                path,
+                Arc::new(store),
+                INDEXED_PROPERTIES
+                    .iter()
+                    .map(|property| (*property).to_owned()),
+            )
+        )
+        .map_err(|error| GraphDbError::unavailable(format!("sealed container write: {error}")))
     }
 }
 
-fn properties_carry_bytes(
-    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
-) -> bool {
-    properties
-        .values()
-        .any(|property| matches!(property, crate::GraphProperty::Bytes(_)))
+fn sealed_build_failure(
+    what: &str,
+    error: grafeo_core::graph::compact::builder::CompactStoreError,
+) -> GraphDbError {
+    GraphDbError::Corrupt {
+        message: format!("sealed compact build refused a {what}: {error}"),
+    }
 }
 
-fn properties_carry_vectors(
-    properties: &std::collections::BTreeMap<crate::GraphPropertyName, crate::GraphProperty>,
-) -> bool {
-    properties
-        .values()
-        .any(|property| matches!(property, crate::GraphProperty::Vector(_)))
-}
-
-fn entity_copy_live_bytes(entity: &GraphEntity) -> usize {
-    let labels: usize = entity.labels.iter().map(|label| label.as_str().len()).sum();
-    entity.identity.as_str().len()
-        + labels
-        + graph_properties_live_bytes(&entity.properties).unwrap_or(usize::MAX / 4)
-}
-
-fn relation_copy_live_bytes(relation: &GraphGenerationRelation) -> usize {
-    relation.identity.as_str().len()
-        + relation.from.identity.as_str().len()
-        + relation.to.identity.as_str().len()
-        + relation.kind.as_str().len()
-        + graph_properties_live_bytes(&relation.properties).unwrap_or(usize::MAX / 4)
+/// The commit a sealed namespace's projection-state node records: the
+/// generation's source and watermark, the canonical digest of the empty
+/// finalization batch for that namespace (the same batch native staging
+/// commits last), and — for the physical namespace only — the dependency
+/// closure digest the recovered proof requires.
+fn sealed_namespace_commit(
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    identity: &GraphGenerationManifestIdentity,
+    sequence: u64,
+    dependency_digest: Option<tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphCommit, GraphDbError> {
+    let mut finalization = GraphWriteBatch::new_canonical_checked(
+        namespace.clone(),
+        projection.clone(),
+        identity.source_generation.clone(),
+        identity.watermark.clone(),
+        Vec::new(),
+        check,
+    )?;
+    Ok(GraphCommit {
+        sequence,
+        source_generation: identity.source_generation.clone(),
+        watermark: identity.watermark.clone(),
+        digest: finalization.validate_and_digest()?,
+        generation_dependency_digest: dependency_digest,
+    })
 }
 
 impl GraphDb {
@@ -564,10 +624,110 @@ impl GraphDb {
                 });
             }
         }
-        let (store, staging_proof) =
-            build_or_open_sealed_store(self, identity, expected, &database_path, check)?;
+        let (store, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(self),
+            identity,
+            expected,
+            &database_path,
+            check,
+        )?;
         self.install_sealed_generation_store(locator, store)?;
         Ok(SealedStoreInstall::Installed { staging_proof })
+    }
+
+    /// Seals a dependency-free generation straight from its verified
+    /// manifest, without staging a row: the compact container is built from
+    /// the manifest, written once, reopened read-only, proven against
+    /// `expected`, and installed for reads. Returns the sealed generation's
+    /// commit, read back from the proven artifact.
+    ///
+    /// Every failure boundary recovers from durable state that already
+    /// exists. Cancellation or a crash before the artifact directory is
+    /// renamed into place leaves no container (the next attempt clears the
+    /// build directory and rebuilds from the replay journal's manifest); a
+    /// crash after it leaves a complete, receipted artifact the next attempt
+    /// adopts by digest. Nothing about this build is recoverable *only* from
+    /// process memory. An artifact from an earlier seal of this exact
+    /// generation is adopted without a build.
+    ///
+    /// `Ok(None)` means the sealed-store lane cannot serve this database
+    /// (kill-switch set, memory-backed, or no reopen configuration), so the
+    /// caller must stage and prove the generation the ordinary way.
+    #[hotpath::measure(label = "graph_db.sealed_store.seal_direct", impl_type = "GraphDb")]
+    pub(crate) fn seal_generation_from_manifest(
+        &self,
+        manifest: &GraphGenerationManifest,
+        expected: &GraphRecoveredGenerationDigestV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Option<GraphCommit>, GraphDbError> {
+        if sealed_store_disabled() {
+            return Ok(None);
+        }
+        let Some(reopen) = self.inner.reopen.as_ref() else {
+            return Ok(None);
+        };
+        let Some(database_path) = reopen.config.path.clone() else {
+            return Ok(None);
+        };
+        check()?;
+        manifest.validate_checked(check)?;
+        let identity = manifest.identity();
+        if !identity.dependencies.is_empty() {
+            return Err(GraphDbError::invalid(
+                "a direct sealed build requires a dependency-free generation",
+            ));
+        }
+        let locator =
+            GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+        if let Some(existing) = self.sealed_generation_reader(&locator)
+            && existing.recovered_digest() != expected.as_str()
+            && let Some(refusal) = self.sealed_write_refusal(&locator)
+        {
+            // Different content is already sealed and serving under this
+            // exact locator: the same immutability refusal a conflicting
+            // restage gets, not a silent rebuild underneath its readers.
+            return Err(refusal);
+        }
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(manifest),
+            &identity,
+            expected,
+            &database_path,
+            check,
+        )?;
+        self.install_sealed_generation_store(locator.clone(), store)?;
+        // The generation normally exists only as this sealed artifact: it is
+        // sealed-only from its first instant, and no lease remembered for it
+        // may claim staging rows in the durable-row ledger. A database written
+        // before generations sealed directly may still hold this generation's
+        // rows beside the artifact; those stay in the ledger so the ordinary
+        // release deletes them instead of leaking them under a sealed-only
+        // claim. A hibernated staging engine is not opened to find out: the
+        // generation stays in the ledger and the next release sweep, which
+        // opens the engine once anyway, settles it from the durable rows.
+        let staging_rows = match self.try_read_open_engine()? {
+            Some(guard) => {
+                let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+                Some(crate::state::projection_node_counts(
+                    database,
+                    &locator.physical_namespace()?,
+                    &locator.projection.projection,
+                )?)
+            }
+            None => None,
+        };
+        if staging_rows == Some((0, 0)) {
+            let mut state = self.wait_verified_generations_write()?;
+            state.stored.remove(&locator);
+            state.sealed_only.insert(locator.clone());
+        }
+        check()?;
+        let commit = self
+            .generation_commit(&locator)?
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "sealed generation is missing its projection commit".to_owned(),
+            })?;
+        Ok(Some(commit))
     }
 
     /// Opens an existing sealed store for `identity` without building one.
@@ -778,44 +938,6 @@ impl GraphDb {
         let root = sealed_store_root(database_path);
         remove_sealed_directory(&sealed_generation_directory(&root, &physical_namespace));
     }
-
-    /// Applies one copy page into a sealed store under construction.
-    ///
-    /// This is the staging `apply` path minus vector-index maintenance: a
-    /// sealed store never serves vector search (HNSW indexes are not durable
-    /// and are rebuilt against the staging database), so building one here
-    /// would be dead weight in the artifact.
-    pub(crate) fn apply_sealed_copy_batch(
-        &self,
-        mut batch: GraphWriteBatch,
-        endpoint_namespaces: &mutation::RelationEndpointNamespaces,
-        dependency_digest: Option<
-            tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
-        >,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<(), GraphDbError> {
-        let digest = batch.validate_and_digest()?;
-        let _snapshot_gate = self.wait_snapshot_gate_write();
-        let guard = self.write_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let mut state = self.state_write_guard()?;
-        let state = state
-            .as_mut()
-            .ok_or_else(|| GraphDbError::unavailable("graph format state is unavailable"))?;
-        self.apply_locked_without_vector_index_maintenance(
-            database,
-            state,
-            batch,
-            mutation::CommitMetadata {
-                digest,
-                generation_dependency_digest: dependency_digest,
-                publication_record: None,
-            },
-            endpoint_namespaces,
-            check,
-        )?;
-        Ok(())
-    }
 }
 
 impl GraphDb {
@@ -827,22 +949,46 @@ impl GraphDb {
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub fn open_sealed_artifact_for_bench(directory: &Path) -> Result<Arc<GraphDb>, GraphDbError> {
         GraphDb::open_with_store_state(
-            sealed_database_options(directory.join(SEALED_STORE_DATABASE_FILE)),
+            sealed_artifact_database_options(directory.join(SEALED_STORE_DATABASE_FILE)),
             Some(PersistentGraphStoreState::Existing),
         )
     }
 }
 
+/// Where a sealed build reads the generation's rows from.
+///
+/// Both sources yield the recovered digest's row stream in its canonical
+/// order — sorted, unique entities, then sorted, unique relations — so the two
+/// build byte-identical containers for the same generation, and the reopen
+/// proof against the relational authority's digest is the same proof.
+pub(crate) enum SealedRowSource<'a> {
+    /// The generation is staged in this shared staging database, which also
+    /// resolves the dependency-generation endpoints its relations reach.
+    Staging(&'a GraphDb),
+    /// The verified manifest hydrated from the durable replay journal. Only a
+    /// dependency-free generation may seal this way: every relation endpoint
+    /// is one of its own entities, so no staging row is ever needed, written,
+    /// or read. The journal and the code generation it names remain the
+    /// recovery source for every failure boundary of the build.
+    Manifest(&'a GraphGenerationManifest),
+}
+
 /// Builds (or adopts) the sealed store for `identity` and returns the
 /// reopened, digest-verified reader.
+///
+/// The returned `Option<u64>` is the staging proof: `Some(canonical_bytes)`
+/// only when this call enumerated the *staging* database's rows and the
+/// reopened artifact reproduced the authority's digest. A manifest-sourced
+/// build never read the staging container, so it proves nothing about it.
 #[hotpath::measure(label = "graph_db.sealed_store.build")]
 fn build_or_open_sealed_store(
-    source: &GraphDb,
+    rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
     expected: &GraphRecoveredGenerationDigestV1,
     database_path: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(Arc<SealedGenerationStore>, Option<u64>), GraphDbError> {
+    let staging_sourced = matches!(rows, SealedRowSource::Staging(_));
     let physical_namespace = identity.physical_namespace()?;
     let root = sealed_store_root(database_path);
     let directory = sealed_generation_directory(&root, &physical_namespace);
@@ -867,12 +1013,12 @@ fn build_or_open_sealed_store(
     remove_sealed_directory(&staging);
     std::fs::create_dir_all(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
-    let built = copy_compact_and_close(source, identity, &staging, check)
+    let built = build_sealed_container(rows, identity, &staging, check)
         .inspect_err(|_| remove_sealed_directory(&staging));
-    let (entities, relations, form) = built?;
+    let (entities, relations) = built?;
     let receipt = SealedStoreReceiptV1 {
         version: SEALED_STORE_RECEIPT_VERSION,
-        form: form.to_owned(),
+        form: SEALED_STORE_FORM_COMPACT.to_owned(),
         namespace: identity.projection.namespace.as_str().to_owned(),
         projection: identity.projection.projection.as_str().to_owned(),
         generation: identity.generation.as_str().to_owned(),
@@ -895,13 +1041,13 @@ fn build_or_open_sealed_store(
         }
     }
     match open_sealed_store(&directory, identity, expected) {
-        // This call enumerated the staging database's rows into the copy and
-        // the reopen digest matched the authority's expectation: together
-        // that is the staging container's own proof, sized by the canonical
-        // bytes the reopen hashed.
+        // When this call enumerated the staging database's rows into the
+        // copy and the reopen digest matched the authority's expectation,
+        // together that is the staging container's own proof, sized by the
+        // canonical bytes the reopen hashed.
         Ok(Some(store)) => {
-            let canonical_bytes = store.canonical_bytes;
-            Ok((store, Some(canonical_bytes)))
+            let staging_proof = staging_sourced.then_some(store.canonical_bytes);
+            Ok((store, staging_proof))
         }
         Ok(None) => {
             remove_sealed_directory(&directory);
@@ -916,161 +1062,205 @@ fn build_or_open_sealed_store(
     }
 }
 
-/// Streams the generation's verified rows into a fresh database under
-/// `staging`, proves the recovered digest reproduces, compacts when the
-/// pinned engine can round-trip every value in the row set, and closes.
-/// Returns the copied `(entities, relations)` counts and the sealed form.
-fn copy_compact_and_close(
-    source: &GraphDb,
+/// Streams the generation's verified rows into a compact store and writes it
+/// as the sealed container under `staging` in one durable pass. Returns the
+/// written `(entities, relations)` counts.
+///
+/// The row set is exactly the recovered digest's: the sorted, unique entity
+/// and relation enumerations of the physical namespace, plus every
+/// dependency-generation endpoint those relations reach, each written once
+/// in its own namespace. `check` runs per row; a cancelled or failed build
+/// has written nothing under `staging` that the caller keeps — the container
+/// appears complete or not at all, and the next attempt rebuilds from the
+/// same source.
+fn build_sealed_container(
+    rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(usize, usize, &'static str), GraphDbError> {
+) -> Result<(usize, usize), GraphDbError> {
     let physical_namespace = identity.physical_namespace()?;
-    let sealed = GraphDb::open_with_store_state(
-        sealed_database_options(staging.join(SEALED_STORE_DATABASE_FILE)),
-        Some(PersistentGraphStoreState::Prospective),
-    )
-    .map_err(|error| sealed_store_failure("open for build failed", error))?;
+    let mut sealed = SealedCompactRows::new();
+    let (entity_count, relation_count, dependency_namespaces_written) = match rows {
+        SealedRowSource::Staging(source) => {
+            push_staged_rows(source, identity, &physical_namespace, &mut sealed, check)?
+        }
+        SealedRowSource::Manifest(manifest) => {
+            let counts =
+                push_manifest_rows(manifest, identity, &physical_namespace, &mut sealed, check)?;
+            (counts.0, counts.1, BTreeMap::new())
+        }
+    };
 
-    let dependency_namespaces: BTreeMap<GraphProjectionIdentity, GraphNamespace> = identity
-        .dependencies
-        .iter()
-        .map(|dependency| {
-            Ok((
-                dependency.projection.clone(),
-                crate::generation::physical_namespace(
-                    &dependency.projection.namespace,
-                    &dependency.projection.projection,
-                    &dependency.generation,
-                )?,
-            ))
-        })
-        .collect::<Result<_, GraphDbError>>()?;
+    // Finalization: one projection commit per written namespace, in
+    // namespace order, then the format marker at the final sequence. The
+    // physical namespace's commit binds the dependency-closure digest — the
+    // recovered proof requires it, and it is what marks these rows as a
+    // *sealed* generation rather than an unfinished stage.
+    let mut sequence = 0_u64;
+    for (namespace, projection) in &dependency_namespaces_written {
+        check()?;
+        sequence += 1;
+        let commit =
+            sealed_namespace_commit(namespace, projection, identity, sequence, None, check)?;
+        sealed.push_projection_commit(namespace, projection, &commit)?;
+    }
+    sequence += 1;
+    let commit = sealed_namespace_commit(
+        &physical_namespace,
+        &identity.projection.projection,
+        identity,
+        sequence,
+        Some(identity.dependency_closure_digest(check)?),
+        check,
+    )?;
+    sealed.push_projection_commit(
+        &physical_namespace,
+        &identity.projection.projection,
+        &commit,
+    )?;
+    sealed.push_format_marker(sequence)?;
+    check()?;
+    sealed.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))?;
+    Ok((entity_count, relation_count))
+}
+
+/// Pushes a dependency-free generation's rows straight from its verified
+/// manifest: the entities in identity order, then the relations in identity
+/// order, each endpoint resolved by binary search over the entity identities.
+/// Entity nodes are the first `entities.len()` sealed ids, so the search
+/// index *is* the endpoint's node.
+///
+/// Refuses, typed, a manifest that carries dependencies or whose rows are
+/// not in canonical order: the recovered digest is defined over the sorted,
+/// unique row set, and the manifest constructor sorts and deduplicates, so
+/// anything else here is a corrupted manifest, not a different build.
+fn push_manifest_rows(
+    manifest: &GraphGenerationManifest,
+    identity: &GraphGenerationManifestIdentity,
+    physical_namespace: &GraphNamespace,
+    sealed: &mut SealedCompactRows,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(usize, usize), GraphDbError> {
+    if !identity.dependencies.is_empty() {
+        return Err(GraphDbError::invalid(
+            "a direct sealed build requires a dependency-free generation",
+        ));
+    }
+    let projection = &identity.projection.projection;
+    let entities = &manifest.entities;
+    hotpath::measure_block!("graph_db.sealed_store.direct.entities", {
+        for (index, entity) in entities.iter().enumerate() {
+            check()?;
+            if index
+                .checked_sub(1)
+                .is_some_and(|prior| entities[prior].identity >= entity.identity)
+            {
+                return Err(GraphDbError::Corrupt {
+                    message: "graph generation manifest entities are not in canonical order"
+                        .to_owned(),
+                });
+            }
+            let node = sealed.push_entity(physical_namespace, projection, entity)?;
+            if node.as_u64() != index as u64 {
+                return Err(GraphDbError::Corrupt {
+                    message: "sealed build entity ids diverged from manifest order".to_owned(),
+                });
+            }
+        }
+        Ok::<(), GraphDbError>(())
+    })?;
+    hotpath::measure_block!("graph_db.sealed_store.direct.relations", {
+        let relations = &manifest.relations;
+        for (index, relation) in relations.iter().enumerate() {
+            check()?;
+            if index
+                .checked_sub(1)
+                .is_some_and(|prior| relations[prior].identity >= relation.identity)
+            {
+                return Err(GraphDbError::Corrupt {
+                    message: "graph generation manifest relations are not in canonical order"
+                        .to_owned(),
+                });
+            }
+            let mut endpoints = [NodeId::new(0); 2];
+            for (slot, endpoint) in endpoints.iter_mut().zip([&relation.from, &relation.to]) {
+                if endpoint.projection != identity.projection {
+                    return Err(GraphDbError::Corrupt {
+                        message: "sealed build relation escapes its dependency closure".to_owned(),
+                    });
+                }
+                let index = entities
+                    .binary_search_by(|entity| entity.identity.cmp(&endpoint.identity))
+                    .map_err(|_| GraphDbError::Corrupt {
+                        message: format!(
+                            "local relation endpoint `{}` is absent from the candidate generation",
+                            endpoint.identity
+                        ),
+                    })?;
+                *slot = NodeId::new(index as u64);
+            }
+            sealed.push_relation(
+                physical_namespace,
+                projection,
+                &relation.storage_relation()?,
+                endpoints[0],
+                endpoints[1],
+            )?;
+        }
+        Ok::<(), GraphDbError>(())
+    })?;
+    Ok((entities.len(), manifest.relations.len()))
+}
+
+/// Pushes a staged generation's rows out of the shared staging database.
+///
+/// Each staging read guard is held for one bounded chunk so concurrent
+/// writers and readers of the shared staging database wait milliseconds, not
+/// a build. Returns the row counts and the dependency namespaces whose
+/// endpoints were copied, each with its projection.
+fn push_staged_rows(
+    source: &GraphDb,
+    identity: &GraphGenerationManifestIdentity,
+    physical_namespace: &GraphNamespace,
+    rows: &mut SealedCompactRows,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<(usize, usize, BTreeMap<GraphNamespace, GraphProjectionId>), GraphDbError> {
+    // Physical namespace -> projection identity for the generation and its
+    // dependency closure; an endpoint outside this map escapes the closure.
     let namespace_projection = physical_namespace_projection_map(identity)?;
 
     // Enumerate exactly the digest's row sets from the staging database.
     // Index scans only under this guard; the row loads below reacquire it in
     // bounded chunks.
-    let (entity_nodes, relation_locators) = {
-        let guard = source.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let entity_nodes = projection_entity_nodes_sorted_checked(
-            database,
-            &physical_namespace,
-            &identity.projection.projection,
-            check,
-        )?;
-        let relation_locators = projection_relation_nodes_sorted_checked(
-            database,
-            &physical_namespace,
-            &identity.projection.projection,
-            check,
-        )?;
-        (entity_nodes, relation_locators)
-    };
-    // The staged generation is immutable, so its node handles stay valid
-    // across guard reacquisitions (the per-entity copy below has always
-    // relied on this). Bounding each hold matters because the staging
-    // database is shared: `std::sync::RwLock` blocks new readers once a
-    // writer queues, so one corpus-length read guard here turned every
-    // concurrent write *and every reader arriving behind it* — memory-graph
-    // publication, fact and journey reads — into a build-length stall.
-    let mut endpoint_cache = EndpointIdentityCache::default();
-    let mut relation_rows = Vec::new();
-    relation_rows
-        .try_reserve_exact(relation_locators.len())
-        .map_err(|_| GraphDbError::unavailable("sealed relation copy set is too large"))?;
-    // Endpoint entities living in dependency generations, keyed by the
-    // dependency projection so each copy batch stays namespace-exact.
-    let mut dependency_endpoints: BTreeMap<
-        GraphProjectionIdentity,
-        BTreeMap<GraphEntityId, GraphEntity>,
-    > = BTreeMap::new();
-    for chunk in relation_locators.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
-        let guard = source.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let store = database.graph_store();
-        for (_, locator) in chunk {
-            check()?;
-            let stored =
-                load_relation_by_locator_cached(store.as_ref(), *locator, &mut endpoint_cache)?;
-            let from = recovered_entity_ref(store.as_ref(), stored.source, &namespace_projection)?;
-            let to = recovered_entity_ref(store.as_ref(), stored.target, &namespace_projection)?;
-            for endpoint in [&from, &to] {
-                if endpoint.projection == identity.projection {
-                    continue;
-                }
-                let dependency_namespace = dependency_namespaces
-                    .get(&endpoint.projection)
-                    .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "sealed copy relation escapes its dependency closure".to_owned(),
-                    })?;
-                let copies = dependency_endpoints
-                    .entry(endpoint.projection.clone())
-                    .or_default();
-                if !copies.contains_key(&endpoint.identity) {
-                    let entity = load_entity(database, dependency_namespace, &endpoint.identity)?
-                        .ok_or_else(|| GraphDbError::Corrupt {
-                        message: "sealed copy dependency endpoint disappeared".to_owned(),
-                    })?;
-                    copies.insert(endpoint.identity.clone(), entity.entity);
-                }
-            }
-            let relation = GraphGenerationRelation::new(
-                stored.relation.identity,
-                from,
-                to,
-                stored.relation.kind,
-                stored.relation.properties,
-            )?;
-            relation_rows.push(relation);
-        }
-    }
-    drop(endpoint_cache);
-    let entity_count = entity_nodes.len();
-    let relation_count = relation_rows.len();
-    let mut saw_bytes_property = relation_rows
-        .iter()
-        .any(|relation| properties_carry_bytes(&relation.properties));
-    let mut saw_vector_property = relation_rows
-        .iter()
-        .any(|relation| properties_carry_vectors(&relation.properties));
-
-    // 1. Dependency endpoint copies, so cross-generation edges resolve.
-    for (projection, copies) in dependency_endpoints {
-        let namespace = dependency_namespaces
-            .get(&projection)
-            .cloned()
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "sealed copy dependency namespace disappeared".to_owned(),
-            })?;
-        let mut pager = SealedCopyPager::new(namespace, projection.projection.clone(), identity);
-        for (_, entity) in copies {
-            check()?;
-            saw_bytes_property |= properties_carry_bytes(&entity.properties);
-            saw_vector_property |= properties_carry_vectors(&entity.properties);
-            let live_bytes = entity_copy_live_bytes(&entity);
-            pager.push(
-                &sealed,
-                GraphMutation::UpsertEntity(entity),
-                None,
-                live_bytes,
+    let (entity_nodes, relation_locators) =
+        hotpath::measure_block!("graph_db.sealed_store.copy.enumerate", {
+            let guard = source.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            let entity_nodes = projection_entity_nodes_sorted_checked(
+                database,
+                physical_namespace,
+                &identity.projection.projection,
                 check,
             )?;
-        }
-        pager.flush(&sealed, check)?;
-    }
+            let relation_locators = projection_relation_nodes_sorted_checked(
+                database,
+                physical_namespace,
+                &identity.projection.projection,
+                check,
+            )?;
+            (entity_nodes, relation_locators)
+        });
+    // The staged generation is immutable, so its node handles stay valid
+    // across guard reacquisitions.
+    let entity_count = entity_nodes.len();
+    let relation_count = relation_locators.len();
+    // Staging entity handle -> sealed node, for endpoint resolution.
+    let mut sealed_endpoints: HashMap<NodeId, NodeId> = HashMap::new();
 
-    // 2. The generation's own entities, in recovered-digest order.
-    let mut pager = SealedCopyPager::new(
-        physical_namespace.clone(),
-        identity.projection.projection.clone(),
-        identity,
-    );
-    for chunk in entity_nodes.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
-        let mut loaded = Vec::with_capacity(chunk.len());
-        {
+    // 1. The generation's own entities, in recovered-digest order.
+    hotpath::measure_block!("graph_db.sealed_store.copy.entities", {
+        for chunk in entity_nodes.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
             let guard = source.read_guard()?;
             let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
             let store = database.graph_store();
@@ -1081,111 +1271,82 @@ fn copy_compact_and_close(
                 // unique-key index round-trip `load_entity_by_node` pays
                 // per row contributes nothing here.
                 let record = store.get_node(*node).ok_or_else(|| GraphDbError::Corrupt {
-                    message: "sealed copy entity disappeared during enumeration".to_owned(),
+                    message: "sealed build entity disappeared during enumeration".to_owned(),
                 })?;
-                loaded.push(crate::schema::decode_entity(&record)?);
+                let entity = decode_entity(&record)?;
+                let sealed =
+                    rows.push_entity(physical_namespace, &identity.projection.projection, &entity)?;
+                if sealed_endpoints.insert(*node, sealed).is_some() {
+                    return Err(GraphDbError::Corrupt {
+                        message: "sealed build enumerated the same entity twice".to_owned(),
+                    });
+                }
             }
         }
-        for entity in loaded {
-            saw_bytes_property |= properties_carry_bytes(&entity.properties);
-            saw_vector_property |= properties_carry_vectors(&entity.properties);
-            let live_bytes = entity_copy_live_bytes(&entity);
-            pager.push(
-                &sealed,
-                GraphMutation::UpsertEntity(entity),
-                None,
-                live_bytes,
-                check,
-            )?;
+        Ok::<(), GraphDbError>(())
+    })?;
+    drop(entity_nodes);
+
+    // 2. The generation's relations, in recovered-digest order. An endpoint
+    // that is not yet written lives in a dependency generation: it is copied
+    // into its own namespace the first time a relation reaches it, so every
+    // edge's endpoints exist before the edge is pushed.
+    let mut endpoint_cache = EndpointIdentityCache::default();
+    let mut dependency_namespaces_written: BTreeMap<GraphNamespace, GraphProjectionId> =
+        BTreeMap::new();
+    hotpath::measure_block!("graph_db.sealed_store.copy.relations", {
+        for chunk in relation_locators.chunks(SEALED_COPY_GUARD_CHUNK_ROWS) {
+            let guard = source.read_guard()?;
+            let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+            let store = database.graph_store();
+            for (_, locator) in chunk {
+                check()?;
+                let stored =
+                    load_relation_by_locator_cached(store.as_ref(), *locator, &mut endpoint_cache)?;
+                let mut endpoints = [NodeId::new(0); 2];
+                for (slot, staging_node) in endpoints.iter_mut().zip([stored.source, stored.target])
+                {
+                    *slot = match sealed_endpoints.get(&staging_node) {
+                        Some(node) => *node,
+                        None => {
+                            let (namespace, _) =
+                                endpoint_cache.identity(store.as_ref(), staging_node)?;
+                            let projection = namespace_projection
+                                .get(&namespace)
+                                .filter(|_| namespace != *physical_namespace)
+                                .ok_or_else(|| GraphDbError::Corrupt {
+                                    message: "sealed build relation escapes its dependency closure"
+                                        .to_owned(),
+                                })?;
+                            let record = store.get_node(staging_node).ok_or_else(|| {
+                                GraphDbError::Corrupt {
+                                    message: "sealed build dependency endpoint disappeared"
+                                        .to_owned(),
+                                }
+                            })?;
+                            let entity = decode_entity(&record)?;
+                            let sealed =
+                                rows.push_entity(&namespace, &projection.projection, &entity)?;
+                            dependency_namespaces_written
+                                .entry(namespace)
+                                .or_insert_with(|| projection.projection.clone());
+                            sealed_endpoints.insert(staging_node, sealed);
+                            sealed
+                        }
+                    };
+                }
+                rows.push_relation(
+                    physical_namespace,
+                    &identity.projection.projection,
+                    &stored.relation,
+                    endpoints[0],
+                    endpoints[1],
+                )?;
+            }
         }
-    }
-    pager.flush(&sealed, check)?;
-
-    // 3. The generation's relations, with exact endpoint namespaces.
-    let mut pager = SealedCopyPager::new(
-        physical_namespace.clone(),
-        identity.projection.projection.clone(),
-        identity,
-    );
-    for relation in relation_rows {
-        check()?;
-        let live_bytes = relation_copy_live_bytes(&relation);
-        let from_namespace = if relation.from.projection == identity.projection {
-            physical_namespace.clone()
-        } else {
-            dependency_namespaces
-                .get(&relation.from.projection)
-                .cloned()
-                .ok_or_else(|| GraphDbError::Corrupt {
-                    message: "sealed copy relation source escapes its closure".to_owned(),
-                })?
-        };
-        let to_namespace = if relation.to.projection == identity.projection {
-            physical_namespace.clone()
-        } else {
-            dependency_namespaces
-                .get(&relation.to.projection)
-                .cloned()
-                .ok_or_else(|| GraphDbError::Corrupt {
-                    message: "sealed copy relation target escapes its closure".to_owned(),
-                })?
-        };
-        let identity_key = relation.identity.clone();
-        let storage = relation.storage_relation()?;
-        pager.push(
-            &sealed,
-            GraphMutation::UpsertRelation(storage),
-            Some((identity_key, (from_namespace, to_namespace))),
-            live_bytes,
-            check,
-        )?;
-    }
-    pager.flush(&sealed, check)?;
-
-    // Finalization: exactly like native staging, an empty batch binds the
-    // dependency-closure digest to the projection commit — the recovered
-    // proof requires it, and it is what marks these rows as a *sealed*
-    // generation rather than an unfinished stage.
-    let finalization = GraphWriteBatch::new_canonical_checked(
-        physical_namespace.clone(),
-        identity.projection.projection.clone(),
-        identity.source_generation.clone(),
-        identity.watermark.clone(),
-        Vec::new(),
-        check,
-    )?;
-    sealed.apply_sealed_copy_batch(
-        finalization,
-        &mutation::RelationEndpointNamespaces::new(),
-        Some(identity.dependency_closure_digest(check)?),
-        check,
-    )?;
-
-    // Compact only when the pinned engine round-trips every scalar and the
-    // measured form policy justifies paying eager construction. Small
-    // Bytes-carrying code generations stay in replay form because compacting
-    // the measured 96,428-row shape made the artifact larger and delayed
-    // activation. Vector-carrying generations always stay in replay form:
-    // mixed-dimension vectors still use a lossy display dictionary in compact
-    // form. The post-reopen digest proof checks whichever durable form was
-    // selected before installation.
-    let generation_rows = entity_count.saturating_add(relation_count);
-    let compact_bytes_generation = saw_bytes_property
-        && COMPACT_ROUND_TRIPS_BYTES
-        && generation_rows >= MIN_EAGER_COMPACT_BYTES_GENERATION_ROWS;
-    let should_compact = !saw_vector_property && (!saw_bytes_property || compact_bytes_generation);
-    let form = if !should_compact {
-        SEALED_STORE_FORM_REPLAY
-    } else {
-        sealed
-            .compact_for_seal()
-            .map_err(|error| sealed_store_failure("compact failed", error))?;
-        SEALED_STORE_FORM_COMPACT
-    };
-    sealed
-        .close()
-        .map_err(|error| sealed_store_failure("durable close failed", error))?;
-    Ok((entity_count, relation_count, form))
+        Ok::<(), GraphDbError>(())
+    })?;
+    Ok((entity_count, relation_count, dependency_namespaces_written))
 }
 
 /// Opens the artifact under `directory` and proves it against `expected`.
@@ -1219,28 +1380,29 @@ fn open_sealed_store(
             "sealed generation store receipt does not bind this generation".to_owned(),
         ));
     }
-    // Lazily: installing a sealed reader must not cost a whole in-memory
-    // graph. grafeo's store is heap resident, so an eager open here replayed
-    // the artifact's entire block log into RAM for every generation this
-    // process ever sealed — five retained generations meant five whole graphs
-    // (#799), and one published worktree scope meant one more (#830). The
-    // proof below resolves by stat whenever the verify-once marker covers
-    // these exact container bytes, so a retained-but-unread generation now
-    // materializes nothing at all; anything that does read it reopens the
-    // same container through `ensure_opened` on first use.
+    // Lazily: installing a sealed reader must not retain a whole in-memory
+    // graph. grafeo's store is heap resident, so an eager open here kept the
+    // artifact's entire block log in RAM for every generation this process
+    // ever sealed — five retained generations meant five whole graphs (#799),
+    // and one published worktree scope meant one more (#830). The proof below
+    // opens the engine once, resolves by marker whenever the verify-once
+    // marker covers the exact container the engine loaded, and the engine is
+    // released again immediately after; anything that reads the generation
+    // later reopens the same container through `ensure_opened`.
     let database = GraphDb::open_lazy_with_store_state(
-        sealed_database_options(database_path),
+        sealed_artifact_database_options(database_path),
         PersistentGraphStoreState::Existing,
     )
     .map_err(|error| sealed_store_failure("reopen failed", error))?;
     // Prove the compacted, reopened store serves exactly the sealed rows
     // before it answers a single read. The artifact is immutable after its
     // build, so a proof established by an earlier open of these exact
-    // container bytes stands: the marker beside the artifact resolves it by
-    // stat, and anything else — a missing or foreign marker, or a container
-    // whose file identity moved — falls back to the full row proof and files
-    // the marker for the next open. `expected` still comes from the
-    // relational authority, exactly as on the staging container.
+    // container bytes stands: the marker beside the artifact resolves it
+    // against the container the engine opened, and anything else — a missing
+    // or foreign marker, or a container whose identity moved — falls back to
+    // the full row proof and files the marker for the next open. `expected`
+    // still comes from the relational authority, exactly as on the staging
+    // container.
     let canonical_bytes = match sealed_copy_proof(&database, identity, expected, &|| Ok(())) {
         Ok(canonical_bytes) => canonical_bytes,
         Err(error) => {
@@ -1252,10 +1414,10 @@ fn open_sealed_store(
         }
     };
     database.mark_sealed_read_only();
-    // A full proof had to materialize the engine to stream the rows. The
-    // proof is filed now, so the engine is pure resident cost until a read
-    // actually arrives: release it and let the first read reopen. A marker
-    // hit never opened it, and hibernation is then a no-op.
+    // The proof materialized the engine, whether it streamed the rows or
+    // resolved by marker against the container that engine opened. The proof
+    // is filed now, so the engine is pure resident cost until a read actually
+    // arrives: release it and let the first read reopen.
     if let Err(error) = database.hibernate_if_lazy() {
         let _ = database.close();
         return Err(sealed_store_failure("post-proof hibernation failed", error));
@@ -1272,10 +1434,11 @@ fn open_sealed_store(
 }
 
 /// Resolves the recovered-digest proof for a reopened sealed copy: by the
-/// artifact's own verify-once marker when the container bytes are the ones an
-/// earlier proof ran over, by the full row-streaming proof otherwise. A full
-/// proof files the marker so the next open of unchanged bytes resolves by
-/// stat. Returns the canonical byte count the proof covers.
+/// artifact's own verify-once marker when the container the engine opened is
+/// the one an earlier proof ran over, by the full row-streaming proof
+/// otherwise. A full proof files the marker so the next open of unchanged
+/// bytes resolves by marker. Returns the canonical byte count the proof
+/// covers.
 fn sealed_copy_proof(
     database: &GraphDb,
     identity: &GraphGenerationManifestIdentity,
@@ -1283,6 +1446,9 @@ fn sealed_copy_proof(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<u64, GraphDbError> {
     let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
+    // The marker is consulted only against the container the resident engine
+    // loaded, so the engine has to be open before the lookup can answer.
+    database.ensure_opened()?;
     if let Some(canonical_bytes) = database.inner.markers.lookup(&locator, expected.as_str()) {
         database.inner.markers.record_fresh(&locator);
         #[cfg(test)]
@@ -1304,16 +1470,16 @@ fn sealed_copy_proof(
         .inner
         .markers
         .record_proven(&locator, expected.as_str(), canonical_bytes);
-    // Published now as well as at close, because both identities matter. An
-    // open session writes only the sidecar WAL (index catalog entries), so
-    // the container bytes stay exactly the ones this proof ran over for as
-    // long as this process serves them: publishing here lets every further
-    // open of the artifact in the same boot — the direct-sealed recover and
-    // the registry adoption were each paying this proof — resolve by stat.
-    // The close-time publish then re-records the checkpointed container for
-    // the next boot. A marker is a cache of completed proofs; failing to
-    // write one costs the next open a re-proof and nothing else.
-    if let Err(error) = database.inner.markers.publish() {
+    // Published now as well as at close, because both identities matter. A
+    // read-only engine never checkpoints, so the container stays exactly the
+    // one this engine opened for as long as this process serves it:
+    // publishing under that identity lets every further open of the artifact
+    // in the same boot — the direct-sealed recover and the registry adoption
+    // were each paying this proof — resolve by marker. The close-time publish
+    // then re-records the container as the closed handle reports it for the
+    // next boot. A marker is a cache of completed proofs; failing to write one
+    // costs the next open a re-proof and nothing else.
+    if let Err(error) = database.inner.markers.publish_resident() {
         let _ = error;
     }
     crate::hotpath_observe::record_sealed_copy_verification(
@@ -1321,6 +1487,441 @@ fn sealed_copy_proof(
         canonical_bytes,
     );
     Ok(canonical_bytes)
+}
+
+#[cfg(test)]
+mod build_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
+        sealed_generation_directory, sealed_store_root,
+    };
+    use crate::{
+        GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
+        GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion, GraphGenerationId,
+        GraphGenerationManifest, GraphGenerationRelation, GraphLabel, GraphNamespace,
+        GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
+        GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled, SourceGeneration,
+    };
+
+    fn entity_identity(index: usize) -> GraphEntityId {
+        GraphEntityId::new(format!("symbol:{index:05}")).unwrap()
+    }
+
+    /// A generation large enough that its copy spans several guard chunks
+    /// and pager pages, with a Bytes payload so it takes the production
+    /// (compact-eligible) row shape.
+    fn manifest(entities: usize, relations: usize) -> GraphGenerationManifest {
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("sealed-build").unwrap(),
+            GraphProjectionId::new("code").unwrap(),
+        );
+        let entity_rows = (0..entities)
+            .map(|index| {
+                GraphEntity::new(
+                    entity_identity(index),
+                    BTreeSet::from([GraphLabel::new("function").unwrap()]),
+                    BTreeMap::from([
+                        (
+                            GraphPropertyName::new("name").unwrap(),
+                            GraphProperty::String(format!("fn_{index:05}")),
+                        ),
+                        (
+                            GraphPropertyName::new("payload").unwrap(),
+                            GraphProperty::Bytes(vec![(index % 251) as u8; 64]),
+                        ),
+                    ]),
+                )
+                .unwrap()
+            })
+            .collect();
+        let entity_ref =
+            |index: usize| GraphEntityRef::new(projection.clone(), entity_identity(index));
+        let relation_rows = (0..relations)
+            .map(|index| {
+                GraphGenerationRelation::new(
+                    GraphRelationId::new(format!("call:{index:05}")).unwrap(),
+                    entity_ref(index % entities),
+                    entity_ref((index + 1) % entities),
+                    GraphRelationKind::new("calls").unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap()
+            })
+            .collect();
+        GraphGenerationManifest::new(
+            projection,
+            GraphGenerationId::new("generation:build").unwrap(),
+            SourceGeneration::new("source:build").unwrap(),
+            GraphWatermark::new("watermark:build").unwrap(),
+            Vec::new(),
+            entity_rows,
+            relation_rows,
+        )
+        .unwrap()
+    }
+
+    fn open_source(database_path: &std::path::Path) -> crate::GraphDbLeaseV1 {
+        let owner = GraphDbOwner::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(database_path.to_path_buf()),
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        owner.issue_lease().unwrap()
+    }
+
+    /// The sealed container is written once, complete, after every row has
+    /// been encoded: no engine, WAL, or partial container exists under the
+    /// staging directory while rows stream. A build cancelled mid-copy leaves
+    /// neither an artifact nor a staging directory behind, and the next
+    /// attempt rebuilds from the source rows and proves the reopened artifact
+    /// against the same digest.
+    #[test]
+    fn interrupted_build_leaves_nothing_and_a_completed_build_is_written_once() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let database = open_source(&database_path);
+        let manifest = manifest(9_000, 9_000);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let container = staging.join(SEALED_STORE_DATABASE_FILE);
+
+        // Cancel once the copy is well inside the row stream. Until the final
+        // write, the staging directory holds no container at all.
+        let checks = AtomicUsize::new(0);
+        let cancel_mid_copy = || {
+            let count = checks.fetch_add(1, Ordering::Relaxed);
+            assert!(
+                !container.exists(),
+                "no container may exist before every row is encoded"
+            );
+            if count >= 12_000 {
+                return Err(GraphDbError::Cancelled);
+            }
+            Ok(())
+        };
+        let interrupted = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            &cancel_mid_copy,
+        );
+        assert!(
+            matches!(interrupted, Err(GraphDbError::Cancelled)),
+            "mid-copy cancellation must surface typed: {interrupted:?}"
+        );
+        assert!(
+            checks.load(Ordering::Relaxed) > 12_000,
+            "the cancellation must have fired inside the row stream"
+        );
+        assert!(
+            !staging.exists() && !directory.exists(),
+            "an interrupted build must leave neither its staging directory nor an artifact"
+        );
+
+        let (store, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        assert!(staging_proof.is_some(), "a fresh build carries its proof");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert_eq!((store.entity_count, store.relation_count), (9_000, 9_000));
+        let artifact = directory.join(SEALED_STORE_DATABASE_FILE);
+        assert!(artifact.is_file());
+        assert!(
+            !staging.exists(),
+            "a completed build renames its staging directory into place"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join("sealed.json")).unwrap()).unwrap();
+        assert_eq!(receipt["form"], "compact");
+        let _ = store.database().close();
+
+        // Exact container identity across reopen: adoption, proof, serving
+        // reads, and close never rewrite a byte of the sealed file.
+        let written = std::fs::read(&artifact).unwrap();
+        let (adopted, adopted_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        assert!(
+            adopted_proof.is_none(),
+            "adoption never re-enumerates staging rows"
+        );
+        let served = adopted.database().read_guard().unwrap();
+        let native = served.as_ref().unwrap();
+        let (entities, relations) = crate::state::projection_node_counts(
+            native,
+            &identity.physical_namespace().unwrap(),
+            &identity.projection.projection,
+        )
+        .unwrap();
+        assert_eq!((entities, relations), (9_000, 9_000));
+        drop(served);
+        let _ = adopted.database().close();
+        assert_eq!(
+            std::fs::read(&artifact).unwrap(),
+            written,
+            "reopen, proof, reads, and close must leave the sealed bytes exactly as written"
+        );
+    }
+
+    /// Two builds of the same staged rows write byte-identical section
+    /// payloads: the build order is the recovered-digest order, and the
+    /// compact serializer is deterministic, so every byte past the Grafeo
+    /// file/DB headers (which carry the creation and checkpoint timestamps by
+    /// format design) is a function of the generation alone.
+    #[test]
+    fn rebuilding_the_same_generation_writes_identical_bytes() {
+        fn payload(bytes: &[u8]) -> &[u8] {
+            let data_offset = usize::try_from(grafeo_storage::file::format::DATA_OFFSET).unwrap();
+            assert!(
+                bytes.len() > data_offset,
+                "container holds no section payload"
+            );
+            &bytes[data_offset..]
+        }
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let database = open_source(&database_path);
+        let manifest = manifest(2_000, 3_000);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+        let directory = sealed_generation_directory(
+            &sealed_store_root(&database_path),
+            &identity.physical_namespace().unwrap(),
+        );
+        let artifact = directory.join(SEALED_STORE_DATABASE_FILE);
+
+        let (first, _) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let _ = first.database().close();
+        let first_bytes = std::fs::read(&artifact).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        let (second, _) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let _ = second.database().close();
+        let second_bytes = std::fs::read(&artifact).unwrap();
+        assert_eq!(second_bytes.len(), first_bytes.len());
+        assert!(
+            payload(&second_bytes) == payload(&first_bytes),
+            "sealed section payloads differ between two builds of one generation"
+        );
+    }
+
+    /// The direct build's failure boundary and its identity with the staged
+    /// build. A build cancelled inside the manifest's row stream leaves
+    /// neither a staging directory nor an artifact; a crash image (a leftover
+    /// staging directory holding a partial container) is cleared by the next
+    /// attempt, which rebuilds from the manifest alone and proves the
+    /// reopened artifact against the same digest; and the container it
+    /// writes carries the same section payload the staged copy of the same
+    /// rows writes, so the sealed identity does not depend on which source
+    /// built it.
+    #[test]
+    fn direct_build_recovers_from_interruption_and_matches_the_staged_build() {
+        fn payload(bytes: &[u8]) -> &[u8] {
+            let data_offset = usize::try_from(grafeo_storage::file::format::DATA_OFFSET).unwrap();
+            assert!(
+                bytes.len() > data_offset,
+                "container holds no section payload"
+            );
+            &bytes[data_offset..]
+        }
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2_000, 3_000);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let artifact = directory.join(SEALED_STORE_DATABASE_FILE);
+
+        // Cancellation inside the row stream: nothing is left behind.
+        let checks = AtomicUsize::new(0);
+        let cancel_mid_build = || {
+            if checks.fetch_add(1, Ordering::Relaxed) >= 2_500 {
+                return Err(GraphDbError::Cancelled);
+            }
+            Ok(())
+        };
+        let interrupted = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &cancel_mid_build,
+        );
+        assert!(
+            matches!(interrupted, Err(GraphDbError::Cancelled)),
+            "mid-build cancellation must surface typed: {interrupted:?}"
+        );
+        assert!(
+            !staging.exists() && !directory.exists(),
+            "an interrupted direct build must leave neither its staging directory nor an artifact"
+        );
+
+        // A crash image: the process died after creating the staging
+        // directory and part of a container. The next attempt owns that
+        // directory and rebuilds from the manifest.
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join(SEALED_STORE_DATABASE_FILE), b"torn container").unwrap();
+        let (direct, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        assert!(
+            staging_proof.is_none(),
+            "a manifest-sourced build proves nothing about the staging database"
+        );
+        assert_eq!(direct.recovered_digest(), expected.as_str());
+        assert_eq!((direct.entity_count, direct.relation_count), (2_000, 3_000));
+        assert!(
+            !staging.exists(),
+            "the crash image must be replaced, not kept"
+        );
+        let _ = direct.database().close();
+        let direct_bytes = std::fs::read(&artifact).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        // The same rows, staged and copied out of the staging database.
+        let database = open_source(&database_path);
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+        let (staged, staged_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        assert!(staged_proof.is_some());
+        let _ = staged.database().close();
+        let staged_bytes = std::fs::read(&artifact).unwrap();
+        assert_eq!(staged_bytes.len(), direct_bytes.len());
+        assert!(
+            payload(&staged_bytes) == payload(&direct_bytes),
+            "the direct and staged builds of one generation must write the same sealed payload"
+        );
+    }
+
+    /// Vector-carrying generations seal in compact form and reproduce their
+    /// recovered digest exactly: the vector property key carries the
+    /// dimension, so a column never mixes dimensions and the `Float32Vector`
+    /// codec round-trips every value.
+    #[test]
+    fn vector_carrying_generation_seals_compact_and_proves_its_digest() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let database = open_source(&database_path);
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("sealed-vectors").unwrap(),
+            GraphProjectionId::new("semantic").unwrap(),
+        );
+        let entity_rows = (0..600_usize)
+            .map(|index| {
+                let values: Vec<f32> = (0..8).map(|d| (index * 8 + d) as f32 * 0.25).collect();
+                let mut properties = BTreeMap::from([(
+                    GraphPropertyName::new("vector").unwrap(),
+                    GraphProperty::Vector(
+                        crate::GraphVector::new(values, 8, crate::VectorMetric::Cosine).unwrap(),
+                    ),
+                )]);
+                // Sparse scalar alongside the vector, on its own label set.
+                if index % 3 == 0 {
+                    properties.insert(
+                        GraphPropertyName::new("score").unwrap(),
+                        GraphProperty::F64(index as f64 / 7.0),
+                    );
+                }
+                let mut labels = BTreeSet::from([GraphLabel::new("chunk").unwrap()]);
+                if index % 3 == 0 {
+                    labels.insert(GraphLabel::new("scored").unwrap());
+                }
+                GraphEntity::new(entity_identity(index), labels, properties).unwrap()
+            })
+            .collect();
+        let manifest = GraphGenerationManifest::new(
+            projection,
+            GraphGenerationId::new("generation:vectors").unwrap(),
+            SourceGeneration::new("source:vectors").unwrap(),
+            GraphWatermark::new("watermark:vectors").unwrap(),
+            Vec::new(),
+            entity_rows,
+            Vec::new(),
+        )
+        .unwrap();
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+        let (store, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        assert!(staging_proof.is_some());
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert_eq!(store.row_counts(), (600, 0));
+        let _ = store.database().close();
+    }
 }
 
 #[cfg(test)]
@@ -1417,8 +2018,7 @@ mod hibernation_tests {
 ///
 /// ```text
 /// TRACEDECAY_VERIFY_PROBE_ROWS=50000 TRACEDECAY_VERIFY_PROBE_PAYLOAD=700 \
-///   cargo test -p tracedecay-graph-db --features graph-sealed-store \
-///   --profile perf --lib -- --ignored --nocapture \
+///   cargo test -p tracedecay-graph-db --profile perf --lib -- --ignored --nocapture \
 ///   sealed_store::cost_probe::sealed_verification_cost_probe
 /// ```
 #[cfg(test)]
@@ -1427,7 +2027,7 @@ mod cost_probe {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use super::{build_or_open_sealed_store, open_sealed_store};
+    use super::{SealedRowSource, build_or_open_sealed_store, open_sealed_store};
     use crate::generation::verify_recovered_generation;
     use crate::{
         GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability, GraphEntity,
@@ -1659,9 +2259,14 @@ mod cost_probe {
         // The sealed build: copy + (compact | replay) + durable close +
         // reopen + full post-reopen proof.
         let started = Instant::now();
-        let (store, staging_proof) =
-            build_or_open_sealed_store(&database, &identity, &expected, &database_path, check)
-                .unwrap();
+        let (store, staging_proof) = build_or_open_sealed_store(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
         let build_s = started.elapsed().as_secs_f64();
         assert!(staging_proof.is_some(), "fresh build must carry its proof");
         let directory = store.directory.clone();

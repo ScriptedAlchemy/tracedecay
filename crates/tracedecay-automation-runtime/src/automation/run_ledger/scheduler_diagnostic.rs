@@ -4,7 +4,7 @@ use std::path::Path;
 use super::{AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path};
 use crate::automation::backend::task_key as canonical_task_key;
 use crate::automation::config_error;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(crate) async fn append_or_reuse_scheduler_diagnostic(
     dashboard_root: &Path,
@@ -46,7 +46,7 @@ fn append_or_reuse_blocking(
     effectful_anchor_run_id: Option<&str>,
 ) -> Result<AutomationRunLedgerRecord> {
     if let Some(parent) = path.parent() {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)
             .map_err(TraceDecayError::from)?;
     }
     let lock =

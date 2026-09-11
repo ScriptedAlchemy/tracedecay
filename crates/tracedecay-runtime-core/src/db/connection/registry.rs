@@ -9,7 +9,7 @@ use tracedecay_domain::errors::TraceDecayError;
 use super::memory_graph_reconciliation::{
     MemoryGraphReconciliationCoordinatorV1, ProjectMemoryReconciliationTelemetryV1,
 };
-use crate::store_runtime::registry::{
+use crate::shard_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, DatabaseRuntimeAttachment,
     DatabaseRuntimeOwnerAttachmentReservationIdentityV1, DatabaseRuntimeOwnerIdentityV1,
     StoreRuntimeClientLease, StoreRuntimeOwnerAttachmentRetirementReservationV1,
@@ -123,7 +123,7 @@ impl DatabaseRuntimeClientV1 {
     #[must_use]
     pub fn writer_telemetry_snapshot(
         &self,
-    ) -> Option<crate::store_runtime::registry::RepositoryRuntimePhysicalSnapshot> {
+    ) -> Option<crate::shard_runtime::registry::RepositoryRuntimePhysicalSnapshot> {
         self.guard.runtime().writer_telemetry_snapshot()
     }
 }
@@ -271,7 +271,7 @@ pub(super) struct DatabaseInner {
     /// The cell is shared (`Arc`) so a deferred-activation graph proxy can
     /// resolve it at use time without retaining this inner allocation.
     pub(super) memory_graph_runtime:
-        Arc<OnceLock<Weak<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>>>,
+        Arc<OnceLock<Weak<dyn crate::shard_runtime::VerifiedGraphRuntimePortV1>>>,
     /// Watermark of the projected memory-graph source, keyed by the exact
     /// append-only lineage stamp it was computed under. See
     /// [`super::graph_binding`] for the invariant that makes the stamp a

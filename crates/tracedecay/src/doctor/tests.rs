@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
-use crate::agents::AgentIntegration;
+use tracedecay_agent_hosts::agents::AgentIntegration;
 use tracedecay_runtime_core::text::format_bytes;
 
 #[test]
@@ -305,10 +305,10 @@ fn daemon_runtime_parser_rejects_missing_json_payload() {
 }
 
 fn storage_runtime_finding(
-    state: tracedecay_application::doctor::DoctorEvidenceStateV1,
+    state: tracedecay_contracts::doctor::DoctorEvidenceStateV1,
     reference: &str,
-) -> tracedecay_application::doctor::DoctorFindingV1 {
-    use tracedecay_application::doctor::{
+) -> tracedecay_contracts::doctor::DoctorFindingV1 {
+    use tracedecay_contracts::doctor::{
         DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
         DoctorEvidenceReferenceV1, DoctorFindingFamilyV1, DoctorFindingV1,
     };
@@ -331,7 +331,7 @@ fn storage_runtime_finding(
 
 #[test]
 fn canonical_storage_runtime_findings_are_the_only_storage_verdict() {
-    use tracedecay_application::doctor::DoctorEvidenceStateV1 as State;
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1 as State;
 
     let healthy = storage_runtime_finding(State::HealthyCompleteCoverage, "runtime.healthy");
     let unknown = storage_runtime_finding(State::Denied, "runtime.denied");
@@ -359,7 +359,7 @@ fn canonical_storage_runtime_findings_are_the_only_storage_verdict() {
 
 #[test]
 fn denied_canonical_evidence_warns_instead_of_inventing_failure() {
-    use tracedecay_application::doctor::DoctorEvidenceStateV1 as State;
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1 as State;
 
     let mut counters = DoctorCounters::new();
     super::render_doctor_finding(

@@ -1,3 +1,5 @@
+// Its own test binary, not a runtime_core_suite module: the ambient-git test
+// re-executes this binary with a bare `--exact` test name.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::io::Write as _;
@@ -50,6 +52,11 @@ impl Fixture {
                 "user.name=Fixture",
                 "-c",
                 "user.email=fixture@example.com",
+                // The nested-tree fixture exceeds MAX_PATH under a Windows
+                // temp root; Git for Windows refuses those paths unless told
+                // to use the extended-length form. A no-op elsewhere.
+                "-c",
+                "core.longpaths=true",
             ])
             .args(args)
             .current_dir(self.path())
@@ -238,9 +245,13 @@ fn authority_honors_repository_included_ignore_configuration() {
     let excludes = config_dir.path().join("ignored");
     std::fs::write(&excludes, "from-included-config.txt\n").unwrap();
     let config = config_dir.path().join("gitconfig");
+    // A backslash starts an escape sequence in a git config value, so a
+    // native Windows path must be spelled with forward slashes (which git
+    // accepts on every host) or the included file fails to parse.
+    let excludes_value = excludes.to_str().unwrap().replace('\\', "/");
     std::fs::write(
         &config,
-        format!("[core]\n\texcludesFile = {}\n", excludes.display()),
+        format!("[core]\n\texcludesFile = {excludes_value}\n"),
     )
     .unwrap();
     fixture.git(&["config", "include.path", config.to_str().unwrap()]);
@@ -619,13 +630,24 @@ fn authority_reports_shallow_history_as_truncated_evidence() {
         source.commit(&format!("commit {index}"));
     }
     let shallow = tempfile::tempdir().unwrap();
+    // `file://` + a native path is not a URL git can parse: on Windows the
+    // backslashes make the drive letter read as a host. Spell the path
+    // plainly and with URL separators, the same way this fixture writes an
+    // `excludesFile` value.
+    let clone_source_url = format!(
+        "file:///{}",
+        tracedecay_runtime_core::path_safety::plain_host_path(source.path())
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    );
     let output = Command::new("git")
         .args([
             "clone",
             "--quiet",
             "--depth",
             "1",
-            &format!("file://{}", source.path().display()),
+            &clone_source_url,
             shallow.path().to_str().unwrap(),
         ])
         .output()

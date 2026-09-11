@@ -1,12 +1,10 @@
 //! Owner-private filesystem creation, validation, and durable publication,
-//! plus the process-wide OS primitives that share this crate's cold,
-//! dependency-light position: background CPU admission and Windows
-//! file-handle identity.
+//! plus the Windows file-handle identity primitive that shares this crate's
+//! cold, dependency-light position.
 
 use std::fs::File;
 use std::io;
 
-pub mod background_cpu;
 pub mod capability_dir;
 pub mod framed_log;
 #[cfg(windows)]
@@ -68,7 +66,8 @@ pub mod windows;
 pub use windows::{
     available_space, create_private_directory, create_private_file, create_private_file_retained,
     make_private_directory, make_private_file, open_private_directory, open_private_file,
-    validate_directory_path, validate_private_directory, validate_private_file,
+    replace_file_atomically, validate_directory_path, validate_private_directory,
+    validate_private_file,
 };
 
 #[cfg(unix)]
@@ -281,6 +280,90 @@ pub use unix::{
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("TraceDecay private filesystem authority requires Unix or Windows");
+
+/// Native non-blocking exclusive-lock contention.
+///
+/// Unix `flock`/`fcntl` reports a held lock as [`io::ErrorKind::WouldBlock`].
+/// Windows `LockFileEx` with `LOCKFILE_FAIL_IMMEDIATELY` reports
+/// `ERROR_LOCK_VIOLATION` (33) instead, often with a kind other than
+/// `WouldBlock`. Sharing violations (`ERROR_SHARING_VIOLATION`, 32) and
+/// `AccessDenied` (`ERROR_ACCESS_DENIED`, 5) are different operations — an
+/// open/ACL problem is not proof that another authority holds the lock.
+pub fn is_lock_contended(error: &io::Error) -> bool {
+    classify_lock_contention(error, cfg!(windows))
+}
+
+/// `ERROR_LOCK_VIOLATION`: the Win32 code `LockFileEx` returns for a
+/// `LOCKFILE_FAIL_IMMEDIATELY` conflict.
+const WINDOWS_LOCK_VIOLATION: i32 = 33;
+
+/// The platform-independent core of [`is_lock_contended`], so the Windows
+/// mapping is provable from a test on any host. `windows_semantics` is the
+/// only platform input; everything else is the same decision everywhere.
+fn classify_lock_contention(error: &io::Error, windows_semantics: bool) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || (windows_semantics && error.raw_os_error() == Some(WINDOWS_LOCK_VIOLATION))
+}
+
+#[cfg(test)]
+mod lock_contention_tests {
+    use super::{classify_lock_contention, is_lock_contended};
+
+    /// Windows `LockFileEx` semantics, asserted from any host.
+    fn windows(error: &std::io::Error) -> bool {
+        classify_lock_contention(error, true)
+    }
+
+    /// Unix `flock`/`fcntl` semantics, asserted from any host.
+    fn unix(error: &std::io::Error) -> bool {
+        classify_lock_contention(error, false)
+    }
+
+    #[test]
+    fn would_block_is_typed_contention_on_every_platform() {
+        let would_block = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(is_lock_contended(&would_block));
+        assert!(windows(&would_block));
+        assert!(unix(&would_block));
+    }
+
+    #[test]
+    fn lock_violation_33_is_contention_only_under_windows_semantics() {
+        let violation = std::io::Error::from_raw_os_error(33);
+        assert!(
+            windows(&violation),
+            "ERROR_LOCK_VIOLATION (33) is the Windows non-blocking lock conflict"
+        );
+        assert!(
+            !unix(&violation),
+            "Unix errno 33 (EPIPE) is not LockFileEx contention"
+        );
+        assert_eq!(is_lock_contended(&violation), cfg!(windows));
+    }
+
+    #[test]
+    fn access_denied_is_not_lock_contention() {
+        let kind = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_lock_contended(&kind));
+        assert!(!windows(&kind));
+        let raw = std::io::Error::from_raw_os_error(5);
+        assert!(
+            !windows(&raw),
+            "ERROR_ACCESS_DENIED (5) is an ACL problem, not a held lock"
+        );
+        assert!(!is_lock_contended(&raw));
+    }
+
+    #[test]
+    fn sharing_violation_is_not_lock_contention() {
+        let raw = std::io::Error::from_raw_os_error(32);
+        assert!(
+            !windows(&raw),
+            "ERROR_SHARING_VIOLATION (32) is an open/share conflict, not LockFileEx contention"
+        );
+        assert!(!is_lock_contended(&raw));
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {

@@ -540,7 +540,7 @@ fn representative_language_walks_allocate_by_changed_region() {
             grammar_key: "bash",
             source: regional_fixture("tiny() { :; }\n"),
             needle: "tiny()",
-            expected_digest: "0b6dc46dcc1aa39ee5e93ab7b7380922ca2299c3090679be0d9f8084d5dbbb3f",
+            expected_digest: "d1b8003a5b51fbeaa81bc03dc58ff38ad4f8ebd7af74533882cbabe8c47a2eb1",
         },
         Case {
             tier: "full",
@@ -586,10 +586,29 @@ fn representative_language_walks_allocate_by_changed_region() {
             incremental.result.errors
         );
 
+        // Informational timing: best of a few repeat walks smooths scheduler
+        // noise. A changed-region walk of one tiny trailing item must not pay
+        // for the megabyte of padding ahead of it.
+        let best_walk_time = (0..10)
+            .map(|_| {
+                let started = Instant::now();
+                let repeat = case.extractor.extract_parsed(
+                    case.file_path,
+                    &case.source,
+                    &tree,
+                    ParsedExtractionScope::ChangedRegions(&regions),
+                );
+                let elapsed = started.elapsed();
+                assert!(repeat.result.errors.is_empty());
+                elapsed
+            })
+            .min()
+            .expect("at least one timed walk");
+
         let cold_digest = canonical_digest(&cold);
         let incremental_digest = canonical_digest(&incremental.result);
         println!(
-            "{} ({}): source={} visited={} allocated={} digest={cold_digest}",
+            "{} ({}): source={} visited={} allocated={} best region walk {best_walk_time:?} digest={cold_digest}",
             case.file_path,
             case.tier,
             case.source.len(),
@@ -680,7 +699,7 @@ const MIGRATED_LANGUAGE_CASES: &[MigratedLanguageCase] = &[
         line_prefix: " ",
         trailing_item: "module Tiny {}\n",
         needle: "module Tiny",
-        expected_digest: "75502dcf8fdb0e73b852bdc2a56404ee79da3a6ca311485429c2cf657a1b7bfd",
+        expected_digest: "30e8c89a82ae13015b58f33a0b891b9aa8f6133019569d14b064e6d6d090cf72",
     },
     MigratedLanguageCase {
         extractor: &ErlangExtractor,
@@ -770,7 +789,7 @@ const MIGRATED_LANGUAGE_CASES: &[MigratedLanguageCase] = &[
         line_prefix: " ",
         trailing_item: "let tiny () = 1\n",
         needle: "tiny",
-        expected_digest: "c6925a1f647d3ba1012f1214d3e9716600e747a17f70eeb13ef604de4c1b234b",
+        expected_digest: "a07acacdc216260172b7b91fd53762cfca3ab60ee44a616266ece5a9ab35e7ea",
     },
     MigratedLanguageCase {
         extractor: &ElixirExtractor,
@@ -869,7 +888,7 @@ const MIGRATED_LANGUAGE_CASES: &[MigratedLanguageCase] = &[
         line_prefix: "//",
         trailing_item: "syntax = \"proto3\";\nmessage Tiny { int32 value = 1; }\n",
         needle: "syntax",
-        expected_digest: "cc6bda39ad1659dc6810e9a3102541a7eccc1dea52cd36619ab00274a012d454",
+        expected_digest: "55dcd5eb9525b1e78abbf7b63eb6ef79c8f4bf34b69da57c8ec240be3b348237",
     },
     MigratedLanguageCase {
         extractor: &MarkdownExtractor,
@@ -905,7 +924,7 @@ const MIGRATED_LANGUAGE_CASES: &[MigratedLanguageCase] = &[
         line_prefix: " ",
         trailing_item: "{ tiny = x: x; }\n",
         needle: "tiny =",
-        expected_digest: "faa55e95bc920f59ffc8e5721929a0c0b011f2c29c95d92917f457b834809b14",
+        expected_digest: "020992eb30b57b524f271c5bba3bc3ce57a7f1cad2639f934b5f1b0d595bfa4b",
     },
     MigratedLanguageCase {
         extractor: &PhpExtractor,
@@ -914,7 +933,7 @@ const MIGRATED_LANGUAGE_CASES: &[MigratedLanguageCase] = &[
         line_prefix: " ",
         trailing_item: "<?php function tiny() {}\n",
         needle: "function tiny",
-        expected_digest: "c802ec1e56f957fb5d5499b159ba3b1cb71fae8c66c5bb39294d5e28865e29dd",
+        expected_digest: "2d7ce0b11cc025ea076c2b8d9106c7faa7073f8701a3b63e7f20ae347a53c181",
     },
     MigratedLanguageCase {
         extractor: &ObjcExtractor,

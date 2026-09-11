@@ -13,4 +13,4 @@ Interpret `$ARGUMENTS` as either a single target branch to compare against the c
 
 Branch tracking is opt-in per branch. If a target branch isn't tracked, tell the user to run `tracedecay branch add <branch>` in the terminal first. A branch-fallback `WARNING` prefix means results came from the nearest tracked ancestor — surface that to the user.
 
-Output: the cross-branch search hits or the added/removed/changed symbol lists, with any branch-fallback warning surfaced. If any result includes a `tracedecay_metrics:` line, report the savings.
+Output: the cross-branch search hits or the added/removed/changed symbol lists, with any branch-fallback warning surfaced.

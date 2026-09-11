@@ -1,9 +1,10 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     SourceEditDiagnosticV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
 };
 
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
+
+use super::port::SourceEditRuntime;
 
 #[hotpath::measure(label = "usecases.edit.verify.file", future = true)]
 async fn run_edit_verification(
@@ -120,7 +121,7 @@ fn failed_edit_verification(error: TraceDecayError) -> SourceEditVerificationV1 
 }
 
 pub(super) fn application_contract_error(
-    error: tracedecay_application::ApplicationContractError,
+    error: tracedecay_contracts::ApplicationContractError,
 ) -> TraceDecayError {
     config_error(format!(
         "source edit application contract is invalid: {error}"
@@ -128,7 +129,7 @@ pub(super) fn application_contract_error(
 }
 
 pub(super) fn application_problem(
-    _error: tracedecay_application::ApplicationProblem,
+    _error: tracedecay_contracts::ApplicationProblem,
 ) -> TraceDecayError {
     config_error("source edit was not found or not authorized")
 }
@@ -145,6 +146,17 @@ pub(super) fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
     }
+}
+
+pub(super) const SOURCE_EDIT_EXPECTED_STATE_MISMATCH: &str = "source_edit.expected_state_mismatch";
+pub(super) const SOURCE_EDIT_IDEMPOTENCY_CONFLICT: &str = "source_edit.idempotency_conflict";
+
+pub(super) fn expected_state_mismatch(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route(SOURCE_EDIT_EXPECTED_STATE_MISMATCH, true, detail)
+}
+
+pub(super) fn idempotency_conflict(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route(SOURCE_EDIT_IDEMPOTENCY_CONFLICT, false, detail)
 }
 
 #[cfg(test)]

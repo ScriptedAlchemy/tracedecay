@@ -8,9 +8,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from COBOL source files using tree-sitter.
@@ -127,7 +129,7 @@ impl CobolExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -141,6 +143,7 @@ impl CobolExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -162,6 +165,16 @@ impl CobolExtractor {
     }
 
     /// Parse source code into a tree-sitter AST.
+    ///
+    /// The `cobol` grammar is the copy of yutaro-sakamoto/tree-sitter-cobol
+    /// vendored in `tokensave-large-treesitters`, pinned to a fork of 0.5.0
+    /// that carries the upstream scanner fix (#1104). Without it the external
+    /// scanner's sequence-number skip `while (get_column() <= 5) advance()`
+    /// never tests for end of input, so any token starting at 0-based column
+    /// 0–5 with no six-column line before EOF spins forever — and no boundary
+    /// in this crate can interrupt it, because tree-sitter polls the progress
+    /// callback only between parse actions, never inside a scanner call. The
+    /// pin can drop once the bundle ships a release with the fix.
     fn parse_source(source: &str) -> Result<Tree, String> {
         crate::ts_provider::parse_extractor_source("cobol", "COBOL", source)
     }
@@ -201,7 +214,13 @@ impl CobolExtractor {
             let start_column = node.start_position().column as u32;
             let end_column = node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Module, name, start_line);
+            let id = local_node_id(
+                &state.file_path,
+                state.source,
+                &NodeKind::Module,
+                name,
+                node,
+            );
 
             let text = state.node_text(node);
             let signature = text
@@ -232,6 +251,7 @@ impl CobolExtractor {
                 unsafe_blocks: 0,
                 unchecked_calls: 0,
                 assertions: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
                 updated_at: state.timestamp,
                 parent_id: None,
             };
@@ -341,7 +361,7 @@ impl CobolExtractor {
         let end_column = node.end_position().column as u32;
         let text = state.node_text(node);
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &kind, name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &kind, name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -365,6 +385,7 @@ impl CobolExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -489,7 +510,13 @@ impl CobolExtractor {
         let start_column = header.start_position().column as u32;
         let end_column = last_child.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Function,
+            &name,
+            header,
+        );
 
         // Count complexity by walking the body statements.
         let mut branches: u32 = 0;
@@ -526,6 +553,7 @@ impl CobolExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

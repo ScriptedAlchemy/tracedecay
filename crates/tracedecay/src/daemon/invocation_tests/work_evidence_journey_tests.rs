@@ -3,7 +3,7 @@ use super::*;
 use std::collections::BTreeSet;
 
 use tokio::sync::Mutex;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOutcome, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, PrepareWorkProductMutationRequestV1, StartWorkAttemptCommand,
     WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1, WorkAttemptStoragePort,
@@ -256,7 +256,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     let project_id = id::<ProjectId>("project.work.evidence-journey");
     let repository_id = id::<RepositoryId>("repository.work.evidence-journey");
     let worktree_id = id::<WorktreeId>("worktree.work.evidence-journey");
-    let host = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+    let host = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
         profile.path(),
         &project,
         project_id.clone(),
@@ -325,10 +325,6 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .identity()
         .session_request_scope()
         .expect("Work scope");
-    let retrieval_authority =
-        crate::daemon::work_evidence_retrieval::WorkEvidenceRetrievalAuthorityV1::mounted_session(
-            retrieval_root.identity(),
-        );
     let retrieval =
         tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalService::new(
             database.clone(),
@@ -337,19 +333,14 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         )
         .expect("mounted session retrieval");
     let evidence_retrieval =
-        crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
-            Arc::new(retrieval),
-            retrieval_authority,
-        )
-        .with_federated_authority(Arc::new(
-            crate::daemon::work_evidence_retrieval::tests::StaticFederatedAuthority(Arc::new(
-                crate::daemon::work_evidence_retrieval::tests::federated_authority(id::<
-                    PrivacyDomainId,
-                >(
-                    "privacy.work.evidence-journey",
+        tracedecay_application::work::WorkTaskSessionEvidenceRetrievalV1::new(Arc::new(retrieval))
+            .with_federated_authority(Arc::new(
+                tracedecay_application::work::StaticFederatedAuthority(Arc::new(
+                    tracedecay_application::work::federated_authority(id::<PrivacyDomainId>(
+                        "privacy.work.evidence-journey",
+                    )),
                 )),
-            )),
-        ));
+            ));
 
     let actor = id::<ActorId>("actor.work.evidence-journey");
     let grant_digest = digest('d');
@@ -362,11 +353,11 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         UtcMicros(journey_now.0.saturating_sub(60_000_000)),
         UtcMicros(journey_now.0.saturating_add(600_000_000)),
         scope.clone(),
-        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
             .iter()
             .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
             .collect(),
-        tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
+        tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
             .iter()
             .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
             .collect(),
@@ -382,7 +373,8 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
     )
     .expect("Work authority");
     let service = DaemonInvocationService::default();
-    let (proposal_routing, configuration_digest) = empty_work_proposal_routing(scope.clone());
+    let (proposal_routing, configuration_digest) =
+        empty_work_proposal_routing(scope.clone(), &grant);
     let policy_digest = mount_test_work_observability(
         &service,
         &project,

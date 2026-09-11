@@ -10,7 +10,7 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, DisclosureClass, EffectReceipt, RequestId,
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
@@ -1231,7 +1231,10 @@ fn open_lock_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create(true)
         .follow(FollowSymlinks::No);
-    let file = directory.open_with(name, &options)?;
+    // Concurrent settlements race the first creation of this lock; the shared
+    // helper absorbs the spurious Darwin `ENOENT` the losers are handed.
+    let file =
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1675,7 +1678,7 @@ fn validate_admission_shape(admission: &DurableAutomationAdmission) -> Result<()
         || template.configuration_digest != admission.configuration_digest
         || template.policy_digest != admission.grant_digest
         || admission.grant_revision == 0
-        || template.outcome != tracedecay_application::EffectTermination::Partial
+        || template.outcome != tracedecay_contracts::EffectTermination::Partial
         || template.committed_state.is_some()
     {
         return Err(contract_error(

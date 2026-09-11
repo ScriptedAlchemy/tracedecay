@@ -1,12 +1,14 @@
 use super::*;
-use crate::config::USER_DATA_DIR_ENV;
 use std::time::Duration;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 use super::super::EnvGuard;
 
 fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
-    crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
-    let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id)
+        .unwrap();
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     layout.data_root
 }
@@ -31,6 +33,7 @@ fn unbound_hook_analytics_do_not_create_a_missing_profile() {
     let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
     let parsed = serde_json::from_str(event).unwrap();
     drop(record_hook_invoked_parsed(
+        &crate::ports::hook_runtime::crate_test_runtime(),
         None,
         HintAgent::Claude,
         "Stop",
@@ -123,6 +126,7 @@ fn timing_span_defaults_to_recording_without_a_registered_authority() {
     let project = tempfile::tempdir().unwrap();
     let project_root = project.path().canonicalize().unwrap();
     let span = HookTimingSpan::new(
+        &crate::ports::hook_runtime::crate_test_runtime(),
         Some(&project_root),
         HintAgent::Claude,
         "missingConfiguration",
@@ -161,7 +165,13 @@ fn payload_bytes_are_length_only_and_omit_forbidden_content() {
     let data_root = enroll_project(&project_root, "proj_hook_privacy");
 
     {
-        let span = record_hook_invoked(Some(&project_root), HintAgent::Claude, "Stop", &event);
+        let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            Some(&project_root),
+            HintAgent::Claude,
+            "Stop",
+            &event,
+        );
         span.note_timeout_budget(Duration::from_millis(750));
         span.note_timed_out(false);
         span.note_completed_daemon_call(
@@ -241,12 +251,14 @@ fn daemon_hook_action_records_completed_rtt_and_wire_length() {
                 "reset": true,
             })]);
             let span = record_hook_invoked(
+                &crate::ports::hook_runtime::crate_test_runtime(),
                 Some(&project_root),
                 HintAgent::Cursor,
                 "daemonBoundary",
                 r#"{"hook_event_name":"daemonBoundary"}"#,
             );
             let result = crate::hooks::daemon_hook_action(
+                &crate::ports::hook_runtime::crate_test_runtime(),
                 Some(&project_root),
                 serde_json::json!({ "action": "reset_counter" }),
                 Some(&span),
@@ -280,6 +292,7 @@ fn one_way_notification_does_not_claim_round_trip_time() {
 
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Cursor,
             "notificationBoundary",
@@ -332,6 +345,7 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
 
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Claude,
             "failureThenSuccess",
@@ -342,6 +356,7 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Codex,
             "successThenFailure",
@@ -352,6 +367,7 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Kiro,
             "backpressureThenSuccess",
@@ -362,6 +378,7 @@ fn hook_disposition_aggregation_preserves_failures_and_sticky_timeout() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Cursor,
             "stickyTimeout",
@@ -430,6 +447,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
 
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Claude,
             "unknownThenSuccess",
@@ -440,6 +458,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Codex,
             "unknownThenFailure",
@@ -450,6 +469,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Kiro,
             "successThenUnknown",
@@ -460,6 +480,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Cursor,
             "failureThenUnknown",
@@ -470,6 +491,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Claude,
             "unknownThenTimeout",
@@ -480,6 +502,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Codex,
             "timeoutThenUnknown",
@@ -490,6 +513,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Kiro,
             "unknownThenCancel",
@@ -500,6 +524,7 @@ fn hook_disposition_order_permutations_unknown_typed_timeout_cancel() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Cursor,
             "cancelThenUnknown",
@@ -578,12 +603,14 @@ fn concurrent_spans_keep_rtt_payload_and_disposition_isolated() {
         let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
         let data_root = enroll_project(&project_root, "proj_hook_concurrent");
         let first = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Cursor,
             "firstHook",
             r#"{"hook_event_name":"firstHook"}"#,
         );
         let second = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Kiro,
             "secondHook",
@@ -648,7 +675,13 @@ fn untyped_ok_daemon_output_emits_unknown_not_default_success() {
     let data_root = enroll_project(&project_root, "proj_untyped_ok_disposition");
 
     {
-        let span = record_hook_invoked(Some(&project_root), HintAgent::Claude, "untypedOk", "{}");
+        let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            Some(&project_root),
+            HintAgent::Claude,
+            "untypedOk",
+            "{}",
+        );
         span.note_daemon_result(&Ok(serde_json::json!({"result": {}})));
     }
 

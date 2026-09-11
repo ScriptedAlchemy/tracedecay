@@ -127,19 +127,24 @@ impl VerifiedGenerationState {
         self.quarantined.remove(&lease.locator);
         self.known
             .insert(lease.locator.clone(), Arc::downgrade(lease));
-        self.stored.insert(
-            lease.locator.clone(),
-            lease
-                .dependency_identities
-                .iter()
-                .map(|dependency| {
-                    GenerationLocator::new(
-                        dependency.projection.clone(),
-                        dependency.generation.clone(),
-                    )
-                })
-                .collect(),
-        );
+        // `stored` is the durable-row ledger. A sealed-only generation has
+        // no staging rows — they were released, or it was sealed straight
+        // from its manifest — so remembering its lease must not claim any.
+        if !self.sealed_only.contains(&lease.locator) {
+            self.stored.insert(
+                lease.locator.clone(),
+                lease
+                    .dependency_identities
+                    .iter()
+                    .map(|dependency| {
+                        GenerationLocator::new(
+                            dependency.projection.clone(),
+                            dependency.generation.clone(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         self.sweep_dead_known();
         Ok(())
     }

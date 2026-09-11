@@ -91,7 +91,7 @@ Related: tracedecay tool runtime (semantic runtime state), tracedecay tool
 configuration_get (the semantic.runtime.v1 setting).";
 
 fn agent_value_parser() -> PossibleValuesParser {
-    PossibleValuesParser::new(tracedecay::agents::available_integrations())
+    PossibleValuesParser::new(tracedecay_agent_hosts::agents::available_integrations())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1189,18 +1189,12 @@ pub(crate) struct SessionsSearchArgs {
 
 #[derive(Subcommand)]
 pub enum SessionsRefreshAction {
-    /// Start or join the durable refresh and return an opaque handle
-    Start(SessionRefreshBeginArgs),
-    /// Report read-only progress or a terminal receipt using a refresh handle
-    Status(SessionRefreshOperationArgs),
-    /// Join or start the durable refresh and return an opaque handle
-    Join(SessionRefreshBeginArgs),
-    /// Resume, join, or start the durable refresh and return an opaque handle
-    Resume(SessionRefreshBeginArgs),
-    /// Durably cancel using a handle from start, join, resume, or begin
-    Cancel(SessionRefreshOperationArgs),
-    /// Compatibility spelling for start; returns an opaque handle
+    /// Begin or join the durable refresh and return an opaque handle
     Begin(SessionRefreshBeginArgs),
+    /// Report read-only progress or a terminal receipt using the handle from begin
+    Status(SessionRefreshOperationArgs),
+    /// Durably cancel using the handle from begin; success is receipt-backed
+    Cancel(SessionRefreshOperationArgs),
 }
 
 #[derive(Args)]
@@ -1219,7 +1213,7 @@ pub(crate) struct SessionRefreshSelectors {
         required_unless_present_any = ["project_id", "profile_id"]
     )]
     pub(crate) project_path: Option<String>,
-    /// Typed profile id that owns a profile-scoped refresh operation
+    /// Typed `profile.<id>` identity whose user-scope session store owns a profile-scoped refresh
     #[arg(
         long,
         conflicts_with_all = ["project_id", "project_path"],
@@ -1253,8 +1247,8 @@ pub(crate) struct SessionRefreshBeginArgs {
 pub(crate) struct SessionRefreshOperationArgs {
     #[command(flatten)]
     pub(crate) selectors: SessionRefreshSelectors,
-    /// Opaque daemon-local handle returned by start, join, resume, or begin; --operation-id is deprecated
-    #[arg(long, visible_alias = "operation-id")]
+    /// Opaque daemon-local handle returned by begin
+    #[arg(long)]
     pub(crate) handle: String,
     /// Output the typed refresh outcome as JSON
     #[arg(long)]
@@ -1269,6 +1263,18 @@ pub enum SessionsAction {
         #[arg(long)]
         project_id: Option<String>,
         /// Registered project root path or alias whose session store should receive ingested messages
+        #[arg(long, conflicts_with = "project_id")]
+        project_path: Option<String>,
+    },
+    /// Check one previously scheduled session import or Git sync
+    SyncStatus {
+        /// Idempotency key returned when the sync was scheduled
+        #[arg(long)]
+        idempotency_key: String,
+        /// Registered project id whose session sync should be inspected
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Registered project root path or alias whose session sync should be inspected
         #[arg(long, conflicts_with = "project_id")]
         project_path: Option<String>,
     },

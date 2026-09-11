@@ -35,7 +35,7 @@ use crate::runtime::source::{
     TranscriptCursorKey, TranscriptDiscoveryBounds, TranscriptSource, bound_path_list,
     collect_files_with_ext_bounded, path_byte_len,
 };
-use tracedecay_runtime_core::privacy::protect_sensitive_structural_id;
+use tracedecay_privacy::protect_sensitive_structural_id;
 mod canonical_projection;
 mod cursor;
 mod frames;
@@ -499,7 +499,7 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
     let parent_transcript_path = parent_session_dir.parent()?.join(parent_filename);
 
     let meta = read_subagent_meta(path);
-    let sanitize = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text;
+    let sanitize = tracedecay_privacy::sanitize_provider_metadata_text;
     let retain_identifier = |value: Option<String>| {
         value.and_then(|value| {
             // The structural pass may already have replaced a credential
@@ -538,10 +538,9 @@ fn read_subagent_meta(transcript_path: &Path) -> ClaudeSubagentMeta {
     else {
         return ClaudeSubagentMeta::default();
     };
-    let Some(value) = tracedecay_runtime_core::privacy::sanitize_provider_metadata_json(
-        &text,
-        MAX_SNAPSHOT_METADATA_BYTES,
-    ) else {
+    let Some(value) =
+        tracedecay_privacy::sanitize_provider_metadata_json(&text, MAX_SNAPSHOT_METADATA_BYTES)
+    else {
         return ClaudeSubagentMeta::default();
     };
     let string_field = |key: &str| {

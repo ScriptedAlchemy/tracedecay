@@ -2,7 +2,7 @@ use std::hash::BuildHasher;
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(unix)]
 use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -16,14 +16,16 @@ use tracedecay_sessions::runtime::cursor::{
 };
 use tracedecay_sessions::runtime::source::TranscriptIngestResult;
 
-#[cfg(unix)]
-use crate::common::spawn_tracedecay_daemon;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
+#[cfg(unix)]
+use crate::common::{spawn_tracedecay_daemon, tracedecay_command_with_home};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, fixture_project_id,
     mark_test_project, open_project_session_db, try_ingest_source,
 };
-use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
+use crate::support::{
+    assert_metadata_path_eq, assert_path_text_eq, init_git_repo, init_project, init_project_at,
+};
 
 async fn ingest_cursor_transcript_event(
     event_json: &str,
@@ -291,13 +293,15 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         EnvVarGuard::set("HOME", &home),
         EnvVarGuard::set("USERPROFILE", &home),
     ];
-    let project = init_project(&tmp);
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
     let project_id = mark_test_project(&project);
     // Since `c24e4a62a` the hook resolves its project root through the
     // initialized-store gate, exactly like production installs: `init` creates
     // the project store, and only then does the daemon mount a project LCM
     // authority. Enrollment alone leaves the route reporting `unavailable`.
     crate::common::initialize_tracedecay_cli_project(&home, &project);
+    crate::common::stop_managed_daemon(&home);
     let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();
@@ -315,6 +319,15 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     .unwrap();
 
     let _daemon = spawn_tracedecay_daemon(&home);
+    // Native pressure needs the registered graph scope as well as the session
+    // shard. An empty graph-file marker bypasses init and never publishes that
+    // scope; exercise the same enrollment that precedes real host callbacks.
+    let init = tracedecay_command_with_home(&home)
+        .arg("init")
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "project init failed: {init:?}");
 
     // In production a preCompact event only fires mid-session, after earlier
     // hook traffic has already admitted the project session store. A freshly
@@ -336,7 +349,8 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
     .to_string();
     let warmup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
-        let warmup = cursor_pre_compact_via_daemon(&warmup_event).await;
+        let warmup =
+            cursor_pre_compact_via_daemon(&tracedecay::hook_runtime(), &warmup_event).await;
         let retryable = match (warmup.status.as_str(), warmup.reason.as_str()) {
             ("error", reason) => {
                 assert_eq!(reason, "timed out", "warmup hit a non-budget error");
@@ -354,7 +368,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         }
         assert!(
             std::time::Instant::now() < warmup_deadline,
-            "daemon never acknowledged pressure within the warmup deadline"
+            "daemon never acknowledged pressure within the warmup deadline: {warmup:?}"
         );
     }
 
@@ -369,7 +383,8 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_b
         "context_tokens": 124000,
         "context_window_size": 128000
     });
-    let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
+    let outcome =
+        cursor_pre_compact_via_daemon(&tracedecay::hook_runtime(), &event.to_string()).await;
     // Pressure-only preCompact never carries Cursor's own summary text. The
     // daemon still runs its owned compaction route against the (empty)
     // session store and reports no backlog instead of treating the missing
@@ -880,7 +895,7 @@ async fn cursor_transcript_ingest_uses_cwd_root_in_multi_root_workspace() {
         .get_session("cursor", "cursor-session")
         .await
         .expect("session should be stored under root B");
-    assert_eq!(session.project_path, root_b.to_string_lossy());
+    assert_path_text_eq(&session.project_path, &root_b);
     assert_eq!(session.project_key, db.project_id().as_str());
 }
 
@@ -1285,7 +1300,7 @@ async fn cursor_sweep_ingests_historical_transcripts() {
         .get_session("cursor", "sweep-session")
         .await
         .expect("swept parent session should be stored");
-    assert_eq!(parent_session.project_path, project.to_string_lossy());
+    assert_path_text_eq(&parent_session.project_path, &project);
     assert!(!parent_session.is_subagent);
 
     let child_session = db

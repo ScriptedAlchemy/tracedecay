@@ -1,16 +1,16 @@
 use std::path::Path;
 
-use tracedecay::application_surface::ApplicationSurfaceRequest;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, CancellationSignal, ComponentConfigurationState,
     Deadline, EffectReceipt, ResolvedSetting,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationGetRequestV1,
     ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
     ConfigurationWireRequestV1,
 };
+use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 use tracedecay_daemon_protocol::{RequestedOutputFormat, invocation_now_micros};
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
@@ -76,10 +76,10 @@ fn configuration_deadline(
     observed_at: UtcMicros,
 ) -> tracedecay_domain::errors::Result<Deadline> {
     let application_operation =
-        tracedecay_application::configuration::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration::configuration_surface_operation(operation.as_str())
             .map_err(|error| configuration_error(error.to_string()))?
             .ok_or_else(|| configuration_error("configuration operation is not cataloged"))?;
-    let catalog = tracedecay::application_surface::application_surface_catalog()
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
         .map_err(|error| configuration_error(error.to_string()))?;
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
@@ -328,9 +328,10 @@ pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
 
 #[hotpath::measure(label = "cli.settings.upload_counter", future = true)]
 pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay_domain::errors::Result<()> {
-    let resolved =
-        super::scope::resolve_project_scope(tracedecay::config::resolve_path_with_discovery(None))
-            .await?;
+    let resolved = super::scope::resolve_project_scope(
+        tracedecay_configuration::resolve_path_with_discovery(None),
+    )
+    .await?;
     let expected_revision = current_configuration_revision(&resolved.project_path).await?;
     let current = canonical_upload_enabled(&resolved.project_path).await?;
     let mutations = if current != enable {
@@ -380,7 +381,7 @@ fn handle_gitignore_inner(
     // Erase the deeply nested gitignore-settings future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
-        let project_path = tracedecay::config::resolve_path(path);
+        let project_path = tracedecay_configuration::resolve_path(path);
         match action.as_deref() {
             Some("on") => {
                 let resolved = super::scope::resolve_project_scope(project_path).await?;

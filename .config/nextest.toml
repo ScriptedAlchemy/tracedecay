@@ -10,7 +10,11 @@ test-threads = 8
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 archive.include = [
-    { path = "controlled-workload-hotpath", relative-to = "target", depth = 1, on-missing = "warn" },
+    # Windows archives use the same perf profile as their prerequisite builds.
+    # Ordinary binaries and the compiled host fixture are not test executables.
+    { path = "perf/tracedecay-search-eval.exe", relative-to = "target", on-missing = "error" },
+    { path = "perf/tracedecay-search-eval-direct.exe", relative-to = "target", on-missing = "error" },
+    { path = "perf/examples/tracedecay-host-cli-fixture.exe", relative-to = "target", on-missing = "error" },
 ]
 
 [profile.ci.junit]

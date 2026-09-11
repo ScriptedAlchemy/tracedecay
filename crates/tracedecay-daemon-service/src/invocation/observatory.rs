@@ -2,35 +2,27 @@
 
 use super::*;
 
-struct RegisteredObservatoryReadPort {
-    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    scope_ref: String,
-}
-
-impl tracedecay_application::ObservatoryReadPortV1 for RegisteredObservatoryReadPort {
-    fn read(
-        &self,
-        request: tracedecay_application::ObservatoryReadRequestV1,
-    ) -> tracedecay_application::ObservatoryReadFuture<'_> {
-        Box::pin(async move {
-            let since_seconds = request.since_seconds();
-            let observatory = tracedecay_usecases::observability::observatory_read_model(
-                self.database.as_ref(),
-                Some(&self.scope_ref),
-                since_seconds,
-            )
-            .await;
-            let costs = tracedecay_usecases::observability::costs_read_model(
-                self.database.as_ref(),
-                None,
-                None,
-                Some(&self.scope_ref),
-                since_seconds,
-            )
-            .await;
-            Ok(tracedecay_application::ObservatoryReadResultV1 { observatory, costs })
-        })
-    }
+async fn read_registered_observatory(
+    database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    scope_ref: &str,
+    request: tracedecay_contracts::ObservatoryReadRequestV1,
+) -> Result<tracedecay_contracts::ObservatoryReadResultV1, ApplicationContractError> {
+    let since_seconds = request.since_seconds();
+    let observatory = tracedecay_application::observability::observatory_read_model(
+        database.as_ref(),
+        Some(scope_ref),
+        since_seconds,
+    )
+    .await;
+    let costs = tracedecay_application::observability::costs_read_model(
+        database.as_ref(),
+        None,
+        None,
+        Some(scope_ref),
+        since_seconds,
+    )
+    .await;
+    Ok(tracedecay_contracts::ObservatoryReadResultV1 { observatory, costs })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -39,7 +31,7 @@ pub(super) async fn execute_observatory_read(
     service: &DaemonInvocationService,
     project_root: Option<&Path>,
     wire_request_id: String,
-    request: tracedecay_application::ObservatoryReadRequestV1,
+    request: tracedecay_contracts::ObservatoryReadRequestV1,
     resolved_scope: Option<ResolvedScope>,
     observed_at: UtcMicros,
     deadline: Deadline,
@@ -82,7 +74,7 @@ pub(super) async fn execute_observatory_read(
         Ok(access) if access.scope == registered.scope => access,
         Ok(_) | Err(_) => return concealed_application_problem(wire_request_id),
     };
-    let operation = match tracedecay_application::observatory_read_operation() {
+    let operation = match tracedecay_contracts::observatory_read_operation() {
         Ok(operation) => operation,
         Err(_) => {
             return observatory_unavailable(
@@ -108,7 +100,7 @@ pub(super) async fn execute_observatory_read(
         Ok(admission) => admission,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
-    let cancellation_signal = match tracedecay_application::CancellationSignal::active(
+    let cancellation_signal = match tracedecay_contracts::CancellationSignal::active(
         context.cancellation().token_id.as_str(),
     ) {
         Ok(signal) => signal,
@@ -117,12 +109,8 @@ pub(super) async fn execute_observatory_read(
     if let CancellationState::Cancelled { requested_at } = &context.cancellation().state {
         cancellation_signal.cancel(*requested_at);
     }
-    let observatory_service =
-        tracedecay_application::ObservatoryReadServiceV1::new(RegisteredObservatoryReadPort {
-            database,
-            scope_ref: registered.scope.project_id.as_str().to_owned(),
-        });
-    let read = observatory_service.read(request);
+    let read =
+        read_registered_observatory(&database, registered.scope.project_id.as_str(), request);
     tokio::pin!(read);
     let result = tokio::select! {
         result = &mut read => result,
@@ -162,7 +150,7 @@ pub(super) async fn execute_observatory_read(
 }
 
 fn observatory_evidence(
-    result: tracedecay_application::ObservatoryReadResultV1,
+    result: tracedecay_contracts::ObservatoryReadResultV1,
     authority: AuthorityReceipt,
     observed_at: UtcMicros,
     deadline: Deadline,

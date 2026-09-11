@@ -7,9 +7,9 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn git_read_evidence_packet(
     request_id: &str,
-    request: &tracedecay_application::git::GitReadRequestV1,
+    request: &tracedecay_contracts::git::GitReadRequestV1,
     current: &DaemonGitAuthorityStateV1,
-    result: tracedecay_usecases::git_reads::GitReadResultV1,
+    result: tracedecay_application::git_reads::GitReadResultV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -72,11 +72,11 @@ pub(super) fn git_read_evidence_packet(
     )
     .map_err(|_| invalid_git_request())?;
     let native_coverage = match &result {
-        tracedecay_usecases::git_reads::GitReadResultV1::Status(envelope) => &envelope.coverage,
-        tracedecay_usecases::git_reads::GitReadResultV1::Diff(envelope) => &envelope.coverage,
-        tracedecay_usecases::git_reads::GitReadResultV1::History(envelope) => &envelope.coverage,
-        tracedecay_usecases::git_reads::GitReadResultV1::Blame(envelope) => &envelope.coverage,
-        tracedecay_usecases::git_reads::GitReadResultV1::Hunks(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::Status(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::Diff(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::History(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::Blame(envelope) => &envelope.coverage,
+        tracedecay_application::git_reads::GitReadResultV1::Hunks(envelope) => &envelope.coverage,
     };
     let coverage = if native_coverage.is_complete() {
         EvidenceCoverage::complete(vec![EvidenceDomain::Source], 1, 1, 1)
@@ -203,19 +203,19 @@ pub(super) async fn execute_git_read(
         return concealed_application_problem(wire_request_id);
     };
     let expected_operation = match &request.request {
-        tracedecay_application::git::GitReadRequestV1::Status => {
+        tracedecay_contracts::git::GitReadRequestV1::Status => {
             ApplicationSurfaceOperation::GitStatus
         }
-        tracedecay_application::git::GitReadRequestV1::Diff { .. } => {
+        tracedecay_contracts::git::GitReadRequestV1::Diff { .. } => {
             ApplicationSurfaceOperation::GitDiff
         }
-        tracedecay_application::git::GitReadRequestV1::History { .. } => {
+        tracedecay_contracts::git::GitReadRequestV1::History { .. } => {
             ApplicationSurfaceOperation::GitHistory
         }
-        tracedecay_application::git::GitReadRequestV1::Blame { .. } => {
+        tracedecay_contracts::git::GitReadRequestV1::Blame { .. } => {
             ApplicationSurfaceOperation::GitBlame
         }
-        tracedecay_application::git::GitReadRequestV1::Hunks { .. } => {
+        tracedecay_contracts::git::GitReadRequestV1::Hunks { .. } => {
             ApplicationSurfaceOperation::GitHunks
         }
     };
@@ -246,10 +246,10 @@ pub(super) async fn execute_git_read(
         .0
         .saturating_sub(current_micros().0)
         .max(0) as u64;
-    let bounds = tracedecay_usecases::git_query::GitQueryBounds {
+    let bounds = tracedecay_application::git_query::GitQueryBounds {
         max_entries: if matches!(
             &request.request,
-            tracedecay_application::git::GitReadRequestV1::Hunks { .. }
+            tracedecay_contracts::git::GitReadRequestV1::Hunks { .. }
         ) {
             request
                 .max_entries
@@ -263,7 +263,7 @@ pub(super) async fn execute_git_read(
     };
     let selected_scope = initial.scope.clone();
     let mut read_request = request.request.clone();
-    let hunk_capture = if let tracedecay_application::git::GitReadRequestV1::Hunks {
+    let hunk_capture = if let tracedecay_contracts::git::GitReadRequestV1::Hunks {
         scope,
         daemon_binding,
     } = &mut read_request
@@ -332,7 +332,7 @@ pub(super) async fn execute_git_read(
                 );
             }
         };
-        *daemon_binding = Some(tracedecay_application::git::DaemonGitHunkPreviewBindingV1 {
+        *daemon_binding = Some(tracedecay_contracts::git::DaemonGitHunkPreviewBindingV1 {
             preview_id,
             snapshot_digest,
             expires_at,
@@ -341,12 +341,12 @@ pub(super) async fn execute_git_read(
     } else {
         None
     };
-    let authority = tracedecay_usecases::git_reads::GitReadAuthorityV1::new(
+    let authority = tracedecay_application::git_reads::GitReadAuthorityV1::new(
         project_root,
         selected_scope.clone(),
     );
     let outcome = tokio::task::spawn_blocking(move || {
-        tracedecay_usecases::git_reads::execute_git_read(
+        tracedecay_application::git_reads::execute_git_read(
             Some(&authority),
             &selected_scope,
             &read_request,
@@ -355,8 +355,8 @@ pub(super) async fn execute_git_read(
     })
     .await
     .unwrap_or(
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_usecases::git_reads::GitReadUnavailableReasonV1::ReadFailed,
+        tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: tracedecay_application::git_reads::GitReadUnavailableReasonV1::ReadFailed,
         },
     );
     let terminal = match owner.current_read_authority(&request.request) {
@@ -377,10 +377,11 @@ pub(super) async fn execute_git_read(
         return concealed_application_problem(wire_request_id);
     }
     match outcome {
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Complete { scope, mut result }
+        tracedecay_application::git_reads::GitReadOutcomeV1::Complete { scope, mut result }
             if scope == terminal.scope =>
         {
-            if let tracedecay_usecases::git_reads::GitReadResultV1::Hunks(envelope) = &mut result {
+            if let tracedecay_application::git_reads::GitReadResultV1::Hunks(envelope) = &mut result
+            {
                 for entry in &envelope.value.hunks {
                     if entry.hunk.verify_digest(&entry.digest).is_err() {
                         return DaemonInvocationResponse::problem(
@@ -396,7 +397,7 @@ pub(super) async fn execute_git_read(
             }
             if let (
                 Some((operation, snapshot)),
-                tracedecay_usecases::git_reads::GitReadResultV1::Hunks(envelope),
+                tracedecay_application::git_reads::GitReadResultV1::Hunks(envelope),
             ) = (&hunk_capture, &result)
             {
                 let input = match GitIndexPreviewInputV1::new_hunk_selection(
@@ -454,23 +455,24 @@ pub(super) async fn execute_git_read(
                 },
             )
         }
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_usecases::git_reads::GitReadUnavailableReasonV1::Cancelled,
+        tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: tracedecay_application::git_reads::GitReadUnavailableReasonV1::Cancelled,
         } => application_problem(
             wire_request_id,
             ApplicationProblem::cancelled_before_admission(),
         ),
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_usecases::git_reads::GitReadUnavailableReasonV1::TimedOut,
+        tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: tracedecay_application::git_reads::GitReadUnavailableReasonV1::TimedOut,
         } => application_problem(
             wire_request_id,
             ApplicationProblem::timed_out_before_admission(),
         ),
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable {
-            reason: tracedecay_usecases::git_reads::GitReadUnavailableReasonV1::OutputLimitExceeded,
+        tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason:
+                tracedecay_application::git_reads::GitReadUnavailableReasonV1::OutputLimitExceeded,
         } => application_problem(wire_request_id, git_read_output_limit_problem()),
-        tracedecay_usecases::git_reads::GitReadOutcomeV1::Complete { .. }
-        | tracedecay_usecases::git_reads::GitReadOutcomeV1::Unavailable { .. } => {
+        tracedecay_application::git_reads::GitReadOutcomeV1::Complete { .. }
+        | tracedecay_application::git_reads::GitReadOutcomeV1::Unavailable { .. } => {
             DaemonInvocationResponse::problem(wire_request_id, DaemonInvocationProblem::Unavailable)
         }
     }
@@ -483,7 +485,7 @@ pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
             message: "The Git read exceeded its output byte limit".to_owned(),
         },
         retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
+        legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
     }
 }
 

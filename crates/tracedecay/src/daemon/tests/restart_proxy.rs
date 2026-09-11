@@ -314,7 +314,7 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_CONNECT_DOWN, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_CONNECT_DOWN, true)),
         "missing socket after grace must be typed daemon_connect_down, got: {message}"
     );
     assert!(
@@ -344,7 +344,7 @@ async fn client_deadline_run_reports_typed_stalled() {
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_RESPONSE_STALLED, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, true)),
         "read-deadline abort must be typed daemon_response_stalled, got: {err}"
     );
 }
@@ -371,7 +371,7 @@ async fn stalled_daemon_response_is_typed_within_deadline() {
     let local_bound = std::time::Duration::from_millis(80);
     let request_deadline = tokio::time::Instant::now()
         .checked_add(local_bound)
-        .and_then(|bound| bound.checked_sub(super::super::DAEMON_TOOL_RESPONSE_GRACE))
+        .and_then(|bound| bound.checked_sub(tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE))
         .expect("monotonic clock must outlive the response grace");
 
     let err = tokio::time::timeout(
@@ -392,7 +392,7 @@ async fn stalled_daemon_response_is_typed_within_deadline() {
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
-        Some((super::super::DAEMON_RESPONSE_STALLED, true)),
+        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, true)),
         "connected stall must be typed daemon_response_stalled, got: {message}"
     );
     assert!(
@@ -495,9 +495,10 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     let project_b = TempDir::new().expect("project b temp dir");
     let project_a = project_a.path().canonicalize().expect("project a path");
     let project_b = project_b.path().canonicalize().expect("project b path");
-    let registry = crate::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
-        .await
-        .expect("open retained profile runtime");
+    let registry =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open retained profile runtime");
     let global_db_path = profile.path().join("global.db");
     registry
         .upsert_code_project("project-a", &project_a, None, None, None)
@@ -596,9 +597,10 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     let alias = alias.path().canonicalize().expect("canonical alias");
     let nested = alias.join("nested");
     std::fs::create_dir_all(&nested).expect("nested alias path");
-    let registry = crate::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
-        .await
-        .expect("open retained profile runtime");
+    let registry =
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open retained profile runtime");
     let global_db_path = profile.path().join("global.db");
     registry
         .upsert_code_project("project-registry-only", &canonical, None, None, None)
@@ -675,11 +677,11 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     })
     .to_string();
 
-    let config = crate::config::TraceDecayConfig {
+    let config = tracedecay_configuration::TraceDecayConfig {
         root_dir: project.display().to_string(),
-        ..crate::config::TraceDecayConfig::default()
+        ..tracedecay_configuration::TraceDecayConfig::default()
     };
-    let config_path = crate::config::get_config_path(&project);
+    let config_path = tracedecay_configuration::get_config_path(&project);
     std::fs::create_dir_all(config_path.parent().expect("legacy config parent"))
         .expect("create legacy config parent");
     let legacy_input = serde_json::to_string_pretty(&config).expect("serialize legacy config");

@@ -6,7 +6,8 @@ use tracedecay_code_index::lineage::{
 };
 use tracedecay_code_index::lineage::{LineageConfidenceKindV1, LineageKindV1, LineageMethodV1};
 use tracedecay_domain::{
-    CodeGenerationId, ContentDigest, FileIdentityDigest, SymbolIdentityDigest, SymbolOccurrenceId,
+    CodeGenerationId, ComplexityAnalysisV1, ContentDigest, FileIdentityDigest,
+    SymbolIdentityDigest, SymbolOccurrenceId,
 };
 
 fn id<T>(value: &str) -> T
@@ -50,9 +51,13 @@ fn symbol(
         branches: 0,
         loops: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         line_span: 1,
         start_line: 0,
         signature: None,
+        docstring: None,
+        is_async: false,
+        derives: Vec::new(),
         skip_test_coverage: false,
         file_identity: digest::<FileIdentityDigest>(file_identity),
         content_digest: digest::<ContentDigest>(content),

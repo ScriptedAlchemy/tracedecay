@@ -260,7 +260,7 @@ impl<'a> ProjectProviderRun<'a> {
         let mut deferred = discovery.is_truncated();
         let mut frontier_committable = true;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
-        for path in &discovery.paths {
+        for (path_index, path) in discovery.paths.iter().enumerate() {
             if remaining == 0 {
                 deferred = true;
                 frontier_committable = false;
@@ -271,12 +271,12 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            match codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+            match codex::try_admit_codex_jsonl_observations_for_project_window(
                 path,
                 self.project_root,
                 self.project_id.clone(),
                 self.facade,
-                Some(remaining),
+                remaining,
                 self.cancellation,
             )
             .await
@@ -286,10 +286,17 @@ impl<'a> ProjectProviderRun<'a> {
                     frontier_committable &=
                         !progress.source_deferred && progress.bytes_consumed <= remaining;
                     remaining = remaining.saturating_sub(progress.bytes_consumed);
+                    if progress.bytes_consumed > 0
+                        && (progress.source_deferred
+                            || path_index.saturating_add(1) < discovery.paths.len())
+                    {
+                        deferred = true;
+                        frontier_committable = false;
+                        break;
+                    }
                 }
                 Err(error) => {
-                    if let Some(cancelled) = cancelled_provider_outcome(&error)
-                    {
+                    if let Some(cancelled) = cancelled_provider_outcome(&error) {
                         return cancelled;
                     }
                     let failure = warn_transcript_catch_up_failure(

@@ -14,12 +14,12 @@ use crate::automation::skill_writer::{
     skill_improvement_recommendations, support_file_evidence as skill_writer_support_file_evidence,
 };
 use crate::automation::text::truncate_chars_for_prompt;
-use crate::errors::Result;
 use crate::ports::session_store::AutomationSessionStore;
-use crate::tracedecay::current_timestamp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracedecay_automation::analytics::{ToolUsageObservation, underused_tool_family_signals};
+use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 use super::retrieval::{
     AutomationSessionRetrieval, AutomationTemporalRetrieval, automation_structural_refusal_reason,
@@ -233,12 +233,6 @@ pub(super) fn find_i64_field_in_json(encoded: &str, field: &str) -> Option<i64> 
     serde_json::from_str(encoded)
         .ok()
         .and_then(|value| visit(&value, field))
-}
-
-pub(super) fn find_string_field_in_json(encoded: &str, field: &str) -> Option<String> {
-    serde_json::from_str(encoded)
-        .ok()
-        .and_then(|value| find_string_field(&value, field))
 }
 
 pub(super) fn canonical_evidence_hash(value: &Value) -> Result<String> {
@@ -764,7 +758,7 @@ pub(super) async fn build_skill_writer_evidence(
 ) -> Result<SkillWriterEvidenceOutcome> {
     let profile_root = match options.profile_root {
         Some(path) => path,
-        None => crate::storage::default_profile_root()?,
+        None => tracedecay_runtime_core::storage::default_profile_root()?,
     };
     let provider =
         normalized_non_empty(&options.provider).unwrap_or_else(default_skill_writer_provider);
@@ -845,6 +839,7 @@ pub(super) async fn build_skill_writer_evidence(
             }))?),
         });
     }
+    crate::automation::managed_skills::migrate_managed_skill_routing(&profile_root).await?;
     let existing_skills = list_managed_skills(&profile_root).await?;
     if let (Some(project_root), Some(analytics_db)) = (analytics_project_root, analytics_db) {
         ingest_project_analytics_events(
@@ -899,6 +894,7 @@ pub(super) async fn build_skill_writer_evidence(
                 "id": skill.metadata.id,
                 "title": skill.metadata.title,
                 "summary": skill.metadata.summary,
+                "routing_description": skill.metadata.routing_description,
                 "category": skill.metadata.category,
                 "state": skill.metadata.state,
                 "pinned": skill.metadata.pinned,

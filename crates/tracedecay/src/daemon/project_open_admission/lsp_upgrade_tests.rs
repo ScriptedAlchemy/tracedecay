@@ -16,9 +16,9 @@ fn route(project_path: &str, scope_prefix: Option<&str>) -> ProjectRouteKey {
     }
 }
 
-fn open_deadline() -> tracedecay_application::Deadline {
-    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-        tracedecay_application::clock::now_micros()
+fn open_deadline() -> tracedecay_contracts::Deadline {
+    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+        tracedecay_contracts::clock::now_micros()
             .0
             .saturating_add(5_000_000),
     ))
@@ -32,12 +32,10 @@ async fn lsp_wait_stays_pending_after_core_publication_until_full_open_finishes(
     let full_open = Arc::new(tokio::sync::Notify::new());
     let release = Arc::clone(&full_open);
     assert!(matches!(
-        tasks
-            .start(route.clone(), async move {
-                release.notified().await;
-                Ok(())
-            })
-            .await,
+        tasks.start(route.clone(), async move {
+            release.notified().await;
+            Ok(())
+        }),
         ProjectOpenTaskClaim::InFlight(_)
     ));
     let cancellation = CancellationToken::new();
@@ -59,12 +57,10 @@ async fn lsp_wait_observes_cancellation_and_deadline_before_full_open() {
     let release = Arc::new(tokio::sync::Notify::new());
     let open_release = Arc::clone(&release);
     assert!(matches!(
-        tasks
-            .start(route.clone(), async move {
-                open_release.notified().await;
-                Ok(())
-            })
-            .await,
+        tasks.start(route.clone(), async move {
+            open_release.notified().await;
+            Ok(())
+        }),
         ProjectOpenTaskClaim::InFlight(_)
     ));
 
@@ -78,9 +74,8 @@ async fn lsp_wait_observes_cancellation_and_deadline_before_full_open() {
         ProjectOpenWaitOutcome::Cancelled
     ));
 
-    let expired =
-        tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
-            .expect("valid expired test deadline");
+    let expired = tracedecay_contracts::Deadline::new(tracedecay_contracts::clock::now_micros())
+        .expect("valid expired test deadline");
     assert!(matches!(
         tasks
             .wait_for_lsp_upgrade(&route, &expired, &CancellationToken::new())
@@ -98,12 +93,10 @@ async fn lsp_wait_requires_exact_route_identity_for_linked_worktrees() {
     let release = Arc::new(tokio::sync::Notify::new());
     let open_release = Arc::clone(&release);
     assert!(matches!(
-        tasks
-            .start(base_route.clone(), async move {
-                open_release.notified().await;
-                Ok(())
-            })
-            .await,
+        tasks.start(base_route.clone(), async move {
+            open_release.notified().await;
+            Ok(())
+        }),
         ProjectOpenTaskClaim::InFlight(_)
     ));
 
@@ -129,14 +122,12 @@ async fn lsp_wait_preserves_a_typed_full_open_failure() {
     let tasks = ProjectOpenTasks::default();
     let route = route("/workspace", None);
     assert!(matches!(
-        tasks
-            .start(route.clone(), async {
-                Err(TraceDecayError::ResetRequired {
-                    authority: "lsp".to_owned(),
-                    reason: "owner registration was rejected".to_owned(),
-                })
+        tasks.start(route.clone(), async {
+            Err(TraceDecayError::ResetRequired {
+                authority: "lsp".to_owned(),
+                reason: "owner registration was rejected".to_owned(),
             })
-            .await,
+        }),
         ProjectOpenTaskClaim::InFlight(_)
     ));
 

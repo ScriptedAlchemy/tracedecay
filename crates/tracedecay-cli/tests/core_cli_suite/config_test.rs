@@ -1,5 +1,7 @@
 use tempfile::TempDir;
-use tracedecay::config::*;
+use tracedecay_configuration::{
+    TraceDecayConfig, get_config_path, is_excluded, is_excluded_dir, is_in_gitignore, load_config,
+};
 
 #[test]
 fn default_config_excludes_generated_vendor_cache_trees_and_gitignore_on() {
@@ -89,22 +91,6 @@ fn default_generated_excludes_prune_nested_dirs() {
 }
 
 #[test]
-fn test_tracedecay_dir_creation() {
-    let dir = TempDir::new().unwrap();
-    let cg_dir = get_tracedecay_dir(dir.path());
-    assert!(cg_dir.ends_with(".tracedecay"));
-}
-
-#[test]
-fn test_config_serde_roundtrip() {
-    let config = TraceDecayConfig::default();
-    let json = serde_json::to_string_pretty(&config).unwrap();
-    let deserialized: TraceDecayConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(config.version, deserialized.version);
-    assert_eq!(config.max_file_size, deserialized.max_file_size);
-}
-
-#[test]
 fn test_legacy_config_with_include_field_still_loads() {
     let dir = TempDir::new().unwrap();
     let tracedecay_dir = dir.path().join(".tracedecay");
@@ -162,21 +148,6 @@ fn test_is_in_gitignore_recognizes_tracedecay_entry_spellings() {
 fn test_is_in_gitignore_no_file() {
     let dir = TempDir::new().unwrap();
     assert!(!is_in_gitignore(dir.path()));
-}
-
-// ── resolve_path ────────────────────────────────────────────────────────────
-
-#[test]
-fn test_resolve_path_with_value() {
-    let path = std::env::temp_dir().join("myproject");
-    let result = resolve_path(Some(path.to_string_lossy().into_owned()));
-    assert_eq!(result, path);
-}
-
-#[test]
-fn test_resolve_path_none_uses_cwd() {
-    let result = resolve_path(None);
-    assert!(!result.as_os_str().is_empty());
 }
 
 #[test]

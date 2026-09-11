@@ -34,11 +34,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, sha256_hex};
 
+use super::artifact_refs::sha256_bytes;
 use super::config_error;
+use super::host_io::{HostIo, home_dir, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
 use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
 use crate::automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 pub use crate::automation::managed_skill_model::MATERIALIZED_SKILL_MANAGED_BY;
 
@@ -373,7 +375,7 @@ fn recompute_on_disk_package(
     let mut hasher = Sha256::new();
     hasher.update(reconstructed.as_bytes());
     let mut files = BTreeMap::new();
-    files.insert(SKILL_FILE.to_string(), hash_bytes(&skill_bytes));
+    files.insert(SKILL_FILE.to_string(), sha256_bytes(&skill_bytes));
     for (relative, bytes) in &supports {
         // Hash the slash-normalized key, not Path display form. On Windows,
         // `strip_prefix` relatives stringify with `\`, while authoring hashes
@@ -384,7 +386,7 @@ fn recompute_on_disk_package(
         hasher.update(key.as_bytes());
         hasher.update(b"\0");
         hasher.update(bytes);
-        files.insert(key, hash_bytes(bytes));
+        files.insert(key, sha256_bytes(bytes));
     }
     let recomputed = encode_tagged_lowercase_hex("sha256:", &hasher.finalize());
     if recomputed != recorded {
@@ -418,10 +420,6 @@ fn on_disk_body_markdown(contents: &str) -> Option<String> {
     let region = region.strip_prefix('\n').unwrap_or(region);
     let region = region.strip_suffix('\n').unwrap_or(region);
     Some(region.to_string())
-}
-
-fn hash_body(body: &str) -> String {
-    encode_tagged_lowercase_hex("sha256:", &Sha256::digest(body.as_bytes()))
 }
 
 const INSTALLATION_ID_FILE: &str = ".materialization-installation-id";
@@ -477,7 +475,7 @@ fn read_file_provenance(path: &Path) -> Result<Option<FileProvenance>> {
         ),
         None => (None, None, None),
     };
-    let body_hash = on_disk_body_markdown(&contents).map(|body| hash_body(&body));
+    let body_hash = on_disk_body_markdown(&contents).map(|body| sha256_bytes(body.as_bytes()));
     Ok(Some(FileProvenance {
         managed_by,
         skill_id,
@@ -517,7 +515,7 @@ fn lock_package(package_dir: &Path) -> Result<PackageLock> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    crate::storage::retry_transient_file_op(|| file.lock_exclusive())?;
+    tracedecay_runtime_core::storage::retry_transient_file_op(|| file.lock_exclusive())?;
     Ok(PackageLock(file))
 }
 
@@ -624,10 +622,6 @@ fn read_materialization_manifest(dir: &Path, skill_id: &str) -> Result<ManifestS
     Ok(ManifestState::Owned(manifest))
 }
 
-fn hash_bytes(bytes: &[u8]) -> String {
-    super::artifact_refs::sha256_bytes(bytes)
-}
-
 fn current_artifact_hash(path: &Path) -> Result<Option<String>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -637,7 +631,7 @@ fn current_artifact_hash(path: &Path) -> Result<Option<String>> {
     if !metadata.file_type().is_file() {
         return Ok(None);
     }
-    Ok(Some(hash_bytes(&fs::read(path)?)))
+    Ok(Some(sha256_bytes(&fs::read(path)?)))
 }
 
 fn artifact_state(dir: &Path, relative: &str, expected_hash: &str) -> Result<ArtifactState> {
@@ -687,7 +681,7 @@ fn write_artifact_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let staging = PathBuf::from(format!("{}.new", path.display()));
     ensure_not_symlink(&staging)?;
     if path_exists_without_following_links(&staging)? {
-        if current_artifact_hash(&staging)?.as_deref() != Some(hash_bytes(bytes).as_str()) {
+        if current_artifact_hash(&staging)?.as_deref() != Some(sha256_bytes(bytes).as_str()) {
             return Err(config_error(format!(
                 "refusing to overwrite foreign materialization staging file '{}'",
                 staging.display()
@@ -721,12 +715,16 @@ fn build_materialization_manifest(
         materialized_by: Some(installation_id.to_string()),
         files: artifacts
             .iter()
-            .map(|(relative, bytes)| (relative.clone(), hash_bytes(bytes)))
+            .map(|(relative, bytes)| (relative.clone(), sha256_bytes(bytes)))
             .collect(),
     }
 }
 
-fn write_materialization_manifest(dir: &Path, manifest: &MaterializationManifest) -> Result<()> {
+fn write_materialization_manifest(
+    host_io: &HostIo,
+    dir: &Path,
+    manifest: &MaterializationManifest,
+) -> Result<()> {
     let value = serde_json::to_value(manifest).map_err(|err| {
         config_error(format!(
             "failed to serialize materialization manifest: {err}"
@@ -734,10 +732,14 @@ fn write_materialization_manifest(dir: &Path, manifest: &MaterializationManifest
     })?;
     let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_MANIFEST_FILE))?;
     ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
-    crate::agents::safe_write_json_file(&path, &value, None)
+    host_io.safe_write_json_file(&path, &value, None)
 }
 
-fn write_pending_materialization(dir: &Path, pending: &PendingMaterialization) -> Result<()> {
+fn write_pending_materialization(
+    host_io: &HostIo,
+    dir: &Path,
+    pending: &PendingMaterialization,
+) -> Result<()> {
     let value = serde_json::to_value(pending).map_err(|err| {
         config_error(format!(
             "failed to serialize pending materialization: {err}"
@@ -745,7 +747,7 @@ fn write_pending_materialization(dir: &Path, pending: &PendingMaterialization) -
     })?;
     let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_PENDING_FILE))?;
     ensure_not_symlink(&PathBuf::from(format!("{}.new", path.display())))?;
-    crate::agents::safe_write_json_file(&path, &value, None)
+    host_io.safe_write_json_file(&path, &value, None)
 }
 
 fn decode_pending_artifacts(pending: &PendingMaterialization) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -757,7 +759,7 @@ fn decode_pending_artifacts(pending: &PendingMaterialization) -> Result<BTreeMap
                 "invalid pending materialization artifact '{relative}': {err}"
             ))
         })?;
-        if pending.next_manifest.files.get(relative) != Some(&hash_bytes(&bytes)) {
+        if pending.next_manifest.files.get(relative) != Some(&sha256_bytes(&bytes)) {
             return Err(config_error(format!(
                 "pending materialization hash mismatch for '{relative}'"
             )));
@@ -867,6 +869,7 @@ fn validate_transaction_paths(
 }
 
 fn apply_pending_materialization(
+    host_io: &HostIo,
     dir: &Path,
     pending: &PendingMaterialization,
 ) -> Result<MaterializeAction> {
@@ -894,7 +897,7 @@ fn apply_pending_materialization(
     for (relative, expected_hash) in &pending.remove_files {
         remove_clean_artifact(dir, relative, expected_hash)?;
     }
-    write_materialization_manifest(dir, &pending.next_manifest)?;
+    write_materialization_manifest(host_io, dir, &pending.next_manifest)?;
 
     let path = checked_descendant_path(dir, Path::new(MATERIALIZATION_PENDING_FILE))?;
     match fs::remove_file(path) {
@@ -907,6 +910,7 @@ fn apply_pending_materialization(
 
 #[hotpath::measure(label = "hosts.automation.skill_materialization.commit")]
 fn commit_materialization_transaction(
+    host_io: &HostIo,
     dir: &Path,
     skill: &ManagedSkill,
     package_hash: String,
@@ -938,22 +942,26 @@ fn commit_materialization_transaction(
             .map(|(relative, bytes)| (relative.clone(), hex::encode(bytes)))
             .collect(),
     };
-    write_pending_materialization(dir, &pending)?;
-    apply_pending_materialization(dir, &pending)
+    write_pending_materialization(host_io, dir, &pending)?;
+    apply_pending_materialization(host_io, dir, &pending)
 }
 
 fn recover_pending_materialization(
+    host_io: &HostIo,
     dir: &Path,
     skill_id: Option<&str>,
 ) -> Result<Option<MaterializeAction>> {
     match read_pending_materialization(dir, skill_id)? {
         PendingState::Missing => Ok(None),
         PendingState::Foreign => Ok(Some(MaterializeAction::SkippedForeign)),
-        PendingState::Owned(pending) => Ok(Some(apply_pending_materialization(dir, &pending)?)),
+        PendingState::Owned(pending) => {
+            Ok(Some(apply_pending_materialization(host_io, dir, &pending)?))
+        }
     }
 }
 
 fn reconcile_owned_package(
+    host_io: &HostIo,
     dir: &Path,
     skill: &ManagedSkill,
     manifest: &MaterializationManifest,
@@ -998,6 +1006,7 @@ fn reconcile_owned_package(
         }
     }
     commit_materialization_transaction(
+        host_io,
         dir,
         skill,
         package_hash,
@@ -1020,7 +1029,7 @@ fn legacy_support_files_are_forked(
         if !path_exists_without_following_links(&path)? {
             continue;
         }
-        let desired_hash = hash_bytes(desired);
+        let desired_hash = sha256_bytes(desired);
         if current_artifact_hash(&path)?.as_deref() != Some(desired_hash.as_str()) {
             return Ok(true);
         }
@@ -1048,12 +1057,13 @@ fn initial_support_path_conflicts(
 /// user-forked file. Idempotent: an already-current managed file is left as
 /// [`MaterializeAction::Unchanged`].
 pub fn materialize_skill(
+    host_io: &HostIo,
     scope: &MaterializationScope,
     skill: &ManagedSkill,
     installation_id: &str,
 ) -> Result<MaterializeEntry> {
     let slug = skill.host_skill_slug();
-    materialize_skill_into(scope, skill, &slug, installation_id)
+    materialize_skill_into(host_io, scope, skill, &slug, installation_id)
 }
 
 /// Materializes one skill into an explicit host slug. `reconcile_scope` passes a
@@ -1061,6 +1071,7 @@ pub fn materialize_skill(
 /// own base slug.
 #[hotpath::measure(label = "hosts.automation.skill_materialization.materialize")]
 fn materialize_skill_into(
+    host_io: &HostIo,
     scope: &MaterializationScope,
     skill: &ManagedSkill,
     slug: &str,
@@ -1075,7 +1086,7 @@ fn materialize_skill_into(
     // concurrent transaction cannot interleave (see [`PackageLock`]).
     let _lock = lock_package(&dir)?;
     if let Some(action @ (MaterializeAction::SkippedForeign | MaterializeAction::SkippedForked)) =
-        recover_pending_materialization(&dir, Some(&skill.metadata.id))?
+        recover_pending_materialization(host_io, &dir, Some(&skill.metadata.id))?
     {
         return Ok(MaterializeEntry {
             skill_id: skill.metadata.id.clone(),
@@ -1093,6 +1104,7 @@ fn materialize_skill_into(
         (_, ManifestState::Owned(manifest)) => {
             fs::create_dir_all(&dir)?;
             reconcile_owned_package(
+                host_io,
                 &dir,
                 skill,
                 &manifest,
@@ -1110,6 +1122,7 @@ fn materialize_skill_into(
             if let Some(rederived) = recompute_on_disk_package(&dir, existing)? {
                 fs::create_dir_all(&dir)?;
                 reconcile_owned_package(
+                    host_io,
                     &dir,
                     skill,
                     &rederived,
@@ -1125,6 +1138,7 @@ fn materialize_skill_into(
                 fs::create_dir_all(&dir)?;
                 let previous_files = current_artifact_hashes(&dir, &artifacts)?;
                 commit_materialization_transaction(
+                    host_io,
                     &dir,
                     skill,
                     package_hash,
@@ -1142,6 +1156,7 @@ fn materialize_skill_into(
             fs::create_dir_all(&dir)?;
             let previous_files = current_artifact_hashes(&dir, &artifacts)?;
             commit_materialization_transaction(
+                host_io,
                 &dir,
                 skill,
                 package_hash,
@@ -1219,6 +1234,7 @@ fn package_is_foreign_to_installation(
 /// left in place.
 #[hotpath::measure(label = "hosts.automation.skill_materialization.remove")]
 pub fn remove_materialized_skill(
+    host_io: &HostIo,
     scope: &MaterializationScope,
     slug: &str,
     installation_id: &str,
@@ -1227,7 +1243,7 @@ pub fn remove_materialized_skill(
     let dir = scope.skill_dir(slug);
     let path = artifact_path(&dir, SKILL_FILE)?;
     let _lock = lock_package(&dir)?;
-    if let Some(action) = recover_pending_materialization(&dir, None)? {
+    if let Some(action) = recover_pending_materialization(host_io, &dir, None)? {
         match action {
             MaterializeAction::SkippedForeign => return Ok(RemoveAction::SkippedForeign),
             MaterializeAction::SkippedForked => return Ok(RemoveAction::SkippedForked),
@@ -1349,6 +1365,7 @@ fn assign_host_slugs(active_skills: &[ManagedSkill]) -> Vec<String> {
 /// recorded in `report.errors` and never aborts the rest of the sweep.
 #[hotpath::measure(label = "hosts.automation.skill_materialization.reconcile")]
 pub fn reconcile_scope(
+    host_io: &HostIo,
     scope: &MaterializationScope,
     active_skills: &[ManagedSkill],
     installation_id: &str,
@@ -1359,7 +1376,7 @@ pub fn reconcile_scope(
     let slugs = assign_host_slugs(active_skills);
     for (skill, slug) in active_skills.iter().zip(slugs.iter()) {
         active_slugs.insert(slug.clone());
-        match materialize_skill_into(scope, skill, slug, installation_id) {
+        match materialize_skill_into(host_io, scope, skill, slug, installation_id) {
             Ok(entry) => report.materialized.push(entry),
             Err(err) => report
                 .errors
@@ -1371,7 +1388,7 @@ pub fn reconcile_scope(
         if active_slugs.contains(&slug) {
             continue;
         }
-        match remove_materialized_skill(scope, &slug, installation_id) {
+        match remove_materialized_skill(host_io, scope, &slug, installation_id) {
             Ok(action) => report.removed.push(RemoveEntry {
                 skill_id,
                 path: scope.skill_md(&slug),
@@ -1494,11 +1511,12 @@ pub struct ScopeReconcileResult {
 /// `errors` rather than aborting the whole sweep.
 #[hotpath::measure(label = "hosts.automation.skill_materialization.reconcile_detected")]
 pub fn reconcile_detected_scopes(
+    host_io: &HostIo,
     profile_root: &Path,
     home: &Path,
     project_root: &Path,
 ) -> (Vec<ScopeReconcileResult>, Vec<String>) {
-    if !crate::agents::uses_default_user_profile(home, profile_root) {
+    if !uses_default_user_profile(home, profile_root) {
         return (Vec::new(), Vec::new());
     }
     let mut results = Vec::new();
@@ -1513,7 +1531,7 @@ pub fn reconcile_detected_scopes(
     let installation = installation_id(profile_root);
     for scope in detect_scopes(home, project_root) {
         let scope_skills = skills_for_scope(&skills, &scope);
-        match reconcile_scope(&scope, &scope_skills, &installation) {
+        match reconcile_scope(host_io, &scope, &scope_skills, &installation) {
             Ok(report) => {
                 for error in &report.errors {
                     errors.push(format!("{}: {error}", scope.describe()));
@@ -1532,8 +1550,8 @@ pub fn reconcile_detected_scopes(
 /// Prefers the tracedecay-registered project root, then the git worktree/repo
 /// checkout root, then falls back to the starting directory.
 pub fn resolve_project_root(start: &Path) -> PathBuf {
-    crate::config::discover_project_root(start)
-        .or_else(|| crate::worktree::git_worktree_root(start))
+    tracedecay_runtime_core::config::discover_project_root(start)
+        .or_else(|| tracedecay_runtime_core::worktree::git_worktree_root(start))
         .unwrap_or_else(|| start.to_path_buf())
 }
 
@@ -1541,11 +1559,11 @@ pub fn resolve_project_root(start: &Path) -> PathBuf {
 /// update): resolves the profile root from the process environment, reconciles
 /// every detected host+scope, and logs (rather than propagates) failures so a
 /// materialization problem never breaks an activation or install.
-pub fn reconcile_after_activation(profile_root: &Path, project_root: &Path) {
-    let Some(home) = crate::agents::home_dir() else {
+pub fn reconcile_after_activation(host_io: &HostIo, profile_root: &Path, project_root: &Path) {
+    let Some(home) = home_dir() else {
         return;
     };
-    let (_results, errors) = reconcile_detected_scopes(profile_root, &home, project_root);
+    let (_results, errors) = reconcile_detected_scopes(host_io, profile_root, &home, project_root);
     for error in errors {
         tracing::warn!(%error, "managed skill materialization failed");
     }

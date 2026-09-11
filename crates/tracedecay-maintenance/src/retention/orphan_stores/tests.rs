@@ -2,7 +2,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use super::quarantine::{QuarantineRecoveryOutcome, recover_existing_store_quarantine};
+#[cfg(windows)]
+use super::quarantine::classify_recovery_journal_probe;
+use super::quarantine::{
+    PendingQuarantineReceiptV1, QuarantineRecoveryOutcome, RegisteredQuarantineDecisionV1,
+    RegisteredQuarantineInventoryV1, committed_journal_cleanup_names,
+    quarantine_candidate_namespace_available, read_registered_quarantine_intents_controlled,
+    recover_existing_store_quarantine, recover_named_store_quarantine,
+    recover_named_store_quarantine_controlled, recover_registered_quarantine_intent_controlled,
+    reserve_quarantine_name_with_sequence,
+};
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
@@ -12,6 +21,17 @@ use tracedecay_runtime_core::storage::{
 };
 
 const DAY: i64 = 24 * 60 * 60;
+#[cfg(unix)]
+const OCCUPIED_RENAME_RAW_OS_ERROR: i32 = 17;
+#[cfg(windows)]
+const OCCUPIED_RENAME_RAW_OS_ERROR: i32 = 183;
+
+/// Same shape as the production convenience caller
+/// (`unbounded_collection_control`): a far-future monotonic deadline so
+/// functional sweep assertions do not race a one-second wall clock.
+fn functional_sweep_deadline() -> MonotonicDeadline {
+    MonotonicDeadline::at(Instant::now() + Duration::from_hours(24))
+}
 
 async fn open_registered_db(
     profile_root: &Path,
@@ -342,10 +362,24 @@ fn execute_collection(plan: &CollectionPlan, profile_root: &Path) -> CollectionO
         match std::fs::remove_dir_all(&finding.data_root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
+            Err(error) => {
                 outcome.errors.push(CollectionFailure {
                     store_id: finding.store_id.clone(),
-                    kind: CollectionFailureKind::RemoveFailed,
+                    kind: CollectionFailureKind::RemoveFailed(
+                        CollectionMutationFailure::from_io_error(
+                            CollectionMutationOperation::RecursiveRemove,
+                            finding.data_root.clone(),
+                            match &finding.expected_content_fence {
+                                StoreContentFence::Present(inventory) => {
+                                    Some(inventory.root.clone())
+                                }
+                                StoreContentFence::Missing | StoreContentFence::Unverifiable => {
+                                    None
+                                }
+                            },
+                            &error,
+                        ),
+                    ),
                 });
                 continue;
             }
@@ -1635,6 +1669,138 @@ fn quarantine_restores_empty_directory_replacement_before_delete() {
     assert!(displaced.is_dir(), "inspected empty directory must survive");
 }
 
+#[test]
+fn stale_retired_marker_occupies_the_whole_quarantine_candidate_namespace() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let parent_path = tmp.path().join("stores");
+    let data_root = parent_path.join("stale-authority");
+    let payload_path = data_root.join("payload.bin");
+    let payload = b"new store payload must survive reservation";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(&payload_path, payload).unwrap();
+    let parent =
+        cap_std::fs::Dir::open_ambient_dir(&parent_path, cap_std::ambient_authority()).unwrap();
+    let candidate = format!(
+        ".tracedecay-orphan-quarantine-stale-authority-{}-7",
+        std::process::id()
+    );
+    let retired_marker_path = parent_path.join(format!("{candidate}.receipt-v1.json.retired"));
+    let marker_bytes = b"stale commit authority must remain exact";
+    std::fs::write(&retired_marker_path, marker_bytes).unwrap();
+
+    assert!(
+        !quarantine_candidate_namespace_available(&parent, &candidate).unwrap(),
+        "a retired marker reserves its candidate even when the directory and journal are absent"
+    );
+    let mut sequences = [7, 8].into_iter();
+    let reserved =
+        reserve_quarantine_name_with_sequence(&parent, &data_root, "stale-authority", None, || {
+            sequences
+                .next()
+                .expect("reservation must use only two candidates")
+        })
+        .unwrap();
+    assert_eq!(
+        reserved,
+        format!(
+            ".tracedecay-orphan-quarantine-stale-authority-{}-8",
+            std::process::id()
+        ),
+        "the stale retired marker must force the next sequence"
+    );
+    assert_eq!(
+        retired_marker_path,
+        parent_path.join(format!(
+            ".tracedecay-orphan-quarantine-stale-authority-{}-7.receipt-v1.json.retired",
+            std::process::id()
+        ))
+    );
+    assert_eq!(std::fs::read(&retired_marker_path).unwrap(), marker_bytes);
+    assert_eq!(std::fs::read(&payload_path).unwrap(), payload);
+}
+
+/// A Windows directory capability denies same-parent rename because cap-std
+/// deliberately omits FILE_SHARE_DELETE. The failed retirement must remain a
+/// typed deferral over the exact censused store, then converge once that
+/// external owner releases its handle.
+#[cfg(windows)]
+#[test]
+fn quarantine_defers_held_windows_store_and_converges_after_release() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/held-capability");
+    let payload_path = data_root.join("payload.bin");
+    let payload = b"held store bytes remain authoritative";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(&payload_path, payload).unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(expected_inventory) = &expected else {
+        panic!("fixture must capture an exact present-store fence");
+    };
+    let expected_root_identity = expected_inventory.root.clone();
+    let external_owner =
+        cap_std::fs::Dir::open_ambient_dir(&data_root, cap_std::ambient_authority()).unwrap();
+
+    let failure =
+        match quarantine_store_for_verified_collection(&profile_root, &data_root, &expected) {
+            Err(failure) => failure,
+            Ok(_) => panic!("held live leaf must not enter quarantine"),
+        };
+    let CollectionFailureKind::RemoveFailed(failure) = failure else {
+        panic!("held live leaf must report a structured mutation failure");
+    };
+    assert_eq!(
+        failure.operation,
+        CollectionMutationOperation::RenameLiveLeafToQuarantine
+    );
+    assert!(
+        matches!(failure.raw_os_error, Some(5 | 32)),
+        "Windows held-directory rename must preserve access-denied/sharing violation: {failure:?}"
+    );
+    assert!(failure.retryable());
+    assert_eq!(
+        failure.classification,
+        CollectionMutationFailureClassification::RetryableDeferred
+    );
+    assert_eq!(failure.target_path, data_root);
+    assert_eq!(failure.expected_root_identity, Some(expected_root_identity));
+    assert_eq!(std::fs::read(&payload_path).unwrap(), payload);
+    assert!(
+        data_root.is_dir(),
+        "failed quarantine must not collect the store"
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty(),
+        "the failed rename's prepared journal must still be cleared"
+    );
+
+    drop(external_owner);
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("retry after releasing the external owner must verify quarantine");
+    };
+    assert_eq!(
+        std::fs::read(quarantine.quarantine_path().join("payload.bin")).unwrap(),
+        payload
+    );
+    quarantine.mark_retirement_committed().unwrap();
+    let QuarantineFinalizeOutcome::Removed { journal_failure } =
+        quarantine.finalize(unbounded_collection_control())
+    else {
+        panic!("released quarantine must complete the durable removal sequence");
+    };
+    assert_eq!(journal_failure, None);
+    assert!(!data_root.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// This simulates a process death after the registry phase was durably marked
 /// but before recursive removal. The journal, quarantine path, and committed
 /// phase remain readable without relying on an in-memory collection outcome.
@@ -1660,6 +1826,1124 @@ fn committed_quarantine_crash_boundary_has_a_readable_recovery_receipt() {
     assert!(receipts[0].retirement_committed);
     assert!(receipts[0].quarantine_path.is_dir());
     assert!(!data_root.exists(), "live name remains private after crash");
+}
+
+#[test]
+fn prepared_journal_recovery_restores_the_exact_original_store() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/prepared-recovery");
+    let payload = b"prepared quarantine bytes are restored exactly";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("fixture must reach verified quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+
+    let outcomes = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Restored {
+            restored_path: data_root.clone(),
+            failure: None,
+        }]
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_eq!(
+        capture_store_content_fence(&profile_root, &data_root).unwrap(),
+        expected
+    );
+    assert!(!quarantine_path.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn committed_journal_recovery_removes_the_exact_quarantine() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/committed-recovery");
+    let payload = b"committed quarantine bytes are removed exactly";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("fixture must reach verified quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    assert_eq!(
+        std::fs::read(quarantine_path.join("payload.bin")).unwrap(),
+        payload
+    );
+    quarantine.mark_retirement_committed().unwrap();
+    drop(quarantine);
+
+    let outcomes = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Removed {
+            quarantine_path: quarantine_path.clone(),
+            journal_failure: None,
+        }]
+    );
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn committed_journal_cleanup_keeps_retired_authority_until_journal_removal() {
+    let journal = "quarantine.receipt-v1.json";
+    let order = committed_journal_cleanup_names(journal);
+
+    assert_eq!(order[0], format!("{journal}.renamed"));
+    assert_eq!(
+        order[1], journal,
+        "the recovery journal must remain while retired authority is required"
+    );
+    assert_eq!(
+        order[2],
+        format!("{journal}.retired"),
+        "retired authority becomes orphan debris only after the journal is gone"
+    );
+}
+
+#[test]
+fn registered_remove_clears_journal_after_exact_quarantine_is_already_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/registered-delete-complete");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(
+        data_root.join("payload.bin"),
+        b"registered deletion completed before metadata cleanup",
+    )
+    .unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let quarantine = quarantine_store_for_verified_collection_controlled(
+        &profile_root,
+        &data_root,
+        &expected,
+        QuarantineKindV1::Registered,
+        "proj_registered_delete_complete",
+        "registered-delete-complete",
+        Some(QuarantineRegistryFenceV1 {
+            store_relpath: "stores/registered-delete-complete".to_owned(),
+            created_at: 1_700_000_000,
+            last_write_at: Some(1_700_000_000),
+        }),
+        unbounded_collection_control(),
+    )
+    .unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach verified registered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    let intent = match read_registered_quarantine_intents_controlled(
+        &profile_root,
+        unbounded_collection_control(),
+    )
+    .unwrap()
+    {
+        RegisteredQuarantineInventoryV1::Complete(mut intents) => {
+            assert_eq!(intents.len(), 1);
+            intents.pop().unwrap()
+        }
+        RegisteredQuarantineInventoryV1::Interrupted => panic!("fixture inventory interrupted"),
+    };
+    std::fs::remove_dir_all(&quarantine_path).unwrap();
+
+    let recovery = recover_registered_quarantine_intent_controlled(
+        &profile_root,
+        &intent,
+        RegisteredQuarantineDecisionV1::Remove,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        recovery,
+        Some(QuarantineRecoveryOutcome::Removed {
+            quarantine_path: quarantine_path.clone(),
+            journal_failure: None,
+        })
+    );
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unregistered_committed_recovery_clears_journal_after_quarantine_is_already_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/unregistered-delete-complete");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(
+        data_root.join("payload.bin"),
+        b"unregistered deletion completed before metadata cleanup",
+    )
+    .unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let quarantine =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach verified unregistered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    quarantine.mark_retirement_committed().unwrap();
+    drop(quarantine);
+    std::fs::remove_dir_all(&quarantine_path).unwrap();
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    let renamed_marker =
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.renamed"));
+    let retired_marker =
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.retired"));
+    std::fs::remove_file(&renamed_marker).unwrap();
+    assert!(
+        journal_path.is_file() && retired_marker.is_file(),
+        "a crash before journal removal retains both recovery authorities"
+    );
+
+    let recovery = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        recovery,
+        vec![QuarantineRecoveryOutcome::Removed {
+            quarantine_path: quarantine_path.clone(),
+            journal_failure: None,
+        }]
+    );
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert!(!journal_path.exists());
+    assert!(!retired_marker.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unregistered_uncommitted_recovery_retains_journal_when_both_names_are_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/unregistered-lost-before-commit");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"uncommitted bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(expected_inventory) = &expected else {
+        panic!("fixture must capture an exact present-store fence");
+    };
+    let expected_root_identity = expected_inventory.root.clone();
+    let quarantine =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach verified unregistered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    std::fs::remove_dir_all(&quarantine_path).unwrap();
+
+    let recovery = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        recovery,
+        vec![QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path.clone(),
+            failure: Some(CollectionMutationFailure {
+                operation: CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                raw_os_error: None,
+                target_path: data_root.clone(),
+                expected_root_identity: Some(expected_root_identity),
+                classification: CollectionMutationFailureClassification::NonRetryable,
+            }),
+        }]
+    );
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert_eq!(
+        read_pending_quarantine_receipts(&profile_root).unwrap(),
+        vec![PendingQuarantineReceiptV1 {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path,
+            retirement_committed: false,
+        }]
+    );
+}
+
+async fn prepare_registered_quarantine(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    project_id: &str,
+    store_id: &str,
+    payload: &[u8],
+) -> (PathBuf, PathBuf) {
+    let data_root = seed_store(
+        db,
+        profile_root,
+        project_id,
+        store_id,
+        &profile_root.join("missing-project-root"),
+        1_700_000_000,
+    )
+    .await;
+    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
+    let row = db
+        .try_list_store_instances_for_project(project_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.store_id == store_id)
+        .unwrap();
+    let expected = capture_store_content_fence(profile_root, &data_root).unwrap();
+    let quarantine = quarantine_store_for_verified_collection_controlled(
+        profile_root,
+        &data_root,
+        &expected,
+        QuarantineKindV1::Registered,
+        project_id,
+        store_id,
+        Some(QuarantineRegistryFenceV1 {
+            store_relpath: row.store_relpath,
+            created_at: row.created_at,
+            last_write_at: row.last_write_at,
+        }),
+        unbounded_collection_control(),
+    )
+    .unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach a verified registered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    (data_root, quarantine_path)
+}
+
+#[tokio::test]
+async fn empty_plan_restores_registered_quarantine_when_exact_row_remains() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"exact registered bytes survive a pre-commit crash";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_restore",
+        "store_registered_restore",
+        payload,
+    )
+    .await;
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.reclaimed_bytes, 0);
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert!(!quarantine_path.exists());
+    assert_eq!(
+        db.try_list_store_instances_for_project("proj_registered_restore")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn registered_recovery_holds_writer_exclusion_through_exact_restore() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"registry deletion waits until exact recovery is durable";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_serialized_restore",
+        "store_registered_serialized_restore",
+        payload,
+    )
+    .await;
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    let (classified_tx, classified_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let recovery_db = db.clone();
+    let recovery_profile_root = profile_root.clone();
+    let recovery = tokio::spawn(async move {
+        let mut classified_tx = Some(classified_tx);
+        let mut outcome = CollectionOutcome::default();
+        reconcile_registered_quarantine_inventory_with_classified_hook(
+            &recovery_db,
+            &recovery_profile_root,
+            unbounded_collection_control(),
+            &mut outcome,
+            move |intent, state| {
+                assert_eq!(intent.store_id, "store_registered_serialized_restore");
+                assert_eq!(state, RegisteredQuarantineRegistryStateV1::Exact);
+                classified_tx.take().unwrap().send(()).unwrap();
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test must release classified recovery");
+            },
+        )
+        .await
+        .unwrap();
+        outcome
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), classified_rx)
+        .await
+        .expect("recovery must reach exact classification")
+        .unwrap();
+    assert!(!data_root.exists());
+    assert!(quarantine_path.is_dir());
+    assert!(journal_path.is_file());
+
+    let competitor_db = db.clone();
+    let (attempted_tx, attempted_rx) = tokio::sync::oneshot::channel();
+    let mut competitor = tokio::spawn(async move {
+        attempted_tx.send(()).unwrap();
+        let transaction = competitor_db.begin_write_transaction().await.unwrap();
+        let deleted = transaction
+            .execute(
+                "DELETE FROM store_instances WHERE store_id = ?1",
+                tracedecay_runtime_core::db::engine::params!["store_registered_serialized_restore"],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        deleted
+    });
+    attempted_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut competitor)
+            .await
+            .is_err(),
+        "competing registry deletion committed between classification and restore"
+    );
+    assert!(!data_root.exists());
+    assert!(quarantine_path.is_dir());
+    assert!(journal_path.is_file());
+
+    release_tx.send(()).unwrap();
+    let outcome = recovery.await.unwrap();
+    assert_eq!(competitor.await.unwrap(), 1);
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert_eq!(
+        outcome.recovery_receipts,
+        vec![CollectionRecoveryReceipt {
+            store_id: "store_registered_serialized_restore".to_owned(),
+            original_path: data_root.clone(),
+            quarantine_path: quarantine_path.clone(),
+            actual_path: data_root.clone(),
+            action: CollectionRecoveryAction::Restored,
+        }]
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert!(!quarantine_path.exists());
+    assert!(!journal_path.exists());
+    assert!(
+        db.try_list_store_instances_for_project("proj_registered_serialized_restore")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn empty_plan_clears_registered_pre_rename_journal_when_exact_row_remains() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"pre-rename registered bytes never moved";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_pre_rename",
+        "store_registered_pre_rename",
+        payload,
+    )
+    .await;
+    let expected = capture_store_content_fence(&profile_root, &quarantine_path).unwrap();
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    let renamed_marker =
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.renamed"));
+    let retired_marker =
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.retired"));
+    std::fs::rename(&quarantine_path, &data_root).unwrap();
+    std::fs::remove_file(&renamed_marker).unwrap();
+    assert!(journal_path.is_file());
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.reclaimed_bytes, 0);
+    assert_eq!(
+        outcome.recovery_receipts,
+        vec![CollectionRecoveryReceipt {
+            store_id: "store_registered_pre_rename".to_owned(),
+            original_path: data_root.clone(),
+            quarantine_path: quarantine_path.clone(),
+            actual_path: data_root.clone(),
+            action: CollectionRecoveryAction::Restored,
+        }]
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_eq!(
+        capture_store_content_fence(&profile_root, &data_root).unwrap(),
+        expected
+    );
+    assert!(!quarantine_path.exists());
+    assert!(!journal_path.exists());
+    assert!(!renamed_marker.exists());
+    assert!(!retired_marker.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db.try_list_store_instances_for_project("proj_registered_pre_rename")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn empty_plan_retains_registered_live_source_when_exact_row_is_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"absent row cannot authorize deleting contradictory live bytes";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_live_absent",
+        "store_registered_live_absent",
+        payload,
+    )
+    .await;
+    let expected = capture_store_content_fence(&profile_root, &quarantine_path).unwrap();
+    let StoreContentFence::Present(expected_inventory) = &expected else {
+        panic!("fixture must capture an exact present-store fence");
+    };
+    let expected_root_identity = expected_inventory.root.clone();
+    std::fs::rename(&quarantine_path, &data_root).unwrap();
+    let transaction = db.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "DELETE FROM store_instances WHERE store_id = ?1",
+                tracedecay_runtime_core::db::engine::params!["store_registered_live_absent"],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert_eq!(
+        outcome,
+        CollectionOutcome {
+            errors: vec![CollectionFailure {
+                store_id: "store_registered_live_absent".to_owned(),
+                kind: CollectionFailureKind::RemoveFailed(CollectionMutationFailure {
+                    operation: CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                    raw_os_error: None,
+                    target_path: data_root.clone(),
+                    expected_root_identity: Some(expected_root_identity),
+                    classification: CollectionMutationFailureClassification::NonRetryable,
+                }),
+            }],
+            recovery_receipts: vec![CollectionRecoveryReceipt {
+                store_id: "store_registered_live_absent".to_owned(),
+                original_path: data_root.clone(),
+                quarantine_path: quarantine_path.clone(),
+                actual_path: data_root.clone(),
+                action: CollectionRecoveryAction::RetainedForRecovery,
+            }],
+            ..CollectionOutcome::default()
+        }
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_eq!(
+        capture_store_content_fence(&profile_root, &data_root).unwrap(),
+        expected
+    );
+    assert!(!quarantine_path.exists());
+    assert_eq!(
+        read_pending_quarantine_receipts(&profile_root).unwrap(),
+        vec![PendingQuarantineReceiptV1 {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: data_root,
+            retirement_committed: false,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn stale_registered_retirement_marker_cannot_override_exact_row() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"the exact registry row remains the commit authority";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_stale_marker",
+        "store_registered_stale_marker",
+        payload,
+    )
+    .await;
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.retired")),
+        [],
+    )
+    .unwrap();
+
+    assert_eq!(
+        recover_existing_store_quarantine(
+            &profile_root,
+            &data_root,
+            unbounded_collection_control()
+        )
+        .unwrap(),
+        vec![QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path.clone(),
+            failure: None,
+        }],
+        "registered named recovery has no database authority to consume the marker"
+    );
+    assert_eq!(
+        std::fs::read(quarantine_path.join("payload.bin")).unwrap(),
+        payload
+    );
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.collected.is_empty());
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert!(!quarantine_path.exists());
+    assert_eq!(
+        db.try_list_store_instances_for_project("proj_registered_stale_marker")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn empty_plan_removes_registered_quarantine_when_exact_row_is_absent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"exact registered bytes retire after the database commit";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_remove",
+        "store_registered_remove",
+        payload,
+    )
+    .await;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "DELETE FROM store_instances
+                 WHERE project_id = ?1 AND store_id = ?2
+                   AND store_relpath = ?3 AND created_at = ?4
+                   AND last_write_at IS ?5",
+                tracedecay_runtime_core::db::engine::params![
+                    "proj_registered_remove",
+                    "store_registered_remove",
+                    "stores/store_registered_remove",
+                    1_700_000_000i64,
+                    Some(1_700_000_000i64)
+                ],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.reclaimed_bytes, 0);
+    assert!(outcome.errors.is_empty(), "{outcome:#?}");
+    assert!(!data_root.exists());
+    assert!(!quarantine_path.exists());
+    assert!(
+        db.try_list_store_instances_for_project("proj_registered_remove")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn empty_plan_retains_registered_quarantine_when_row_fence_changed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let payload = b"changed registry authority cannot consume these bytes";
+    let (data_root, quarantine_path) = prepare_registered_quarantine(
+        &db,
+        &profile_root,
+        "proj_registered_changed",
+        "store_registered_changed",
+        payload,
+    )
+    .await;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE store_instances SET last_write_at = ?3
+                 WHERE project_id = ?1 AND store_id = ?2",
+                tracedecay_runtime_core::db::engine::params![
+                    "proj_registered_changed",
+                    "store_registered_changed",
+                    1_700_000_001i64
+                ],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    let (outcome, retired) =
+        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
+            .await
+            .unwrap();
+
+    assert_eq!(retired, 0);
+    assert!(outcome.collected.is_empty());
+    assert_eq!(outcome.reclaimed_bytes, 0);
+    assert_eq!(
+        outcome.errors,
+        vec![CollectionFailure {
+            store_id: "store_registered_changed".to_owned(),
+            kind: CollectionFailureKind::RegistryChanged,
+        }]
+    );
+    assert_eq!(
+        outcome.recovery_receipts,
+        vec![CollectionRecoveryReceipt {
+            store_id: "store_registered_changed".to_owned(),
+            original_path: data_root.clone(),
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path.clone(),
+            action: CollectionRecoveryAction::RetainedForRecovery,
+        }]
+    );
+    assert!(!data_root.exists());
+    assert_eq!(
+        std::fs::read(quarantine_path.join("payload.bin")).unwrap(),
+        payload
+    );
+    let rows = db
+        .try_list_store_instances_for_project("proj_registered_changed")
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].last_write_at, Some(1_700_000_001));
+    assert_eq!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn registered_recovery_completes_without_fabricating_collection_totals() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/registered-recovery-consumer");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"resume exactly once").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("fixture must reach verified quarantine");
+    };
+    quarantine.mark_retirement_committed().unwrap();
+    drop(quarantine);
+    let mut outcome = CollectionOutcome::default();
+
+    assert!(!reconcile_existing_quarantine(
+        &profile_root,
+        &data_root,
+        "registered-recovery-consumer",
+        &mut outcome,
+        unbounded_collection_control(),
+    ));
+    assert_eq!(outcome, CollectionOutcome::default());
+    assert!(reconcile_existing_quarantine(
+        &profile_root,
+        &data_root,
+        "registered-recovery-consumer",
+        &mut outcome,
+        unbounded_collection_control(),
+    ));
+    assert_eq!(outcome.reclaimed_bytes, 0);
+    assert!(outcome.collected.is_empty());
+}
+
+#[test]
+fn committed_journal_recovery_retains_an_identity_replacement() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/committed-identity-replacement");
+    let original_payload = b"exact committed quarantine bytes";
+    let replacement_payload = b"replacement must never inherit delete authority";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), original_payload).unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(expected_inventory) = &expected else {
+        panic!("fixture must capture an exact present-store fence");
+    };
+    let expected_root_identity = expected_inventory.root.clone();
+
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("fixture must reach verified quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    quarantine.mark_retirement_committed().unwrap();
+    drop(quarantine);
+    let displaced = profile_root.join("stores/exact-committed-quarantine");
+    std::fs::rename(&quarantine_path, &displaced).unwrap();
+    std::fs::create_dir_all(&quarantine_path).unwrap();
+    std::fs::write(quarantine_path.join("payload.bin"), replacement_payload).unwrap();
+
+    let outcomes = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path.clone(),
+            failure: Some(CollectionMutationFailure {
+                operation: CollectionMutationOperation::ValidateRestoredStoreIdentity,
+                raw_os_error: None,
+                target_path: quarantine_path.clone(),
+                expected_root_identity: Some(expected_root_identity),
+                classification: CollectionMutationFailureClassification::NonRetryable,
+            }),
+        }]
+    );
+    assert_eq!(
+        std::fs::read(displaced.join("payload.bin")).unwrap(),
+        original_payload
+    );
+    assert_eq!(
+        std::fs::read(quarantine_path.join("payload.bin")).unwrap(),
+        replacement_payload
+    );
+    assert!(!data_root.exists());
+    assert_eq!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn legacy_journal_without_identity_fails_closed_and_preserves_exact_bytes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/legacy-journal");
+    let payload = b"legacy journal bytes must remain untouched";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("fixture must reach verified quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    let legacy_journal = br#"{"version":1,"kind":"Unregistered","project_id":"test-project","store_id":"test-store","original_name":"legacy-journal","registry_fence":null}"#;
+    std::fs::write(&journal_path, legacy_journal).unwrap();
+
+    let outcomes = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine_path.clone(),
+            actual_path: quarantine_path.clone(),
+            failure: Some(CollectionMutationFailure {
+                operation: CollectionMutationOperation::ProbeRecoveryJournal,
+                raw_os_error: None,
+                target_path: journal_path.clone(),
+                expected_root_identity: None,
+                classification: CollectionMutationFailureClassification::NonRetryable,
+            }),
+        }]
+    );
+    assert_eq!(
+        std::fs::read(quarantine_path.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_eq!(std::fs::read(journal_path).unwrap(), legacy_journal);
+    assert!(!data_root.exists());
+}
+
+#[test]
+fn unreadable_pre_rename_journal_reports_the_observed_original_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/unreadable-pre-rename-journal");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"original bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("fixture must reach verified quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    std::fs::rename(&quarantine_path, &data_root).unwrap();
+    std::fs::remove_file(&journal_path).unwrap();
+    std::fs::create_dir(&journal_path).unwrap();
+
+    let outcomes = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    let [
+        QuarantineRecoveryOutcome::Retained {
+            actual_path,
+            quarantine_path: retained_quarantine_path,
+            failure: Some(failure),
+        },
+    ] = outcomes.as_slice()
+    else {
+        panic!("unreadable journal must retain the observed store: {outcomes:#?}");
+    };
+    assert_eq!(actual_path, &data_root);
+    assert_eq!(retained_quarantine_path, &quarantine_path);
+    assert_eq!(
+        failure.operation,
+        CollectionMutationOperation::ProbeRecoveryJournal
+    );
+    assert_eq!(failure.target_path, journal_path);
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        b"original bytes"
+    );
+}
+
+#[test]
+fn unregistered_pre_rename_journal_clears_at_exact_original() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let data_root = profile_root.join("stores/missing-quarantine");
+    let payload = b"restored bytes cannot imply journal completion";
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+
+    let result =
+        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = result else {
+        panic!("fixture must reach verified quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    let quarantine_name = quarantine_path.file_name().unwrap().to_str().unwrap();
+    let journal_path = quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json"));
+    let renamed_marker =
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.renamed"));
+    let retired_marker =
+        quarantine_path.with_file_name(format!("{quarantine_name}.receipt-v1.json.retired"));
+    std::fs::rename(&quarantine_path, &data_root).unwrap();
+
+    let outcomes = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Restored {
+            restored_path: data_root.clone(),
+            failure: None,
+        }]
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_eq!(
+        capture_store_content_fence(&profile_root, &data_root).unwrap(),
+        expected
+    );
+    assert!(!quarantine_path.exists());
+    assert!(!journal_path.exists());
+    assert!(!renamed_marker.exists());
+    assert!(!retired_marker.exists());
+    assert!(
+        read_pending_quarantine_receipts(&profile_root)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// A restore rename can complete before the parent-directory sync or journal
@@ -1928,13 +3212,20 @@ fn interrupted_quarantine_is_restored_on_the_next_collection_admission() {
         profile_root.join("projects/.tracedecay-orphan-quarantine-proj_recover_quarantine-42-7");
     std::fs::rename(&data_root, &quarantine).unwrap();
 
-    let outcomes = recover_existing_store_quarantine(&profile_root, &data_root).unwrap();
+    let outcomes = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
 
-    assert_eq!(outcomes.len(), 1);
-    assert!(matches!(
-        outcomes.as_slice(),
-        [QuarantineRecoveryOutcome::Restored { .. }]
-    ));
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Restored {
+            restored_path: data_root.clone(),
+            failure: None,
+        }]
+    );
     assert_eq!(
         std::fs::read(data_root.join("payload.bin")).unwrap(),
         b"recover me"
@@ -1952,18 +3243,39 @@ fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
     let data_root = profile_root.join("projects/proj_retained_quarantine");
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(data_root.join("payload.bin"), b"quarantined bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(inventory) = expected else {
+        panic!("fixture must capture the legacy quarantine identity");
+    };
+    let expected_root_identity = inventory.root;
     let quarantine =
         profile_root.join("projects/.tracedecay-orphan-quarantine-proj_retained_quarantine-42-7");
     std::fs::rename(&data_root, &quarantine).unwrap();
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(data_root.join("payload.bin"), b"new live bytes").unwrap();
 
-    let outcomes = recover_existing_store_quarantine(&profile_root, &data_root).unwrap();
+    let outcomes = recover_existing_store_quarantine(
+        &profile_root,
+        &data_root,
+        unbounded_collection_control(),
+    )
+    .unwrap();
 
-    assert!(matches!(
-        outcomes.as_slice(),
-        [QuarantineRecoveryOutcome::Retained { .. }]
-    ));
+    let expected_failure = CollectionMutationFailure {
+        operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+        raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
+        target_path: data_root.clone(),
+        expected_root_identity: Some(expected_root_identity),
+        classification: CollectionMutationFailureClassification::NonRetryable,
+    };
+    assert_eq!(
+        outcomes,
+        vec![QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine.clone(),
+            actual_path: quarantine.clone(),
+            failure: Some(expected_failure.clone()),
+        }]
+    );
     assert_eq!(
         std::fs::read(data_root.join("payload.bin")).unwrap(),
         b"new live bytes"
@@ -1971,6 +3283,121 @@ fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
     assert_eq!(
         std::fs::read(quarantine.join("payload.bin")).unwrap(),
         b"quarantined bytes"
+    );
+
+    let mut collection = CollectionOutcome::default();
+    assert!(!reconcile_existing_quarantine(
+        &profile_root,
+        &data_root,
+        "proj_retained_quarantine",
+        &mut collection,
+        unbounded_collection_control(),
+    ));
+    assert_eq!(
+        collection,
+        CollectionOutcome {
+            errors: vec![
+                CollectionFailure {
+                    store_id: "proj_retained_quarantine".to_owned(),
+                    kind: CollectionFailureKind::RemoveFailed(expected_failure),
+                },
+                CollectionFailure {
+                    store_id: "proj_retained_quarantine".to_owned(),
+                    kind: CollectionFailureKind::PayloadChanged,
+                },
+            ],
+            recovery_receipts: vec![CollectionRecoveryReceipt {
+                store_id: "proj_retained_quarantine".to_owned(),
+                original_path: data_root,
+                quarantine_path: quarantine.clone(),
+                actual_path: quarantine,
+                action: CollectionRecoveryAction::RetainedForRecovery,
+            }],
+            ..CollectionOutcome::default()
+        }
+    );
+}
+
+#[test]
+fn legacy_recovery_rejects_post_rename_identity_replacement() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let projects = profile_root.join("projects");
+    let data_root = projects.join("proj_identity_race");
+    let quarantine_name = ".tracedecay-orphan-quarantine-proj_identity_race-42-7";
+    let quarantine = projects.join(quarantine_name);
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"exact quarantined bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+    let StoreContentFence::Present(inventory) = expected else {
+        panic!("fixture must capture the legacy quarantine identity");
+    };
+    let expected_root_identity = inventory.root;
+    std::fs::rename(&data_root, &quarantine).unwrap();
+
+    let outcome = recover_named_store_quarantine_controlled(
+        &profile_root,
+        &data_root,
+        std::ffi::OsStr::new(quarantine_name),
+        &projects,
+        || {
+            std::fs::rename(&data_root, &quarantine).unwrap();
+            std::fs::create_dir_all(&data_root).unwrap();
+            std::fs::write(data_root.join("payload.bin"), b"replacement live bytes").unwrap();
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        Some(QuarantineRecoveryOutcome::Retained {
+            quarantine_path: quarantine.clone(),
+            actual_path: quarantine.clone(),
+            failure: Some(CollectionMutationFailure {
+                operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+                raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
+                target_path: quarantine.clone(),
+                expected_root_identity: Some(expected_root_identity),
+                classification: CollectionMutationFailureClassification::NonRetryable,
+            }),
+        })
+    );
+    assert_eq!(
+        std::fs::read(quarantine.join("payload.bin")).unwrap(),
+        b"exact quarantined bytes"
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        b"replacement live bytes"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn unreadable_recovery_journal_is_a_retryable_typed_failure() {
+    let journal_path = PathBuf::from(
+        r"C:\profile\projects\.tracedecay-orphan-quarantine-proj_journal-42-7.receipt-v1.json",
+    );
+    let expected_root_identity = StoreRootIdentity {
+        device: 17,
+        inode: 23,
+    };
+
+    assert_eq!(
+        classify_recovery_journal_probe(
+            Err(std::io::Error::from_raw_os_error(32)),
+            journal_path.clone(),
+            &expected_root_identity,
+        ),
+        Err(CollectionFailureKind::RemoveFailed(
+            CollectionMutationFailure {
+                operation: CollectionMutationOperation::ProbeRecoveryJournal,
+                raw_os_error: Some(32),
+                target_path: journal_path,
+                expected_root_identity: Some(expected_root_identity),
+                classification: CollectionMutationFailureClassification::RetryableDeferred,
+            }
+        ))
     );
 }
 
@@ -1988,7 +3415,7 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
         std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
     }
     let cancellation = CancellationToken::new();
-    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+    let deadline = functional_sweep_deadline();
 
     let first = sweep_unregistered_store_page(
         &db,
@@ -2011,6 +3438,12 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
         .next_cursor
         .clone()
         .expect("a third directory requires a second page");
+    let portable_inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
+    let portable_inventory =
+        std::fs::read(&portable_inventory_path).expect("read first portable inventory state");
 
     let second = sweep_unregistered_store_page(
         &db,
@@ -2030,6 +3463,12 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     assert_eq!(second.completion, UnregisteredSweepCompletionV1::Complete);
     assert_eq!(second.outcome.collected.len(), 1);
     assert!(second.next_cursor.is_none());
+    assert_eq!(
+        std::fs::read(portable_inventory_path)
+            .expect("resumed portable page keeps the prior inventory"),
+        portable_inventory,
+        "the second apply page must resume the durable inventory rather than re-scan after its own deletion"
+    );
     assert!(
         !profile_root.join("projects/proj_page_a").exists()
             && !profile_root.join("projects/proj_page_b").exists()
@@ -2038,115 +3477,611 @@ async fn unregistered_store_sweep_applies_one_cursor_page_at_a_time() {
     );
 }
 
-/// The page cursor must survive both a process restart and directory
-/// mutation. It is the last name the previous page returned, so nothing about
-/// resuming depends on a live directory stream, an OS offset cookie, or a
-/// sidecar log: a fresh process resumes the same slice, entries the previous
-/// pages already collected can be gone, and entries created behind the cursor
-/// cannot silently displace the ones ahead of it.
+/// A deadline already elapsed at entry must not inspect or advance a cursor
+/// page. `DeadlineExceeded` is distinct from a successful empty page.
+#[tokio::test]
+async fn unregistered_store_sweep_elapsed_deadline_does_not_advance_page_state() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    for name in ["proj_page_a", "proj_page_b", "proj_page_c"] {
+        std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
+    }
+    let cancellation = CancellationToken::new();
+
+    let report = sweep_unregistered_store_page(
+        &db,
+        &profile_root,
+        UnregisteredStoreSweepRequestV1 {
+            cursor: None,
+            limit: 2,
+            retention_secs: 0,
+            now: 1_700_000_000,
+            apply: true,
+            cancellation: &cancellation,
+            deadline: MonotonicDeadline::at(Instant::now()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        report.completion,
+        UnregisteredSweepCompletionV1::DeadlineExceeded
+    );
+    assert!(report.plan.collect.is_empty());
+    assert!(report.outcome.collected.is_empty());
+    assert!(report.next_cursor.is_none());
+    assert!(
+        profile_root.join("projects/proj_page_a").is_dir()
+            && profile_root.join("projects/proj_page_b").is_dir()
+            && profile_root.join("projects/proj_page_c").is_dir(),
+        "an already-elapsed deadline must not reclaim any page directory"
+    );
+    assert!(
+        !profile_root
+            .join("maintenance/unregistered-project-directory-inventory-v2")
+            .exists(),
+        "an already-elapsed deadline must not create portable inventory state"
+    );
+}
+
 #[test]
-fn project_directory_cursor_resumes_after_restart_and_directory_mutation() {
+fn portable_inventory_other_profiles_progress_while_one_writer_is_paused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let first_profile = tmp.path().join("first");
+    let second_profile = tmp.path().join("second");
+    for profile in [&first_profile, &second_profile] {
+        std::fs::create_dir_all(profile.join("projects/proj_independent")).unwrap();
+    }
+    let first_projects = first_profile.join("projects");
+    let signature =
+        super::unregistered_page::portable_directory_signature(&first_projects).unwrap();
+    let inventory = super::unregistered_page::portable_inventory_path(&first_profile, &signature);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let first = std::thread::spawn(move || {
+        let paused = AtomicBool::new(false);
+        let mut scanned = 0;
+        super::unregistered_page::advance_portable_inventory(
+            &first_projects,
+            &inventory,
+            &signature,
+            1,
+            &mut scanned,
+            &|| {
+                if !paused.swap(true, Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+                false
+            },
+        )
+    });
+    entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let result = super::unregistered_page::read_project_directory_page(
+            &second_profile,
+            None,
+            1,
+            &|| false,
+        );
+        finished_tx.send(result).unwrap();
+    });
+    let independent = finished_rx.recv_timeout(Duration::from_secs(1));
+    // Always release and join the stalled writer before asserting so the
+    // regression cannot strand a process-global lock on its failure path.
+    release_tx.send(()).unwrap();
+    assert_eq!(first.join().unwrap().unwrap(), Some(false));
+    second.join().unwrap();
+    let page = independent
+        .expect("another profile must progress before the paused writer is released")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        page.entries.as_slice(),
+        [super::unregistered_page::ProjectDirectoryWorkV1::Project(name)]
+            if name == "proj_independent"
+    ));
+}
+
+/// Every platform uses an append-only durable inventory. A cancelled admission
+/// keeps its partial inventory, and
+/// the next page advances that exact log instead of deleting/rebuilding it.
+#[test]
+fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..32 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_partial_{index}")),
+        )
+        .unwrap();
+    }
+    let cancellation = CancellationToken::new();
+    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let page =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+            .unwrap()
+            .expect("first bounded portable page completes");
+    let cursor = page
+        .next_cursor
+        .expect("a bounded first chunk leaves durable continuation work");
+    let inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
+    let partial = std::fs::read(&inventory_path).unwrap();
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let interrupted = || cancelled.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    assert!(
+        super::unregistered_page::read_project_directory_page(
+            &profile_root,
+            Some(&cursor),
+            1,
+            &interrupted,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(std::fs::read(&inventory_path).unwrap(), partial);
+
+    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
+
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let hydration_page = super::unregistered_page::read_project_directory_page(
+        &profile_root,
+        Some(&cursor),
+        1,
+        &interrupted,
+    )
+    .unwrap()
+    .expect("restart hydrates the durable portable inventory in a bounded slice");
+    let hydration_cursor = hydration_page
+        .next_cursor
+        .expect("partial inventory remains resumable after restart");
+    let replay_page = super::unregistered_page::read_project_directory_page(
+        &profile_root,
+        Some(&hydration_cursor),
+        1,
+        &interrupted,
+    )
+    .unwrap()
+    .expect("restart replays only a bounded source slice");
+    let replay_cursor = replay_page
+        .next_cursor
+        .expect("replay keeps a typed continuation cursor");
+    let resumed_page = super::unregistered_page::read_project_directory_page(
+        &profile_root,
+        Some(&replay_cursor),
+        1,
+        &interrupted,
+    )
+    .unwrap()
+    .expect("later page resumes the portable inventory");
+    assert!(resumed_page.next_cursor.is_some());
+    assert!(
+        std::fs::read(&inventory_path).unwrap().len() > partial.len(),
+        "a later bounded page appends rather than replacing durable partial progress"
+    );
+}
+
+#[test]
+fn unregistered_inventory_hydrates_another_writers_committed_suffix() {
+    use std::io::Write;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path();
+    for index in 0..17 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_writer_{index}")),
+        )
+        .unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let cursor = first.next_cursor.unwrap();
+    let inventory = super::unregistered_page::portable_inventory_path(
+        profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
+    let initial = std::fs::read_to_string(&inventory).unwrap();
+    let foreign = (0..17)
+        .map(|index| format!("proj_writer_{index}"))
+        .find(|name| !initial.lines().any(|line| line == name))
+        .unwrap();
+    // Reproduce another process's durable append between writer admissions.
+    let lock = tracedecay_runtime_core::storage::try_acquire_sidecar_lock(
+        &tracedecay_runtime_core::storage::append_lock_path(&inventory),
+    )
+    .unwrap()
+    .unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&inventory)
+        .unwrap();
+    writeln!(writer, "{foreign}").unwrap();
+    writer.sync_data().unwrap();
+    drop(writer);
+    drop(lock);
+    let mut cursor = Some(cursor);
+    let mut pages = 0;
+    while let Some(saved) = cursor {
+        let page = super::unregistered_page::read_project_directory_page(
+            profile_root,
+            Some(&saved),
+            1,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap();
+        cursor = page.next_cursor;
+        pages += 1;
+        assert!(pages <= 18);
+    }
+    let log = std::fs::read_to_string(&inventory).unwrap();
+    let records = log.lines().skip(1).collect::<Vec<_>>();
+    assert_eq!(records.len(), 17);
+    assert_eq!(
+        records
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        17
+    );
+    assert_eq!(records.iter().filter(|name| **name == foreign).count(), 1);
+}
+
+#[test]
+fn unregistered_inventory_restart_converges_without_repeating_records() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path();
+    let count = 73;
+    for index in 0..count {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_restart_{index}")),
+        )
+        .unwrap();
+    }
+    let first =
+        super::unregistered_page::read_project_directory_page(profile_root, None, 1, &|| false)
+            .unwrap()
+            .unwrap();
+    let mut scanned = first.entries_scanned;
+    let mut observed = std::collections::HashSet::new();
+    for entry in first.entries {
+        let super::unregistered_page::ProjectDirectoryWorkV1::Project(name) = entry else {
+            panic!("unexpected quarantine")
+        };
+        assert!(observed.insert(name));
+    }
+    let saved = first.next_cursor.unwrap();
+    let inventory = super::unregistered_page::portable_inventory_path(
+        profile_root,
+        saved.split(':').nth(1).unwrap(),
+    );
+    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory);
+    let mut cursor = Some(saved);
+    let mut pages = 0;
+    while let Some(saved) = cursor {
+        let page = super::unregistered_page::read_project_directory_page(
+            profile_root,
+            Some(&saved),
+            1,
+            &|| false,
+        )
+        .unwrap()
+        .unwrap();
+        scanned += page.entries_scanned;
+        for entry in page.entries {
+            let super::unregistered_page::ProjectDirectoryWorkV1::Project(name) = entry else {
+                panic!("unexpected quarantine")
+            };
+            assert!(observed.insert(name), "restart repeated a committed record");
+        }
+        cursor = page.next_cursor;
+        pages += 1;
+        assert!(
+            pages <= count + 3,
+            "restart failed to converge within bounded hydration and replay"
+        );
+    }
+    assert_eq!(observed.len(), count);
+    // Directory + inventory reads cost 2N; the one restart hydrates and
+    // replays only the eight records persisted by the first admission.
+    assert_eq!(scanned, count * 2 + 16);
+}
+
+/// A crash while a first inventory header is being published must not turn the
+/// cursor into a permanent configuration error. The next admission replaces
+/// the uncommitted header before it recreates bounded inventory progress.
+#[test]
+fn portable_inventory_repairs_torn_header_before_restart_resume() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    for index in 0..16 {
+        std::fs::create_dir_all(
+            profile_root
+                .join("projects")
+                .join(format!("proj_header_recovery_{index}")),
+        )
+        .unwrap();
+    }
+    let cancellation = CancellationToken::new();
+    let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let page =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+            .unwrap()
+            .expect("first bounded page creates a resumable inventory");
+    let cursor = page
+        .next_cursor
+        .expect("the first source slice remains incomplete");
+    let inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
+    std::fs::write(&inventory_path, b"v2:").unwrap();
+    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
+
+    let resumed = super::unregistered_page::read_project_directory_page(
+        &profile_root,
+        Some(&cursor),
+        1,
+        &interrupted,
+    )
+    .unwrap()
+    .expect("a torn header is replaced before restart resume");
+
+    assert_eq!(resumed.entries.len(), 1);
+    assert!(resumed.next_cursor.is_some());
+    let signature = cursor.split(':').nth(1).unwrap();
+    assert!(
+        std::fs::read(&inventory_path)
+            .unwrap()
+            .starts_with(format!("v2:{signature}\n").as_bytes()),
+        "the recovered inventory must have a complete published header"
+    );
+}
+
+/// A final append is committed only by its newline. After a restart, an
+/// unterminated project id is discarded before hydration, so it cannot be
+/// joined with a later append and hide the real project from the page.
+#[test]
+fn portable_inventory_truncates_torn_final_entry_before_restart_resume() {
+    use std::io::Write;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let project_ids = (0..32)
+        .map(|index| format!("proj_torn_tail_{index}"))
+        .collect::<Vec<_>>();
+    for project_id in &project_ids {
+        std::fs::create_dir_all(profile_root.join("projects").join(project_id)).unwrap();
+    }
+    let cancellation = CancellationToken::new();
+    let deadline = functional_sweep_deadline();
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let page =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+            .unwrap()
+            .expect("first bounded page creates partial inventory");
+    let cursor = page
+        .next_cursor
+        .expect("the inventory has unscanned source entries");
+    let inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
+    let inventory_before_torn_append = String::from_utf8(std::fs::read(&inventory_path).unwrap())
+        .expect("the production inventory is UTF-8");
+    let target = project_ids
+        .iter()
+        .find(|project_id| {
+            !inventory_before_torn_append
+                .lines()
+                .skip(1)
+                .any(|recorded| recorded == project_id.as_str())
+        })
+        .expect("the first bounded source slice does not contain every project")
+        .clone();
+    let torn = target[..target.len() - 1].to_owned();
+    assert!(tracedecay_runtime_core::storage::validate_project_id(&torn).is_ok());
+    let mut output = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&inventory_path)
+        .unwrap();
+    output.write_all(torn.as_bytes()).unwrap();
+    output.sync_data().unwrap();
+    drop(output);
+    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
+
+    let _ = super::unregistered_page::read_project_directory_page(
+        &profile_root,
+        Some(&cursor),
+        64,
+        &interrupted,
+    )
+    .unwrap()
+    .expect("restart resumes after trimming the torn final record");
+
+    let recovered = String::from_utf8(std::fs::read(&inventory_path).unwrap()).unwrap();
+    assert!(
+        recovered
+            .lines()
+            .any(|recorded| recorded == target.as_str()),
+        "the real project must be re-appended as its own record"
+    );
+    assert!(
+        !recovered.contains(&format!("{torn}{target}")),
+        "a torn record must never be joined with the subsequent append"
+    );
+    assert!(recovered.ends_with('\n'));
+}
+
+/// An already-elapsed deadline must not report a successful resume page.
+/// Tail recovery may still truncate the unterminated suffix; the real
+/// project is not fabricated onto the log.
+#[test]
+fn portable_inventory_elapsed_deadline_does_not_resume_torn_final_entry() {
+    use std::io::Write;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let project_ids = (0..32)
+        .map(|index| format!("proj_torn_deadline_{index}"))
+        .collect::<Vec<_>>();
+    for project_id in &project_ids {
+        std::fs::create_dir_all(profile_root.join("projects").join(project_id)).unwrap();
+    }
+    let cancellation = CancellationToken::new();
+    let deadline = functional_sweep_deadline();
+    let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+    let page =
+        super::unregistered_page::read_project_directory_page(&profile_root, None, 1, &interrupted)
+            .unwrap()
+            .expect("first bounded page creates partial inventory");
+    let cursor = page
+        .next_cursor
+        .expect("the inventory has unscanned source entries");
+    let inventory_path = super::unregistered_page::portable_inventory_path(
+        &profile_root,
+        cursor.split(':').nth(1).unwrap(),
+    );
+    let inventory_before_torn_append = String::from_utf8(std::fs::read(&inventory_path).unwrap())
+        .expect("the production inventory is UTF-8");
+    let target = project_ids
+        .iter()
+        .find(|project_id| {
+            !inventory_before_torn_append
+                .lines()
+                .skip(1)
+                .any(|recorded| recorded == project_id.as_str())
+        })
+        .expect("the first bounded source slice does not contain every project")
+        .clone();
+    let torn = target[..target.len() - 1].to_owned();
+    assert!(tracedecay_runtime_core::storage::validate_project_id(&torn).is_ok());
+    let mut output = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&inventory_path)
+        .unwrap();
+    output.write_all(torn.as_bytes()).unwrap();
+    output.sync_data().unwrap();
+    drop(output);
+    super::unregistered_page::forget_portable_inventory_builder_for_test(&inventory_path);
+
+    let expired = MonotonicDeadline::at(Instant::now());
+    let interrupted = || expired.is_elapsed_at(Instant::now());
+    assert!(
+        super::unregistered_page::read_project_directory_page(
+            &profile_root,
+            Some(&cursor),
+            64,
+            &interrupted,
+        )
+        .unwrap()
+        .is_none(),
+        "an already-elapsed deadline must not report a resumed page"
+    );
+    let recovered = String::from_utf8(std::fs::read(&inventory_path).unwrap()).unwrap();
+    assert_eq!(
+        recovered, inventory_before_torn_append,
+        "interruption after tail recovery must leave only committed records"
+    );
+    assert!(
+        !recovered
+            .lines()
+            .any(|recorded| recorded == target.as_str()),
+        "interruption must not fabricate the repaired project record"
+    );
+    assert!(
+        !recovered.contains(&format!("{torn}{target}")),
+        "a torn record must never be joined with the subsequent append"
+    );
+}
+
+/// The canonical sidecar writer lock is process-safe, rather than merely the
+/// in-process builder map. A competing admission yields without touching the
+/// log and a later admission resumes from the same durable boundary.
+#[test]
+fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     let projects_dir = profile_root.join("projects");
-    for name in ["proj_a", "proj_b", "proj_c", "proj_d", "proj_e", "proj_f"] {
-        std::fs::create_dir_all(projects_dir.join(name)).unwrap();
+    for index in 0..4 {
+        std::fs::create_dir_all(projects_dir.join(format!("proj_writer_lock_{index}"))).unwrap();
     }
-    let interrupted = || false;
-    let page_names = |cursor: Option<&str>| {
-        let page = super::unregistered_page::read_project_directory_page(
-            &profile_root,
-            cursor,
-            2,
+    let signature = super::unregistered_page::portable_directory_signature(&projects_dir).unwrap();
+    let inventory = super::unregistered_page::portable_inventory_path(&profile_root, &signature);
+    std::fs::create_dir_all(inventory.parent().unwrap()).unwrap();
+
+    let writer_lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(
+        &tracedecay_runtime_core::storage::append_lock_path(&inventory),
+    )
+    .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let worker_profile_root = profile_root.clone();
+    let worker = std::thread::spawn(move || {
+        let cancellation = CancellationToken::new();
+        let deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(1));
+        let interrupted = || cancellation.is_cancelled() || deadline.is_elapsed_at(Instant::now());
+        started_tx.send(()).unwrap();
+        super::unregistered_page::read_project_directory_page(
+            &worker_profile_root,
+            None,
+            1,
             &interrupted,
         )
+    });
+    started_rx.recv().unwrap();
+    let page = worker
+        .join()
         .unwrap()
-        .expect("an uninterrupted page is never a cancelled read");
-        let names = page
-            .entries
-            .iter()
-            .map(|entry| match entry {
-                super::ProjectDirectoryWorkV1::Project(name) => name.clone(),
-                super::ProjectDirectoryWorkV1::Quarantine {
-                    quarantine_name, ..
-                } => quarantine_name.clone(),
-            })
-            .collect::<Vec<_>>();
-        (names, page.next_cursor)
-    };
-
-    let (first, first_cursor) = page_names(None);
-    assert_eq!(first, vec!["proj_a".to_owned(), "proj_b".to_owned()]);
-    let first_cursor = first_cursor.expect("four more directories require a second page");
+        .unwrap()
+        .expect("a contending writer must return an incomplete retry page");
+    assert!(page.entries.is_empty());
     assert_eq!(
-        first_cursor, "name-v3:proj_b",
-        "the resume token must be the last returned name, not an OS stream offset"
+        page.next_cursor,
+        Some(format!("portable-v2:{signature}:0")),
+        "a second process-equivalent writer must yield with an opaque retry cursor"
     );
+    drop(writer_lock);
 
-    // Everything a restart plus an applied page can do to the directory: the
-    // collected entries disappear, an unrelated entry ahead of the cursor
-    // disappears, and new entries appear on both sides of the cursor.
-    std::fs::remove_dir(projects_dir.join("proj_a")).unwrap();
-    std::fs::remove_dir(projects_dir.join("proj_b")).unwrap();
-    std::fs::remove_dir(projects_dir.join("proj_e")).unwrap();
-    std::fs::create_dir_all(projects_dir.join("proj_aa")).unwrap();
-    std::fs::create_dir_all(projects_dir.join("proj_z")).unwrap();
-
-    let (second, second_cursor) = page_names(Some(&first_cursor));
+    let mut entries_scanned = 0usize;
     assert_eq!(
-        second,
-        vec!["proj_c".to_owned(), "proj_d".to_owned()],
-        "a mutated directory must resume at the cursor rather than restart or terminate early"
-    );
-    let second_cursor = second_cursor.expect("two directories still sort after the cursor");
-
-    // Replaying the same cursor is a position, not a consumed stream slot.
-    let (replayed, replayed_cursor) = page_names(Some(&first_cursor));
-    assert_eq!(replayed, second);
-    assert_eq!(replayed_cursor.as_deref(), Some(second_cursor.as_str()));
-
-    let (third, third_cursor) = page_names(Some(&second_cursor));
-    assert_eq!(
-        third,
-        vec!["proj_f".to_owned(), "proj_z".to_owned()],
-        "a directory created after the cursor must still be reached in this pass"
-    );
-    assert_eq!(
-        third_cursor, None,
-        "an exhausted name order must terminate the pass instead of paging forever"
-    );
-
-    // `proj_aa` sorts behind the cursor, so this pass never returns it; the
-    // next full pass does. Nothing else was skipped.
-    assert!(projects_dir.join("proj_aa").is_dir());
-}
-
-/// An unknown or truncated resume token restarts the pass. Treating it as a
-/// name would silently skip every directory that sorts before it.
-#[test]
-fn project_directory_unknown_cursor_restarts_the_pass() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    for name in ["proj_a", "proj_b"] {
-        std::fs::create_dir_all(profile_root.join("projects").join(name)).unwrap();
-    }
-    let interrupted = || false;
-    for cursor in ["", "proj_b", "v1:2049:12345:99", "name-v3:"] {
-        let page = super::unregistered_page::read_project_directory_page(
-            &profile_root,
-            Some(cursor),
+        super::unregistered_page::advance_portable_inventory(
+            &projects_dir,
+            &inventory,
+            &signature,
             8,
-            &interrupted,
+            &mut entries_scanned,
+            &|| false,
         )
-        .unwrap()
-        .expect("an uninterrupted page is never a cancelled read");
-        assert_eq!(
-            page.entries.len(),
-            2,
-            "cursor {cursor:?} must restart the pass rather than skip directories"
-        );
-        assert_eq!(page.next_cursor, None);
-    }
+        .unwrap(),
+        Some(true)
+    );
+    let records = String::from_utf8(std::fs::read(&inventory).unwrap()).unwrap();
+    assert!(records.ends_with('\n'));
+    assert!(
+        records
+            .lines()
+            .skip(1)
+            .all(super::unregistered_page::portable_inventory_entry_is_valid)
+    );
 }
 
 /// Cancellation is a typed page result and must prevent both inspection and
@@ -2258,6 +4193,294 @@ async fn unregistered_store_sweep_reconciles_interrupted_quarantine() {
         b"recover through pager"
     );
     assert!(!quarantine.exists());
+}
+
+#[test]
+fn committed_unregistered_recovery_preserves_interrupted_control_and_resumes() {
+    for expected_completion in [
+        CollectionCompletionV1::Cancelled,
+        CollectionCompletionV1::DeadlineExceeded,
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let projects = profile_root.join("projects");
+        let data_root = projects.join("proj_controlled_recovery");
+        std::fs::create_dir_all(data_root.join("nested")).unwrap();
+        std::fs::write(
+            data_root.join("nested/payload.bin"),
+            b"retained exact bytes",
+        )
+        .unwrap();
+        let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+        let QuarantineStoreOutcome::Verified(quarantine) =
+            quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap()
+        else {
+            panic!("fixture must reach verified quarantine");
+        };
+        let quarantine_path = quarantine.quarantine_path().to_path_buf();
+        quarantine.mark_retirement_committed().unwrap();
+        drop(quarantine);
+        let pending = read_pending_quarantine_receipts(&profile_root).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].retirement_committed);
+        let cancellation = CancellationToken::new();
+        let deadline = if expected_completion == CollectionCompletionV1::DeadlineExceeded {
+            MonotonicDeadline::at(Instant::now())
+        } else {
+            cancellation.cancel();
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(1))
+        };
+        let control = CollectionControl::new(&cancellation, deadline);
+        let outcome = recover_named_store_quarantine(
+            &profile_root,
+            &data_root,
+            quarantine_path.file_name().unwrap(),
+            &projects,
+            control,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            Some(QuarantineRecoveryOutcome::Retained {
+                quarantine_path: quarantine_path.clone(),
+                actual_path: quarantine_path.clone(),
+                failure: None,
+            })
+        );
+        assert_eq!(control.completion(), Some(expected_completion));
+        assert_eq!(
+            std::fs::read(quarantine_path.join("nested/payload.bin")).unwrap(),
+            b"retained exact bytes"
+        );
+        assert_eq!(
+            read_pending_quarantine_receipts(&profile_root).unwrap(),
+            pending
+        );
+        assert!(!data_root.exists());
+
+        let mut collection = CollectionOutcome::default();
+        assert!(!reconcile_existing_quarantine(
+            &profile_root,
+            &data_root,
+            "proj_controlled_recovery",
+            &mut collection,
+            control,
+        ));
+        assert_eq!(collection.completion, expected_completion);
+        assert_eq!(collection.reclaimed_bytes, 0);
+        assert!(collection.collected.is_empty());
+        assert_eq!(
+            read_pending_quarantine_receipts(&profile_root).unwrap(),
+            pending
+        );
+
+        let fresh = CancellationToken::new();
+        let resumed = recover_named_store_quarantine(
+            &profile_root,
+            &data_root,
+            quarantine_path.file_name().unwrap(),
+            &projects,
+            CollectionControl::new(
+                &fresh,
+                MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            resumed,
+            Some(QuarantineRecoveryOutcome::Removed {
+                quarantine_path: quarantine_path.clone(),
+                journal_failure: None,
+            })
+        );
+        assert!(!quarantine_path.exists());
+        assert!(
+            read_pending_quarantine_receipts(&profile_root)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn unregistered_recovery_removal_has_no_fabricated_bytes_or_receipt() {
+    for already_removed in [false, true] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        let data_root = profile_root.join("projects/proj_committed_recovery");
+        std::fs::create_dir_all(&data_root).unwrap();
+        std::fs::write(data_root.join("payload.bin"), b"remove through pager").unwrap();
+        let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
+        let result =
+            quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
+        let QuarantineStoreOutcome::Verified(quarantine) = result else {
+            panic!("fixture must reach verified quarantine");
+        };
+        let quarantine_path = quarantine.quarantine_path().to_path_buf();
+        quarantine.mark_retirement_committed().unwrap();
+        drop(quarantine);
+        if already_removed {
+            // Model a crash after deleting the committed leaf but before clearing
+            // its journal. The pager must discover the journal without a directory.
+            std::fs::remove_dir_all(&quarantine_path).unwrap();
+        }
+        let (_runtime, db) = open_registered_db(&profile_root).await;
+        let cancellation = CancellationToken::new();
+
+        let report = sweep_unregistered_store_page(
+            &db,
+            &profile_root,
+            UnregisteredStoreSweepRequestV1 {
+                cursor: None,
+                limit: 4,
+                retention_secs: 0,
+                now: 1_700_000_000,
+                apply: true,
+                cancellation: &cancellation,
+                deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.completion, UnregisteredSweepCompletionV1::Complete);
+        assert_eq!(report.outcome.reclaimed_bytes, 0);
+        assert!(report.outcome.collected.is_empty());
+        assert!(report.outcome.recovery_receipts.is_empty());
+        assert!(report.outcome.errors.is_empty());
+        assert!(!quarantine_path.exists());
+        assert!(
+            read_pending_quarantine_receipts(&profile_root)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn unregistered_store_sweep_reports_failed_legacy_restore() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let projects = profile_root.join("projects");
+    let data_root = projects.join("proj_paged_retained");
+    let quarantine = projects.join(".tracedecay-orphan-quarantine-proj_paged_retained-42-7");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"new live bytes").unwrap();
+    std::fs::create_dir_all(&quarantine).unwrap();
+    std::fs::write(quarantine.join("payload.bin"), b"legacy quarantine bytes").unwrap();
+    let expected = capture_store_content_fence(&profile_root, &quarantine).unwrap();
+    let StoreContentFence::Present(inventory) = expected else {
+        panic!("fixture must capture the legacy quarantine identity");
+    };
+    let expected_root_identity = inventory.root;
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let cancellation = CancellationToken::new();
+
+    let report = sweep_unregistered_store_page(
+        &db,
+        &profile_root,
+        UnregisteredStoreSweepRequestV1 {
+            cursor: None,
+            limit: 2,
+            retention_secs: 0,
+            now: 1_700_000_000,
+            apply: true,
+            cancellation: &cancellation,
+            deadline: functional_sweep_deadline(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let failure = CollectionMutationFailure {
+        operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
+        raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
+        target_path: data_root.clone(),
+        expected_root_identity: Some(expected_root_identity),
+        classification: CollectionMutationFailureClassification::NonRetryable,
+    };
+    assert_eq!(
+        report.outcome.errors,
+        vec![
+            CollectionFailure {
+                store_id: "proj_paged_retained".to_owned(),
+                kind: CollectionFailureKind::RemoveFailed(failure),
+            },
+            CollectionFailure {
+                store_id: "proj_paged_retained".to_owned(),
+                kind: CollectionFailureKind::PayloadChanged,
+            },
+        ]
+    );
+    assert_eq!(
+        report.outcome.recovery_receipts,
+        vec![CollectionRecoveryReceipt {
+            store_id: "proj_paged_retained".to_owned(),
+            original_path: data_root.clone(),
+            quarantine_path: quarantine.clone(),
+            actual_path: quarantine.clone(),
+            action: CollectionRecoveryAction::RetainedForRecovery,
+        }]
+    );
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        b"new live bytes"
+    );
+    assert_eq!(
+        std::fs::read(quarantine.join("payload.bin")).unwrap(),
+        b"legacy quarantine bytes"
+    );
+}
+
+/// Expiry before the quarantine entry is processed is not a fabricated
+/// recovery failure: `DeadlineExceeded` carries the empty accumulated list.
+#[tokio::test]
+async fn unregistered_store_sweep_elapsed_deadline_reports_empty_legacy_restore_failures() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    let projects = profile_root.join("projects");
+    let data_root = projects.join("proj_paged_retained");
+    let quarantine = projects.join(".tracedecay-orphan-quarantine-proj_paged_retained-42-7");
+    std::fs::create_dir_all(&data_root).unwrap();
+    std::fs::write(data_root.join("payload.bin"), b"new live bytes").unwrap();
+    std::fs::create_dir_all(&quarantine).unwrap();
+    std::fs::write(quarantine.join("payload.bin"), b"legacy quarantine bytes").unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let cancellation = CancellationToken::new();
+
+    let report = sweep_unregistered_store_page(
+        &db,
+        &profile_root,
+        UnregisteredStoreSweepRequestV1 {
+            cursor: None,
+            limit: 2,
+            retention_secs: 0,
+            now: 1_700_000_000,
+            apply: true,
+            cancellation: &cancellation,
+            deadline: MonotonicDeadline::at(Instant::now()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        report.completion,
+        UnregisteredSweepCompletionV1::DeadlineExceeded
+    );
+    assert!(
+        report.outcome.errors.is_empty(),
+        "interruption before the quarantine entry must not fabricate restore failures"
+    );
+    assert!(report.outcome.recovery_receipts.is_empty());
+    assert_eq!(
+        std::fs::read(data_root.join("payload.bin")).unwrap(),
+        b"new live bytes"
+    );
+    assert_eq!(
+        std::fs::read(quarantine.join("payload.bin")).unwrap(),
+        b"legacy quarantine bytes"
+    );
 }
 
 /// A durable-memory guard applies to unregistered directories exactly as it

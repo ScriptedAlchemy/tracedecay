@@ -8,7 +8,7 @@ impl WorkStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         task_id: &TaskId,
     ) -> Result<Vec<WorkEvent>, WorkStorageError> {
-        load_registered_history(self.handle(), authority, task_id)
+        load_registered_history(self.handle(), authority, task_id, None)
     }
 
     fn projection(
@@ -16,7 +16,7 @@ impl WorkStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         task_id: &TaskId,
     ) -> Result<WorkProjection, WorkStorageError> {
-        let history = load_registered_history(self.handle(), authority, task_id)?;
+        let history = load_registered_history(self.handle(), authority, task_id, None)?;
         WorkProjection::rebuild(&history).map_err(|_| WorkStorageError::Unavailable)
     }
 
@@ -25,20 +25,28 @@ impl WorkStoragePort for WorkSqliteStorage {
     }
 }
 
+/// Loads one task's history in version order — the whole history, or only the
+/// events at or below an append position so the read is coherent with a
+/// frontier captured before it. No events is `NotFoundOrNotAuthorized`.
 pub(crate) fn load_registered_history(
-    handle: &ExactSqlHandle,
+    source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
     task_id: &TaskId,
+    through: Option<u64>,
 ) -> Result<Vec<WorkEvent>, WorkStorageError> {
     let rows = registered_work_query(
-        handle,
+        source,
         "SELECT event_payload FROM work_events_v1
          WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
            AND actor_id = ?4 AND policy_digest = ?5 AND task_id = ?6
+           AND (?7 IS NULL OR owner_sequence <= ?7)
          ORDER BY version",
         authority_params_owned(authority)
             .into_iter()
-            .chain([ExactSqlValue::Text(task_id.as_str().to_owned())])
+            .chain([
+                ExactSqlValue::Text(task_id.as_str().to_owned()),
+                through.map_or(Ok(ExactSqlValue::Null), sequence_param)?,
+            ])
             .collect(),
     )
     .map_err(|_| WorkStorageError::Unavailable)?;
@@ -59,26 +67,6 @@ pub(crate) fn load_registered_authority_events(
     )
     .map_err(|_| WorkStorageError::Unavailable)?;
     decode_registered_events(rows, false)
-}
-
-pub(crate) fn load_registered_history_in_transaction(
-    transaction: &ExactSqlTransaction,
-    authority: &WorkAuthority,
-    task_id: &TaskId,
-) -> Result<Vec<WorkEvent>, WorkStorageError> {
-    let rows = registered_work_query(
-        transaction,
-        "SELECT event_payload FROM work_events_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5 AND task_id = ?6
-         ORDER BY version",
-        authority_params_owned(authority)
-            .into_iter()
-            .chain([ExactSqlValue::Text(task_id.as_str().to_owned())])
-            .collect(),
-    )
-    .map_err(|_| WorkStorageError::Unavailable)?;
-    decode_registered_events(rows, true)
 }
 
 pub(crate) fn decode_registered_events(
@@ -106,15 +94,16 @@ pub(crate) fn append_registered(
         .map_err(|_| WorkStorageError::Unavailable)?;
     let authority = request.event.authority();
     let task_id = request.event.task_id();
-    let history = load_registered_history_in_transaction(&transaction, authority, task_id)
-        .or_else(|error| match error {
+    let history = load_registered_history(&transaction, authority, task_id, None).or_else(
+        |error| match error {
             WorkStorageError::NotFoundOrNotAuthorized => Ok(Vec::new()),
             error => Err(error),
-        })?;
+        },
+    )?;
     let current = if history.is_empty() {
         None
     } else {
-        Some(WorkProjection::rebuild(&history).map_err(|_| WorkStorageError::Unavailable)?)
+        Some(WorkProjectionStateV1::rebuild(&history).map_err(|_| WorkStorageError::Unavailable)?)
     };
 
     if let Some(replayed) = history
@@ -123,6 +112,7 @@ pub(crate) fn append_registered(
     {
         let outcome = if replayed.input_digest() == request.event.input_digest() {
             current
+                .map(WorkProjectionStateV1::into_projection)
                 .map(WorkAppendOutcome::Replayed)
                 .ok_or(WorkStorageError::Unavailable)
         } else {
@@ -138,7 +128,7 @@ pub(crate) fn append_registered(
         let _ = transaction.rollback();
         return Err(WorkStorageError::NotFoundOrNotAuthorized);
     }
-    let current_version = current.as_ref().map(WorkProjection::version);
+    let current_version = current.as_ref().map(WorkProjectionStateV1::version);
     if current_version != request.expected_version {
         let _ = transaction.rollback();
         return Err(WorkStorageError::VersionConflict);
@@ -153,14 +143,23 @@ pub(crate) fn append_registered(
         return Err(WorkStorageError::VersionConflict);
     }
 
-    advance_registered_owner_cursor(&transaction, authority)?;
-    registered_insert_event(&transaction, &request.event)?;
-    let next_history = load_registered_history_in_transaction(&transaction, authority, task_id)?;
-    let next = WorkProjection::rebuild(&next_history).map_err(|_| WorkStorageError::Unavailable)?;
+    // The state folded above is the history the insert below extends by
+    // exactly this event, inside the transaction that holds the write lock,
+    // so admitting the event onto it is the same fold a re-read would perform.
+    let next = match current {
+        Some(state) => state.fold(&request.event),
+        None => WorkProjectionStateV1::rebuild(std::slice::from_ref(&request.event)),
+    };
+    let Ok(next) = next else {
+        let _ = transaction.rollback();
+        return Err(WorkStorageError::Unavailable);
+    };
+    let owner_sequence = advance_registered_owner_cursor(&transaction, authority)?;
+    registered_insert_event(&transaction, &request.event, owner_sequence)?;
     transaction
         .commit()
         .map_err(|_| WorkStorageError::Unavailable)?;
-    Ok(WorkAppendOutcome::Appended(next))
+    Ok(WorkAppendOutcome::Appended(next.into_projection()))
 }
 
 pub(crate) fn advance_registered_owner_cursor(
@@ -196,9 +195,13 @@ pub(crate) fn advance_registered_owner_cursor(
         .ok_or(WorkStorageError::Unavailable)
 }
 
+/// Inserts one event bound to the owner sequence the same transaction just
+/// advanced to, so the row's append position is exactly the cursor value that
+/// committed with it.
 pub(crate) fn registered_insert_event(
     transaction: &ExactSqlTransaction,
     event: &WorkEvent,
+    owner_sequence: u64,
 ) -> Result<(), WorkStorageError> {
     let payload = serde_json::to_string(event).map_err(|_| WorkStorageError::Unavailable)?;
     transaction
@@ -206,8 +209,9 @@ pub(crate) fn registered_insert_event(
             exact_sql_statement(
                 "INSERT INTO work_events_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    task_id, version, command_id, input_digest, occurred_at, event_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    task_id, version, command_id, input_digest, occurred_at, event_payload,
+                    owner_sequence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 authority_params_owned(event.authority())
                     .into_iter()
                     .chain([
@@ -220,6 +224,7 @@ pub(crate) fn registered_insert_event(
                         ExactSqlValue::Text(event.input_digest().as_str().to_owned()),
                         ExactSqlValue::Integer(event.occurred_at().0),
                         ExactSqlValue::Text(payload),
+                        sequence_param(owner_sequence)?,
                     ])
                     .collect(),
             )
@@ -227,4 +232,102 @@ pub(crate) fn registered_insert_event(
         )
         .map_err(|_| WorkStorageError::Unavailable)?;
     Ok(())
+}
+
+/// The authority's durable append frontier: the owner cursor, or 0 before the
+/// first append. Every committed event carries an `owner_sequence` at or below
+/// it, and any event committed after this read carries a greater one, so a
+/// read bounded by this value sees one coherent journal prefix.
+pub(crate) fn load_registered_owner_frontier(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+) -> Result<u64, WorkStorageError> {
+    let rows = registered_work_query(
+        source,
+        "SELECT sequence FROM work_owner_cursors_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5",
+        authority_params_owned(authority),
+    )
+    .map_err(|_| WorkStorageError::Unavailable)?;
+    rows.rows.first().map_or(Ok(0), |row| {
+        exact_sql_integer(&row.values, 0)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or(WorkStorageError::Unavailable)
+    })
+}
+
+/// The append position and task of every event in `(after, through]`, in
+/// append order. Positions and task identities only: discovering what changed
+/// decodes no payload.
+pub(crate) fn load_registered_appended_positions(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+    after: u64,
+    through: u64,
+) -> Result<Vec<(u64, TaskId)>, WorkStorageError> {
+    let rows = registered_work_query(
+        source,
+        "SELECT owner_sequence, task_id FROM work_events_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5
+           AND owner_sequence > ?6 AND owner_sequence <= ?7
+         ORDER BY owner_sequence",
+        authority_params_owned(authority)
+            .into_iter()
+            .chain([sequence_param(after)?, sequence_param(through)?])
+            .collect(),
+    )
+    .map_err(|_| WorkStorageError::Unavailable)?;
+    rows.rows
+        .into_iter()
+        .map(|row| {
+            let sequence = exact_sql_integer(&row.values, 0)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(WorkStorageError::Unavailable)?;
+            let task_id = exact_sql_text(&row.values, 1)
+                .and_then(|value| TaskId::try_from(value.to_owned()).ok())
+                .ok_or(WorkStorageError::Unavailable)?;
+            Ok((sequence, task_id))
+        })
+        .collect()
+}
+
+/// The histories, as of `through`, of every task with an event appended in
+/// `(after, through]` — grouped by task and in version order, so one ordered
+/// pass folds each selected task once. Tasks untouched in that range are not
+/// read. From the journal start every task at or below `through` is changed,
+/// so the membership subquery is skipped rather than built.
+pub(crate) fn load_registered_changed_histories(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+    after: u64,
+    through: u64,
+) -> Result<Vec<WorkEvent>, WorkStorageError> {
+    let rows = registered_work_query(
+        source,
+        "SELECT event_payload FROM work_events_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5
+           AND owner_sequence <= ?7
+           AND (?6 = 0 OR task_id IN (
+               SELECT task_id FROM work_events_v1
+               WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+                 AND actor_id = ?4 AND policy_digest = ?5
+                 AND owner_sequence > ?6 AND owner_sequence <= ?7
+           ))
+         ORDER BY task_id, version",
+        authority_params_owned(authority)
+            .into_iter()
+            .chain([sequence_param(after)?, sequence_param(through)?])
+            .collect(),
+    )
+    .map_err(|_| WorkStorageError::Unavailable)?;
+    decode_registered_events(rows, false)
+}
+
+fn sequence_param(sequence: u64) -> Result<ExactSqlValue, WorkStorageError> {
+    i64::try_from(sequence)
+        .map(ExactSqlValue::Integer)
+        .map_err(|_| WorkStorageError::Unavailable)
 }

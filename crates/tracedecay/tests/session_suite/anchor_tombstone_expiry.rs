@@ -19,7 +19,7 @@ use tracedecay_domain::{
     VectorWatermark,
 };
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,

@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, interval};
 use tokio_util::codec::FramedRead;
-use tracedecay_application::{CancellationSignal, Deadline, InvocationError};
+use tracedecay_contracts::{CancellationSignal, Deadline, InvocationError};
 use tracedecay_daemon_protocol::{
     DaemonLspSessionClient, FramePoll, FrameSend, ProcessLocalRequestSequence,
 };
@@ -305,9 +305,13 @@ fn canonicalize_workspace_root(path: &Path) -> tracedecay_domain::errors::Result
             path.display()
         ))
     })?;
+    // The bridge replaces the client's `rootUri` with this path, and the
+    // daemon publishes the root's identity, so the two must spell it the same
+    // way: `canonicalize` yields the `\\?\` verbatim form on Windows, which
+    // is not what the daemon advertises.
     canonical
         .is_dir()
-        .then_some(canonical)
+        .then(|| tracedecay_runtime_core::path_safety::canonical_root_identity(&canonical))
         .ok_or_else(|| bridge_config_error("LSP workspace root must be a directory"))
 }
 
@@ -407,7 +411,7 @@ fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationErr
     let budget_micros = i64::try_from(DEFAULT_LSP_REQUEST_DEADLINE_MS)
         .map_err(|_| InvocationError::Unavailable)?
         .saturating_mul(1_000);
-    let expires_at = tracedecay_application::clock::now_micros()
+    let expires_at = tracedecay_contracts::clock::now_micros()
         .0
         .saturating_add(budget_micros);
     let deadline =

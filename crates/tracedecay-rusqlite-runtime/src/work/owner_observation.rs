@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU16;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     PendingWorkOwnerObservationV1, WorkOwnerObservationKindV1, WorkOwnerObservationMarkOutcomeV1,
     WorkOwnerObservationMarkerV1, WorkOwnerObservationReceiptV1, WorkOwnerObservationScanCursorV1,
     WorkOwnerObservationStorageErrorV1, WorkOwnerObservationStoragePortV1,

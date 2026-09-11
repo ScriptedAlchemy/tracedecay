@@ -1,6 +1,7 @@
 use std::fmt;
 
 use thiserror::Error;
+use tracedecay_store::runtime::{GraphPublicationStoreErrorV1, RuntimeInterruptionV1};
 
 /// Named graph-operation budget that was exhausted.
 ///
@@ -13,6 +14,12 @@ pub enum GraphBudgetKind {
     Write,
     Capacity,
     Mutation,
+    /// The process-wide measured-RSS admission watermark. A corpus-sized
+    /// publication that trips it is refused with the daemon still alive and
+    /// its text serving intact, instead of growing until the kernel kills the
+    /// whole process. The scheduler treats this name as a typed graph
+    /// refusal, never a retryable fault.
+    ResidentMemory,
 }
 
 impl GraphBudgetKind {
@@ -24,6 +31,7 @@ impl GraphBudgetKind {
             Self::Write => "write",
             Self::Capacity => "capacity",
             Self::Mutation => "mutation",
+            Self::ResidentMemory => "resident_memory",
         }
     }
 
@@ -36,6 +44,7 @@ impl GraphBudgetKind {
             "write" => Some(Self::Write),
             "capacity" => Some(Self::Capacity),
             "mutation" => Some(Self::Mutation),
+            "resident_memory" => Some(Self::ResidentMemory),
             _ => None,
         }
     }
@@ -108,6 +117,20 @@ pub enum GraphDbError {
     ResetRequired { message: String },
     #[error("graph database is corrupt: {message}")]
     Corrupt { message: String },
+    #[error(
+        "sealed code generation `{sealed_state_digest}` predates authenticated source commitments"
+    )]
+    SourceCommitmentsUnavailable { sealed_state_digest: String },
+    /// The sealed generation's rows are refused by the current reader's
+    /// contract (a historical writer revision). No retry or rebuild of the
+    /// graph can ever complete it; only a fresh code-index seal can.
+    #[error(
+        "sealed code generation `{sealed_state_digest}` is refused by the current reader: {message}"
+    )]
+    SealedRevisionIncompatible {
+        sealed_state_digest: String,
+        message: String,
+    },
     /// A write reached a generation that is sealed into an immutable
     /// compacted store. Sealed rows accept exact idempotent replays only;
     /// anything else is refused with this typed error rather than a generic
@@ -120,6 +143,26 @@ pub enum GraphDbError {
     DurabilityUncertain { message: String },
     #[error("graph database is closed")]
     Closed,
+}
+
+impl From<GraphPublicationStoreErrorV1> for GraphDbError {
+    fn from(error: GraphPublicationStoreErrorV1) -> Self {
+        match error {
+            GraphPublicationStoreErrorV1::InvalidRequest(error) => {
+                GraphDbError::invalid(error.to_string())
+            }
+            GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::Cancelled) => {
+                GraphDbError::Cancelled
+            }
+            GraphPublicationStoreErrorV1::Interrupted(RuntimeInterruptionV1::DeadlineExceeded) => {
+                GraphDbError::DeadlineExceeded
+            }
+            GraphPublicationStoreErrorV1::Infrastructure => {
+                GraphDbError::unavailable("relational graph publication authority is unavailable")
+            }
+            GraphPublicationStoreErrorV1::Corrupt(message) => GraphDbError::Corrupt { message },
+        }
+    }
 }
 
 impl GraphDbError {

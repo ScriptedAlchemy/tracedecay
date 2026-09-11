@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::config_error;
 use super::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 const MAX_SKILL_BODY_CHARS: usize = 100_000;
 const MAX_SKILL_DEPTH: usize = 4;
@@ -100,7 +100,7 @@ impl Default for HermesSkillBridgeContracts {
 pub fn load_standard_hermes_skill_bridge(
     options: HermesSkillBridgeOptions,
 ) -> Result<HermesSkillBridgeSnapshot> {
-    let user_home = crate::agents::home_dir().ok_or_else(|| {
+    let user_home = super::host_io::home_dir().ok_or_else(|| {
         config_error("could not determine the user home for Hermes skill inventory")
     })?;
     load_standard_hermes_skill_bridge_from_user_home(&user_home, options)

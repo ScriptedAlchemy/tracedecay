@@ -31,9 +31,3 @@
 pub(crate) type ProfiledMutex<T> = hotpath::mutexes::Mutex<T>;
 
 pub(crate) type ProfiledMutexGuard<'a, T> = hotpath::mutexes::MutexGuard<'a, T>;
-
-pub(crate) type ProfiledRwLock<T> = hotpath::rw_locks::RwLock<T>;
-
-pub(crate) type ProfiledRwLockReadGuard<'a, T> = hotpath::rw_locks::RwLockReadGuard<'a, T>;
-
-pub(crate) type ProfiledRwLockWriteGuard<'a, T> = hotpath::rw_locks::RwLockWriteGuard<'a, T>;

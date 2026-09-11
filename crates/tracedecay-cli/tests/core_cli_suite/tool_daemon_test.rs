@@ -3,6 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -12,6 +14,9 @@ use crate::common::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_contracts::{
+    ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
+};
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookCapabilityV1, HookConfigurationFileWriterV1,
@@ -22,6 +27,7 @@ use tracedecay_hooks::{
 use tracedecay_runtime_core::storage::{
     default_profile_project_id, pin_fixture_repository_identity, profile_sharded_data_root,
 };
+use tracedecay_tool_catalog::SchemaId;
 
 /// Bound for waits that depend on spawning and running the real `tracedecay`
 /// CLI as a child process: connecting to the fake daemon socket and forwarding
@@ -632,7 +638,13 @@ fn enroll_native_capture_project(
     families: &[HookEventFamily],
 ) -> PathBuf {
     pin_fixture_repository_identity(project, project_id).unwrap();
-    let data_root = home.join(".tracedecay/projects").join(project_id);
+    // An enrolled project always belongs to an installed profile: the prompt
+    // callbacks stay quiet without a profile identity, so the fixture installs
+    // it through the canonical authority before the project store exists.
+    let profile_root = home.join(".tracedecay");
+    tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("install fixture profile identity");
+    let data_root = profile_root.join("projects").join(project_id);
     std::fs::create_dir_all(&data_root).unwrap();
     let now = capture_test_now();
     HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(hook_configuration_path(
@@ -709,7 +721,16 @@ fn assert_capture_transport_response(label: &str, output: &Output, expected_exit
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"{}\n", "{label}: {output:?}");
-    assert!(output.stderr.is_empty(), "{label}: {output:?}");
+    // A landed capture is silent on stderr; a refused one must name its
+    // refusal there rather than exit 1 with nothing to act on.
+    if expected_exit == 0 {
+        assert!(output.stderr.is_empty(), "{label}: {output:?}");
+    } else {
+        assert!(
+            output.stderr.starts_with(b"tracedecay hook: "),
+            "{label}: refusal must be named on stderr: {output:?}"
+        );
+    }
 }
 
 #[test]
@@ -1403,26 +1424,20 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
     init_project_with_cli(&home_path, &project_path);
     let daemon = spawn_tracedecay_daemon(&home_path);
 
-    let observed = configuration_tool_success(
-        &home_path,
-        &project_path,
-        "configuration_observed_state",
-        json!({}),
-    );
-    let project_id = observed["scope"]["project_id"]
-        .as_str()
-        .expect("configuration scope project id")
-        .to_owned();
-    let initial_revision = observed["outcome"]["value"]["payload"][0]["desired_revision_id"]
-        .as_str()
-        .expect("initial configuration revision")
-        .to_owned();
     let initial = configuration_tool_success(
         &home_path,
         &project_path,
         "configuration_get",
         json!({ "key": "diagnostics.prewarm.v1" }),
     );
+    let project_id = initial["scope"]["project_id"]
+        .as_str()
+        .expect("configuration scope project id")
+        .to_owned();
+    let initial_revision = initial["outcome"]["value"]["payload"]["revision_id"]
+        .as_str()
+        .expect("configuration get revision")
+        .to_owned();
     let initial_value = initial["outcome"]["value"]["payload"]["effective_value"]["value"]
         .as_bool()
         .expect("initial diagnostics prewarm value");
@@ -1470,6 +1485,10 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
     assert_eq!(
         reloaded["outcome"]["value"]["payload"]["effective_value"]["value"], next_value,
         "the CLI mutation must survive a daemon restart and affect the resolved setting"
+    );
+    assert_eq!(
+        reloaded["outcome"]["value"]["payload"]["revision_id"], advanced_revision,
+        "configuration get must return the revision accepted by the next mutation CAS"
     );
 
     let stale_mutation = json!({
@@ -1973,6 +1992,299 @@ fn status_command_times_out_when_daemon_never_replies() {
     );
 }
 
+/// The `tools/call` requests a [`spawn_scripted_result_sequence_daemon`]
+/// observed. Dropping it stops the daemon thread.
+struct ScriptedResultSequenceDaemon {
+    requests: mpsc::Receiver<Value>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for ScriptedResultSequenceDaemon {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// A fake daemon that answers every `tools/call` for `expected_tool_name` with
+/// the next scripted `result`, repeating the last one once the script is
+/// exhausted, so a test can hand the CLI a typed retryable state for as many
+/// attempts as it makes and then either the answer or nothing else.
+fn spawn_scripted_result_sequence_daemon(
+    socket_path: PathBuf,
+    expected_tool_name: &'static str,
+    results: Vec<Value>,
+) -> ScriptedResultSequenceDaemon {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (request_tx, request_rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let daemon_stop = Arc::clone(&stop);
+
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        ready_tx.send(()).expect("notify fake daemon readiness");
+        let mut results = results.into_iter();
+        let mut current = results.next().expect("at least one scripted result");
+
+        while !daemon_stop.load(Ordering::Acquire) {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(e) => panic!("accept fake daemon client: {e}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("set accepted stream blocking");
+            stream
+                .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
+                .expect("write timeout");
+            let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            let request = loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break None,
+                    Ok(_) => {}
+                }
+                let value: Value =
+                    serde_json::from_str(line.trim()).expect("fake daemon preamble JSON");
+                if value.get("method").is_some() {
+                    break Some(value);
+                }
+            };
+            let Some(request) = request else {
+                continue;
+            };
+            let result = if request["method"] == "initialize" {
+                json!({
+                    "serverInfo": {
+                        "name": "tracedecay",
+                        "version": cli_build_version(),
+                    }
+                })
+            } else {
+                assert_eq!(request["method"], "tools/call");
+                assert_eq!(request["params"]["name"], expected_tool_name);
+                if request_tx.send(request.clone()).is_err() {
+                    break;
+                }
+                let served = current.clone();
+                if let Some(next) = results.next() {
+                    current = next;
+                }
+                served
+            };
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request["id"].clone(),
+                "result": result,
+            });
+            let mut writer = stream;
+            writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+                .expect("write fake daemon response");
+        }
+    });
+
+    ready_rx
+        .recv_timeout(LOCAL_READY_TIMEOUT)
+        .expect("fake daemon should become ready");
+    ScriptedResultSequenceDaemon {
+        requests: request_rx,
+        stop,
+    }
+}
+
+/// The MCP tool result the daemon renders for a project route whose retained
+/// owner is still mounting behind the core publication: `isError` with the
+/// typed pre-admission problem and its after-delay retry directive.
+fn mounting_owner_tool_result(retry_after_millis: u64) -> Value {
+    let envelope = ApplicationProblemEnvelope::new(
+        ResultContractRef::new(
+            SchemaId::new("schema.retained.fact_store_add.result").expect("schema id"),
+            1,
+        )
+        .expect("result contract"),
+        RequestId::new("request.cli.tool.mounting-owner").expect("request id"),
+        ApplicationProblem::unavailable(
+            SafeDiagnostic::new(
+                "application.surface.unavailable",
+                "The project runtime for this operation is still mounting",
+            )
+            .expect("diagnostic"),
+        ),
+    )
+    .expect("mounting owner envelope")
+    .with_retry_after_millis(Some(retry_after_millis))
+    .expect("retry delay");
+    json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::to_string(&envelope).expect("envelope JSON"),
+        }],
+        "isError": true,
+        "problem": serde_json::to_value(envelope.problem.as_ref()).expect("problem record"),
+    })
+}
+
+fn fact_store_add_args() -> String {
+    json!({
+        "category": "project",
+        "content": "the fact store answers once its owner has mounted",
+        "format": "json",
+        "source_label": "retry-directive-journey",
+        "trust": 0.3,
+    })
+    .to_string()
+}
+
+fn fact_store_add_command(
+    home: &Path,
+    project: &Path,
+    socket: &Path,
+    deadline_ms: &str,
+) -> Command {
+    let project_arg = project.to_string_lossy().to_string();
+    let mut command = tracedecay_command_with_home(home);
+    command
+        .current_dir(project)
+        .env("TRACEDECAY_DAEMON_SOCKET", socket)
+        .env("TRACEDECAY_TOOL_DEADLINE_MS", deadline_ms)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "tracedecay_fact_store_add",
+            "--json",
+            "--args",
+            &fact_store_add_args(),
+        ]);
+    command
+}
+
+/// A one-shot `tracedecay tool` call holds a deadline, so a typed
+/// `retry: after_delay` unavailable from an owner still mounting is progress
+/// to wait through on the delay the directive names, not the answer.
+#[test]
+fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    const RETRY_AFTER_MILLIS: u64 = 100;
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let daemon = spawn_scripted_result_sequence_daemon(
+        socket_path.clone(),
+        "tracedecay_fact_store_add",
+        vec![
+            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
+            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": json!({"outcome": {"outcome": "effect", "marker": "mounted-answer"}}).to_string(),
+                }]
+            }),
+        ],
+    );
+    let started = Instant::now();
+    let output = run_command_with_timeout(
+        fact_store_add_command(&home_path, &project_path, &socket_path, "10000"),
+        CLI_ROUNDTRIP_TIMEOUT,
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "the tool must return the owner's answer once it mounts\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("mounted-answer"),
+        "stdout must carry the mounted owner's answer, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("application.surface.unavailable"),
+        "a ridden-out mounting state must not reach the caller, got:\n{stdout}"
+    );
+    let attempts = std::iter::from_fn(|| daemon.requests.try_recv().ok()).count();
+    assert_eq!(
+        attempts, 3,
+        "the CLI must re-send the same request until the owner answers"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(2 * RETRY_AFTER_MILLIS),
+        "each retry must wait the delay the directive names, took {elapsed:?}"
+    );
+}
+
+/// The retry directive is honoured only inside the caller's budget: once the
+/// deadline cannot hold another delay, the daemon's typed state is the answer
+/// and the process fails typed instead of retrying past its budget.
+#[test]
+fn tool_fails_typed_when_an_after_delay_unavailable_outlives_its_deadline() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_dir = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+
+    let socket_path = socket_dir.path().join("tracedecay.sock");
+    let daemon = spawn_scripted_result_sequence_daemon(
+        socket_path.clone(),
+        "tracedecay_fact_store_add",
+        vec![mounting_owner_tool_result(250)],
+    );
+    let started = Instant::now();
+    let output = run_command_with_timeout(
+        fact_store_add_command(&home_path, &project_path, &socket_path, "1500"),
+        CLI_CHILD_KILL_TIMEOUT,
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        !output.status.success(),
+        "an owner that never mounts within the deadline must fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let printed: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!("the typed daemon result must be printed as JSON ({error}):\n{stdout}")
+    });
+    assert_eq!(printed["isError"], true);
+    assert_eq!(
+        printed["problem"]["code"], "application.surface.unavailable",
+        "the daemon's typed state must be surfaced once the deadline is exhausted"
+    );
+    assert_eq!(printed["problem"]["retry"], "after_delay");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reported an application failure"),
+        "the process must fail typed, got:\n{stderr}"
+    );
+    let attempts = std::iter::from_fn(|| daemon.requests.try_recv().ok()).count();
+    assert!(
+        attempts >= 2,
+        "the CLI must retry within its deadline before surfacing the state, made {attempts} attempt(s)"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(1000) && elapsed < Duration::from_secs(10),
+        "retries must stop at the deadline, not before or long after it, took {elapsed:?}"
+    );
+}
+
 fn spawn_handshake_capturing_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let (handshake_tx, handshake_rx) = mpsc::channel();
@@ -2235,4 +2547,80 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
         Some("unavailable"),
         "stock Hermes regression: temporal store must stay attached, got {payload}"
     );
+}
+
+#[tokio::test]
+async fn daemon_upgrades_retained_receipts_and_reopens_without_reset() {
+    let home = TempDir::new().unwrap();
+    let db_path = home.path().join(".tracedecay/global.db");
+    common::write_empty_global_db_schema(&db_path).await;
+    {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch("DROP TABLE session_relation_receipts;")
+            .unwrap();
+        db.execute_batch(include_str!(
+            "../../../tracedecay-global-db/tests/fixtures/session-relation-receipts-before-recovery.sql"
+        )).unwrap();
+        db.execute_batch(
+            "INSERT INTO session_temporal_generations (
+                session_id, generation, state, frozen_watermarks_json, created_at
+             ) VALUES ('retained-upgrade', 1, 'building', '{}', 100);
+             INSERT INTO session_relation_receipts (
+                session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+                state, graph_watermark, created_at, applied_at
+             ) VALUES ('retained-upgrade', 1, 'project_sessions', 'project-a',
+                       'watermark-1', 'applied', 'watermark-1', 101, 102);
+             INSERT INTO session_relation_effect_journal (
+                session_id, generation, projection_json, created_at
+             ) VALUES ('retained-upgrade', 1, '{\"effects\":1}', 102);",
+        )
+        .unwrap();
+        let version: i64 = db.query_row(
+            "SELECT version FROM session_temporal_schema_migrations WHERE name = 'session-temporal'",
+            [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(version, 4);
+    }
+    for _ in 0..2 {
+        let daemon = spawn_tracedecay_daemon(home.path());
+        let db = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let retained: (String, String, i64, i64, Option<String>, i64, i64) = db
+            .query_row(
+                "SELECT state, recovery_state, created_at, applied_at, recovery_failure_code,
+                    recovery_failure_count, recovery_next_attempt_at
+             FROM session_relation_receipts WHERE session_id = 'retained-upgrade'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            retained,
+            ("applied".into(), "pending".into(), 101, 102, None, 0, 0)
+        );
+        let journal: String = db
+            .query_row(
+                "SELECT projection_json FROM session_relation_effect_journal
+             WHERE session_id = 'retained-upgrade'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(journal, r#"{"effects":1}"#);
+        drop(db);
+        drop(daemon);
+    }
 }

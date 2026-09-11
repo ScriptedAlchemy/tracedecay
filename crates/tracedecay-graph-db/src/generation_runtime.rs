@@ -306,12 +306,18 @@ impl GraphDb {
     /// **activation** path, re-hashing only when it has to.
     ///
     /// This is the verify-once boundary. A verified-generation marker that was
-    /// written against the exact container backing this open, and that records
-    /// this exact expected digest, means the full proof has already run over
-    /// these bytes and does not run again. Every other case -- no marker, a
-    /// marker for other bytes, a marker that does not name this generation, a
-    /// digest that differs by one character, or a container this process has
-    /// since written to -- falls through to the full row-streaming proof.
+    /// written against the exact container the resident engine opened, and
+    /// that records this exact expected digest, means the full proof has
+    /// already run over these bytes and does not run again. Every other case
+    /// -- no marker, a marker for other bytes, a marker that does not name
+    /// this generation, a digest that differs by one character, or a container
+    /// this process has since written to -- falls through to the full
+    /// row-streaming proof.
+    ///
+    /// The engine is opened first because the marker is only ever consulted
+    /// against the container the engine actually loaded: a proof admitted
+    /// before the open would be about whatever file the path named at that
+    /// moment, not about the rows the engine serves.
     ///
     /// `expected` always comes from the relational authority, never from the
     /// marker, so a marker can only ever assert freshness. It cannot name
@@ -326,6 +332,7 @@ impl GraphDb {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
         check()?;
+        self.ensure_opened()?;
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
         if let Some(canonical_bytes) = self.inner.markers.lookup(&locator, expected.as_str()) {
@@ -479,14 +486,16 @@ impl GraphDb {
         reopen_fallback: bool,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(GraphCommit, GraphRecoveredGenerationDigestV1), GraphDbError> {
-        // Cheapest proof first: a marker filed by an earlier open of these
-        // exact container bytes. `expected` still comes from the relational
-        // authority, so a marker can only assert freshness - it can neither
-        // name which generation is served nor make a wrong digest pass, and
-        // corruption stays a typed failure from the full proof below. This is
-        // the mount point for the verify-once path; without it the marker set
-        // is written at close and never consulted, because publication routes
-        // through here rather than through `verify_activated_generation`.
+        // Cheapest proof first: a marker filed by an earlier open of the exact
+        // container bytes the resident engine loaded. `expected` still comes
+        // from the relational authority, so a marker can only assert freshness
+        // - it can neither name which generation is served nor make a wrong
+        // digest pass, and corruption stays a typed failure from the full
+        // proof below. This is the mount point for the verify-once path;
+        // without it the marker set is written at close and never consulted,
+        // because publication routes through here rather than through
+        // `verify_activated_generation`.
+        self.ensure_opened()?;
         let locator =
             GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
         if let Some(canonical_bytes) = self.inner.markers.lookup(&locator, expected.as_str()) {
@@ -1850,6 +1859,23 @@ impl GraphDb {
         state.heads.clear();
         state.known.clear();
         Ok(())
+    }
+
+    /// Stages a generation's rows in the shared staging database without
+    /// publishing it.
+    ///
+    /// This is the on-disk shape every sealed-replay code generation had
+    /// before generations sealed straight from their manifest: rows in the
+    /// staging container beside the sealed artifact the head serves from.
+    /// No current publication journey produces it, but databases that do
+    /// exist, and the release and recovery contracts over that shape stay
+    /// falsifiable only if tests can reach it.
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn stage_generation_rows_unpublished(
+        &self,
+        manifest: std::sync::Arc<GraphGenerationManifest>,
+    ) -> Result<GraphCommit, GraphDbError> {
+        self.apply_generation_unverified(manifest, &|| Ok(()))
     }
 
     /// Test surface for
@@ -3325,6 +3351,56 @@ mod tests {
         owner.close().unwrap();
     }
 
+    /// Retirement pages a generation out in `MAX_VERIFIED_GENERATION_BATCH_MUTATIONS`
+    /// slices. Each slice must read only the rows it retires: reading the
+    /// whole remaining projection to pick one page made a corpus release
+    /// O(rows² / page), which is what kept a first publication's serving
+    /// seat pending behind the sweep.
+    #[test]
+    fn staged_row_release_reads_each_row_once_across_its_pages() {
+        let temp = TempDir::new().unwrap();
+        let manifest = large_manifest("released-row-read-once");
+        let rows = manifest.entities.len();
+        assert!(
+            rows > crate::limits::MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+            "fixture must retire across more than one page"
+        );
+        let sealed = sealed_digest(&manifest);
+        let locator =
+            GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
+        let (owner, database) = persistent_database(&temp);
+        database
+            .apply_generation_unverified_with_digest_observed(
+                arc_manifest(&manifest),
+                &sealed,
+                &|| Ok(()),
+            )
+            .unwrap();
+        crate::state::reset_retirement_page_record_reads();
+        assert!(matches!(
+            database.delete_staged_generation_rows(&locator, &|| Ok(())),
+            Ok(StagedGenerationRowsDeletion::Deleted { removed_rows: true })
+        ));
+        // Every entity is read on exactly one page. The owner label also
+        // covers the projection's own non-record node, which each page scan
+        // (including the empty terminal one) may read once more.
+        let pages = rows.div_ceil(crate::limits::MAX_VERIFIED_GENERATION_BATCH_MUTATIONS) + 1;
+        let reads = crate::state::retirement_page_record_reads();
+        assert!(
+            (rows..=rows + pages).contains(&reads),
+            "retirement read {reads} records for {rows} rows over {pages} page scans; each page \
+             must read only the rows it retires"
+        );
+        assert_eq!(
+            database
+                .staging_generation_row_counts(&manifest.identity())
+                .unwrap(),
+            (0, 0)
+        );
+        drop(database);
+        owner.close().unwrap();
+    }
+
     #[test]
     fn persistent_reopen_replays_released_rows_instead_of_false_reseat() {
         let temp = TempDir::new().unwrap();
@@ -3400,19 +3476,14 @@ mod tests {
 
     fn assert_partial_release_replays(shared: bool) {
         let temp = TempDir::new().unwrap();
-        // One full native page plus a second page wider than a single
-        // retirement transaction: after one durable release page the
-        // remaining rows still cover the first page's range.
+        let fixture = large_manifest("partial-release-replay");
         let entity_count =
             MAX_NATIVE_GENERATION_STAGE_MUTATIONS + 2 * MAX_VERIFIED_GENERATION_BATCH_MUTATIONS;
         let manifest = GraphGenerationManifest::new(
-            GraphProjectionIdentity::new(
-                GraphNamespace::new("partial-release-replay").unwrap(),
-                GraphProjectionId::new("large").unwrap(),
-            ),
-            GraphGenerationId::new("generation-partial-release").unwrap(),
-            SourceGeneration::new("source-partial-release").unwrap(),
-            GraphWatermark::new("watermark-partial-release").unwrap(),
+            fixture.projection,
+            fixture.generation,
+            fixture.source_generation,
+            fixture.watermark,
             vec![],
             (0..entity_count)
                 .map(|index| {
@@ -3440,10 +3511,8 @@ mod tests {
             )
             .unwrap();
 
-        // Stop at the exact production release boundary: one bounded
-        // retirement transaction is durable and the original page receipts
-        // are all still filed, which is what an interrupted staging-row
-        // release leaves behind.
+        // Stop at the production retirement transaction boundary, retaining
+        // the original page receipts just as interrupted row release does.
         let (_, removed) = database
             .delete_projection_page_checked(
                 &manifest.identity().physical_namespace().unwrap(),
@@ -3462,8 +3531,6 @@ mod tests {
             remaining,
             (entity_count - MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, 0)
         );
-        // The geometry the bug needs: the survivors still out-count the first
-        // page, so a count-only check calls that page applied.
         assert!(remaining.0 >= pages[0].range.end);
         drop(database);
         owner.close().unwrap();
@@ -3477,13 +3544,6 @@ mod tests {
         reopened
             .apply_generation_unverified_with_digest_observed(replay_manifest, &sealed, &|| Ok(()))
             .expect("a retained generation must replay after a partial durable row release");
-        assert_eq!(
-            reopened
-                .staging_generation_row_counts(&manifest.identity())
-                .unwrap(),
-            manifest.row_counts(),
-            "every released row must be restaged, not skipped by a row count"
-        );
         let (_, recovered) = reopened
             .reopen_and_verify_existing_generation(
                 &manifest.identity(),

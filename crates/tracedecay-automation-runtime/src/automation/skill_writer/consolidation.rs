@@ -14,7 +14,7 @@ use super::{
     SkillProposalAction, optional_proposal_string, optional_proposal_targets,
     required_proposal_string, support_files_from_proposal,
 };
-use crate::errors::Result;
+use tracedecay_domain::errors::Result;
 
 #[derive(Debug, Clone)]
 pub(super) struct SkillArchiveProposal {
@@ -127,15 +127,29 @@ pub(super) fn skill_merge_from_proposal(
         ));
     }
 
+    if object
+        .get("routing_description")
+        .is_some_and(|value| !value.is_null())
+    {
+        super::validate_routing_examples(proposal, &target.host_skill_slug())?;
+    }
     let update = ManagedSkillUpdate {
         title: optional_proposal_string(object.get("title"))?,
         summary: optional_proposal_string(object.get("summary"))?,
+        routing_description: object
+            .get("routing_description")
+            .filter(|value| !value.is_null())
+            .map(|value| super::required_routing_description(Some(value)))
+            .transpose()?,
         category: optional_proposal_string(object.get("category"))?,
         targets: optional_proposal_targets(object.get("targets"))?,
         body_markdown: optional_proposal_string(
             object.get("body_markdown").or_else(|| object.get("body")),
         )?,
-        support_files: if object.contains_key("support_files") {
+        support_files: if object
+            .get("support_files")
+            .is_some_and(|value| !value.is_null())
+        {
             Some(support_files_from_proposal(object.get("support_files"))?)
         } else {
             None
@@ -144,6 +158,7 @@ pub(super) fn skill_merge_from_proposal(
     };
     let has_update = update.title.is_some()
         || update.summary.is_some()
+        || update.routing_description.is_some()
         || update.category.is_some()
         || update.targets.is_some()
         || update.body_markdown.is_some()
@@ -279,6 +294,8 @@ mod tests {
             id: id.to_string(),
             title: format!("{id} guidance"),
             summary: format!("Guidance for {id}."),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "workflow".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: format!("Follow the {id} workflow before applying changes."),

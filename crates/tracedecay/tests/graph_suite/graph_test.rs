@@ -6,7 +6,7 @@ use tracedecay_graph_query::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth,
     gini_coefficient, gini_label, modularity_score,
 };
-use tracedecay_usecases::git_intelligence::churn::file_churn;
+use tracedecay_runtime_core::git::churn::file_churn;
 
 // These tests cover the store-independent health algorithms. Code-graph read
 // behavior is covered through the verified Grafeo reader and production MCP
@@ -225,11 +225,12 @@ async fn test_file_churn() {
 
 #[tokio::test]
 async fn test_file_churn_nonexistent_dir() {
-    let churn = file_churn(
-        std::path::Path::new("/nonexistent/path/that/does/not/exist"),
-        90,
-    )
-    .await
-    .expect("file_churn should not error for nonexistent dir");
+    let missing = std::env::temp_dir().join(format!(
+        "tracedecay-missing-churn-root-{}",
+        std::process::id()
+    ));
+    let churn = file_churn(&missing, 90)
+        .await
+        .expect("file_churn should not error for nonexistent dir");
     assert!(churn.is_empty());
 }

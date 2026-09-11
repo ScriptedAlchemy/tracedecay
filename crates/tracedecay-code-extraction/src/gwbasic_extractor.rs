@@ -12,9 +12,11 @@ use tree_sitter::{Node as TsNode, Tree};
 use crate::basic_common::{
     BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
 };
+use crate::common::local_node_id;
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 /// Extracts code graph nodes and edges from GW-BASIC source files using tree-sitter.
@@ -114,7 +116,7 @@ impl GwBasicExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -128,6 +130,7 @@ impl GwBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -264,7 +267,13 @@ impl GwBasicExtractor {
             let start_column = basic_line.node.start_position().column as u32;
             let end_column = basic_line.node.end_position().column as u32;
             let qualified_name = format!("{}::{}", state.qualified_prefix(), fn_name);
-            let id = generate_node_id(&state.file_path, &NodeKind::Function, fn_name, start_line);
+            let id = local_node_id(
+                &state.file_path,
+                state.source,
+                &NodeKind::Function,
+                fn_name,
+                basic_line.node,
+            );
             let text = state.node_text(basic_line.node);
 
             let graph_node = Node {
@@ -289,6 +298,7 @@ impl GwBasicExtractor {
                 unsafe_blocks: 0,
                 unchecked_calls: 0,
                 assertions: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
                 updated_at: state.timestamp,
                 parent_id: None,
             };
@@ -353,7 +363,13 @@ impl GwBasicExtractor {
         let start_column = basic_line.node.start_position().column as u32;
         let end_column = basic_line.node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Const, name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Const,
+            name,
+            basic_line.node,
+        );
         let text = state.node_text(basic_line.node);
 
         let graph_node = Node {
@@ -378,6 +394,7 @@ impl GwBasicExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -457,11 +474,12 @@ impl GwBasicExtractor {
                     let start_column = first_node.start_position().column as u32;
                     let end_column = last_node.end_position().column as u32;
                     let qualified_name = format!("{}::{}", state.qualified_prefix(), fn_name);
-                    let fn_id = generate_node_id(
+                    let fn_id = local_node_id(
                         &state.file_path,
+                        state.source,
                         &NodeKind::Function,
                         &fn_name,
-                        start_line,
+                        first_node,
                     );
 
                     // Count complexity by walking body lines' AST nodes.
@@ -504,6 +522,7 @@ impl GwBasicExtractor {
                         unsafe_blocks: 0,
                         unchecked_calls: 0,
                         assertions: 0,
+                        complexity_analysis: ComplexityAnalysisV1::Complete,
                         updated_at: state.timestamp,
                         parent_id: None,
                     };

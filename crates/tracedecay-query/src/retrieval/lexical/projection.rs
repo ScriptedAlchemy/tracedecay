@@ -17,6 +17,7 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
+    admit_candidate_sources, candidate_admission_outcome, lexical_checkpoint,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
@@ -328,9 +329,13 @@ impl ProjectedChunkV1 {
 /// enabled independently by deriving an [`CodeExactProjectionAdapterV1`] with
 /// the central admission authority; constructing this lexical adapter alone
 /// never enables or mints exact proofs.
+///
+/// Metadata is shared, not owned: every scoped projection built over one
+/// generation reads the same immutable copy instead of cloning its logical
+/// path table per scope.
 #[derive(Clone, Debug)]
 pub struct CodeLexicalProjectionAdapterV1 {
-    metadata: CodeLexicalProjectionMetadataV1,
+    metadata: Arc<CodeLexicalProjectionMetadataV1>,
     rows: Arc<Vec<ProjectedChunkV1>>,
     postings: Arc<LexicalGenerationPostingsV1>,
 }
@@ -509,11 +514,12 @@ enum CodeLexicalProjectionBuildPhaseV1 {
 /// between bounded scheduler windows.
 #[derive(Debug)]
 pub struct CodeLexicalProjectionBuildV1 {
-    metadata: CodeLexicalProjectionMetadataV1,
+    metadata: Arc<CodeLexicalProjectionMetadataV1>,
     /// Parser-attested extracted qualified name per symbol occurrence. The
     /// sealed-page artifact path carries the same authority per chunk on its
-    /// symbol display; this is how the in-memory build receives it.
-    symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+    /// symbol display; this is how the in-memory build receives it. Shared so
+    /// scoped builds over one generation read one corpus-wide map.
+    symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
     chunks: Vec<Option<CodeSearchChunkV1>>,
     rows: Vec<ProjectedChunkV1>,
     postings: Option<LexicalGenerationPostingsBuildV1>,
@@ -525,28 +531,28 @@ pub struct CodeLexicalProjectionBuildV1 {
 
 impl CodeLexicalProjectionBuildV1 {
     pub fn new_admitted<C>(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: impl Into<Arc<CodeLexicalProjectionMetadataV1>>,
         chunks: Vec<C>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: impl Into<Arc<BTreeMap<SymbolOccurrenceId, String>>>,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
     {
         Self::new_inner(
-            metadata,
+            metadata.into(),
             chunks
                 .into_iter()
                 .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
                 .collect(),
-            symbol_qualified_names,
+            symbol_qualified_names.into(),
             true,
         )
     }
 
     fn new_inner(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: Arc<CodeLexicalProjectionMetadataV1>,
         mut chunks: Vec<CodeSearchChunkV1>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
         extraction_admitted: bool,
     ) -> Result<Self, RetrievalPortError> {
         metadata.validate()?;
@@ -804,22 +810,34 @@ impl LexicalGenerationPostingsV1 {
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
         phrase_candidates: &BTreeMap<String, RoaringBitmap>,
+        pruned: &mut Vec<(String, u64)>,
     ) -> RoaringBitmap {
-        let mut documents = RoaringBitmap::new();
+        let mut sources = Vec::new();
         for term in &request.whole_terms {
-            self.union_whole_term(&normalize_lexical(term), &mut documents);
+            let (frequency, documents) = self.whole_term_documents(&normalize_lexical(term));
+            sources.push((frequency, (term.clone(), documents)));
             if let Some(expansions) = fuzzy.by_query.get(term) {
                 for expansion in expansions {
-                    self.union_whole_term(expansion, &mut documents);
+                    let (frequency, documents) = self.whole_term_documents(expansion);
+                    sources.push((frequency, (expansion.clone(), documents)));
                 }
             }
         }
         if let Some(postings) = self.term_documents.get(&LexicalFieldV1::Subtoken) {
             for subtoken in &request.subtokens {
                 if let Some(posting) = postings.get(&normalize_lexical(subtoken)) {
-                    documents |= &posting.documents;
+                    sources.push((
+                        posting.documents.len() as usize,
+                        (subtoken.clone(), posting.documents.clone()),
+                    ));
                 }
             }
+        }
+        let mut documents = RoaringBitmap::new();
+        for (_, source) in admit_candidate_sources(sources, |frequency, (term, _)| {
+            pruned.push((term.clone(), frequency as u64));
+        }) {
+            documents |= source;
         }
         // Reuse the per-phrase n-gram candidate sets computed once by the
         // caller. Union is idempotent, so unioning the deduplicated normalized
@@ -875,15 +893,22 @@ impl LexicalGenerationPostingsV1 {
             .count()
     }
 
-    fn union_whole_term(&self, term: &str, documents: &mut RoaringBitmap) {
+    /// A whole-term candidate source: the term's documents across every
+    /// non-subtoken field, keyed by the summed per-field document frequency
+    /// the artifact reader also admits by.
+    fn whole_term_documents(&self, term: &str) -> (usize, RoaringBitmap) {
+        let mut documents = RoaringBitmap::new();
+        let mut frequency = 0usize;
         for (field, postings) in &self.term_documents {
             if *field == LexicalFieldV1::Subtoken {
                 continue;
             }
             if let Some(posting) = postings.get(term) {
-                *documents |= &posting.documents;
+                frequency = frequency.saturating_add(posting.documents.len() as usize);
+                documents |= &posting.documents;
             }
         }
+        (frequency, documents)
     }
 }
 
@@ -935,35 +960,52 @@ impl CodeLexicalProjectionAdapterV1 {
     }
 
     pub fn new(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: impl Into<Arc<CodeLexicalProjectionMetadataV1>>,
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Self, RetrievalPortError> {
-        Self::new_inner(metadata, chunks, BTreeMap::new(), false, None)
+        Self::new_inner(
+            metadata.into(),
+            chunks,
+            Arc::new(BTreeMap::new()),
+            false,
+            None,
+        )
     }
 
+    /// The single shared-source constructor: `chunks` carry parser-backed
+    /// extraction admission and `symbol_qualified_names` the extractor's
+    /// qualified name for every symbol occurrence among them; the sealed-page
+    /// artifact path carries the same authority on its per-chunk symbol
+    /// display. Passing an empty map projects no qualified-name postings, so
+    /// qualified-symbol queries lose their exact recall.
+    ///
+    /// Both shared inputs are accepted as anything convertible to an `Arc`, so
+    /// a caller building one projection per scope over the same generation
+    /// hands every scope the same immutable metadata and name map instead of
+    /// cloning them per scope.
+    ///
     /// Hard-wires `deadline_micros = None` (crate 30s fallback); the daemon
     /// mount passes its own deadline to [`Self::new_admitted_with_deadline`].
-    ///
-    /// `symbol_qualified_names` carries the extractor's qualified name for
-    /// every symbol occurrence in `chunks`; the sealed-page artifact path
-    /// carries the same authority on its per-chunk symbol display. Passing an
-    /// empty map projects no qualified-name postings, so qualified-symbol
-    /// queries lose their exact recall.
     pub fn new_admitted<C>(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: impl Into<Arc<CodeLexicalProjectionMetadataV1>>,
         chunks: Vec<C>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: impl Into<Arc<BTreeMap<SymbolOccurrenceId, String>>>,
     ) -> Result<Self, RetrievalPortError>
     where
         C: ExtractionAdmittedChunkV1,
     {
-        Self::new_admitted_with_deadline(metadata, chunks, symbol_qualified_names, None)
+        Self::new_admitted_with_deadline(
+            metadata.into(),
+            chunks,
+            symbol_qualified_names.into(),
+            None,
+        )
     }
 
     fn new_admitted_with_deadline<C>(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: Arc<CodeLexicalProjectionMetadataV1>,
         chunks: Vec<C>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError>
     where
@@ -982,9 +1024,9 @@ impl CodeLexicalProjectionAdapterV1 {
     }
 
     fn new_inner(
-        metadata: CodeLexicalProjectionMetadataV1,
+        metadata: Arc<CodeLexicalProjectionMetadataV1>,
         chunks: Vec<CodeSearchChunkV1>,
-        symbol_qualified_names: BTreeMap<SymbolOccurrenceId, String>,
+        symbol_qualified_names: Arc<BTreeMap<SymbolOccurrenceId, String>>,
         extraction_admitted: bool,
         deadline_micros: Option<u64>,
     ) -> Result<Self, RetrievalPortError> {
@@ -1033,7 +1075,7 @@ impl CodeLexicalProjectionAdapterV1 {
     fn lexical_batch(
         &self,
         request: &LexicalLaneRequest<'_>,
-    ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
+    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request)?;
         let prepared = PreparedLexicalQueryV1::new(request);
         // Intersect the n-gram postings for each normalized phrase exactly once,
@@ -1057,12 +1099,14 @@ impl CodeLexicalProjectionAdapterV1 {
                 (phrase.clone(), frequency)
             })
             .collect::<BTreeMap<_, _>>();
-        let documents = self
-            .postings
-            .lexical_documents(request, &fuzzy, &phrase_candidates);
+        let mut pruned = Vec::new();
+        let documents =
+            self.postings
+                .lexical_documents(request, &fuzzy, &phrase_candidates, &mut pruned);
         let mut pairs = Vec::new();
         let mut excluded = self.rows.len() as u64 - documents.len();
         for document in documents {
+            lexical_checkpoint(request.control)?;
             let row = &self.rows[document as usize];
             let score = self.score_row(
                 document,
@@ -1107,18 +1151,21 @@ impl CodeLexicalProjectionAdapterV1 {
         }
         hotpath::gauge!("query.lane.lexical.candidates").set(candidates.len());
         hotpath::gauge!("query.lane.lexical.examined").set(self.rows.len());
-        Ok(RetrieverBatch {
-            coverage: RetrieverCoverage {
-                examined: self.rows.len() as u64,
-                eligible: candidates.len() as u64,
-                excluded,
-                capped: 0,
-                unknown: 0,
+        Ok(candidate_admission_outcome(
+            RetrieverBatch {
+                coverage: RetrieverCoverage {
+                    examined: self.rows.len() as u64,
+                    eligible: candidates.len() as u64,
+                    excluded,
+                    capped: 0,
+                    unknown: 0,
+                },
+                candidates,
+                evidence_by_occurrence,
+                continuation: None,
             },
-            candidates,
-            evidence_by_occurrence,
-            continuation: None,
-        })
+            pruned,
+        ))
     }
 
     #[hotpath::measure(label = "query.lane.fuzzy.expand")]
@@ -1417,7 +1464,7 @@ impl LexicalPostingReadPort for CodeLexicalProjectionAdapterV1 {
         if let Some(outcome) = self.stale_outcome() {
             return Ok(outcome);
         }
-        Ok(RetrieverOutcome::Complete(self.lexical_batch(request)?))
+        self.lexical_batch(request)
     }
 }
 
@@ -1952,9 +1999,9 @@ mod deadline_budget_tests {
     #[test]
     fn zero_deadline_is_immediate_budget_exceeded() {
         let error = CodeLexicalProjectionAdapterV1::new_inner(
-            dummy_metadata(),
+            Arc::new(dummy_metadata()),
             Vec::<CodeSearchChunkV1>::new(),
-            BTreeMap::new(),
+            Arc::new(BTreeMap::new()),
             true,
             Some(0),
         )

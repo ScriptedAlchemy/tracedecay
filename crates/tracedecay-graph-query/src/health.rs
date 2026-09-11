@@ -27,6 +27,9 @@ pub struct VerifiedHealthSnapshotV1 {
     pub max_chain: usize,
     pub ideal_chain: usize,
     pub complexity_files: usize,
+    /// Symbols whose complexity counters were left out of the per-file
+    /// complexity because their bounded walk did not cover the body.
+    pub incomplete_complexity_symbols: usize,
     pub modularity_components: usize,
     pub dead_count: usize,
     pub total_fns: usize,
@@ -38,26 +41,27 @@ pub async fn compute_verified_health_snapshot(
     graph: &GraphQueryManager<'_>,
     path_prefix: Option<&str>,
 ) -> Result<VerifiedHealthSnapshotV1> {
-    let adjacency = hotpath::future!(
-        graph.build_file_adjacency(path_prefix),
-        label = "usecases.graph.health.adjacency"
+    let inputs = hotpath::future!(
+        graph.health_inputs(path_prefix),
+        label = "usecases.graph.health.inputs"
     )
     .await?;
+    let adjacency = inputs.adjacency;
     let files_analyzed = adjacency.len();
     let total_edges = adjacency.values().map(HashSet::len).sum();
     let (acyclicity, edges_in_cycles) = acyclicity_score(&adjacency);
     let depth_result = dependency_depth(&adjacency, 1);
     let depth = depth_score(depth_result.max_depth, depth_result.ideal_depth);
-    let aggregates = hotpath::future!(
-        graph.health_file_aggregates(path_prefix),
-        label = "usecases.graph.health.aggregates"
-    )
-    .await?;
+    let aggregates = inputs.aggregates;
     let complexity_values = aggregates
         .iter()
         .map(|aggregate| aggregate.complexity)
         .collect::<Vec<_>>();
     let complexity_files = complexity_values.len();
+    let incomplete_complexity_symbols = aggregates
+        .iter()
+        .map(|aggregate| aggregate.incomplete_complexity_symbols)
+        .sum::<usize>();
     let total_fns = aggregates
         .iter()
         .map(|aggregate| aggregate.function_methods)
@@ -106,6 +110,7 @@ pub async fn compute_verified_health_snapshot(
         max_chain: depth_result.max_depth,
         ideal_chain: depth_result.ideal_depth,
         complexity_files,
+        incomplete_complexity_symbols,
         modularity_components,
         dead_count,
         total_fns,

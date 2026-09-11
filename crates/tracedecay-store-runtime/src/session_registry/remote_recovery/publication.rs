@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 
 use tracedecay_domain::ProjectId;
+use tracedecay_runtime_core::shard_runtime::registry::DestructiveMaintenanceTarget;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
-use tracedecay_runtime_core::store_runtime::registry::DestructiveMaintenanceTarget;
 use tracedecay_session_temporal_store::relations::SessionRelationScope;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
@@ -202,10 +202,10 @@ impl RemoteRecoveryPublicationContextV1 {
             }
         };
         let store = match self.registry.reserve_retirement_batch(vec![store_target]) {
-            tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Reserved(
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Reserved(
                 reservation,
             ) => reservation,
-            tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult::Blocked(
+            tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult::Blocked(
                 refusal,
             ) => {
                 let (blockers, mut targets) = refusal.into_parts();
@@ -304,7 +304,11 @@ impl RemoteRecoveryPublicationContextV1 {
         )
         .await?;
         let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-        let database = RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?;
+        let database = RegisteredGlobalDbOwnerV1::admit_and_attach_with_operation_task_owner(
+            database,
+            Arc::clone(&self.operation_task_owner),
+        )
+        .await?;
         let graph_open_task_key = format!("{shard_id:?}");
         let (graph, store_target) =
             super::super::code_graph::graph_attachment::open_session_relation_owner(
@@ -726,7 +730,7 @@ mod tests {
 
     use tracedecay_domain::ProjectId;
     use tracedecay_graph_db::NeverCancelled;
-    use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRetirementResult;
+    use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRetirementResult;
 
     use super::*;
     use crate::session_registry::{
@@ -902,6 +906,7 @@ mod tests {
             registry.registry.clone(),
             registry.graph_registry.clone(),
             Arc::clone(&registry.graph_lifecycle_cancelled),
+            Arc::clone(&registry.semantic_vector_operation_task_owner),
             profile_pin,
             registry.project_owners.clone(),
             Arc::clone(&registry.remote_replay_transaction),
@@ -984,5 +989,81 @@ mod tests {
                 ProjectSessionRecoveryPhaseV1::Terminal(proof) if proof.verify()
             ));
         }
+    }
+
+    /// `retire_replacement_to_vacancy` fences replay/sync through an old
+    /// lease before it reserves the graph. That lease binds a counted graph
+    /// client into the owner-retained slot, which outlives the lease itself;
+    /// reserving the retirement target must release it or graph retirement is
+    /// refused by `can_reserve_owner_attachment`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_retirement_target_releases_owner_retained_client_from_old_lease() {
+        let temporary = tempfile::tempdir().expect("temporary project parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            1,
+            "old lease graph client release",
+        )
+        .expect("daemon database scope");
+        let project_id =
+            ProjectId::new("project.old-lease-graph-client").expect("typed project identity");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let mounted = registry
+            .project_sessions(project_id.clone(), [project_root])
+            .await
+            .expect("registered project sessions");
+        drop(mounted);
+
+        let mut replacement = registry
+            .reserve_project_session_replacement(&project_id)
+            .await
+            .expect("reserve prior session owner")
+            .expect("mounted session owner");
+        let old_lease = replacement.issue_old_lease().expect("old session lease");
+        old_lease
+            .session_relation_graph_lease()
+            .expect("old lease binds the owner-retained graph client");
+        drop(old_lease);
+        let graph_target = replacement
+            .graph_retirement_target()
+            .expect("prior graph target");
+        let graph = registry
+            .graph_registry
+            .reserve_retirement_batch(vec![graph_target])
+            .expect("dropped old lease must leave no owner-retained graph client");
+        let store_target = replacement
+            .reserve_store_target()
+            .expect("reserve prior Store target");
+        let store = match registry
+            .registry
+            .reserve_retirement_batch(vec![store_target])
+        {
+            StoreRuntimeRetirementResult::Reserved(reservation) => reservation,
+            StoreRuntimeRetirementResult::Blocked(refusal) => {
+                panic!("prior Store target unexpectedly blocked: {refusal:?}")
+            }
+        };
+        drop(ProjectSessionNativeRetirementV1::new(
+            replacement,
+            graph,
+            store,
+        ));
     }
 }

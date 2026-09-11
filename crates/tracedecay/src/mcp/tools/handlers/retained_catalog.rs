@@ -1,16 +1,18 @@
 use std::collections::BTreeSet;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use serde_json::Value;
-use tracedecay_application::{
+use tracedecay_contracts::{
     APPLICATION_DEFAULT_PROFILE_ID, RetainedSurfaceOperation,
     retained_surface_application_operation,
 };
 use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
-use crate::application_surface::normalize_application_tool_args;
-use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::tracedecay::TraceDecay;
+use tracedecay_contracts::catalog_composition::{
+    ApplicationCatalogComposition, compose_application_catalog,
+};
+use tracedecay_daemon_protocol::separate_application_tool_request;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{ToolCallRegistryOptions, application_surface};
@@ -126,21 +128,22 @@ fn retained_mcp_binding_from_cache(
         .map_err(retained_catalog_error)
 }
 
-pub(crate) fn retained_mcp_operation(
-    tool_name: &str,
-    arguments: &Value,
-) -> Option<RetainedSurfaceOperation> {
-    match tool_name {
-        "tracedecay_session_refresh" => match arguments.get("action").and_then(Value::as_str) {
-            Some("status") => Some(RetainedSurfaceOperation::SessionRefreshStatus),
-            Some("start" | "join" | "resume" | "begin") => {
-                Some(RetainedSurfaceOperation::SessionRefreshBegin)
-            }
-            Some("cancel") => Some(RetainedSurfaceOperation::SessionRefreshCancel),
-            _ => None,
-        },
-        _ => RetainedSurfaceOperation::from_tool_name(tool_name),
-    }
+/// Whether a session refresh call selects the profile-owned session store. The
+/// canonical request carries the scope, so MCP routes on it directly instead
+/// of a transport-only selector.
+pub(crate) fn session_refresh_profile_scope_requested(tool_name: &str, arguments: &Value) -> bool {
+    matches!(
+        RetainedSurfaceOperation::from_tool_name(tool_name),
+        Some(
+            RetainedSurfaceOperation::SessionRefreshBegin
+                | RetainedSurfaceOperation::SessionRefreshStatus
+                | RetainedSurfaceOperation::SessionRefreshCancel
+        )
+    ) && arguments
+        .get("scope")
+        .and_then(|scope| scope.get("kind"))
+        .and_then(Value::as_str)
+        == Some("profile")
 }
 
 #[hotpath::measure(future = true, label = "mcp.dispatch.profile_retained_application")]
@@ -168,6 +171,7 @@ pub(super) async fn dispatch_profile_retained_application_tool(
         cg.store_runtime_registry().as_ref(),
         authority,
         options.session_authorities.profile_lcm,
+        options.session_authorities.profile_session_refresh,
         options.application_request_id,
         options.application_deadline,
         options.application_cancellation,
@@ -182,30 +186,32 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     tool_name: &str,
     mut args: Value,
     runtime_registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
-    authority: &crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1,
+    authority: &tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
     lcm_authority: Option<&dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
-    protocol_request_id: Option<tracedecay_application::RequestId>,
-    protocol_deadline: Option<tracedecay_application::Deadline>,
-    protocol_cancellation: Option<tracedecay_application::CancellationSignal>,
+    session_refresh: Option<
+        &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1,
+    >,
+    protocol_request_id: Option<tracedecay_contracts::RequestId>,
+    protocol_deadline: Option<tracedecay_contracts::Deadline>,
+    protocol_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     project_root: Option<&std::path::Path>,
 ) -> Result<ToolResult> {
-    if let Some(arguments) = args.as_object_mut() {
-        if tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search" {
-            arguments.remove("storage_scope");
-        }
-        if tool_name == "tracedecay_session_refresh" {
-            arguments.remove("action");
-        }
+    if let Some(arguments) = args.as_object_mut()
+        && (tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
+    {
+        arguments.remove("storage_scope");
     }
-    let normalized = normalize_application_tool_args(tool_name, args).map_err(|error| {
-        TraceDecayError::Config {
+    let normalized =
+        separate_application_tool_request(args).map_err(|error| TraceDecayError::Config {
             message: error.to_string(),
-        }
-    })?;
+        })?;
     let requested_format = normalized.requested_format;
     let typed_request = hotpath::measure_block!(
         "mcp.retained.profile.decode",
-        crate::application_surface::retained::decode_request(operation, normalized.request)
+        tracedecay_daemon_service::application_surface::retained::decode_request(
+            operation,
+            normalized.request
+        )
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("invalid retained application request for {tool_name}: {error}"),
@@ -234,12 +240,19 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
         )
     })?;
     let result = hotpath::future!(
-        crate::daemon::retained_owner::execute_profile_retained_application(
-            crate::daemon::retained_owner::ProfileRetainedAuthoritiesV1 {
-                runtime_registry: Some(runtime_registry),
+        tracedecay_session_runtime::retained::execute_profile_retained_application(
+            tracedecay_session_runtime::retained::ProfileRetainedAuthoritiesV1 {
+                profile_sessions: Some(Arc::new(|| Box::pin(runtime_registry.profile_sessions()))),
                 session_identity: authority.session_identity().clone(),
                 configuration_digest: authority.configuration_digest().clone(),
                 lcm_authority,
+                session_refresh,
+                memory: Some(Arc::new(
+                    tracedecay_store_runtime::retained_memory::DirectRetainedMemoryPortV1::profile(
+                        runtime_registry,
+                        authority.configuration_digest().clone(),
+                    ),
+                )),
             },
             authority,
             typed_request,

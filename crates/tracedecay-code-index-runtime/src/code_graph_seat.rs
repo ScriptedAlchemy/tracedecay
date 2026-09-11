@@ -20,6 +20,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use tracedecay_application::semantic_runtime::{
+    SemanticVectorGraphScopeV1, VerifiedSemanticVectorGraphRuntimeV1,
+};
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
@@ -28,11 +31,8 @@ use tracedecay_graph_db::{
     SealedReadBundleArtifactStateV1, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
+use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
-use tracedecay_usecases::semantic_runtime::{
-    SemanticVectorGraphScopeV1, VerifiedSemanticVectorGraphRuntimeV1,
-};
 
 /// Sealed-generation replay identity the seat port needs to retain a runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]

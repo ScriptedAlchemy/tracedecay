@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use tracedecay_application::{
-    AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext,
-    Deadline, RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
+use tracedecay_contracts::{
+    AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, Deadline,
+    RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_daemon_protocol::MAX_LSP_WORKSPACE_ROOTS;
 use tracedecay_domain::{ScopeSetId, ScopeSetRevision, UtcMicros, canonical_sha256};
@@ -59,35 +59,16 @@ impl DaemonInvocationService {
         if authorized.scope_set.roots().len() != authorized.factories.len() {
             return None;
         }
-        // The factories keep the workspace's own scope-digest order while
-        // `AuthorizedScopeSet` canonicalizes its roots by scope identity
-        // (project, repository, worktree, reference, canonical root). The two
-        // lists therefore agree on membership but not on position, so pairing
-        // them by index attributed a factory to another root's locator and
-        // refused a workspace whose every root was in fact its own owner —
-        // for whichever root orderings happened to disagree. Pair on the exact
-        // scope digest both sides carry instead.
-        let locator_for = |root: &AdmittedRoot| -> Option<&RegisteredRootLocatorV1> {
-            let scope_digest = root.scope_digest()?;
-            authorized
-                .scope_set
-                .roots()
-                .iter()
-                .find(|candidate| candidate.scope().scope_digest == *scope_digest)
-                .and_then(AuthorizedRoot::locator)
-        };
-        if expected_owner.is_some_and(|expected| {
-            !authorized.factories.iter().any(|(root, factory)| {
-                locator_for(root).is_some_and(|locator| {
-                    expected.project_identity.matches_locator(locator)
-                        && std::sync::Arc::ptr_eq(factory, &expected.factory)
-                })
-            })
-        }) {
-            return None;
-        }
+        let mut expected_owner_matched = expected_owner.is_none();
         for (root, factory) in &authorized.factories {
-            let locator = locator_for(root)?;
+            // LSP roots are ordered by scope digest; the application scope set
+            // orders exact project identities. Bind authorities by identity,
+            // since their positions need not agree.
+            let authorized_root =
+                authorized.scope_set.roots().iter().find(|candidate| {
+                    Some(&candidate.scope().scope_digest) == root.scope_digest()
+                })?;
+            let locator = authorized_root.locator()?;
             let path = url::Url::parse(root.uri()).ok()?.to_file_path().ok()?;
             let current_owner = self.lsp_owner(Some(&path)).await?;
             if !current_owner.project_identity.matches_locator(locator)
@@ -95,6 +76,15 @@ impl DaemonInvocationService {
             {
                 return None;
             }
+            if expected_owner.is_some_and(|expected| {
+                expected.project_identity.matches_locator(locator)
+                    && std::sync::Arc::ptr_eq(factory, &expected.factory)
+            }) {
+                expected_owner_matched = true;
+            }
+        }
+        if !expected_owner_matched {
+            return None;
         }
         Some(CurrentLspWorkspaceAuthorityV1::Federated(authorized))
     }

@@ -1,23 +1,19 @@
-//! Composition-root registration for every process-global runtime port.
+//! Composition-root wiring for the capabilities the extracted crates invert.
 //!
-//! The crate split left several capabilities inverted behind `OnceLock` slots
-//! in the extracted crates: `tracedecay_sessions::host_ports` and
-//! `tracedecay_agent_hosts::ports`. Each slot has a
-//! conservative default so an unwired process still runs — it just does less
-//! (no memory injection, zero turn costs, a daemon that reports itself
-//! unavailable).
+//! Two shapes live here. The hook runtime is an explicit value: [`hook_runtime`]
+//! builds the [`HookRuntimeV1`] handle from root adapters and the CLI passes it
+//! into every `tracedecay_agent_hosts::hooks::hook_*` entry point, so a hook
+//! path cannot run without a complete handle and two fixtures can hold two
+//! different handles in one process.
 //!
-//! Only the composition root can fill them, and it must do so before any
-//! transcript ingest, host installer, hook, or branch lock runs. That is what
+//! The remaining capabilities (`tracedecay_sessions::host_ports` and the
+//! automation host-I/O bundle) are still process-global `OnceLock` slots that
+//! only the composition root can fill, and it must do so before any transcript
+//! ingest, host installer, or branch lock runs. That is what
 //! [`register_runtime_ports`] is: the complete, idempotent, root-owned wiring
-//! call. There is no partial form: an earlier split that installed everything
-//! *except* the agent-host MCP tool catalog let any installer reached on that
-//! path write an empty tool permission set with no error, so the catalog is
-//! now read directly from `tracedecay-mcp` by the crate that needs it and is
-//! not wired here at all. Composition-root registry wrappers (`join_standalone_session_registry`, session-runtime
-//! shutdown, host admission) invoke the complete form for embedded and
-//! integration-test runtimes that never pass through `main`. The extracted
-//! store-runtime crate never calls this.
+//! call. Composition-root registry wrappers (`join_standalone_session_registry`,
+//! session-runtime shutdown, host admission) invoke it for embedded and
+//! integration-test runtimes that never pass through `main`.
 //!
 //! Every underlying `register` is `OnceLock::set`, so repeated calls are safe
 //! and the first registration wins.
@@ -28,6 +24,7 @@ use std::pin::Pin;
 
 use serde_json::Value;
 
+use tracedecay_agent_hosts::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_domain::errors::Result;
 
 /// Installs every root-owned runtime port. Idempotent; first call wins.
@@ -42,14 +39,17 @@ pub fn register_runtime_ports() -> Result<()> {
     Ok(())
 }
 
-/// Adapts the root catalog composer to the code-index runtime's provider seam.
+/// Injects the contracts-owned catalog composition into the code-index
+/// runtime's provider seam.
 pub(crate) fn compose_application_catalog_snapshot() -> std::result::Result<
     tracedecay_tool_catalog::CatalogSnapshotV1,
     tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1,
 > {
-    crate::catalog_composition::build_application_catalog_snapshot().map_err(|error| {
-        tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
-    })
+    tracedecay_contracts::catalog_composition::build_application_catalog_snapshot().map_err(
+        |error| {
+            tracedecay_code_index_runtime::ApplicationCatalogSnapshotErrorV1::new(error.to_string())
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +71,13 @@ fn schedule_user_session_review<'a>(
     session_id: Option<&'a str>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(hotpath::future!(
-        tracedecay_agent_hosts::hooks::schedule_user_session_review(provider, session_id),
+        async move {
+            let runtime = hook_runtime();
+            tracedecay_agent_hosts::hooks::schedule_user_session_review(
+                &runtime, provider, session_id,
+            )
+            .await;
+        },
         label = "runtime_ports.session_review"
     ))
 }
@@ -101,20 +107,27 @@ fn unregistered_admission(
 // ---------------------------------------------------------------------------
 
 fn register_agent_host_ports() {
-    use tracedecay_agent_hosts::ports;
     use tracedecay_automation_runtime::ports as automation_ports;
 
-    tracedecay_agent_hosts::register_automation_host_io();
     automation_ports::codex_app_server::register(run_codex_app_server_prompt);
     automation_ports::session_store::register_canonical_project_key(
         tracedecay_global_db::RegisteredGlobalDb::canonical_project_key,
     );
-    // One handle, built here and installed whole: a hook path either has every
-    // root capability or the process reports a bootstrap failure. Two former
-    // slots are absent by design — the memory-injection gate and the Cursor
-    // ingest ceiling were agent-hosts' own function and constant round-tripped
-    // through the root, and their readers now call them directly.
-    ports::hook_runtime::install(ports::hook_runtime::HookRuntimeV1 {
+}
+
+/// The root's hook runtime handle: every capability a hook path needs, as one
+/// `Copy` value of root adapters.
+///
+/// Built wherever a hook entry point starts (the CLI hook dispatcher, native
+/// capture, the session-review port adapter) rather than stored: the struct is
+/// plain function pointers, so constructing it is free and there is no slot for
+/// a second composition to lose. Two former slots are absent by design — the
+/// memory-injection gate and the Cursor ingest ceiling were agent-hosts' own
+/// function and constant round-tripped through the root, and their readers now
+/// call them directly.
+#[must_use]
+pub fn hook_runtime() -> HookRuntimeV1 {
+    HookRuntimeV1 {
         daemon_tool: daemon_tool_json,
         project_root_resolver: resolve_project_root_with_identity,
         scope_resolver: resolve_hook_scope,
@@ -122,7 +135,7 @@ fn register_agent_host_ports() {
         timing_gate: hook_timings_enabled,
         project_initialization_gate: crate::tracedecay::TraceDecay::is_initialized,
         store_layout_resolver: resolve_hook_store_layout,
-    });
+    }
 }
 
 #[hotpath::measure(label = "runtime_ports.codex_app_server")]
@@ -130,24 +143,35 @@ fn run_codex_app_server_prompt(
     prompt: &str,
     config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
     thread_source: &str,
+    response_schema: Option<&Value>,
 ) -> std::result::Result<tracedecay_automation_runtime::ports::codex_app_server::Summary, String> {
     let config = tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig {
         codex_bin: config.codex_bin.clone(),
         model: config.model.clone(),
         timeout: config.timeout,
     };
-    tracedecay_sessions::runtime::codex_app_server::run_prompt_with_codex_app_server(
-        prompt,
-        &config,
-        thread_source,
-    )
-    .map(
-        |summary| tracedecay_automation_runtime::ports::codex_app_server::Summary {
-            text: summary.text,
-            model: summary.model,
-        },
-    )
-    .map_err(|error| error.to_string())
+    let result = if let Some(response_schema) = response_schema {
+        tracedecay_sessions::runtime::codex_app_server::run_prompt_with_codex_app_server_response_schema(
+            prompt,
+            &config,
+            thread_source,
+            response_schema,
+        )
+    } else {
+        tracedecay_sessions::runtime::codex_app_server::run_prompt_with_codex_app_server(
+            prompt,
+            &config,
+            thread_source,
+        )
+    };
+    result
+        .map(
+            |summary| tracedecay_automation_runtime::ports::codex_app_server::Summary {
+                text: summary.text,
+                model: summary.model,
+            },
+        )
+        .map_err(|error| error.to_string())
 }
 
 /// Fn-pointer shim over the root's async daemon tool call.
@@ -188,7 +212,7 @@ fn resolve_project_root_with_identity(
 fn resolve_hook_scope(
     project_root: &Path,
     project_id: &tracedecay_domain::ProjectId,
-) -> std::result::Result<tracedecay_application::ResolvedScope, String> {
+) -> std::result::Result<tracedecay_contracts::ResolvedScope, String> {
     tracedecay_code_index_runtime::resolved_scope_for_project(project_root, project_id)
         .map_err(|error| error.to_string())
 }
@@ -241,18 +265,26 @@ mod tests {
         pinned
     }
 
+    /// YAML double-quoted scalars treat `\t`/`\U` as escapes. A Windows
+    /// native path must be written so those separators survive as separators.
+    fn hermes_project_root_yaml(project_root: &str) -> String {
+        format!(
+            "plugins:\n  tracedecay:\n    project_root: '{}'\n",
+            project_root.replace('\'', "''")
+        )
+    }
+
     #[test]
     fn hermes_profile_pin_resolves_a_pinned_root_after_registration() {
         let _pinned = registered();
         let temp = tempfile::tempdir().expect("tempdir");
         let config = temp.path().join("config.yaml");
         let pinned = temp.path().join("pinned-project");
+        // Single-quoted so a Windows path's backslashes are not read as YAML
+        // escapes (`\a` -> BEL, `\t` -> TAB).
         std::fs::write(
             &config,
-            format!(
-                "plugins:\n  tracedecay:\n    project_root: \"{}\"\n",
-                pinned.display()
-            ),
+            hermes_project_root_yaml(&pinned.display().to_string()),
         )
         .expect("write hermes profile config");
 
@@ -262,6 +294,22 @@ mod tests {
             tracedecay_sessions::host_ports::hermes_profile_pin::resolve(&config),
             Some(pinned.display().to_string()),
             "registered resolver must back the hermes profile pin port"
+        );
+    }
+
+    #[test]
+    fn hermes_profile_pin_preserves_windows_escape_prone_separators() {
+        let _pinned = registered();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("config.yaml");
+        let windows_root = r"C:\Users\temp\pinned-project";
+        std::fs::write(&config, hermes_project_root_yaml(windows_root))
+            .expect("write hermes profile config");
+
+        assert_eq!(
+            tracedecay_sessions::host_ports::hermes_profile_pin::resolve(&config),
+            Some(windows_root.to_string()),
+            "a Windows native path must round-trip through YAML without bell/tab escapes"
         );
     }
 
@@ -282,15 +330,34 @@ mod tests {
         );
     }
 
-    /// The whole hook runtime arrives as one handle, so this is the single
-    /// assertion that the composition root is complete for every hook path.
-    #[test]
-    fn the_hook_runtime_handle_is_installed_after_registration() {
+    /// The hook runtime is one explicit handle of root adapters, so this is
+    /// the single check that every hook capability the root composes answers
+    /// through the root (here: the registered-identity gates for an
+    /// unregistered checkout) instead of through a slot that may be empty.
+    #[tokio::test]
+    async fn the_hook_runtime_handle_answers_through_root_adapters() {
         let _pinned = registered();
+        let runtime = hook_runtime();
+        let unregistered = tempfile::tempdir().expect("tempdir");
+        // The layout keeps the caller's spelling of the root, so hand it the
+        // canonical form up front: macOS temp roots live behind the
+        // `/var` -> `/private/var` symlink.
+        let checkout = unregistered
+            .path()
+            .canonicalize()
+            .expect("canonical checkout");
+
+        assert!(!(runtime.project_initialization_gate)(&checkout));
+        assert!((runtime.project_root_resolver)(&checkout).await.is_none());
         assert!(
-            tracedecay_agent_hosts::ports::hook_runtime::installed().is_some(),
-            "register_runtime_ports must install the hook runtime handle"
+            (runtime.timing_gate)(&checkout).is_none(),
+            "an unregistered checkout has no published telemetry override"
         );
+        let layout = (runtime.store_layout_resolver)(&checkout)
+            .await
+            .expect("the root resolves a canonical layout for any checkout");
+        assert_eq!(layout.project_root, checkout);
+        assert!(layout.identity.project_id.is_some());
     }
 
     /// The tool catalog is no longer wired here at all: host installers read

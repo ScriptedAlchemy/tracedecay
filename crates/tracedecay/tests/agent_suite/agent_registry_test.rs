@@ -1,6 +1,6 @@
 //! Agent registry and agent-trait tests (availability, ids, names).
 
-use tracedecay::agents::*;
+use tracedecay_agent_hosts::agents::*;
 
 // ---------------------------------------------------------------------------
 // 1. Registry tests

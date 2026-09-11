@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-use crate::storage::StoreLayout;
+use tracedecay_runtime_core::storage::StoreLayout;
 
 type LayoutCache = HashMap<(PathBuf, PathBuf), Option<StoreLayout>>;
 
@@ -33,20 +33,20 @@ static RESOLVED_LAYOUTS: LazyLock<Mutex<LayoutCache>> =
     LazyLock::new(|| Mutex::new(LayoutCache::new()));
 
 /// The store layout for `project_root` only when an authority already names
-/// this checkout. Memoized [`crate::storage::resolve_enrolled_layout_for_current_profile`].
+/// this checkout. Memoized [`tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile`].
 pub(super) fn enrolled_layout(project_root: &Path) -> Option<StoreLayout> {
     memoized(&ENROLLED_LAYOUTS, project_root, |root| {
-        crate::storage::resolve_enrolled_layout_for_current_profile(root)
+        tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(root)
             .ok()
             .flatten()
     })
 }
 
 /// The store layout for `project_root`, falling back to the default
-/// profile-sharded layout. Memoized [`crate::storage::resolve_layout_for_current_profile`].
+/// profile-sharded layout. Memoized [`tracedecay_runtime_core::storage::resolve_layout_for_current_profile`].
 pub(super) fn layout(project_root: &Path) -> Option<StoreLayout> {
     memoized(&RESOLVED_LAYOUTS, project_root, |root| {
-        crate::storage::resolve_layout_for_current_profile(root).ok()
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(root).ok()
     })
 }
 
@@ -55,7 +55,7 @@ fn memoized(
     project_root: &Path,
     resolve: impl FnOnce(&Path) -> Option<StoreLayout>,
 ) -> Option<StoreLayout> {
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
+    let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
         // Without a profile there is nothing to key on and nothing to resolve.
         return None;
     };
@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn enrolled_layout_is_resolved_once_per_project_root() {
         // `PinnedUserDataDir` already holds the user-data-dir test lock.
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         clear_memoized_layouts();
 
         let project = tempfile::tempdir().unwrap();
@@ -112,8 +112,11 @@ mod tests {
 
         // Enrolling after the miss is cached does not change the memoized
         // answer: a hook process resolves one checkout's identity once.
-        crate::storage::pin_fixture_repository_identity(&project_root, "proj_hook_layout_memo")
-            .unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            "proj_hook_layout_memo",
+        )
+        .unwrap();
         assert!(enrolled_layout(&project_root).is_none());
 
         clear_memoized_layouts();
@@ -132,7 +135,7 @@ mod tests {
     #[test]
     fn layout_falls_back_to_the_default_profile_shard() {
         // `PinnedUserDataDir` already holds the user-data-dir test lock.
-        let _profile = crate::config::PinnedUserDataDir::new();
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         clear_memoized_layouts();
 
         let project = tempfile::tempdir().unwrap();

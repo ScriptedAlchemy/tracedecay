@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-LINT_RANGE = REPOSITORY_ROOT / "scripts" / "lint-commit-range.sh"
+LINT_RANGE = REPOSITORY_ROOT / "scripts" / "lint-commit-range.mjs"
 
 
 def run(
@@ -82,7 +82,7 @@ class CommitRangeLintTests(unittest.TestCase):
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return run(
-            ["bash", str(LINT_RANGE), base, head],
+            ["node", str(LINT_RANGE), "--repository", str(self.root), base, head],
             cwd=self.root,
             env=env,
             check=False,

@@ -9,7 +9,7 @@
 
 /// Installer for the registered global/session schema.
 ///
-/// `store_runtime::registry` initialises a freshly created profile- or
+/// `shard_runtime::registry` initialises a freshly created profile- or
 /// session-scoped shard by running the registered global-database schema
 /// against the attachment it just opened. That schema lives in
 /// `tracedecay-global-db`, which depends on this crate — so the kernel cannot
@@ -338,17 +338,6 @@ pub mod registered_schema {
                 }
                 Ok(())
             }
-        }
-
-        #[test]
-        fn installer_signature_borrows_only_the_sealed_installation_capability() {
-            fn installer<'a>(
-                _: &'a RegisteredSchemaInstallationV1,
-            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-                Box::pin(async { Ok(()) })
-            }
-
-            let _: Installer = installer;
         }
 
         /// The port stays fail-closed: with no installer registered, the open

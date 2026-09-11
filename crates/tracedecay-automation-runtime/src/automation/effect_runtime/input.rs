@@ -1,6 +1,6 @@
 //! Canonical automation request projection.
 
-use tracedecay_application::retained_surfaces::{
+use tracedecay_contracts::retained_surfaces::{
     AutomationRunRequestV1, AutomationTaskRequestV1, LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1,
     MemoryCuratorRunInputV1, SessionReflectorRunInputV1, SkillWriterRunInputV1, UserJobRunInputV1,
 };

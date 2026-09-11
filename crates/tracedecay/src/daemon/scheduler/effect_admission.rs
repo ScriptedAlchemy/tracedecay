@@ -5,21 +5,25 @@ use std::pin::Pin;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 
-use super::super::{DaemonEngine, DaemonHandshake, log_daemon_event};
+use super::super::{DaemonEngine, DaemonHandshake};
 use super::{
     automation_scheduler_has_work, effective_automation_config_for_project,
     log_scheduler_automation_replay, log_scheduler_task_error, log_scheduler_task_start,
     maybe_run_global_retention, run_user_jobs_scheduler_pass, scheduler_run_observer,
     settle_scheduler_retained_automation,
 };
-use crate::daemon::automation_effect::AutomationEffectAdmission;
+use crate::daemon::automation_effect::prepare as prepare_automation_effect;
 use crate::tracedecay::TraceDecay;
+use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
+    AutomationEffectAdmission, AutomationEffectAuthority,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub(super) fn log_scheduler_pre_admission_problem(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
-    problem: &tracedecay_application::ApplicationProblemEnvelope,
+    problem: &tracedecay_contracts::ApplicationProblemEnvelope,
 ) {
     let mut fields = vec![
         ("project", project_path.display().to_string()),
@@ -100,6 +104,10 @@ async fn fixed_task_schedule_decision(
 }
 
 #[hotpath::measure(label = "daemon.scheduler.automation_effect", future = true)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Admission binds the engine, retained memory, cancellation and pinned configuration before creating an effect."
+)]
 pub(super) async fn scheduler_automation_effect(
     engine: &DaemonEngine,
     memory: &crate::tracedecay::TraceDecay,
@@ -110,23 +118,16 @@ pub(super) async fn scheduler_automation_effect(
     configuration_digest: tracedecay_domain::ManifestDigest,
     request: impl FnOnce(
         &str,
-    )
-        -> Result<tracedecay_application::retained_surfaces::AutomationRunRequestV1>,
-) -> Result<(
-    crate::daemon::automation_effect::AutomationEffectAdmission,
-    String,
-    AutomationRunControl,
-)> {
+    ) -> Result<tracedecay_contracts::retained_surfaces::AutomationRunRequestV1>,
+) -> Result<(AutomationEffectAdmission, String, AutomationRunControl)> {
     let request_id = scheduler_automation_request_id(requested_run_id)?;
-    let cancellation = tracedecay_application::CancellationSignal::active(format!(
-        "cancel.{}",
-        request_id.as_str()
-    ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("automation scheduler cancellation is invalid: {error}"),
-    })?;
-    let observed_at = tracedecay_application::now_micros();
-    let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active(format!("cancel.{}", request_id.as_str()))
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("automation scheduler cancellation is invalid: {error}"),
+            })?;
+    let observed_at = tracedecay_contracts::now_micros();
+    let deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
         .map_err(|error| TraceDecayError::Config {
             message: format!("automation scheduler deadline is invalid: {error}"),
         })?;
@@ -135,7 +136,7 @@ pub(super) async fn scheduler_automation_effect(
     synchronize_scheduler_effect_control(&effect_run_control);
     let run_id = requested_run_id.map_or_else(|| request_id.as_str().to_owned(), str::to_owned);
     let request = request(&run_id)?;
-    let effect = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+    let effect = prepare_automation_effect(
         &engine.invocation.invocation_service(),
         memory,
         project_path,
@@ -193,7 +194,7 @@ impl Drop for SchedulerCancellationBridge {
 /// channel.
 fn spawn_scheduler_cancellation_bridge<Interrupted>(
     interrupted: Interrupted,
-    cancellation: tracedecay_application::CancellationSignal,
+    cancellation: tracedecay_contracts::CancellationSignal,
 ) -> SchedulerCancellationBridge
 where
     Interrupted: Fn() -> bool + Send + 'static,
@@ -209,7 +210,7 @@ where
                 return;
             }
             if interrupted() {
-                let _ = cancellation.cancel(tracedecay_application::now_micros());
+                let _ = cancellation.cancel(tracedecay_contracts::now_micros());
                 return;
             }
             if started.elapsed() >= SCHEDULER_CANCELLATION_BRIDGE_MAX_LIFETIME {
@@ -222,8 +223,8 @@ where
 
 fn scheduler_effect_run_control(
     run_control: &AutomationRunControl,
-    cancellation: tracedecay_application::CancellationSignal,
-    deadline: tracedecay_application::Deadline,
+    cancellation: tracedecay_contracts::CancellationSignal,
+    deadline: tracedecay_contracts::Deadline,
 ) -> AutomationRunControl {
     let parent = run_control.read_control().clone();
     let bridge = spawn_scheduler_cancellation_bridge(
@@ -237,7 +238,7 @@ fn scheduler_effect_run_control(
         // Load-bearing capture: the bridge is owned by this predicate, so it
         // is aborted exactly when the effect run control is dropped.
         let _bridge = &bridge;
-        let observed_at = tracedecay_application::now_micros();
+        let observed_at = tracedecay_contracts::now_micros();
         if parent.interrupted() {
             let _ = cancellation.cancel(observed_at);
         }
@@ -249,13 +250,17 @@ pub(super) fn synchronize_scheduler_effect_control(run_control: &AutomationRunCo
     run_control.read_control().interrupted();
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Settlement keeps the effect and runner guard alive together while recording the exact project and task outcome."
+)]
 pub(super) async fn abandon_reused_scheduler_skip(
     engine: &DaemonEngine,
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     task: AgentTaskKind,
     run_control: &AutomationRunControl,
-    effect: crate::daemon::automation_effect::AutomationEffectAuthority,
+    effect: AutomationEffectAuthority,
     reused: tracedecay_automation_runtime::automation::runner::ReusedSchedulerSkip,
     settlement_guard: tracedecay_automation_runtime::automation::runner::AutomationRunSettlementGuard,
 ) -> Option<TraceDecayError> {
@@ -294,6 +299,10 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
 /// Body of [`run_automation_scheduler_tick`], boxed at definition so the
 /// instrumented wrapper does not inline every fixed automation effect of a
 /// tick into one scheduler poll frame.
+#[expect(
+    clippy::too_many_lines,
+    reason = "An automation tick is one ordered admission of every enabled retained effect."
+)]
 fn run_automation_scheduler_tick_inner<'a>(
     project_path: &'a Path,
     cg: &'a TraceDecay,
@@ -341,6 +350,7 @@ fn run_automation_scheduler_tick_inner<'a>(
             );
             return Ok(());
         }
+        let automation_context = cg.automation_project_context()?;
         if let Ok(profile_database) = engine
             .store_administration
             .registered_profile_database()
@@ -354,31 +364,19 @@ fn run_automation_scheduler_tick_inner<'a>(
             .await;
         }
         let backend = CodexAppServerBackend::from_automation_config(config);
-        let authoritative_project_id = cg
-            .store_layout()
-            .identity
-            .project_id
-            .as_deref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "automation scheduler requires an authoritative project identity"
-                    .to_string(),
-            })?;
-        let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "automation scheduler has an invalid authoritative project identity: {error}"
-                ),
-            })?;
         let session_database = engine
             .store_administration
-            .registered_project_session_database(project_path, cg.store_layout())
+            .registered_project_session_database(
+                automation_context.project_root(),
+                cg.store_layout(),
+            )
             .await?;
         let schedule_activity =
             tracedecay_automation_runtime::automation::scheduler::load_session_activity(
                 session_database.as_ref(),
             )
             .await;
-        let schedule_now_secs = tracedecay_application::now_micros().0.div_euclid(1_000_000);
+        let schedule_now_secs = tracedecay_contracts::now_micros().0.div_euclid(1_000_000);
         let memory_curator_decision = fixed_task_schedule_decision(
             &cg.store_layout().dashboard_root,
             config,
@@ -407,7 +405,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         let retrieval = registered_project_automation_retrieval(
             session_database,
             &profile_identity,
-            &project_id,
+            automation_context.project_id(),
         )
         .await?;
         let mut first_error: Option<TraceDecayError> = None;
@@ -424,8 +422,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                 engine,
                 cg,
                 run_control,
-                project_path,
-                &cg.store_layout().dashboard_root,
+                automation_context.project_root(),
+                &automation_context.dashboard_root,
                 None,
                 configuration.configuration_digest.clone(),
                 |run_id| {
@@ -460,7 +458,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                         let mut options = memory_curator_options;
                         options.run_id = Some(run_id);
                         let retained_run = run_memory_curator_with_backend_for_retained_settlement(
-                            cg,
+                            &automation_context,
                             config,
                             &configuration.configuration_revision_id,
                             &backend,
@@ -470,8 +468,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                         .await;
                         if let Some(error) = settle_scheduler_retained_automation(
                             engine,
-                            &project_id,
-                            project_path,
+                            automation_context.project_id(),
+                            automation_context.project_root(),
                             AgentTaskKind::MemoryCurator,
                             &effect_run_control,
                             *effect,
@@ -511,8 +509,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                 engine,
                 cg,
                 run_control,
-                project_path,
-                &cg.store_layout().dashboard_root,
+                automation_context.project_root(),
+                &automation_context.dashboard_root,
                 None,
                 configuration.configuration_digest.clone(),
                 &combined_options,
@@ -523,9 +521,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                     combined_handled = super::combined_effect::run_combined_scheduler_effect(
                         admission,
                         engine,
-                        cg,
-                        &project_id,
-                        project_path,
+                        &automation_context,
                         config,
                         &configuration.configuration_revision_id,
                         &backend,
@@ -555,8 +551,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                     engine,
                     cg,
                     run_control,
-                    project_path,
-                    &cg.store_layout().dashboard_root,
+                    automation_context.project_root(),
+                    &automation_context.dashboard_root,
                     None,
                     configuration.configuration_digest.clone(),
                     |run_id| {
@@ -603,7 +599,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                     )) => {
                         let retained_run =
                             run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
-                                cg,
+                                &automation_context,
                                 config,
                                 &effect_run_control,
                                 &configuration.configuration_revision_id,
@@ -617,8 +613,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                             .await;
                         if let Some(error) = settle_scheduler_retained_automation(
                             engine,
-                            &project_id,
-                            project_path,
+                            automation_context.project_id(),
+                            automation_context.project_root(),
                             AgentTaskKind::SessionReflector,
                             &effect_run_control,
                             *effect,
@@ -645,8 +641,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                     engine,
                     cg,
                     run_control,
-                    project_path,
-                    &cg.store_layout().dashboard_root,
+                    automation_context.project_root(),
+                    &automation_context.dashboard_root,
                     None,
                     configuration.configuration_digest.clone(),
                     |run_id| {
@@ -684,7 +680,7 @@ fn run_automation_scheduler_tick_inner<'a>(
                         options.run_id = Some(run_id);
                         let retained_run =
                             run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-                                cg,
+                                &automation_context,
                                 config,
                                 &configuration.configuration_revision_id,
                                 &backend,
@@ -694,8 +690,8 @@ fn run_automation_scheduler_tick_inner<'a>(
                             .await;
                         if let Some(error) = settle_scheduler_retained_automation(
                             engine,
-                            &project_id,
-                            project_path,
+                            automation_context.project_id(),
+                            automation_context.project_root(),
                             AgentTaskKind::SkillWriter,
                             &effect_run_control,
                             *effect,
@@ -713,8 +709,8 @@ fn run_automation_scheduler_tick_inner<'a>(
         run_user_jobs_scheduler_pass(
             engine,
             run_control,
-            &project_id,
-            project_path,
+            automation_context.project_id(),
+            automation_context.project_root(),
             &handshake.client_identity.profile_root,
             cg,
             configuration.configuration_digest.clone(),
@@ -732,7 +728,7 @@ fn run_automation_scheduler_tick_inner<'a>(
 
 pub(crate) fn scheduler_automation_request_id(
     requested_run_id: Option<&str>,
-) -> Result<tracedecay_application::RequestId> {
+) -> Result<tracedecay_contracts::RequestId> {
     match requested_run_id {
         Some(run_id) => {
             let digest = tracedecay_domain::canonical_sha256(&(
@@ -742,7 +738,7 @@ pub(crate) fn scheduler_automation_request_id(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("automation scheduler stable request digest is invalid: {error}"),
             })?;
-            tracedecay_application::RequestId::new(format!(
+            tracedecay_contracts::RequestId::new(format!(
                 "request.automation-scheduler.{}",
                 digest.as_str().trim_start_matches("sha256:")
             ))
@@ -752,8 +748,8 @@ pub(crate) fn scheduler_automation_request_id(
                 ),
             })
         }
-        None => tracedecay_application::request_identity::mint_global_request_id(
-            tracedecay_application::request_identity::GlobalRequestSurface::AutomationScheduler,
+        None => tracedecay_contracts::request_identity::mint_global_request_id(
+            tracedecay_contracts::request_identity::GlobalRequestSurface::AutomationScheduler,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("automation scheduler request identity is unavailable: {error}"),
@@ -767,8 +763,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use tracedecay_application::{CancellationSignal, Deadline};
     use tracedecay_automation_runtime::automation::AutomationRunControl;
+    use tracedecay_contracts::{CancellationSignal, Deadline};
     use tracedecay_domain::UtcMicros;
 
     use super::{

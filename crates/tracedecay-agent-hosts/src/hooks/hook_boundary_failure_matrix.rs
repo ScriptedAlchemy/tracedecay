@@ -14,11 +14,13 @@ use serde_json::Value;
 use super::analytics::{HOOK_ANALYTICS_FILENAME, record_hook_invoked};
 use super::tool_hints::HintAgent;
 use super::{EnvGuard, TestDaemonHookActionGuard, daemon_hook_action, lock_test_env};
-use crate::config::USER_DATA_DIR_ENV;
+use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
-    crate::storage::pin_fixture_repository_identity(project_root, project_id).unwrap();
-    let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(project_root, project_id)
+        .unwrap();
+    let layout =
+        tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
     layout.data_root
 }
@@ -50,6 +52,7 @@ fn matrix_rejects_default_success_when_disposition_absent() {
 
     {
         let _span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Claude,
             "noDisposition",
@@ -85,6 +88,7 @@ fn matrix_rejects_default_success_for_untyped_ok_then_keeps_later_typed_failure(
     }));
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Codex,
             "untypedThenFailure",
@@ -138,6 +142,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
 
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Claude,
             "unavailableThenSuccess",
@@ -148,6 +153,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Kiro,
             "cancelThenSuccess",
@@ -158,6 +164,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Codex,
             "backpressureThenSuccess",
@@ -168,6 +175,7 @@ fn matrix_sticky_failure_survives_later_success_for_unavailable_cancel_backpress
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Cursor,
             "timeoutThenSuccess",
@@ -231,6 +239,7 @@ fn matrix_unknown_order_permutations_later_typed_replaces_unknown() {
 
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Claude,
             "unknownThenSuccess",
@@ -241,6 +250,7 @@ fn matrix_unknown_order_permutations_later_typed_replaces_unknown() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Codex,
             "unknownThenFailure",
@@ -251,6 +261,7 @@ fn matrix_unknown_order_permutations_later_typed_replaces_unknown() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Kiro,
             "successThenUnknown",
@@ -261,6 +272,7 @@ fn matrix_unknown_order_permutations_later_typed_replaces_unknown() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Cursor,
             "timeoutThenUnknown",
@@ -271,6 +283,7 @@ fn matrix_unknown_order_permutations_later_typed_replaces_unknown() {
     }
     {
         let span = record_hook_invoked(
+            &crate::ports::hook_runtime::crate_test_runtime(),
             Some(&project_root),
             HintAgent::Claude,
             "cancelThenUnknown",
@@ -318,9 +331,15 @@ fn matrix_daemon_unavailable_transport_does_not_invent_success() {
         // daemon_hook_action. It cannot fall through to a live daemon socket.
         {
             let guard = TestDaemonHookActionGuard::install(std::iter::empty());
-            let span =
-                record_hook_invoked(Some(&project_root), HintAgent::Cursor, "daemonDown", "{}");
+            let span = record_hook_invoked(
+                &crate::ports::hook_runtime::crate_test_runtime(),
+                Some(&project_root),
+                HintAgent::Cursor,
+                "daemonDown",
+                "{}",
+            );
             let result = daemon_hook_action(
+                &crate::ports::hook_runtime::crate_test_runtime(),
                 Some(&project_root),
                 serde_json::json!({ "action": "reset_counter" }),
                 Some(&span),

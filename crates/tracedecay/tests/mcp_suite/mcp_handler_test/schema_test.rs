@@ -476,7 +476,7 @@ fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
 
 #[test]
 fn exact_fact_store_definitions_project_canonical_request_schemas() {
-    let registry = tracedecay_application::mcp_executable_binding_registry()
+    let registry = tracedecay_contracts::mcp_executable_binding_registry()
         .expect("MCP executable binding registry");
     let tools = get_tool_definitions().expect("tool definitions");
     for operation in [
@@ -497,13 +497,14 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
         let operation_id =
             tracedecay_tool_catalog::OperationId::new(format!("operation.application.{operation}"))
                 .expect("fact-store operation id");
-        let mut canonical = registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-            .unwrap_or_else(|| panic!("{operation} executable binding"))
-            .request_schema()
-            .body()
-            .clone();
+        let mut canonical = tracedecay_mcp::mcp_input_schema(
+            registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .unwrap_or_else(|| panic!("{operation} executable binding"))
+                .request_schema()
+                .body(),
+        );
         let tool_name = format!("tracedecay_{operation}");
         let mut advertised = tool_schema(&tools, &tool_name).clone();
         for schema in [&mut canonical, &mut advertised] {

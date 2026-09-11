@@ -12,10 +12,12 @@ use std::time::Duration;
 
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tracedecay::daemon::{DaemonClientIdentity, DaemonHandshake, call_tool};
+use tracedecay::daemon::call_tool;
 use tracedecay::tracedecay::MovedStoreAdoption;
 use tracedecay_daemon_protocol::transport::DaemonAuthPreface;
-use tracedecay_daemon_protocol::{DaemonHandshakeRefusal, DaemonHandshakeRefusalReason};
+use tracedecay_daemon_protocol::{
+    DaemonClientIdentity, DaemonHandshake, DaemonHandshakeRefusal, DaemonHandshakeRefusalReason,
+};
 
 use crate::common::{daemon_socket_path, spawn_tracedecay_daemon, tempdir_or_panic};
 

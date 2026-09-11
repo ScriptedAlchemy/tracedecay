@@ -675,7 +675,7 @@ export const CodeIndexBuildProgressV1Schema = z.object({
   committed_pages: z.number().int().safe().min(0),
   committed_payload_bytes: z.number().int().safe().min(0),
   completed_files: z.number().int().safe().min(0),
-  completed_lexical_bytes: z.number().int().safe().min(0),
+  completed_lexical_units: z.number().int().safe().min(0),
   current_batch_pages: z.number().int().safe().min(0),
   current_batch_payload_bytes: z.number().int().safe().min(0),
   daemon_incarnation: z.number().int().safe().min(0),
@@ -685,13 +685,13 @@ export const CodeIndexBuildProgressV1Schema = z.object({
   generation_id: z.string(),
   last_commit_latency_micros: z.number().int().safe().min(0).nullable(),
   last_progress_micros: z.number().int().safe(),
-  lexical_bytes_per_second: z.number().nullable(),
+  lexical_units_per_second: z.number().nullable(),
   phase: z.lazy(() => CodeIndexBuildPhaseV1Schema),
   producer_incarnation: z.number().int().safe().min(0),
   progress_epoch: z.number().int().safe().min(0),
   sealed_source_digest: z.string(),
   total_files: z.number().int().safe().min(0),
-  total_lexical_bytes: z.number().int().safe().min(0),
+  total_lexical_units: z.number().int().safe().min(0),
 });
 export type CodeIndexBuildProgressV1 = z.infer<typeof CodeIndexBuildProgressV1Schema>;
 
@@ -795,6 +795,16 @@ export type CommitId = z.infer<typeof CommitIdSchema>;
 
 export const ComparisonDispositionV1Schema = z.enum(["insufficient_evidence", "promote", "reject"]);
 export type ComparisonDispositionV1 = z.infer<typeof ComparisonDispositionV1Schema>;
+
+/** Whether the bounded complexity walk over a symbol's body ran to the end.
+
+The extractor stops walking a body once its traversal budget is spent. The
+counters accumulated by then are lower bounds over the visited prefix, not
+facts about the whole body, so every surface that prints, ranks, or
+aggregates complexity must render this state instead of treating those
+counters as exact. */
+export const ComplexityAnalysisV1Schema = z.union([z.literal("complete"), z.literal("traversal_budget_exhausted")]);
+export type ComplexityAnalysisV1 = z.infer<typeof ComplexityAnalysisV1Schema>;
 
 /** Strongly typed canonical identity: `ComponentVersion`. */
 export const ComponentVersionSchema = z.string();
@@ -2435,6 +2445,7 @@ export const GraphNodeV1Schema = z.object({
   assertions: z.number().int().safe().nullable(),
   attrs_start_line: z.number().int().safe().nullable(),
   branches: z.number().int().safe().nullable(),
+  complexity_analysis: z.union([z.lazy(() => ComplexityAnalysisV1Schema), z.null()]),
   degree: z.number().int().safe().nullable(),
   doc: z.string().nullable(),
   edge_kind: z.string().nullable(),
@@ -4412,11 +4423,12 @@ export const SettingsPayloadV1Schema = z.object({
 });
 export type SettingsPayloadV1 = z.infer<typeof SettingsPayloadV1Schema>;
 
-/** Shared physical profile-store locator supplied by the profile authority.
+/** Logical and verified physical identity of the shared Profile shard.
 
-The typed profile and store IDs select this locator. It never derives an
-identity from a path, CWD, active graph, or mutable project alias. */
+Brain and profile IDs select the shard; the verified store locator binds its
+physical store. Lease incarnations and authority epochs remain runtime fences. */
 export const SharedProfileStoreLocatorV1Schema = z.object({
+  brain_id: z.lazy(() => BrainIdSchema),
   profile_id: z.lazy(() => UserProfileIdSchema),
   store_id: z.string(),
 }).strict();
@@ -5162,7 +5174,13 @@ export const WorkAttemptReceiptV1Schema = z.object({
 }).strict();
 export type WorkAttemptReceiptV1 = z.infer<typeof WorkAttemptReceiptV1Schema>;
 
-/** What resume-after-restart did to each open attempt. */
+/** What restart recovery did to each open attempt.
+
+This report never claims that a provider resumed. An attempt in
+`recovery_required` remains fenced under its original identity. This report
+does not authorize another launch; an explicit `retry_attempt` must verify
+the exact recovery fence and effect safety before it can atomically admit a
+new identity. */
 export const WorkAttemptRecoveryReportV1Schema = z.object({
   cancelled: z.array(z.lazy(() => WorkAttemptV1Schema)),
   recovery_required: z.array(z.lazy(() => WorkAttemptV1Schema)),
@@ -5874,6 +5892,13 @@ export const WorkflowRunEventKindSchema = z.discriminatedUnion("type", [z.object
 }), z.object({
   type: z.literal("cancelled"),
 }), z.object({
+  planned_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  prior_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  replacement_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
+  retry_receipt_digest: z.lazy(() => ManifestDigestSchema),
+  step_id: z.lazy(() => WorkflowStepIdSchema),
+  type: z.literal("fan_out_child_retry_rebound"),
+}), z.object({
   attempts: z.array(z.lazy(() => WorkAttemptIdentityV1Schema)),
   step_id: z.lazy(() => WorkflowStepIdSchema),
   type: z.literal("fan_out_children_released"),
@@ -5908,6 +5933,7 @@ export const WorkflowRunGetRequestSchema = z.object({
 export type WorkflowRunGetRequest = z.infer<typeof WorkflowRunGetRequestSchema>;
 
 export const WorkflowRunProjectionSchema = z.object({
+  active_fan_out_attempts: z.record(z.lazy(() => WorkAttemptIdentityV1Schema)),
   definition: z.lazy(() => WorkflowDefinitionSchema),
   fan_out_plans: z.record(z.lazy(() => WorkflowFanOutPlanV1Schema)),
   history: z.array(z.lazy(() => WorkflowRunEventSchema)),
@@ -6786,6 +6812,7 @@ export type WorkRankedRouteV1 = z.infer<typeof WorkRankedRouteV1Schema>;
 export const WorkRecoveryStateV1Schema = z.discriminatedUnion("state", [z.object({
   state: z.literal("fresh"),
 }), z.object({
+  observed_at: z.lazy(() => UtcMicrosSchema),
   reason: z.lazy(() => WorkRestartReasonV1Schema),
   source_attempt_id: z.union([z.lazy(() => AttemptIdSchema), z.null()]),
   state: z.literal("recovery_required"),
@@ -6832,7 +6859,7 @@ export const WorkRetryAttemptOutcomeV1Schema = z.discriminatedUnion("outcome", [
 }).strict()]);
 export type WorkRetryAttemptOutcomeV1 = z.infer<typeof WorkRetryAttemptOutcomeV1Schema>;
 
-export const WorkRetryCauseV1Schema = z.literal("runtime_failure");
+export const WorkRetryCauseV1Schema = z.enum(["restart_recovery_required", "runtime_failure"]);
 export type WorkRetryCauseV1 = z.infer<typeof WorkRetryCauseV1Schema>;
 
 /** A selector into the owning runtime-terminal evidence authority.

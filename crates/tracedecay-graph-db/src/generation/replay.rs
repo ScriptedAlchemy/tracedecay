@@ -110,14 +110,19 @@ impl GraphGenerationManifest {
     }
 }
 
-pub(crate) fn metadata_manifest_from_replay(
+/// Hydrates the metadata-only manifest a replay `source` describes, or
+/// `None` when the source carries (or names) native rows. The caller decodes
+/// the canonical payload once and inspects the source itself first; the
+/// binding validation here reuses the decoded metadata rather than parsing a
+/// second time.
+pub(crate) fn metadata_manifest_from_source(
     publication: &GraphPublicationReplayV1,
+    source: &GraphGenerationReplaySource,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Option<GraphGenerationManifest>, GraphDbError> {
-    let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
     let metadata = match source {
         GraphGenerationReplaySource::MetadataOnlyManifest(metadata) => metadata,
-        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => vector.metadata,
+        GraphGenerationReplaySource::SemanticVectorGeneration(vector) => &vector.metadata,
         GraphGenerationReplaySource::InlineManifest(_)
         | GraphGenerationReplaySource::SealedCodeGeneration(_) => return Ok(None),
     };
@@ -136,7 +141,7 @@ pub(crate) fn metadata_manifest_from_replay(
         check,
     )?;
     validate_metadata_publication(publication)?;
-    validate_decoded_metadata_binding(publication, &manifest, &metadata, false, check)?;
+    validate_decoded_metadata_binding(publication, &manifest, metadata, false, check)?;
     Ok(Some(manifest))
 }
 
@@ -642,12 +647,12 @@ mod tests {
         assert_eq!(result, Err(GraphDbError::Cancelled));
     }
 
-    /// `metadata_manifest_from_replay` must decode the canonical payload
-    /// exactly once; the binding validation reuses the decoded metadata. The
-    /// hydration counters record one replay row per decode, so a second parse
-    /// pass fails this test.
+    /// Metadata hydration must decode the canonical payload exactly once;
+    /// the binding validation reuses the decoded metadata. The hydration
+    /// counters record one replay row per decode, so a second parse pass
+    /// fails this test.
     #[test]
-    fn metadata_manifest_from_replay_decodes_the_payload_once() {
+    fn metadata_manifest_hydration_decodes_the_payload_once() {
         let manifest = metadata_manifest();
         let publication = manifest
             .relational_metadata_replay(
@@ -659,7 +664,9 @@ mod tests {
             )
             .unwrap();
         let _ = crate::hotpath_observe::take_hydration_counters();
-        let hydrated = metadata_manifest_from_replay(&publication, &|| Ok(()))
+        let source =
+            checked_decode_replay_source(&publication.canonical_replay_source, &|| Ok(())).unwrap();
+        let hydrated = metadata_manifest_from_source(&publication, &source, &|| Ok(()))
             .unwrap()
             .expect("a metadata-only replay must hydrate a metadata manifest");
         let counters = crate::hotpath_observe::take_hydration_counters();

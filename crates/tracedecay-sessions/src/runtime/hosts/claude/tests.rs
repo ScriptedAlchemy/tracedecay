@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::SessionMessageRecord;
 use serde_json::json;
 use tracedecay_capture::claude as canonical;
 use tracedecay_runtime_core::git_discovery::{
@@ -94,7 +95,7 @@ fn bounded_scan_blocks_oversized_frame_and_suffix_at_one_mib() {
     let path = dir.path().join("session-42.jsonl");
     let oversized = format!(
         "{{\"payload\":\"{}\"}}\n",
-        "x".repeat(tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES)
+        "x".repeat(tracedecay_privacy::MAX_OBSERVATION_RECORD_BYTES)
     );
     std::fs::write(&path, format!("{oversized}{{\"type\":\"summary\"}}\n")).unwrap();
 
@@ -186,6 +187,80 @@ fn canonical_mapper_emits_one_conversational_message() {
         map_sanitized_claude_record(&json!({"type": "summary"}), &context),
         ClaudeRecordDisposition::NonConversational
     ));
+}
+
+#[test]
+fn compact_pair_projection_keeps_pairing_evidence() {
+    let fixtures = format!(
+        "{}/../../tests/fixtures/provider_normalization/claude",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let context = ClaudeRecordContext {
+        session_id: "claude-compact-pair-session",
+        project_key: "project-1",
+        project_path: "/project-1",
+        file_generation: 1,
+        offset: 0,
+        session_cwd: Some(Path::new("/project-1")),
+        source_path: None,
+        raw_message_id: None,
+        raw_tool_event_ids: &[],
+        raw_hook_tool_use_id: None,
+    };
+    let boundary = map_checked_in_claude_fixture(
+        &format!("{fixtures}/compact_summary_pair.boundary.input.json"),
+        &context,
+    );
+    let summary = map_checked_in_claude_fixture(
+        &format!("{fixtures}/compact_summary_pair.summary.input.json"),
+        &context,
+    );
+    assert_eq!(
+        boundary.message_id,
+        "compact_boundary:ffffffff-0000-1111-2222-333333333333"
+    );
+    let boundary_metadata: Value =
+        serde_json::from_str(boundary.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        boundary_metadata["canonical_envelope"]["facts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|fact| fact.pointer("/summary/preservedSegment/anchorUuid"))
+            .and_then(Value::as_str),
+        Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    );
+    assert_eq!(summary.message_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    let summary_metadata: Value =
+        serde_json::from_str(summary.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        summary_metadata["canonical_envelope"]["relations"]["parent_message_id"],
+        "ffffffff-0000-1111-2222-333333333333"
+    );
+}
+
+fn map_checked_in_claude_fixture(
+    path: &str,
+    context: &ClaudeRecordContext<'_>,
+) -> SessionMessageRecord {
+    let bytes = std::fs::read(path).unwrap();
+    let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
+        &bytes,
+        range,
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
+        |native| {
+            let stable = canonical::stable_record_id(&native, context.session_id, 0)?;
+            canonical::normalize(&native, context.session_id, stable, range)
+        },
+    )
+    .unwrap();
+    let ClaudeRecordDisposition::Message { message, .. } =
+        map_sanitized_claude_record(parsed.value(), context)
+    else {
+        panic!("{} must map to a persisted row", path);
+    };
+    *message
 }
 
 #[test]
@@ -691,7 +766,7 @@ fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
     );
     let bytes = std::fs::read(&path).unwrap();
     let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
@@ -748,7 +823,7 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
         "../../../../../../tests/fixtures/provider_normalization/claude/assistant_thinking_text_tool_use.input.json"
     );
     let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         bytes,
         range,
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
@@ -828,7 +903,7 @@ fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
     );
     let bytes = std::fs::read(&path).unwrap();
     let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
@@ -912,7 +987,7 @@ fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
     });
     let bytes = serde_json::to_vec(&record).unwrap();
     let range = tracedecay_domain::ClaudeByteRangeV1::new(0, bytes.len() as u64).unwrap();
-    let parsed = tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1(
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
         &bytes,
         range,
         tracedecay_domain::ObservationOrderingDomainV1::FileBytes,

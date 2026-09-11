@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseAuthorityRole;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use crate::RegisteredGlobalDb;
 
@@ -94,13 +95,16 @@ impl RegisteredGlobalDb {
     #[hotpath::skip]
     pub async fn checkpoint(&self) {
         if let Err(error) = self.checkpoint_result().await {
-            eprintln!("[tracedecay] registered database WAL checkpoint failed: {error}");
+            log_daemon_event(
+                "registered_database_wal_checkpoint_failed",
+                &[("error", error.to_string())],
+            );
         }
     }
 
-    // Root-owned policy, deliberately not driven here: `prune_global_retention`
-    // wraps `tracedecay_maintenance::retention::prune_global_tables`,
-    // keyed by the root `config::RetentionConfig`) in a write transaction.
+    // Root-owned policy, deliberately not driven here:
+    // `tracedecay_maintenance::retention::prune_global_retention` drains the
+    // root `config::RetentionConfig` windows in bounded write transactions.
     // Reaching up for those types would point this crate back at the composition
     // root.
 }

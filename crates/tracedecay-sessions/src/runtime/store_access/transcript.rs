@@ -9,6 +9,7 @@ use super::super::git_correlation::{
     CommitSessionRecord, SpanObservation, enqueue_git_evidence_publication,
 };
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn};
+use super::super::shared::{durable_project_path_key, path_identity_key};
 use super::codex_goal_reconciliation::find_preceding_codex_goal_response;
 use super::types::{TranscriptBatch, TranscriptPersistenceError};
 
@@ -124,10 +125,17 @@ async fn reconcile_codex_goal_response(
     })
 }
 
+/// Reads one durable cursor by its canonical key.
+///
+/// `path_identity_key` is applied on every write to this table, so the stored
+/// form is unique and this stays a single primary-key lookup — no candidate
+/// expansion, no table scan, on the per-file-per-pass ingest hot path.
 pub async fn get_parse_offset(
     conn: &impl QueryExecutor,
     path: &str,
 ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
+    let path = path_identity_key(path);
+    let path = path.as_str();
     match conn
         .query(
             "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
@@ -143,9 +151,9 @@ pub async fn get_parse_offset(
                 return Ok(None);
             };
             Ok(Some(ParseOffset {
-                byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
-                mtime: decode_u64(&row, 1, "decode transcript mtime")?,
-                file_id: decode_file_id(&row, 2, "decode transcript file id")?,
+                byte_offset: decode_u64_bits(&row, 0, "decode transcript byte offset")?,
+                mtime: decode_u64_bits(&row, 1, "decode transcript mtime")?,
+                file_id: decode_u64_bits(&row, 2, "decode transcript file id")?,
             }))
         }
         Err(error) if sqlite_missing_column(&error, "file_id") => {
@@ -165,8 +173,8 @@ pub async fn get_parse_offset(
                 return Ok(None);
             };
             Ok(Some(ParseOffset {
-                byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
-                mtime: decode_u64(&row, 1, "decode transcript mtime")?,
+                byte_offset: decode_u64_bits(&row, 0, "decode transcript byte offset")?,
+                mtime: decode_u64_bits(&row, 1, "decode transcript mtime")?,
                 file_id: 0,
             }))
         }
@@ -186,7 +194,15 @@ fn sqlite_missing_column(error: &tracedecay_runtime_core::db::engine::Error, col
     }
 }
 
-fn decode_u64(
+/// Every `parse_offsets` numeric column carries the full `u64` domain of its
+/// `ParseOffset` field through SQLite's signed 64-bit INTEGER as a two's
+/// complement bit-cast. Transcript byte positions never leave the
+/// non-negative half, but the same three columns are the durable authority
+/// for versioned host frontiers whose fields are digests and sentinels (the
+/// Codex corpus epoch packs a 128-bit digest into `byte_offset`/`mtime`, the
+/// OpenCode rewrite frontier uses `u64::MAX`), so a range-checked encode
+/// refused to persist them and left every history pass retrying forever.
+fn decode_u64_bits(
     row: &Row,
     index: i32,
     operation: &'static str,
@@ -194,29 +210,14 @@ fn decode_u64(
     let value = row
         .get::<i64>(index)
         .map_err(|error| TranscriptPersistenceError::storage(operation, error))?;
-    u64::try_from(value).map_err(|error| TranscriptPersistenceError::storage(operation, error))
+    Ok(decode_u64_bits_value(value))
 }
 
-fn encode_i64(value: u64, operation: &'static str) -> Result<i64, TranscriptPersistenceError> {
-    i64::try_from(value).map_err(|error| TranscriptPersistenceError::storage(operation, error))
-}
-
-fn decode_file_id(
-    row: &Row,
-    index: i32,
-    operation: &'static str,
-) -> Result<u64, TranscriptPersistenceError> {
-    let value = row
-        .get::<i64>(index)
-        .map_err(|error| TranscriptPersistenceError::storage(operation, error))?;
-    Ok(decode_file_id_value(value))
-}
-
-fn encode_file_id(value: u64) -> i64 {
+fn encode_u64_bits(value: u64) -> i64 {
     i64::from_le_bytes(value.to_le_bytes())
 }
 
-fn decode_file_id_value(value: i64) -> u64 {
+fn decode_u64_bits_value(value: i64) -> u64 {
     u64::from_le_bytes(value.to_le_bytes())
 }
 
@@ -233,11 +234,16 @@ pub async fn require_expected_offset(
     }
 }
 
+/// Writes one durable cursor under its canonical key.
+///
+/// Normalising here — the single write funnel for this table — is what keeps
+/// [`get_parse_offset`] a primary-key lookup.
 pub async fn set_parse_offset(
     conn: &impl Executor,
     path: &str,
     offset: ParseOffset,
 ) -> Result<(), TranscriptPersistenceError> {
+    let path = path_identity_key(path);
     conn.execute(
         "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
          VALUES (?1, ?2, ?3, ?4)
@@ -247,9 +253,9 @@ pub async fn set_parse_offset(
             file_id = excluded.file_id",
         params![
             path,
-            encode_i64(offset.byte_offset, "encode transcript byte offset")?,
-            encode_i64(offset.mtime, "encode transcript mtime")?,
-            encode_file_id(offset.file_id)
+            encode_u64_bits(offset.byte_offset),
+            encode_u64_bits(offset.mtime),
+            encode_u64_bits(offset.file_id)
         ],
     )
     .await
@@ -278,6 +284,9 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         transaction.commit().await.is_ok()
     }
 
+    /// Writes one session row with its path column in the canonical form that
+    /// project-scoped reads query. `project_key` is an opaque authority and
+    /// remains byte-exact; `transcript_path` remains the real display path.
     #[hotpath::skip]
     async fn upsert_session_in_existing_tx(conn: &impl Executor, session: &SessionRecord) -> bool {
         conn.execute(
@@ -302,7 +311,7 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 session.provider.clone(),
                 session.session_id.clone(),
                 session.project_key.clone(),
-                session.project_path.clone(),
+                durable_project_path_key(&session.project_path),
                 session.title.clone(),
                 session.started_at,
                 session.ended_at,
@@ -837,12 +846,18 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         })
     }
 
+    /// The SQL ordering compares the stored signed encoding, so it is exact
+    /// for transcript positions and mtimes (never above `i64::MAX`); host
+    /// frontiers that carry sentinels or digests in these columns advance
+    /// through a changed `file_id` or a strictly greater revision `mtime`
+    /// (see `opencode_frontier`), never through the byte-offset comparison.
     #[hotpath::skip]
     async fn set_parse_offset_monotonic_in_existing_tx(
         conn: &impl Executor,
         path: &str,
         offset: ParseOffset,
     ) -> Result<(), String> {
+        let path = path_identity_key(path);
         conn.execute(
             "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
                  VALUES (?1, ?2, ?3, ?4)
@@ -856,11 +871,9 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                         AND excluded.byte_offset >= parse_offsets.byte_offset)",
             params![
                 path,
-                i64::try_from(offset.byte_offset)
-                    .map_err(|error| format!("encode transcript byte offset: {error}"))?,
-                i64::try_from(offset.mtime)
-                    .map_err(|error| format!("encode transcript mtime: {error}"))?,
-                encode_file_id(offset.file_id)
+                encode_u64_bits(offset.byte_offset),
+                encode_u64_bits(offset.mtime),
+                encode_u64_bits(offset.file_id)
             ],
         )
         .await
@@ -896,8 +909,8 @@ mod tests {
     use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
     use super::{
-        PayloadFileRollback, TranscriptBatch, TranscriptPersistenceError, decode_file_id_value,
-        encode_file_id, flush_transcript_statement_window, stage_full_transcript_messages,
+        PayloadFileRollback, TranscriptBatch, TranscriptPersistenceError, decode_u64_bits_value,
+        encode_u64_bits, flush_transcript_statement_window, stage_full_transcript_messages,
     };
 
     #[derive(Default)]
@@ -946,11 +959,24 @@ mod tests {
         }
     }
 
+    /// Every `parse_offsets` column round-trips the whole `u64` domain: the
+    /// Codex corpus epoch stores a 128-bit digest across `byte_offset` and
+    /// `mtime`, so any half with its top bit set must persist losslessly and
+    /// non-negative transcript positions must keep their identity encoding.
     #[test]
-    fn transcript_file_id_encoding_round_trips_the_full_u64_domain() {
-        for file_id in [0, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
-            assert_eq!(decode_file_id_value(encode_file_id(file_id)), file_id);
+    fn parse_offset_field_encoding_round_trips_the_full_u64_domain() {
+        for value in [0, 1, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
+            assert_eq!(decode_u64_bits_value(encode_u64_bits(value)), value);
         }
+        assert_eq!(
+            encode_u64_bits(7),
+            7,
+            "non-negative values keep their stored form"
+        );
+        assert!(
+            encode_u64_bits((i64::MAX as u64) + 1) < 0,
+            "the upper half maps onto the negative INTEGER range instead of failing"
+        );
     }
 
     #[test]

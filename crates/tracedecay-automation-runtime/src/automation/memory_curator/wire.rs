@@ -240,10 +240,10 @@ pub(super) fn valid_curation_op(raw: &Value, allowed: &BTreeMap<FactId, FactEven
             source_label,
             reason,
             ..
-        } => source_label.as_deref().is_none_or(valid_source_label) && valid_reason(reason),
+        } => source_label.as_deref().is_none_or(valid_curation_text) && valid_curation_text(reason),
         CanonicalCurationWire::Update { target, reason, .. }
         | CanonicalCurationWire::Remove { target, reason, .. } => {
-            target.matches(allowed) && valid_reason(reason)
+            target.matches(allowed) && valid_curation_text(reason)
         }
         CanonicalCurationWire::Merge {
             winner,
@@ -260,7 +260,7 @@ pub(super) fn valid_curation_op(raw: &Value, allowed: &BTreeMap<FactId, FactEven
                         .iter()
                         .any(|previous| previous.fact_id == target.fact_id)
                 })
-                && valid_reason(reason)
+                && valid_curation_text(reason)
         }
         CanonicalCurationWire::NormalizeTags { target, tags, .. } => {
             target.matches(allowed)
@@ -273,7 +273,7 @@ pub(super) fn valid_curation_op(raw: &Value, allowed: &BTreeMap<FactId, FactEven
             source_label,
             ..
         } => {
-            valid_source_label(source_label)
+            valid_curation_text(source_label)
                 && source.fact_id != target.fact_id
                 && source.matches(allowed)
                 && target.matches(allowed)
@@ -300,16 +300,6 @@ fn valid_evidence(facts: &[ExactFactWire], allowed: &BTreeMap<FactId, FactEventI
                     .iter()
                     .any(|prior| prior.fact_id == fact.fact_id)
         })
-}
-
-fn valid_reason(reason: &str) -> bool {
-    !reason.trim().is_empty() && reason.len() <= 4 * 1024 && !reason.chars().any(char::is_control)
-}
-
-fn valid_source_label(source_label: &str) -> bool {
-    !source_label.trim().is_empty()
-        && source_label.len() <= 4 * 1024
-        && !source_label.chars().any(char::is_control)
 }
 
 fn valid_curation_text(value: &str) -> bool {

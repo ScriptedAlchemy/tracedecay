@@ -14,11 +14,15 @@ use super::format::{
     encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt, ngram_page_digest,
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
-use super::row_codec::encode_artifact_row;
+use super::row_codec::{RowDictionaryTableV1, encode_artifact_row};
 use super::schema::LexicalArtifactLayoutV1;
 use super::{
     CodeLexicalArtifactErrorV1, NGRAM_AGGREGATION_BYTES_PER_LOGICAL_POSTING_V1, checkpoint,
 };
+
+/// Amortized per-entry b-tree node overhead charged on top of each dictionary
+/// entry's key/value payload (same constant the builder ledger uses).
+const BTREE_MAP_ENTRY_OVERHEAD_BYTES: usize = 16;
 
 #[derive(Debug)]
 pub struct PreparedCodeLexicalArtifactPageV1 {
@@ -37,6 +41,9 @@ pub struct PreparedCodeLexicalArtifactPageV1 {
     pub(super) ngram_shards: Vec<PreparedNgramShardV1>,
     pub(super) ngram_digest: ManifestDigest,
     pub(super) base_sections_receipt: Vec<u8>,
+    /// Every dictionary entry this page's rows reference (revision 14);
+    /// empty for layouts whose rows carry their strings inline.
+    pub(super) row_dictionary: RowDictionaryTableV1,
     source_retained_bytes: usize,
     prepared_retained_bytes: usize,
     preparation_scratch_bytes: usize,
@@ -102,7 +109,10 @@ pub(super) struct PreparedDocumentV1 {
     pub(super) row: Vec<u8>,
     pub(super) term_postings: Vec<PreparedTermPostingV1>,
     pub(super) exact_postings: Vec<(String, Vec<u8>)>,
+    /// Tagged hex form persisted by layouts up to 13.
     pub(super) integrity_digest: ManifestDigest,
+    /// The same digest as the 32 raw bytes revision 14 persists.
+    pub(super) integrity_digest_bytes: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -139,6 +149,7 @@ pub(super) fn prepare_page(
             )
         })?;
     let mut documents = Vec::with_capacity(page.chunks().len());
+    let mut row_dictionary = RowDictionaryTableV1::new();
     let mut ngram_documents = BTreeMap::<(i64, i64), RoaringBitmap>::new();
     let mut logical_ngram_postings = 0usize;
     if page.symbol_displays().len() != page.chunks().len() {
@@ -163,6 +174,7 @@ pub(super) fn prepare_page(
             i64::try_from(document).map_err(contract_number)?,
             admitted.chunk(),
             display.as_ref(),
+            &mut row_dictionary,
             control,
         )?;
         let document = u32::try_from(prepared.document_id).map_err(contract_number)?;
@@ -228,6 +240,7 @@ pub(super) fn prepare_page(
         }),
     )?;
     let base_sections_receipt = prepare_base_sections_receipt(
+        layout,
         page.page_ordinal(),
         &imports,
         &documents,
@@ -264,6 +277,7 @@ pub(super) fn prepare_page(
         ngram_shards,
         ngram_digest,
         base_sections_receipt,
+        row_dictionary,
         source_retained_bytes: page.retained_owned_bytes(),
         prepared_retained_bytes: 0,
         preparation_scratch_bytes,
@@ -279,6 +293,7 @@ pub(super) fn prepare_page(
 }
 
 fn prepare_base_sections_receipt(
+    layout: LexicalArtifactLayoutV1,
     page_ordinal: u64,
     imports: &[PreparedImportV1],
     documents: &[PreparedDocumentV1],
@@ -312,8 +327,12 @@ fn prepare_base_sections_receipt(
         checkpoint(control)?;
         document_integrity.begin_row()?;
         document_integrity.integer(document.document_id);
-        document_integrity.text(&document.chunk_id)?;
-        document_integrity.text(document.integrity_digest.as_str())?;
+        if layout.stores_document_integrity_bytes() {
+            document_integrity.blob(&document.integrity_digest_bytes)?;
+        } else {
+            document_integrity.text(&document.chunk_id)?;
+            document_integrity.text(document.integrity_digest.as_str())?;
+        }
 
         rows.begin_row()?;
         rows.integer(document.document_id);
@@ -366,6 +385,7 @@ fn prepare_document(
     document_id: i64,
     chunk: &tracedecay_domain::CodeSearchChunkV1,
     display: Option<&tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1>,
+    row_dictionary: &mut RowDictionaryTableV1,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(PreparedDocumentV1, Vec<(i64, i64)>), CodeLexicalArtifactErrorV1> {
     u32::try_from(document_id).map_err(|_| {
@@ -445,9 +465,9 @@ fn prepare_document(
     }
     let artifact_row = ArtifactRowV1::from(row);
     let chunk_id = artifact_row.id.as_str().to_owned();
-    let row = encode_artifact_row(layout, &artifact_row)?;
+    let row = encode_artifact_row(layout, &artifact_row, row_dictionary)?;
     let exact_postings = exact_postings.into_iter().collect::<Vec<_>>();
-    let integrity_digest = document_integrity_digest(
+    let (integrity_digest, integrity_digest_bytes) = document_integrity_digest(
         document_id,
         chunk_id.as_bytes(),
         &row,
@@ -462,6 +482,7 @@ fn prepare_document(
             term_postings,
             exact_postings,
             integrity_digest,
+            integrity_digest_bytes,
         },
         ngram_postings,
     ))
@@ -473,7 +494,7 @@ fn document_integrity_digest(
     row: &[u8],
     term_postings: &[PreparedTermPostingV1],
     exact_postings: &[(String, Vec<u8>)],
-) -> Result<ManifestDigest, CodeLexicalArtifactErrorV1> {
+) -> Result<(ManifestDigest, [u8; 32]), CodeLexicalArtifactErrorV1> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.code-lexical-artifact-derived-document.v3\0");
     hasher.update(document.to_le_bytes());
@@ -503,7 +524,10 @@ fn document_integrity_digest(
             hash_blob(hasher, term)
         },
     )?;
-    integrity_digest(hasher)
+    let bytes: [u8; 32] = hasher.finalize().into();
+    let digest = ManifestDigest::from_sha256_bytes(&bytes)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    Ok((digest, bytes))
 }
 
 fn hash_table(
@@ -618,6 +642,7 @@ fn prepared_retained_bytes(
             .checked_add(document.chunk_id.capacity())
             .and_then(|bytes| bytes.checked_add(document.row.capacity()))
             .and_then(|bytes| bytes.checked_add(document.integrity_digest.as_str().len()))
+            .and_then(|bytes| bytes.checked_add(document.integrity_digest_bytes.len()))
             .and_then(|bytes| {
                 bytes.checked_add(
                     document
@@ -651,6 +676,16 @@ fn prepared_retained_bytes(
     for shard in &page.ngram_shards {
         bytes = bytes
             .checked_add(shard.documents.capacity())
+            .ok_or_else(prepared_charge_overflow)?;
+    }
+    for entry in page.row_dictionary.values() {
+        bytes = bytes
+            .checked_add(entry.capacity())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    std::mem::size_of::<(i64, Vec<u8>)>() + BTREE_MAP_ENTRY_OVERHEAD_BYTES,
+                )
+            })
             .ok_or_else(prepared_charge_overflow)?;
     }
     Ok(bytes)
@@ -705,6 +740,15 @@ fn estimated_sqlite_writes(
         bytes = bytes
             .checked_add(shard.documents.len())
             .and_then(|bytes| bytes.checked_add(32))
+            .ok_or_else(prepared_write_overflow)?;
+    }
+    rows = rows
+        .checked_add(page.row_dictionary.len())
+        .ok_or_else(prepared_write_overflow)?;
+    for entry in page.row_dictionary.values() {
+        bytes = bytes
+            .checked_add(entry.len())
+            .and_then(|bytes| bytes.checked_add(16))
             .ok_or_else(prepared_write_overflow)?;
     }
     Ok((rows, bytes))

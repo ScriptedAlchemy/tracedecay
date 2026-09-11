@@ -1,14 +1,26 @@
 //! `TraceDecay` runtime kernel.
 //!
 //! This crate owns the load-bearing runtime substrate that every other
-//! `TraceDecay` subsystem sits on: shared value types, the storage layout
-//! resolver, the `SQLite` database facade and its
-//! migrations, the observation/memory/session stores, git and worktree
-//! topology reads, process-level leases, and the privacy detectors.
+//! `TraceDecay` subsystem sits on: cancellation and task ownership, process
+//! and profile leases, resource accounting (resident memory, background CPU),
+//! the storage layout and store-identity resolver with the repository and
+//! worktree reads it depends on, the `SQLite` database facade with its
+//! migrations and read snapshots, and the per-shard runtime registry.
 //!
-//! ## Outward seams that could not follow the kernel
+//! ## What sits above this kernel
 //!
-//! `daemon::store_runtime::session_registry` stayed in the root crate: it
+//! Product runtimes live with their vertical owners, not here: the fact store
+//! and memory model in `tracedecay-session-memory`, privacy detection and
+//! sanitization in `tracedecay-privacy`, Work/Workflow topology projections in
+//! `tracedecay-application`, and the token-savings monitor ring in
+//! `tracedecay-session-memory`. Branch tracking (`branch`, `branch_meta`)
+//! remains here only because its consumers (`tracedecay-global-db`,
+//! `tracedecay-maintenance`, the CLI) sit below every crate that could own it,
+//! and [`worktree`] identity reads depend on [`branch::current_branch`].
+//!
+//! [`shard_runtime`] is the per-shard runtime and registry that `db::Database`
+//! is built on. The store runtime that decides which shards a daemon opens and
+//! how they converge, retire, and shut down is `tracedecay-store-runtime`; it
 //! stores `RegisteredGlobalDbLeaseV1` in its public surface, and
 //! `tracedecay-global-db` depends on this kernel — so the kernel taking that
 //! edge back would be a Cargo cycle. `global_db`, sessions, and semantic
@@ -18,10 +30,10 @@
 //! session-scoped shard uses to install the registered global/session schema
 //! (owned by `tracedecay-global-db`, which this crate cannot name). It
 //! **fails closed**: an unregistered installer refuses the open rather than
-//! publishing an uninitialised store. The root registers it from
-//! `daemon::store_runtime::register_registered_schema_installer()`, called at
-//! the top of `DaemonSessionRuntimeRegistryV1::open()` — the sole constructor
-//! of the production registry.
+//! publishing an uninitialised store. `tracedecay-store-runtime` registers it
+//! from `register_registered_schema_installer()`, called at the top of
+//! `DaemonSessionRuntimeRegistryV1::open()` — the sole constructor of the
+//! production registry.
 //!
 //! `test-transport` forwards to `tracedecay-rusqlite-runtime/test-transport`.
 //! Platform cfgs travel with the code that needs them: `cfg(windows)`
@@ -81,6 +93,8 @@ pub const DAEMON_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::f
 /// Grace retained for forced task abort and join during daemon shutdown.
 pub const DAEMON_TASK_ABORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
+pub mod ast_grep;
+pub mod background_cpu;
 pub mod branch;
 pub mod branch_meta;
 pub mod cancellation;
@@ -90,28 +104,26 @@ pub mod git;
 pub mod git_discovery;
 pub mod git_repository;
 pub mod lifecycle_lease;
-pub mod memory;
-pub mod monitor_ring;
+pub mod logging;
+pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;
 pub mod path_scope;
-pub mod privacy;
 mod profiled_lock;
 pub mod resident_memory;
 pub mod runtime_identity;
+pub mod shard_runtime;
 pub mod sqlite_read_snapshot;
 pub mod storage;
-pub mod store;
-pub mod store_runtime;
+pub mod store_telemetry;
 pub mod sync;
 pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
 pub mod weak_registry;
+pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;
-pub mod work_topology;
-pub mod workflow_topology;
 pub mod worktree;
 
 /// Ports the kernel exposes so the root crate can inject subsystems that stay

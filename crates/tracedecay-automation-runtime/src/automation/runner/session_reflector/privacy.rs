@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 fn values_digest(values: &[Value]) -> Result<String> {
     let bytes = serde_json::to_vec(values).map_err(TraceDecayError::from)?;

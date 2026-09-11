@@ -11,6 +11,14 @@ truthful typed states, maintainable crate/module boundaries, and direct
 behavioral evidence—not PR choreography, gate scaffolding, or code that merely
 compiles.
 
+## Task completion
+
+Carry the requested change through implementation and relevant verification; fix
+failures introduced by the change before reporting completion. Use focused checks
+for affected behavior and broaden only for unresolved risk. Documentation-only
+edits do not require application builds. Pause for a missing decision or an
+unauthorized external action after completing independent, authorized work.
+
 ## Layout
 
 - The repository root is a **virtual workspace** — it has no package of its
@@ -22,8 +30,8 @@ compiles.
 - `crates/tracedecay-cli/` — the package that produces the shipped
   `tracedecay` binary.
 - `crates/` — the remaining workspace member crates (`tracedecay-api`,
-  `-application`, `-domain`, `-store`, `-hooks`, `-policy`, `-tool-catalog`,
-  rusqlite parity/runtime crates).
+  `-application`, `-contracts`, `-domain`, `-store`, `-hooks`, `-policy`,
+  `-tool-catalog`, rusqlite parity/runtime crates).
 - `dashboard/` — the single embedded dashboard (React + rsbuild + vitest).
   `dashboard/src/contracts/` is generated from Rust schemas via schemars —
   never hand-edit it; regenerate with the `contracts:generate` script and
@@ -47,13 +55,19 @@ compiles.
   reason to ossify CI or test names. Otherwise pass the full path
   (`module::path::test_name`) and confirm the reported count is non-zero before
   treating a run as evidence.
-- `dashboard/app-dist/` is gitignored build output; only the CLI build script
-  (`crates/tracedecay-cli/build.rs`) embeds it, so a fresh checkout/worktree
-  must build the dashboard (or seed the directory) before building
-  `tracedecay-cli` — library crates no longer touch it.
-  `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` skips the npm rebuild only when
-  `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` carries the existing bundle's digest
-  (`python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+- `dashboard/app-dist/` is gitignored build output for `rsbuild dev`, CI,
+  and release packaging. The CLI build script (`crates/tracedecay-cli/build.rs`)
+  is the only embedder and never embeds `app-dist` itself: it builds the
+  frontend into an immutable, digest-named bundle under its own `OUT_DIR`
+  (`dashboard-bundle/<digest>`), rebuilding only when the content fingerprint
+  of the frontend inputs changes and running `npm ci` only when
+  `dashboard/node_modules` lacks the marker for the current
+  `package-lock.json`. A Rust-only edit never reruns npm, and a concurrent
+  `rsbuild dev` cannot wipe compiler inputs; ordinary builds need no
+  environment. `TRACEDECAY_SKIP_DASHBOARD_BUILD=1` stages a prebuilt
+  `dashboard/app-dist` instead of building (CI artifacts, seeded worktrees)
+  and requires `TRACEDECAY_DASHBOARD_BUNDLE_SHA256` to carry that bundle's
+  digest (`python3 scripts/check-dashboard-bundle.py dashboard/app-dist
   --print-digest`); a missing or mismatched digest fails the build.
   Create linked worktrees with `scripts/agent-worktree.sh`
   (it locks the lane). Clean up only via `scripts/worktree-gc.sh` or by the
@@ -156,9 +170,9 @@ compiles.
   messages instead of holding a large mixed working tree.
 - Resolve conflicts and integrate parallel work from relevant transcripts,
   plans, and Git history so intent—not whichever side is newer—wins.
-- Before final review, checkpoint the lane, merge the latest explicit clean-main
-  floor, and compare patch IDs plus owned paths. Drop duplicate or superseded
-  work instead of carrying parallel implementations; regenerate canonical
+- When integrating divergent development lanes, checkpoint the lane, merge the
+  latest explicit clean-main floor, and compare patch IDs plus owned paths. Drop
+  duplicate or superseded work instead of carrying parallel implementations; regenerate canonical
   outputs after the merge rather than hand-merging generated files.
 
 ## Learned Workspace Facts

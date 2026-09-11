@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     CalleeV1, CalleesSurfaceRequestV1, ImpactNodeV1, ImpactResultV1, ImpactSurfaceRequestV1,
     NodeDetailsV1, NodeExpansionCostV1, NodeSurfaceRequestV1,
 };
@@ -18,12 +18,12 @@ use crate::{
 };
 
 use super::{
-    GRAPH_RELATION_READ_LIMIT, canonical_relation_kind, canonical_relation_kind_name,
-    cost_to_expand_verified, graph_name_matches, graph_occurrence_id, graph_symbol_corrupt,
-    graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths, node_not_found,
-    nodes_addressed_by_args, require_positive_depth, required_graph_file_path,
-    required_graph_metadata, single_graph_adjacency_batch, traverse_verified_neighbors, user_line,
-    verified_neighbor_value, verified_trait_dispatch_targets,
+    GRAPH_RELATION_READ_LIMIT, canonical_relation_kind, cost_to_expand_verified,
+    graph_name_matches, graph_occurrence_id, graph_symbol_corrupt, graph_symbol_end_line,
+    graph_symbol_location_value, graph_symbol_paths, node_not_found, nodes_addressed_by_args,
+    require_positive_depth, required_graph_file_path, required_graph_metadata,
+    single_graph_adjacency_batch, traverse_verified_neighbors, user_line, verified_neighbor_value,
+    verified_trait_dispatch_targets,
 };
 
 #[hotpath::measure(label = "mcp.graph.callers.total")]
@@ -107,7 +107,7 @@ pub async fn handle_callees(graph: &VerifiedGraphQuery, args: Value) -> Result<T
                 kind: metadata.kind.clone(),
                 file: required_graph_file_path(&result.symbol)?.to_owned(),
                 line: user_line(metadata.start_line),
-                edge_kind: canonical_relation_kind_name(result.edge_kind).to_owned(),
+                edge_kind: result.edge_kind.as_str().to_owned(),
                 dispatch_via_trait: false,
                 depth: Some(u32::try_from(result.depth).map_err(|_| {
                     graph_symbol_corrupt("callee traversal depth exceeds u32".to_owned())
@@ -223,12 +223,33 @@ pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
             let touched_files = vec![file_path.to_owned()];
             let file_size_bytes = bound_source_file_len(graph, file_path)?;
             let end_line = graph_symbol_end_line(metadata)?;
-            let cyclomatic_complexity = metadata.branches.checked_add(1).ok_or_else(|| {
-                graph_symbol_corrupt(format!(
-                    "verified graph symbol '{}' branch count overflows complexity",
-                    n.occurrence.as_str()
-                ))
-            })?;
+            let complexity = metadata.exact_complexity();
+            let cyclomatic_complexity = complexity
+                .map(|complexity| {
+                    complexity.cyclomatic().ok_or_else(|| {
+                        graph_symbol_corrupt(format!(
+                            "verified graph symbol '{}' branch count overflows complexity",
+                            n.occurrence.as_str()
+                        ))
+                    })
+                })
+                .transpose()?;
+            let mut unavailable_fields = vec![
+                "assertions",
+                "attrs_start_line",
+                "returns",
+                "unchecked_calls",
+                "unsafe_blocks",
+            ];
+            if complexity.is_none() {
+                unavailable_fields.extend([
+                    "branches",
+                    "cyclomatic_complexity",
+                    "loops",
+                    "max_nesting",
+                ]);
+                unavailable_fields.sort_unstable();
+            }
             let line_count = end_line - metadata.start_line + 1;
             let output = hotpath::measure_block!(
                 "mcp.graph.node.serialize",
@@ -241,28 +262,20 @@ pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
                     start_line: user_line(metadata.start_line),
                     end_line: user_line(end_line),
                     signature: metadata.signature.clone(),
+                    docstring: metadata.docstring.clone(),
+                    is_async: metadata.is_async,
+                    derives: metadata.derives.clone(),
                     visibility: metadata.visibility.clone(),
-                    branches: metadata.branches,
-                    loops: metadata.loops,
-                    max_nesting: metadata.max_nesting,
+                    branches: complexity.map(|complexity| complexity.branches),
+                    loops: complexity.map(|complexity| complexity.loops),
+                    max_nesting: complexity.map(|complexity| complexity.max_nesting),
                     cyclomatic_complexity,
+                    complexity_analysis: metadata.complexity_analysis,
                     cost_to_expand: NodeExpansionCostV1 {
                         body: u64::from(line_count) * 20,
                         full_file: file_size_bytes / 4,
                     },
-                    unavailable_fields: [
-                        "assertions",
-                        "attrs_start_line",
-                        "derives",
-                        "docstring",
-                        "is_async",
-                        "returns",
-                        "unchecked_calls",
-                        "unsafe_blocks",
-                    ]
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect(),
+                    unavailable_fields: unavailable_fields.into_iter().map(str::to_owned).collect(),
                 })?
             );
             Ok(generic_tool_result(
@@ -425,11 +438,13 @@ pub async fn handle_signature(graph: &VerifiedGraphQuery, args: Value) -> Result
             "kind": metadata.kind,
             "visibility": metadata.visibility,
             "signature": metadata.signature,
+            "docstring": metadata.docstring,
+            "is_async": metadata.is_async,
             "file": file_path,
             "start_line": user_line(metadata.start_line),
             "end_line": user_line(end_line),
             "cost_to_expand": cost_to_expand_verified(metadata, file_size_bytes)?,
-            "unavailable_fields": ["attrs_start_line", "docstring", "is_async"],
+            "unavailable_fields": ["attrs_start_line"],
         }));
     }
 
@@ -553,9 +568,8 @@ pub async fn handle_impls(graph: &VerifiedGraphQuery, args: Value) -> Result<Too
     ))
 }
 
-/// Derive annotations are not published in the
-/// verified code graph generation, so a matched symbol reports a typed
-/// evidence-unavailable route error. Accepts `node_id` or `qualified_name`.
+/// Derive annotations attached to a symbol. Accepts `node_id` or
+/// `qualified_name`. Macro expansion is outside the retained syntax evidence.
 #[hotpath::measure(label = "mcp.graph.derives.total")]
 pub async fn handle_derives(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
     let nodes = hotpath::measure_block!(
@@ -565,12 +579,41 @@ pub async fn handle_derives(graph: &VerifiedGraphQuery, args: Value) -> Result<T
     if nodes.is_empty() {
         return Ok(text_tool_result("No matching symbol found.", Vec::new()));
     }
-    Err(TraceDecayError::ProjectRoute {
-        reason_code: "verified-code-graph-evidence-unavailable".to_owned(),
-        retryable: false,
-        detail: "derive annotations are not published in the verified code graph generation"
-            .to_owned(),
-    })
+
+    let touched_files = graph_symbol_paths(&nodes)?;
+    let mut items = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        let metadata = required_graph_metadata(node)?;
+        let file_path = required_graph_file_path(node)?;
+        let derives = metadata
+            .derives
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "evidence_class": "syntax_exact",
+                    "unavailable_fields": ["generated_trait_impl", "generated_methods"],
+                })
+            })
+            .collect::<Vec<_>>();
+        items.push(json!({
+            "node_id": node.occurrence.as_str(),
+            "name": metadata.simple_name,
+            "qualified_name": metadata.qualified_name,
+            "kind": metadata.kind,
+            "file": file_path,
+            "line": user_line(metadata.start_line),
+            "derives": derives,
+        }));
+    }
+
+    let output = hotpath::measure_block!("mcp.graph.derives.serialize", json!(items));
+    Ok(generic_tool_result(
+        Some(graph.project_root()?),
+        &args,
+        &output,
+        touched_files,
+    ))
 }
 
 /// Trait / method implementor lookup.

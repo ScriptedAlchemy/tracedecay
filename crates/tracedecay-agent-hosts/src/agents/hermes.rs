@@ -11,10 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Result, TraceDecayError};
 use crate::ports::mcp_tools::{AdvertisedToolV1, advertised_tools};
 pub use profile_config::read_config_pinned_project_root;
 use profile_config::{disable_plugin, enable_plugin};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext};
 
@@ -127,6 +127,7 @@ impl AgentIntegration for HermesIntegration {
         let mut exports = Vec::new();
         for plugin_dir in detected_plugin_dirs(home) {
             exports.push(tracedecay_automation_runtime::automation::skill_targets::install_managed_skills(
+                &crate::host_io(),
                 profile_root,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Hermes,
                 &plugin_dir,

@@ -1,5 +1,6 @@
-use tracedecay_application::ProfileIdentityReadPort;
+use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 /// Database authorities retained by the owning MCP server for its lifetime.
 /// Hook and LCM handlers borrow these capabilities; they never rediscover or
@@ -10,17 +11,25 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 /// with `DaemonSessionRuntimeRegistryV1`.
 #[derive(Clone, Default)]
 pub struct SessionAuthorities<'a> {
+    /// Registered project session store; ingestion, retrieval, and project
+    /// host admission are all derived from this one lease.
     pub(crate) project: Option<&'a RegisteredGlobalDbLeaseV1>,
+    /// Registered profile (user-scope) session store.
     pub(crate) user: Option<&'a RegisteredGlobalDbLeaseV1>,
     pub(crate) profile_identity: Option<std::sync::Arc<dyn ProfileIdentityReadPort>>,
+    /// The process background CPU authority host observation capture prepares
+    /// under; absent on direct servers, where capture fails closed.
+    pub(crate) background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
     pub(crate) profile_retained_authority:
-        Option<&'a crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
-    pub(crate) project_registered: Option<&'a RegisteredGlobalDbLeaseV1>,
-    pub(crate) profile_registered: Option<&'a RegisteredGlobalDbLeaseV1>,
+        Option<&'a tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1>,
     pub(crate) project_lcm:
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
     pub(crate) profile_lcm:
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+    /// Daemon-wide profile session refresh service serving profile-scoped
+    /// `tracedecay_session_refresh_*` calls on this connection.
+    pub(crate) profile_session_refresh:
+        Option<&'a dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -33,23 +42,12 @@ impl<'a> SessionAuthorities<'a> {
             project,
             user,
             profile_identity: None,
+            background_cpu: None,
             profile_retained_authority: None,
-            project_registered: None,
-            profile_registered: None,
             project_lcm: None,
             profile_lcm: None,
+            profile_session_refresh: None,
         }
-    }
-
-    #[hotpath::skip]
-    pub(crate) const fn with_registered_databases(
-        mut self,
-        project: Option<&'a RegisteredGlobalDbLeaseV1>,
-        profile: Option<&'a RegisteredGlobalDbLeaseV1>,
-    ) -> Self {
-        self.project_registered = project;
-        self.profile_registered = profile;
-        self
     }
 
     pub(crate) fn with_profile_identity(
@@ -60,10 +58,20 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
+    pub(crate) fn with_background_cpu(
+        mut self,
+        background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
+    ) -> Self {
+        self.background_cpu = background_cpu;
+        self
+    }
+
     #[hotpath::skip]
     pub(crate) const fn with_profile_retained_authority(
         mut self,
-        authority: Option<&'a crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
+        authority: Option<
+            &'a tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
+        >,
     ) -> Self {
         self.profile_retained_authority = authority;
         self
@@ -77,6 +85,15 @@ impl<'a> SessionAuthorities<'a> {
     ) -> Self {
         self.project_lcm = project;
         self.profile_lcm = profile;
+        self
+    }
+
+    #[hotpath::skip]
+    pub(crate) const fn with_profile_session_refresh(
+        mut self,
+        refresh: Option<&'a dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
+    ) -> Self {
+        self.profile_session_refresh = refresh;
         self
     }
 }

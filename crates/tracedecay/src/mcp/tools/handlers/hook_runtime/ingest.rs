@@ -2,6 +2,7 @@ use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
+use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
@@ -15,7 +16,6 @@ use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
 use tracedecay_sessions::runtime::source::TranscriptSource;
-use tracedecay_usecases::observation::ObservationCancellation;
 
 use super::super::SessionAuthorities;
 
@@ -65,47 +65,32 @@ fn host_admission_facade<'a>(
     authorities: SessionAuthorities<'a>,
 ) -> Result<HostAdmissionFacade<'a>> {
     let authority = match scope {
-        HostAdmissionScope::Project => match (
-            authorities.project,
-            authorities.profile_identity,
-            authorities.project_registered,
-        ) {
-            (Some(_), Some(identity), registered) => {
+        HostAdmissionScope::Project => match (authorities.project, authorities.profile_identity) {
+            (Some(registered), Some(identity)) => {
                 let project_id = project_observation_id(
                     cg.ok_or_else(|| config_error("project admission requires a project"))?,
                 )?;
-                match registered {
-                    Some(registered) => HostAdmissionAuthorities::for_project(
-                        identity.brain_id().clone(),
-                        identity.profile_id().clone(),
-                        project_id,
-                        registered,
-                    ),
-                    None => HostAdmissionAuthorities::unavailable_for_project(
-                        identity.brain_id().clone(),
-                        identity.profile_id().clone(),
-                        project_id,
-                    ),
-                }
+                HostAdmissionAuthorities::for_project(
+                    identity.brain_id().clone(),
+                    identity.profile_id().clone(),
+                    project_id,
+                    registered,
+                )
             }
-            (Some(_), None, _) | (None, _, _) => HostAdmissionAuthorities::default(),
+            (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
         },
-        HostAdmissionScope::Profile => match (
-            authorities.user,
-            authorities.profile_identity,
-            authorities.profile_registered,
-        ) {
-            (Some(_), Some(identity), Some(registered)) => HostAdmissionAuthorities::for_profile(
+        HostAdmissionScope::Profile => match (authorities.user, authorities.profile_identity) {
+            (Some(registered), Some(identity)) => HostAdmissionAuthorities::for_profile(
                 identity.brain_id().clone(),
                 identity.profile_id().clone(),
                 registered,
             ),
-            (Some(_), Some(identity), None) => HostAdmissionAuthorities::unavailable_for_profile(
-                identity.brain_id().clone(),
-                identity.profile_id().clone(),
-            ),
-            (Some(_), None, _) | (None, _, _) => HostAdmissionAuthorities::default(),
+            (Some(_), None) | (None, _) => HostAdmissionAuthorities::default(),
         },
+    };
+    let authority = match authorities.background_cpu {
+        Some(background_cpu) => authority.with_background_cpu(background_cpu),
+        None => authority,
     };
     Ok(HostAdmissionFacade::new(authority))
 }
@@ -590,6 +575,10 @@ pub(super) async fn ingest_transcript(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.ingest")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Transcript ingest is one cancelled-aware write through the capture authority."
+)]
 pub(crate) async fn ingest_transcript_with_cancellation(
     cg: Option<&TraceDecay>,
     args: &Value,
@@ -710,7 +699,9 @@ pub(crate) async fn ingest_transcript_with_cancellation(
             tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
                 accounting_db,
                 session_authorities.project.map(std::convert::AsRef::as_ref),
-                tracedecay_usecases::analytics_bridge::hook_import_sources(Some(cg.project_root())),
+                tracedecay_application::analytics_bridge::hook_import_sources(Some(
+                    cg.project_root()
+                )),
                 cg.project_root(),
                 crate::tracedecay::current_timestamp()
             ),

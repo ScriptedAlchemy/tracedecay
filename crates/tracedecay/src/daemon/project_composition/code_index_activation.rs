@@ -7,6 +7,7 @@
 use super::*;
 use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1;
 use tracedecay_domain::EmbeddingDocumentCompositionV1;
+use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_semantic_contracts::SemanticResourceCeilings;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
@@ -22,12 +23,12 @@ pub(super) struct CodeIndexActivationMountInputs {
     pub(super) semantic_resources: SemanticResourceCeilings,
     pub(super) semantic_document_composition: EmbeddingDocumentCompositionV1,
     pub(super) native_graph_activation: bool,
-    pub(super) scope: tracedecay_application::ResolvedScope,
+    pub(super) scope: tracedecay_contracts::ResolvedScope,
     pub(super) route_registered: Arc<AtomicBool>,
     pub(super) cancellation: CancellationToken,
     pub(super) graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     pub(super) graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
-    pub(super) configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
+    pub(super) semantic_runtime_ready: tokio::sync::watch::Sender<bool>,
     pub(super) profile_id: tracedecay_domain::configuration::UserProfileId,
 }
 
@@ -53,7 +54,7 @@ pub(super) fn code_index_activation_mount(
         cancellation,
         graph_runtime,
         graph_publication_database,
-        configuration_runtime,
+        semantic_runtime_ready,
         profile_id,
     } = inputs;
     let mount: code_index_scheduler::CodeIndexActivationMountV1 = Arc::new(move || {
@@ -70,7 +71,7 @@ pub(super) fn code_index_activation_mount(
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::clone(&graph_publication_database);
-        let configuration_runtime = Arc::clone(&configuration_runtime);
+        let semantic_runtime_ready = semantic_runtime_ready.clone();
         let profile_id = profile_id.clone();
         Box::pin(hotpath::future!(
             async move {
@@ -103,29 +104,15 @@ pub(super) fn code_index_activation_mount(
                     }
                     outcome = mount => outcome.map_err(|error| error.to_string())?,
                 }
-                // Semantic readiness sits above code-index warming in the
-                // lifecycle: a failed semantic owner degrades semantic
-                // activation, it never fails the text/graph mount.
-                if let Err(error) = project_open_owners::install_semantic_activation_runtime_owner(
-                    &invocation,
-                    &project_root,
-                    configuration_runtime,
-                    scope.clone(),
-                )
-                .await
-                {
-                    log_daemon_event(
-                        "project_open_phase",
-                        &[
-                            ("project", project_root.display().to_string()),
-                            ("phase", "semantic_activation_owner".to_owned()),
-                            ("outcome", "degraded".to_owned()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                }
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked after code-index mount".to_owned());
+                }
+                if tracedecay_application::semantic_runtime::project_semantic_production_runtime(
+                    &project_root,
+                )
+                .is_some()
+                {
+                    semantic_runtime_ready.send_replace(true);
                 }
 
                 // Query authority depends on the first sealed generation, but
@@ -159,7 +146,7 @@ struct QueryAuthorityWaitInputs {
     project_id: tracedecay_domain::ProjectId,
     graph_runtime: Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     profile_id: tracedecay_domain::configuration::UserProfileId,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     route_registered: Arc<AtomicBool>,
     cancellation: CancellationToken,
 }
@@ -174,6 +161,10 @@ struct QueryAuthorityWaitInputs {
 /// every slot write records a seat, and the loop re-reads the exact state
 /// (`latest_generation_id`) on each wake. Subscribing before the first read is
 /// what keeps a seat that lands during it observable.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Query authority spawn waits for one generation and installs its readers."
+)]
 fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs) {
     let QueryAuthorityWaitInputs {
         invocation: authority_invocation,
@@ -378,7 +369,14 @@ pub(super) fn code_index_hook_sink(
     let sink: crate::mcp::server::CodeIndexHookSink =
         Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
             let activation = Arc::clone(&activation);
-            Box::pin(async move { activation.notify_hook_paths(&root, rel_paths).await })
+            Box::pin(async move {
+                if activation.automatic_admission()
+                    == code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+                {
+                    return crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled;
+                }
+                activation.notify_hook_paths(&root, rel_paths).await.into()
+            })
         });
     sink
 }
@@ -387,30 +385,47 @@ pub(super) fn code_index_hook_sink(
 /// worktree must be reconciled asks the activation owner for that pass instead
 /// of enumerating paths.
 ///
-/// This is the *explicit demand* channel — `tracedecay init` / `tracedecay
-/// sync` through `tracedecay_admin_sync`, and the hook effects that have
-/// concluded a full reconcile is required. It is therefore not subject to
-/// `CodeIndexAutomaticAdmissionV1`, which answers only "may the daemon start
-/// indexing this route on its own?" and is derived from
-/// `sync.watch_linked_worktrees` — a filesystem-watcher policy. Watch-driven
-/// hints keep that gate: they arrive through [`code_index_hook_sink`] and
-/// [`code_index_freshness_probe_sink`], which still call the automatic
-/// entry points.
+/// The caller names who is asking. `CodeIndexAutomaticAdmissionV1` answers
+/// only "may the daemon start indexing this route on its own?" — it is
+/// derived from `sync.watch_linked_worktrees`, a watcher policy — so every
+/// demand the daemon raises by itself (host lifecycle hooks, the server's
+/// startup catch-up, and the path hints that arrive through
+/// [`code_index_hook_sink`] and [`code_index_freshness_probe_sink`]) is
+/// `Automatic` and keeps that gate. Only `Explicit` demand — `tracedecay
+/// init` / `tracedecay sync` through `tracedecay_admin_sync` — skips the
+/// automatic-admission question for a route the operator named. Routing the
+/// daemon's own demands as explicit indexed every un-opted-in linked worktree
+/// moments after it opened and made the published
+/// `code_index=linked_worktree_disabled` state a lie.
 pub(super) fn code_index_reconcile_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexReconcileSink {
-    let sink: crate::mcp::server::CodeIndexReconcileSink = Arc::new(move |root: PathBuf| {
-        let schedulers = schedulers.clone();
-        let activation = Arc::clone(&activation);
-        Box::pin(async move {
-            if schedulers.notify_hook_overflow(&root).await {
-                true
-            } else {
-                activation.notify_explicit_reconciliation(&root).await
-            }
-        })
-    });
+    let sink: crate::mcp::server::CodeIndexReconcileSink = Arc::new(
+        move |root: PathBuf, demand: crate::mcp::server::CodeIndexReconcileDemandV1| {
+            let schedulers = schedulers.clone();
+            let activation = Arc::clone(&activation);
+            Box::pin(async move {
+                if demand == crate::mcp::server::CodeIndexReconcileDemandV1::Automatic
+                    && activation.automatic_admission() == code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+                {
+                    return crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled;
+                }
+                if schedulers.notify_hook_overflow(&root).await {
+                    return crate::mcp::server::CodeIndexAdmission::Accepted;
+                }
+                match demand {
+                    crate::mcp::server::CodeIndexReconcileDemandV1::Automatic => {
+                        activation.notify_hook_overflow(&root).await.into()
+                    }
+                    crate::mcp::server::CodeIndexReconcileDemandV1::Explicit => activation
+                        .notify_explicit_reconciliation(&root)
+                        .await
+                        .into(),
+                }
+            })
+        },
+    );
     sink
 }
 
@@ -419,19 +434,19 @@ pub(super) fn code_index_reconcile_sink(
 /// overflow wake solely when that evidence proves a reconcile is required.
 pub(super) fn code_index_freshness_probe_sink(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexFreshnessProbeSink {
     Arc::new(move |root: PathBuf| {
         let schedulers = schedulers.clone();
-        Box::pin(async move { schedulers.probe_freshness(&root).await })
-    })
-}
-
-pub(super) fn diagnostics_change_generation_resolver(
-    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-) -> crate::mcp::server::DiagnosticsChangeGenerationResolver {
-    Arc::new(move |root: PathBuf| {
-        let schedulers = schedulers.clone();
-        Box::pin(async move { schedulers.diagnostics_change_generation(&root).await })
+        let activation = Arc::clone(&activation);
+        Box::pin(async move {
+            if activation.automatic_admission()
+                == code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+            {
+                return crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled;
+            }
+            schedulers.probe_freshness(&root).await.into()
+        })
     })
 }
 
@@ -507,7 +522,12 @@ mod tests {
         let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
 
         assert!(
-            sink(root.clone()).await,
+            sink(
+                root.clone(),
+                crate::mcp::server::CodeIndexReconcileDemandV1::Explicit
+            )
+            .await
+                == crate::mcp::server::CodeIndexAdmission::Accepted,
             "a pre-mount reconcile request must be accepted, not dropped"
         );
 
@@ -574,9 +594,47 @@ mod tests {
         );
 
         let registry = code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1);
+        let hook_sink = code_index_hook_sink(Arc::clone(&activation));
+        assert_eq!(
+            hook_sink(root.clone(), vec!["lib.rs".to_owned()]).await,
+            crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled
+        );
+        let probe_sink = code_index_freshness_probe_sink(registry.clone(), Arc::clone(&activation));
+        assert_eq!(
+            probe_sink(root.clone()).await,
+            crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled
+        );
         let sink = code_index_reconcile_sink(registry, Arc::clone(&activation));
+        // The daemon's own whole-worktree demands — a `workspaceOpen` /
+        // `sessionStart` hook effect, the server's startup catch-up — are
+        // automatic and must honour the same watch policy as a path hint:
+        // otherwise every un-opted-in linked worktree is indexed the moment
+        // its full server opens, and the typed `linked_worktree_disabled`
+        // admission the daemon publishes for it is false.
         assert!(
-            sink(root.clone()).await,
+            sink(
+                root.clone(),
+                crate::mcp::server::CodeIndexReconcileDemandV1::Automatic
+            )
+            .await
+                == crate::mcp::server::CodeIndexAdmission::LinkedWorktreeDisabled,
+            "an automatic whole-worktree demand must honour the linked-worktree watch policy"
+        );
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            mount_attempts.load(Ordering::SeqCst),
+            0,
+            "a refused automatic demand must not start the demand-driven mount"
+        );
+        assert!(
+            sink(
+                root.clone(),
+                crate::mcp::server::CodeIndexReconcileDemandV1::Explicit
+            )
+            .await
+                == crate::mcp::server::CodeIndexAdmission::Accepted,
             "explicit reconcile demand must be accepted on a linked worktree"
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {

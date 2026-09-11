@@ -3,10 +3,9 @@
 //! Gauge keys stay the historical `usecases.retention.*` labels so dashboards
 //! and comparisons remain continuous across the crate extraction. Never pass
 //! model inputs, paths, or generation identifiers as labels. Every macro
-//! expands to a no-op unless this crate's `hotpath` feature is selected.
+//! expands to a no-op until the binary selects the `hotpath/hotpath` backend.
 
 #[inline]
-#[cfg(feature = "hotpath")]
 pub(crate) fn retention_plan(candidates: usize, bytes_planned: u64) {
     hotpath::gauge!("usecases.retention.candidates_planned").set(candidates as f64);
     hotpath::gauge!("usecases.retention.bytes_planned").set(bytes_planned as f64);

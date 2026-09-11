@@ -10,9 +10,6 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
 use super::*;
-use crate::application::memory::{
-    MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
-};
 use crate::automation::AutomationRunControl;
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
@@ -21,11 +18,14 @@ use crate::automation::config::{
     AutomationBackend, AutomationHostMode, AutomationTaskConfig, AutomationTaskSet,
 };
 use crate::automation::run_ledger::AutomationRunStatus;
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
-use crate::store::memory::DatabaseFactStore;
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
+use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplicationError;
+use tracedecay_session_memory::memory::{
+    MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+};
 use tracedecay_store::{FactStoreError, ProjectMemoryGraphQueryV1};
 
 mod user_scope_graph_runtime;
@@ -68,7 +68,8 @@ impl UserRuntimeHarness {
         let session_runtime = RegisteredGlobalDbTestRuntime::profile(&profile_root)
             .await
             .expect("registered profile session runtime");
-        let memory_path = crate::memory::user::user_memory_db_path(&profile_root);
+        let memory_path =
+            tracedecay_session_memory::memory::user::user_memory_db_path(&profile_root);
         let authority =
             DatabaseAuthority::acquire_test(&memory_path, "profile automation memory fixture")
                 .expect("profile memory authority");
@@ -104,6 +105,17 @@ impl UserRuntimeHarness {
 
 fn configuration_revision() -> ConfigurationRevisionId {
     ConfigurationRevisionId::new("config.user-automation-test.v1").expect("configuration revision")
+}
+
+fn no_skill_needed_output() -> Value {
+    json!({
+        "skills": [],
+        "outcome": "no_skill_needed",
+        "decision": {
+            "reason": "No repeated user-scoped evidence warrants a managed skill mutation.",
+            "remedy": "insufficient_repeated_evidence"
+        }
+    })
 }
 
 fn test_run_control() -> AutomationRunControl {
@@ -210,7 +222,7 @@ impl AutomationSessionRetrieval for TestRetrieval {
 
     fn retrieve(
         &self,
-        _query: crate::application::session::SessionTemporalQuery,
+        _query: tracedecay_session_memory::session::SessionTemporalQuery,
     ) -> AutomationSessionRetrievalFuture<'_> {
         Box::pin(async move {
             match &self.outcome {
@@ -326,7 +338,7 @@ async fn projectless_reflection_uses_caller_supplied_automation_configuration() 
 #[tokio::test]
 async fn projectless_skill_writer_uses_user_ledger() {
     let harness = UserRuntimeHarness::open("user-skill-writer").await;
-    let backend = JsonBackend::new(AgentTaskKind::SkillWriter, json!({ "skills": [] }));
+    let backend = JsonBackend::new(AgentTaskKind::SkillWriter, no_skill_needed_output());
     let retrieval = TestRetrieval::message(
         "hermes",
         "user-session-1",
@@ -335,6 +347,7 @@ async fn projectless_skill_writer_uses_user_ledger() {
     );
 
     let run = run_user_skill_writer_with_backend_and_retrieval(
+        crate::automation::host_io::plain_file_host_io(),
         &harness.profile_root,
         Arc::clone(&harness.registry),
         &enabled_user_config(),
@@ -376,7 +389,7 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
         let retrieval = TestRetrieval::rejected(reason);
         let reflector_backend =
             JsonBackend::new(AgentTaskKind::SessionReflector, json!({ "facts": [] }));
-        let skill_backend = JsonBackend::new(AgentTaskKind::SkillWriter, json!({ "skills": [] }));
+        let skill_backend = JsonBackend::new(AgentTaskKind::SkillWriter, no_skill_needed_output());
         let config = enabled_user_config();
 
         let reflector = run_user_session_reflector_with_backend_and_retrieval(
@@ -394,6 +407,7 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
         .await
         .expect("rejected reflector");
         let skill = run_user_skill_writer_with_backend_and_retrieval(
+            crate::automation::host_io::plain_file_host_io(),
             &harness.profile_root,
             Arc::clone(&harness.registry),
             &config,
@@ -416,7 +430,7 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
     let retrieval = TestRetrieval::empty();
     let reflector_backend =
         JsonBackend::new(AgentTaskKind::SessionReflector, json!({ "facts": [] }));
-    let skill_backend = JsonBackend::new(AgentTaskKind::SkillWriter, json!({ "skills": [] }));
+    let skill_backend = JsonBackend::new(AgentTaskKind::SkillWriter, no_skill_needed_output());
     let config = enabled_user_config();
     let reflector = run_user_session_reflector_with_backend_and_retrieval(
         &harness.profile_root,
@@ -433,6 +447,7 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
     .await
     .expect("empty reflector");
     let skill = run_user_skill_writer_with_backend_and_retrieval(
+        crate::automation::host_io::plain_file_host_io(),
         &harness.profile_root,
         Arc::clone(&harness.registry),
         &config,

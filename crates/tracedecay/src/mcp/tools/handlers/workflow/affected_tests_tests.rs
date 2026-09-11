@@ -6,19 +6,19 @@ use std::future::ready;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::{
+use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
+use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
 };
-use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
-use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
-    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ContentDigest,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, ManifestDigest,
-    PolicyRevisionId, ProjectId, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
-    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
-    SourceSpan, SymbolOccurrenceId, WorktreeId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1,
+    ContentDigest, EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId,
+    ManifestDigest, PolicyRevisionId, ProjectId, RefId, RelationEdgeKindV1, RepositoryId,
+    SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+    SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, WorktreeId,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -224,9 +224,13 @@ fn push_fixture_symbol(
         branches: 0,
         loops: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         line_span: 1,
         start_line: ordinal,
         signature: None,
+        docstring: None,
+        is_async: false,
+        derives: Vec::new(),
         skip_test_coverage: false,
         file_identity: fixture_digest("file-identity", path),
         content_digest: fixture_digest("symbol-content", occurrence.as_str()),
@@ -291,7 +295,7 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
         database
             .execute_write_batch(
                 "seed managed test-run diagnostics schema",
-                tracedecay_usecases::diagnostics_store::SCHEMA,
+                tracedecay_application::diagnostics_store::SCHEMA,
             )
             .await
             .unwrap();
@@ -416,7 +420,7 @@ async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
         database
             .execute_write_batch(
                 "seed managed test-run diagnostics schema",
-                tracedecay_usecases::diagnostics_store::SCHEMA,
+                tracedecay_application::diagnostics_store::SCHEMA,
             )
             .await
             .unwrap();
@@ -593,7 +597,7 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
         database
             .execute_write_batch(
                 "seed timed managed test-run diagnostics schema",
-                tracedecay_usecases::diagnostics_store::SCHEMA,
+                tracedecay_application::diagnostics_store::SCHEMA,
             )
             .await
             .unwrap();
@@ -662,7 +666,7 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
         database
             .execute_write_batch(
                 "seed partial cancelled managed test-run schema",
-                tracedecay_usecases::diagnostics_store::SCHEMA,
+                tracedecay_application::diagnostics_store::SCHEMA,
             )
             .await
             .unwrap();
@@ -742,7 +746,7 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
         database
             .execute_write_batch(
                 "seed failed managed test-run diagnostics schema",
-                tracedecay_usecases::diagnostics_store::SCHEMA,
+                tracedecay_application::diagnostics_store::SCHEMA,
             )
             .await
             .unwrap();
@@ -829,7 +833,7 @@ async fn reported_passing_and_failing_tests_complete_with_observed_results() {
         database
             .execute_write_batch(
                 "seed failing managed test-run result schema",
-                tracedecay_usecases::diagnostics_store::SCHEMA,
+                tracedecay_application::diagnostics_store::SCHEMA,
             )
             .await
             .unwrap();

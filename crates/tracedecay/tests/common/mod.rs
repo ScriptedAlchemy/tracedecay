@@ -25,7 +25,7 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
@@ -141,6 +141,25 @@ impl Drop for EnvVarGuard {
     }
 }
 
+/// Query lanes a terminal code-index answer must report as `"complete"`.
+/// Daemon journeys and the MCP readiness wait share this set.
+pub const CODE_INDEX_QUERY_COVERAGE_LANES: [&str; 3] = ["exact", "lexical", "graph"];
+
+fn code_index_lane_is_complete(value: &Value) -> bool {
+    value == "complete" || value["status"] == "complete"
+}
+
+/// Lanes whose search `coverage.<lane>` marker is not complete.
+///
+/// Search renders a complete lane as the string `"complete"`; the primitive
+/// context surface uses `{ "status": "complete" }`. Both are terminal.
+pub fn incomplete_code_index_query_lanes(search: &Value) -> Vec<&'static str> {
+    CODE_INDEX_QUERY_COVERAGE_LANES
+        .into_iter()
+        .filter(|lane| !code_index_lane_is_complete(&search["coverage"][*lane]))
+        .collect()
+}
+
 /// Env var pinning the global DB path; tests that set it serialize on
 /// [`GLOBAL_DB_ENV_LOCK`].
 pub const GLOBAL_DB_ENV: &str = "TRACEDECAY_GLOBAL_DB";
@@ -176,22 +195,56 @@ static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 /// [`IsolatedEnv::acquire_blocking`] (sync tests); both return the guard plus
 /// a ready-made `project` directory inside the temp home.
 pub struct IsolatedEnv {
-    // Field order matters: fields drop in declaration order, so the lock must
-    // be declared last. Dropping it first would let the next waiting test
+    toolchain_environment: [(&'static str, Option<OsString>); 3],
+    // Field order matters: fields drop in declaration order, so the locks must
+    // be declared last. Dropping them first would let the next waiting test
     // install its own isolated env, only for `storage`'s restore to clobber it.
     storage: TraceDecayStorageEnvGuard,
     dir: TempDir,
+    // Tests that swap the same process env by hand serialize on
+    // [`GLOBAL_DB_ENV_LOCK`] instead of this fixture. Holding both keeps one
+    // binary's `IsolatedEnv` journeys from interleaving with them: an
+    // `EnvVarGuard` restored mid-journey pointed a live daemon handshake at the
+    // cargo `target/test-profile` socket, and a swapped `HOME` emptied the
+    // Claude transcript root under a running provider fixture.
+    _global_db_env_lock: std::sync::MutexGuard<'static, ()>,
     _env_lock: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl IsolatedEnv {
     fn build(env_lock: tokio::sync::MutexGuard<'static, ()>) -> (Self, PathBuf) {
+        let global_db_env_lock = lock_global_db_env();
         // Every fixture built on top of this guard eventually asks the shipped
         // daemon for a handshake, which reads the registered product runtime.
         // Registering here — the single choke point both `acquire` paths share
         // — keeps that out of every individual suite fixture.
         register_process_product_runtime();
         let dir = tempdir_or_panic();
+        let original_home =
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+        let toolchain_environment = [
+            (
+                "RUSTUP_HOME",
+                std::env::var_os("RUSTUP_HOME").or_else(|| {
+                    original_home
+                        .as_ref()
+                        .map(|home| home.join(".rustup").into_os_string())
+                }),
+            ),
+            (
+                "CARGO_HOME",
+                std::env::var_os("CARGO_HOME").or_else(|| {
+                    original_home
+                        .as_ref()
+                        .map(|home| home.join(".cargo").into_os_string())
+                }),
+            ),
+            (
+                "RUSTUP_TOOLCHAIN",
+                std::env::var_os("RUSTUP_TOOLCHAIN")
+                    .or_else(|| option_env!("RUSTUP_TOOLCHAIN").map(OsString::from)),
+            ),
+        ];
         let storage = TraceDecayStorageEnvGuard::for_tempdir(&dir);
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap_or_else(|err| {
@@ -202,8 +255,10 @@ impl IsolatedEnv {
         });
         (
             Self {
+                toolchain_environment,
                 storage,
                 dir,
+                _global_db_env_lock: global_db_env_lock,
                 _env_lock: env_lock,
             },
             project,
@@ -224,6 +279,22 @@ impl IsolatedEnv {
 
     pub fn home(&self) -> &Path {
         self.storage.home()
+    }
+
+    /// Reuses the installed toolchain while retaining the fixture's isolated
+    /// product home. Values are captured under the environment lock before
+    /// HOME changes, so parallel tests cannot borrow another fixture's home.
+    pub fn apply_toolchain_env(&self, command: &mut Command) {
+        for (key, value) in &self.toolchain_environment {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
     }
 
     /// The throwaway directory holding the isolated home and every checkout, so

@@ -1,20 +1,29 @@
-//! Canonical memory use cases over the append-only fact authority.
+//! Canonical memory use cases over the append-only fact authority, plus the
+//! memory model they and [`crate::fact_store`] share: sanitization hygiene,
+//! scoring, entity, encoding, and trust utilities.
 
+use crate::fact_store::DatabaseFactStore;
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 mod anchors;
 mod canonical;
 mod context;
 mod curation;
 mod dashboard;
+pub mod diff;
+pub mod encoding;
+pub mod entities;
 mod error;
 mod graph;
+pub mod hygiene;
 mod privacy_remediation;
 mod project_memory;
 mod sanitize;
+pub mod similarity;
+pub mod trust;
+pub mod user;
 
 #[cfg(test)]
 mod tests;
@@ -66,12 +75,20 @@ use tracedecay_store::{
     StoredFactV1,
 };
 
+/// Operation label for a typed memory-application cancellation. Callers that
+/// must distinguish cancellation from a generic database failure match this
+/// exact [`TraceDecayError::Database::operation`] instead of scanning Display.
+pub const MEMORY_APPLICATION_INTERRUPTED_OPERATION: &str = "memory application interrupted";
+
 /// Maps a [`MemoryApplicationError`] onto the root/dashboard-facing
 /// [`TraceDecayError`]. The single conversion site for every project-memory
 /// route across the root crate and the dashboard API, so both stay in sync
 /// instead of maintaining independent copies.
 pub fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     match error {
+        MemoryApplicationError::Cancelled(error) => {
+            TraceDecayError::database_operation(MEMORY_APPLICATION_INTERRUPTED_OPERATION, error)
+        }
         MemoryApplicationError::Store(tracedecay_store::FactStoreError::GraphResetRequired {
             owner,
             reason,
@@ -84,6 +101,16 @@ pub fn memory_application_error(error: MemoryApplicationError) -> TraceDecayErro
         }
         error => TraceDecayError::database_operation("memory application", error),
     }
+}
+
+/// True when [`memory_application_error`] mapped a store cancellation or
+/// deadline into the typed interrupted-operation database error.
+pub fn is_memory_application_cancellation(error: &TraceDecayError) -> bool {
+    matches!(
+        error,
+        TraceDecayError::Database { operation, .. }
+            if operation == MEMORY_APPLICATION_INTERRUPTED_OPERATION
+    )
 }
 
 /// Builds a [`MemoryApplication`] directly over a database handle's

@@ -5,19 +5,22 @@
 //! falls back to the legacy `dashboard_hint_events` table when present.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use axum::extract::State;
 use axum::response::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_application::ObservatoryReadModelV1;
+use tracedecay_contracts::ObservatoryReadModelV1;
 use tracedecay_domain::CoverageStateV1;
 
 use tracedecay_automation::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
+use tracedecay_automation_runtime::automation::agent_targets::managed_agent_label;
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_global_db::{
     AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, RegisteredGlobalDb,
 };
@@ -27,7 +30,7 @@ use super::DashboardState;
 use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
 use super::util::{i64_field, query_i64, query_i64_result, query_rows, str_field};
 
-pub use tracedecay_usecases::analytics_bridge::{
+pub use tracedecay_application::analytics_bridge::{
     AnalyticsDiagnosticsPayloadV1, AnalyticsDiagnosticsRatiosV1, AnalyticsEventKindCountV1,
     AnalyticsHintEfficacyCategoryV1, AnalyticsHintEfficacyTotalsV1, AnalyticsHintEfficacyV1,
     AnalyticsHookNameCountV1, AnalyticsHookWindowV1, AnalyticsOutcomeCountV1,
@@ -232,7 +235,7 @@ pub async fn overview(
             let (durable_events, observatory, agents, underused) = tokio::join!(
                 durable_analytics_rows_for_state(&state),
                 observatory_model(&state),
-                agent_usage_summary(state.lcm_db.as_deref()),
+                agent_usage_summary(&state.host_io, state.lcm_db.as_deref()),
                 underused_tool_families(state.lcm_db.as_deref()),
             );
             let observatory = Some(observatory);
@@ -392,6 +395,7 @@ async fn observatory_model(state: &DashboardState) -> ObservatoryReadModelV1 {
 }
 
 async fn agent_usage_summary(
+    host_io: &HostIo,
     db: Option<&RegisteredGlobalDb>,
 ) -> Result<AnalyticsAgentsPayloadV1, String> {
     let Some(db) = db else {
@@ -420,7 +424,7 @@ async fn agent_usage_summary(
     for row in rows {
         let agent_id = str_field(&row, "agent_id");
         let Some(label) =
-            managed_agent_label_for_session(agent_id, str_field(&row, "metadata_json"))
+            managed_agent_label_for_session(host_io, agent_id, str_field(&row, "metadata_json"))
         else {
             continue;
         };
@@ -437,21 +441,19 @@ async fn agent_usage_summary(
     })
 }
 
-fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
-    if let Ok(Some(label)) =
-        tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(agent_id)
-    {
+fn managed_agent_label_for_session(
+    host_io: &HostIo,
+    agent_id: &str,
+    metadata_json: &str,
+) -> Option<&'static str> {
+    if let Some(label) = managed_agent_label(host_io, agent_id) {
         return Some(label);
     }
     let metadata: Value = serde_json::from_str(metadata_json).ok()?;
     ["agent_nickname", "agent_role"]
         .into_iter()
         .filter_map(|key| metadata.get(key).and_then(Value::as_str))
-        .find_map(|id| {
-            tracedecay_automation_runtime::automation::agent_targets::managed_agent_label(id)
-                .ok()
-                .flatten()
-        })
+        .find_map(|id| managed_agent_label(host_io, id))
 }
 
 /// `GET /api/plugins/analytics/agents` — sessions per managed subagent,
@@ -463,7 +465,7 @@ pub async fn agents(
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsAgentsPayloadV1>>> {
     hotpath::future!(
         async move {
-            match agent_usage_summary(state.lcm_db.as_deref()).await {
+            match agent_usage_summary(&state.host_io, state.lcm_db.as_deref()).await {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),
@@ -649,8 +651,9 @@ fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNo
 }
 
 async fn subagent_tree_reading(
+    host_io: &HostIo,
     db: Option<&RegisteredGlobalDb>,
-    project_key: &str,
+    project_root: &Path,
 ) -> Result<AnalyticsSubagentTreePayloadV1, String> {
     let Some(db) = db else {
         return Ok(AnalyticsSubagentTreePayloadV1 {
@@ -669,6 +672,8 @@ async fn subagent_tree_reading(
     };
 
     let connection = db.read_connection();
+    let canonical = RegisteredGlobalDb::canonical_project_key(project_root);
+    let opened = project_root.to_string_lossy().into_owned();
     let rows = query_rows(
         &connection,
         "SELECT provider,
@@ -683,14 +688,16 @@ async fn subagent_tree_reading(
                 COALESCE(parent_tool_use_id, '') AS parent_tool_use_id
          FROM sessions
          -- Either column may carry the project: `project_key` is a provider's
-         -- own label and `project_path` the canonical root. Matching both is
+         -- own label and `project_path` the stored root. Matching both is
          -- the convention every scoped session read in `registered_sessions`
-         -- already uses, and matching only one silently empties the tree for
-         -- whichever provider labels its sessions the other way.
-         WHERE (project_key = ?1 OR project_path = ?1)
+         -- already uses. The opened spelling and the canonical OS identity
+         -- (`/var` vs `/private/var`) are one project; matching only the
+         -- canonical key silently empties the tree for rows stored under the
+         -- alias the host wrote.
+         WHERE (project_key IN (?1, ?2) OR project_path IN (?1, ?2))
          ORDER BY COALESCE(started_at, 0), provider, session_id
-         LIMIT ?2",
-        params![project_key, SUBAGENT_TREE_SESSION_CEILING],
+         LIMIT ?3",
+        params![canonical, opened, SUBAGENT_TREE_SESSION_CEILING],
     )
     .await
     .map_err(|error| format!("analytics subagent tree query failed: {error}"))?;
@@ -700,9 +707,10 @@ async fn subagent_tree_reading(
         .iter()
         .map(|row| {
             let agent_id = str_field(row, "agent_id");
-            let agent = managed_agent_label_for_session(agent_id, str_field(row, "metadata_json"))
-                .map(str::to_owned)
-                .or_else(|| optional_text(row, "agent_id"));
+            let agent =
+                managed_agent_label_for_session(host_io, agent_id, str_field(row, "metadata_json"))
+                    .map(str::to_owned)
+                    .or_else(|| optional_text(row, "agent_id"));
             SubagentSessionRow {
                 provider: str_field(row, "provider").to_owned(),
                 session_id: str_field(row, "session_id").to_owned(),
@@ -748,8 +756,13 @@ pub async fn subagent_tree(
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>> {
     hotpath::future!(
         async move {
-            let project_key = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-            match subagent_tree_reading(state.lcm_db.as_deref(), &project_key).await {
+            match subagent_tree_reading(
+                &state.host_io,
+                state.lcm_db.as_deref(),
+                &state.project_root,
+            )
+            .await
+            {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),

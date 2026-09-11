@@ -272,19 +272,74 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     assert_eq!(provenance[0].5, "message-atomic");
     assert!(PayloadDigestV1::new(provenance[0].6.clone()).is_ok());
 
-    let raw_conn = rusqlite::Connection::open(database_path).unwrap();
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let error = raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance SET retrieval_anchor_id = NULL
+         WHERE projector_version = ?1 AND observation_id = ?2",
+            rusqlite::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                candidate.observation_id().as_str()
+            ],
+        )
+        .expect_err("current projection must preserve its anchor binding");
+    assert_eq!(
+        error.sqlite_error().unwrap().extended_code,
+        rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+    );
     assert!(
-        raw_conn
-            .execute(
-                "UPDATE observation_projection_provenance
-                 SET retrieval_anchor_id = NULL
-                 WHERE projector_version = ?1 AND observation_id = ?2",
-                rusqlite::params![
-                    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
-                    candidate.observation_id().as_str()
-                ],
+        error
+            .to_string()
+            .contains("invalid projection provenance binding")
+    );
+    // Retained stores can still carry the earlier V4-only guard. Admission
+    // must replace that definition before a V5 writer can reuse the store.
+    raw_conn
+        .execute_batch(
+            "DROP TRIGGER projection_provenance_binding_update_v4;
+         CREATE TRIGGER projection_provenance_binding_update_v4
+         BEFORE UPDATE OF projector_version, observation_id, retrieval_anchor_id, receipt_id
+         ON observation_projection_provenance
+         WHEN NEW.projector_version = 'claude-session-message-v4' AND (
+            NEW.retrieval_anchor_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM observation_retrieval_anchors AS binding
+                JOIN observations AS observation
+                  ON observation.observation_id = binding.observation_id
+                WHERE binding.observation_id = NEW.observation_id
+                  AND binding.anchor_id = NEW.retrieval_anchor_id
+                  AND observation.receipt_id = NEW.receipt_id
             )
-            .is_err()
+         ) BEGIN
+            SELECT RAISE(ABORT, 'invalid v4 projection provenance binding');
+         END;",
+        )
+        .unwrap();
+    drop(raw_conn);
+    drop(store);
+    drop(runtime);
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let error = raw_conn
+        .execute(
+            "UPDATE observation_projection_provenance SET retrieval_anchor_id = NULL
+         WHERE projector_version = ?1 AND observation_id = ?2",
+            rusqlite::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                candidate.observation_id().as_str()
+            ],
+        )
+        .expect_err("reopened current projection must preserve its anchor binding");
+    assert_eq!(
+        error.sqlite_error().unwrap().extended_code,
+        rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("invalid projection provenance binding")
     );
     drop(raw_conn);
 

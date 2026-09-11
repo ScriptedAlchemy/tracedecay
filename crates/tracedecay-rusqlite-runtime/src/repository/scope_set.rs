@@ -6,7 +6,7 @@
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
-use tracedecay_application::{AuthorizedScopeSet, AuthorizedScopeSetError};
+use tracedecay_contracts::{AuthorizedScopeSet, AuthorizedScopeSetError};
 use tracedecay_domain::{ManifestDigest, ScopeSetId, ScopeSetRevision};
 use tracedecay_store::runtime::{
     AuthorizedScopeSetRecordV1, ScopeSetCasOutcomeV1, ScopeSetCompareAndSwapV1,

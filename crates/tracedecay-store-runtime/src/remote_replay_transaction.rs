@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, mpsc};
 
-use tracedecay_application::OperationBudgetUsage;
-use tracedecay_application::remote::capture::RemoteWriterAuthorityV1;
-use tracedecay_application::remote::replay::{
+use tracedecay_contracts::OperationBudgetUsage;
+use tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1;
+use tracedecay_contracts::remote::replay::{
     RemoteReplayCommitReceiptV1, RemoteReplayFrameV1, RemoteReplayTransactionErrorV1,
     RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionPortV1,
 };
@@ -652,7 +652,7 @@ fn prepare_request(
     .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
     let projection_generation = ProjectionGenerationId::new(PROJECTION_GENERATION)
         .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
-    let committed_at = tracedecay_application::clock::now_micros();
+    let committed_at = tracedecay_contracts::clock::now_micros();
     let authorization =
         build_observation_resolution_authorization_v1(&observation, PROJECTION_GENERATION)
             .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;

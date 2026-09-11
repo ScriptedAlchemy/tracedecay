@@ -18,30 +18,15 @@
     "acceptable": [
       "tracedecay_commit_context",
       "tracedecay_changelog"
-    ],
-    "forbidden_first": [
-      "Grep",
-      "Glob",
-      "Bash"
-    ],
-    "forbidden_bash": [
-      "grep",
-      "rg ",
-      "rg\t",
-      "find ",
-      "cat ",
-      "sed ",
-      "awk ",
-      "ack ",
-      "git log",
-      "git diff",
-      "git show",
-      "git blame",
-      "git status"
     ]
   },
   "ground_truth": [],
   "max_tool_calls": 6,
   "requires_fixture": "git-history",
-  "notes": "DEFERRED: needs real uncommitted/branch changes on top of seeded history for tracedecay_pr_context to have anything to summarize."
+  "notes": "DEFERRED: needs real uncommitted/branch changes on top of seeded history for tracedecay_pr_context to have anything to summarize.",
+  "expected_skill": "reviewing-changes",
+  "allowed_skills": [
+    "reviewing-changes"
+  ],
+  "max_tracedecay_calls": 6
 }

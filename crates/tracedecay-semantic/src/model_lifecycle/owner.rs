@@ -6,7 +6,10 @@ pub struct SemanticModelLifecycleOwnerV1 {
     root: PathBuf,
     catalog: FastEmbedModelCatalogV1,
     source: Arc<dyn ModelMemberSourceV1>,
-    artifact_store: ModelArtifactStore,
+    artifact_store: Arc<ModelArtifactStore>,
+    artifact_root: PathBuf,
+    lease_namespace: Option<String>,
+    configuration_selection: Arc<tokio::sync::Mutex<()>>,
     inner: Arc<LifecyclePublicationGateV1>,
     worker: Mutex<AcquisitionWorkerStateV1>,
     acquisition: Arc<AcquisitionControlV1>,
@@ -223,18 +226,70 @@ impl SemanticModelLifecycleOwnerV1 {
         catalog: FastEmbedModelCatalogV1,
         source: Arc<dyn ModelMemberSourceV1>,
     ) -> Result<Self, ModelLifecycleErrorV1> {
-        catalog.validate()?;
         let root = root.into();
+        let artifact_root = root.join("verified-artifacts");
+        Self::open_storage(root, artifact_root, None, catalog, source)
+    }
+
+    /// Keep selection and acquisition control private to one logical owner while
+    /// sharing only the verified immutable artifact inventory.
+    pub fn open_scoped(
+        selection_root: impl Into<PathBuf>,
+        shared_artifact_root: impl Into<PathBuf>,
+        lease_namespace: &str,
+        catalog: FastEmbedModelCatalogV1,
+        source: Arc<dyn ModelMemberSourceV1>,
+    ) -> Result<Self, ModelLifecycleErrorV1> {
+        if lease_namespace.is_empty() {
+            return Err(ModelLifecycleErrorV1::Rejected);
+        }
+        Self::open_storage(
+            selection_root.into(),
+            shared_artifact_root.into(),
+            Some(encode_lowercase_hex(&Sha256::digest(
+                lease_namespace.as_bytes(),
+            ))),
+            catalog,
+            source,
+        )
+    }
+
+    pub fn open_scoped_default(
+        selection_root: impl Into<PathBuf>,
+        shared_artifact_root: impl Into<PathBuf>,
+        lease_namespace: &str,
+    ) -> Result<Self, ModelLifecycleErrorV1> {
+        let root = selection_root.into();
+        let source = Arc::new(HfHubModelMemberSourceV1::new(
+            root.join(HF_HUB_CACHE_DIRECTORY_V1),
+        ));
+        Self::open_scoped(
+            root,
+            shared_artifact_root,
+            lease_namespace,
+            FastEmbedModelCatalogV1::production(),
+            source,
+        )
+    }
+
+    fn open_storage(
+        root: PathBuf,
+        artifact_root: PathBuf,
+        lease_namespace: Option<String>,
+        catalog: FastEmbedModelCatalogV1,
+        source: Arc<dyn ModelMemberSourceV1>,
+    ) -> Result<Self, ModelLifecycleErrorV1> {
+        catalog.validate()?;
         fs::create_dir_all(root.join("staging"))
             .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
         fs::create_dir_all(root.join("installs"))
             .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
-        let artifact_store = ModelArtifactStore::open(
-            root.join("verified-artifacts"),
+        let artifact_store = Arc::new(ModelArtifactStore::open(
+            &artifact_root,
             RetentionPolicyV1 {
                 grace_seconds: 7 * 24 * 60 * 60,
             },
-        )?;
+        )?);
         let durable = load_or_default_durable(&root, &catalog)?;
         let initial_ready = SemanticLifecycleVerifiedReadyEventV1 {
             epoch: 0,
@@ -249,6 +304,9 @@ impl SemanticModelLifecycleOwnerV1 {
             catalog,
             source,
             artifact_store,
+            artifact_root,
+            lease_namespace,
+            configuration_selection: Arc::new(tokio::sync::Mutex::new(())),
             inner: Arc::new(LifecyclePublicationGateV1::new(durable)),
             worker: Mutex::new(AcquisitionWorkerStateV1::default()),
             acquisition: Arc::new(AcquisitionControlV1::default()),
@@ -266,6 +324,19 @@ impl SemanticModelLifecycleOwnerV1 {
             root.join(HF_HUB_CACHE_DIRECTORY_V1),
         ));
         Self::open(root, FastEmbedModelCatalogV1::production(), source)
+    }
+
+    fn lease_id(&self, slot: &str) -> String {
+        match &self.lease_namespace {
+            Some(owner) => format!("owner:{owner}:{slot}"),
+            None => slot.to_owned(),
+        }
+    }
+
+    /// Serialize canonical configuration read-and-select for startup requests
+    /// that share this logical owner, including linked worktrees.
+    pub async fn configuration_selection_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.configuration_selection).lock_owned().await
     }
 
     pub fn catalog(&self) -> &FastEmbedModelCatalogV1 {
@@ -329,7 +400,7 @@ impl SemanticModelLifecycleOwnerV1 {
                 &digest,
                 &RuntimeEnvironmentV1::detect_fastembed_process()
                     .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?,
-                RERANKER_ACTIVE_LEASE_ID_V1,
+                &self.lease_id(RERANKER_ACTIVE_LEASE_ID_V1),
                 ArtifactLeaseKindV1::Active,
                 current_unix_seconds()?,
             )
@@ -411,8 +482,8 @@ impl SemanticModelLifecycleOwnerV1 {
             .map_err(map_reranker_admission_error)?;
         self.artifact_store.activate_artifact_with_rollback(
             &record.artifact_digest,
-            RERANKER_ACTIVE_LEASE_ID_V1,
-            RERANKER_ROLLBACK_LEASE_ID_V1,
+            &self.lease_id(RERANKER_ACTIVE_LEASE_ID_V1),
+            &self.lease_id(RERANKER_ROLLBACK_LEASE_ID_V1),
             now_unix,
         )?;
         self.retain_active_reranker(&record.artifact_digest);
@@ -425,12 +496,12 @@ impl SemanticModelLifecycleOwnerV1 {
         let now_unix = current_unix_seconds()?;
         Ok(RerankerArtifactLifecycleStatusV1 {
             active_artifact_digest: self.artifact_store.artifact_digest_for_lease(
-                RERANKER_ACTIVE_LEASE_ID_V1,
+                &self.lease_id(RERANKER_ACTIVE_LEASE_ID_V1),
                 ArtifactLeaseKindV1::Active,
                 now_unix,
             )?,
             rollback_artifact_digest: self.artifact_store.artifact_digest_for_lease(
-                RERANKER_ROLLBACK_LEASE_ID_V1,
+                &self.lease_id(RERANKER_ROLLBACK_LEASE_ID_V1),
                 ArtifactLeaseKindV1::Rollback,
                 now_unix,
             )?,
@@ -447,8 +518,8 @@ impl SemanticModelLifecycleOwnerV1 {
             .ok_or(ModelLifecycleErrorV1::Rejected)?;
         self.artifact_store.activate_artifact_with_rollback(
             &rollback,
-            RERANKER_ACTIVE_LEASE_ID_V1,
-            RERANKER_ROLLBACK_LEASE_ID_V1,
+            &self.lease_id(RERANKER_ACTIVE_LEASE_ID_V1),
+            &self.lease_id(RERANKER_ROLLBACK_LEASE_ID_V1),
             now_unix,
         )?;
         self.retain_active_reranker(&rollback);
@@ -460,10 +531,6 @@ impl SemanticModelLifecycleOwnerV1 {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|digest, _| digest == active_digest);
-    }
-
-    pub fn mounted_shared() -> Option<Arc<Self>> {
-        SHARED_LIFECYCLE_OWNER.get().cloned().flatten()
     }
 
     pub fn run_daemon_artifact_gc(
@@ -513,8 +580,8 @@ impl SemanticModelLifecycleOwnerV1 {
         let prior_durable = guard.durable.clone();
         self.artifact_store.activate_artifact_with_rollback(
             &record.artifact_digest,
-            EMBEDDING_ACTIVE_LEASE_ID_V1,
-            EMBEDDING_ROLLBACK_LEASE_ID_V1,
+            &self.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1),
+            &self.lease_id(EMBEDDING_ROLLBACK_LEASE_ID_V1),
             now_unix,
         )?;
         let install_path = self
@@ -558,11 +625,20 @@ impl SemanticModelLifecycleOwnerV1 {
         ) {
             remediation.rollback = true;
         }
-        let semantics_omitted = guard
+        // Durable readiness describes verified artifacts. Executability belongs
+        // to this binary and must never retire another runtime's valid install.
+        let runtime_available = guard
             .durable
-            .state
-            .as_ref()
-            .is_none_or(SemanticModelLifecycleStateV1::omits_semantics);
+            .selected_model
+            .as_deref()
+            .and_then(|id| self.catalog.get(id))
+            .is_some_and(|model| model.backend.runtime_family().is_compiled());
+        let semantics_omitted = !runtime_available
+            || guard
+                .durable
+                .state
+                .as_ref()
+                .is_none_or(SemanticModelLifecycleStateV1::omits_semantics);
         SemanticModelLifecycleStatusV1 {
             selected_model: guard.durable.selected_model.clone(),
             auto_download: guard.durable.auto_download,
@@ -589,7 +665,11 @@ impl SemanticModelLifecycleOwnerV1 {
                         return Err(CatalogErrorV1::UnknownModel.into());
                     }
                 };
-                Some((model, self.re_admit_durable_selection(model)?))
+                let installed = match self.re_admit_durable_selection(model)? {
+                    Some(state) => Some(state),
+                    None => self.discover_shared_selection(model)?,
+                };
+                Some((model, installed))
             }
             None => None,
         };
@@ -626,6 +706,7 @@ impl SemanticModelLifecycleOwnerV1 {
             }
         }
         persist_durable(&self.root, &guard.durable)?;
+        self.reconcile_embedding_artifact_leases(&guard.durable, current_unix_seconds()?)?;
         match guard.durable.state.as_ref() {
             Some(state) => {
                 crate::hotpath_observe::record_lifecycle_state(state);
@@ -638,6 +719,40 @@ impl SemanticModelLifecycleOwnerV1 {
         Ok(self.status())
     }
 
+    fn discover_shared_selection(
+        &self,
+        model: &CatalogedFastEmbedModelV1,
+    ) -> Result<Option<SemanticModelLifecycleStateV1>, ModelLifecycleErrorV1> {
+        if self.lease_namespace.is_none() {
+            return Ok(None);
+        }
+        for record in self.artifact_store.inventory()?.records.values() {
+            let Some(manifest) = record.manifest.as_ref() else {
+                continue;
+            };
+            if verify_catalog_manifest(model, manifest).is_err()
+                || !matches!(
+                    record.state,
+                    ArtifactInventoryStateV1::Installed
+                        | ArtifactInventoryStateV1::RetainedForRollback
+                )
+            {
+                continue;
+            }
+            self.artifact_store
+                .verified_installed_record(&record.artifact_digest)?;
+            return Ok(Some(SemanticModelLifecycleStateV1::Installed {
+                model_id: model.model_id.clone(),
+                revision: model.source.revision.clone(),
+                artifact_digest: catalog_package_digest(model),
+                install_path: self
+                    .artifact_store
+                    .installed_directory(&record.artifact_digest),
+            }));
+        }
+        Ok(None)
+    }
+
     fn re_admit_durable_selection(
         &self,
         model: &CatalogedFastEmbedModelV1,
@@ -646,22 +761,22 @@ impl SemanticModelLifecycleOwnerV1 {
             let guard = self.inner.read();
             guard.durable.state.clone()
         };
-        let (was_ready, artifact_digest) = match state {
+        let (was_ready, artifact_digest, durable_install_path) = match state {
             Some(SemanticModelLifecycleStateV1::Installed {
                 model_id,
                 revision,
                 artifact_digest,
-                ..
+                install_path,
             }) if model_id == model.model_id && revision == model.source.revision => {
-                (false, artifact_digest)
+                (false, artifact_digest, install_path)
             }
             Some(SemanticModelLifecycleStateV1::Ready {
                 model_id,
                 revision,
                 artifact_digest,
-                ..
+                install_path,
             }) if model_id == model.model_id && revision == model.source.revision => {
-                (true, artifact_digest)
+                (true, artifact_digest, install_path)
             }
             _ => return Ok(None),
         };
@@ -685,21 +800,19 @@ impl SemanticModelLifecycleOwnerV1 {
                 }
             }));
         }
-        let digest = Sha256DigestHex::new(artifact_digest.clone())
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        let environment = RuntimeEnvironmentV1::detect_fastembed_process()
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        let admitted = self
+        // Every other verified install lives in the artifact inventory, whose
+        // content address is the install directory's name — not the lifecycle
+        // digest, which names the catalog package for a scoped acquisition.
+        let digest = self
             .artifact_store
-            .admit_leased_for_runtime_by_digest(
-                &digest,
-                &environment,
-                EMBEDDING_ACTIVE_LEASE_ID_V1,
-                ArtifactLeaseKindV1::Active,
-                current_unix_seconds()?,
-            )
-            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
-        verify_catalog_manifest(model, admitted.manifest())?;
+            .installed_digest(&durable_install_path)
+            .ok_or(ModelLifecycleErrorV1::VerificationFailed)?;
+        let record = self.artifact_store.verified_installed_record(&digest)?;
+        let manifest = record
+            .manifest
+            .as_ref()
+            .ok_or(ModelLifecycleErrorV1::VerificationFailed)?;
+        verify_catalog_manifest(model, manifest)?;
         let install_path = self.artifact_store.installed_directory(&digest);
         Ok(Some(if was_ready {
             SemanticModelLifecycleStateV1::Ready {
@@ -781,7 +894,7 @@ impl SemanticModelLifecycleOwnerV1 {
         if let Some(state) = &status.state
             && let Some(path) = install_path_of(state)
         {
-            if path.starts_with(self.root.join("verified-artifacts").join("artifacts")) {
+            if path.starts_with(self.artifact_root.join("artifacts")) {
                 // Store bytes remain inventory-owned and become eligible only
                 // under a later daemon GC lease.
             } else {
@@ -869,15 +982,13 @@ impl SemanticModelLifecycleOwnerV1 {
             return Err(ModelLifecycleErrorV1::Rejected);
         }
         let prior_durable = guard.durable.clone();
-        if install_path_of(&previous).is_some_and(|path| {
-            path.starts_with(self.root.join("verified-artifacts").join("artifacts"))
-        }) {
-            let digest = Sha256DigestHex::new(previous.artifact_digest().to_owned())
-                .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        if let Some(digest) = install_path_of(&previous)
+            .and_then(|path| self.artifact_store.installed_digest(path))
+        {
             self.artifact_store.activate_artifact_with_rollback(
                 &digest,
-                EMBEDDING_ACTIVE_LEASE_ID_V1,
-                EMBEDDING_ROLLBACK_LEASE_ID_V1,
+                &self.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1),
+                &self.lease_id(EMBEDDING_ROLLBACK_LEASE_ID_V1),
                 current_unix_seconds()?,
             )?;
         }
@@ -1131,17 +1242,28 @@ impl SemanticModelLifecycleOwnerV1 {
         let worker_model_id = model_id.clone();
         let worker_inner = Arc::clone(&inner);
         let verified_ready = self.verified_ready.clone();
+        let shared_store = self
+            .lease_namespace
+            .as_ref()
+            .map(|_| Arc::clone(&self.artifact_store));
+        let active_lease = self.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1);
+        let rollback_lease = self.lease_id(EMBEDDING_ROLLBACK_LEASE_ID_V1);
         let handle = thread::Builder::new()
             .name("tracedecay-fastembed-acquire".to_owned())
             .spawn(move || {
                 run_acquisition(
-                    &worker_root,
-                    &worker_catalog,
-                    source.as_ref(),
-                    &worker_model_id,
+                    AcquisitionTargetV1 {
+                        root: &worker_root,
+                        catalog: &worker_catalog,
+                        source: source.as_ref(),
+                        model_id: &worker_model_id,
+                    },
                     &epoch,
                     &worker_inner,
                     &verified_ready,
+                    shared_store
+                        .as_deref()
+                        .map(|store| (store, active_lease.as_str(), rollback_lease.as_str())),
                 )
             });
         match handle {
@@ -1173,13 +1295,26 @@ impl SemanticModelLifecycleOwnerV1 {
             .ok_or(ModelLifecycleErrorV1::Rejected)?;
         let epoch = self.acquisition.begin_epoch();
         run_acquisition(
-            &self.root,
-            &self.catalog,
-            self.source.as_ref(),
-            &model_id,
+            AcquisitionTargetV1 {
+                root: &self.root,
+                catalog: &self.catalog,
+                source: self.source.as_ref(),
+                model_id: &model_id,
+            },
             &epoch,
             &self.inner,
             &self.verified_ready,
+            self.lease_namespace
+                .as_ref()
+                .map(|_| {
+                    (
+                        self.artifact_store.as_ref(),
+                        self.lease_id(EMBEDDING_ACTIVE_LEASE_ID_V1),
+                        self.lease_id(EMBEDDING_ROLLBACK_LEASE_ID_V1),
+                    )
+                })
+                .as_ref()
+                .map(|(store, active, rollback)| (*store, active.as_str(), rollback.as_str())),
         )
     }
 }

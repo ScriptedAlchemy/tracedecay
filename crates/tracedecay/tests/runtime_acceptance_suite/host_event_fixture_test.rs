@@ -4,7 +4,8 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_application::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -20,9 +21,7 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use tracedecay_runtime_core::privacy::{
-    ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
-};
+use tracedecay_privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
@@ -31,7 +30,6 @@ use tracedecay_sessions::runtime::source::try_stream_new_jsonl_raw_strict_with_r
 use tracedecay_sessions::runtime::{claude, codex, cursor, hermes};
 use tracedecay_store::ObservationReplayRequest;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
-use tracedecay_usecases::observation::{CaptureObservationRequest, ObservationCancellation};
 
 use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV_LOCK, git_program, spawn_tracedecay_daemon,
@@ -781,7 +779,6 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     assert_external_source_contract(provider, &scope, &project_id, observations[0].observation());
     let committed = runtime
         .external_source_receipt_for_test(scope, observations[0].commit_receipt())
-        .await
         .unwrap()
         .expect("sanitized host observation must reach the canonical external-source store");
     let outcome = facade.probe(provider, scope);
@@ -795,7 +792,6 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     assert_eq!(
         reopened
             .external_source_receipt_for_test(scope, observations[0].commit_receipt())
-            .await
             .unwrap(),
         Some(committed),
         "external-source receipt and its published projection must survive runtime restart"
@@ -2084,7 +2080,7 @@ fn encode_workspace_path(path: &Path) -> String {
 }
 
 fn write_kiro_native_fixture(home: &Path, project: &Path) {
-    let directory = tracedecay::agents::kiro_data_dir(home)
+    let directory = tracedecay_agent_hosts::agents::kiro_data_dir(home)
         .join("User/globalStorage/kiro.kiroagent/workspace-sessions")
         .join(encode_workspace_path(project));
     std::fs::create_dir_all(&directory).unwrap();
@@ -2381,7 +2377,6 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
             HostAdmissionScope::Project,
             project_rows[0].commit_receipt(),
         )
-        .await
         .unwrap()
         .unwrap();
     let advanced_source_commit = runtime
@@ -2389,7 +2384,6 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
             HostAdmissionScope::Project,
             project_rows[2].commit_receipt(),
         )
-        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -2428,7 +2422,6 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
                 HostAdmissionScope::Project,
                 project_rows[2].commit_receipt(),
             )
-            .await
             .unwrap(),
         Some(advanced_source_commit),
         "exact replay must preserve the committed frontier and projection receipt"

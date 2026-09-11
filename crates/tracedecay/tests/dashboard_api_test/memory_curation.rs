@@ -308,7 +308,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
         SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1,
     };
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::{
         MemoryApplication, ProjectMemoryFactAddRequest, automatic_fact_add_command,
     };

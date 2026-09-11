@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestContext,
 };
 use tracedecay_domain::{ActorId, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256};
@@ -78,6 +78,10 @@ impl DashboardLcmReadAdapter {
     }
 
     #[hotpath::measure(future = true, label = "mcp.lcm.total")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Dashboard LCM execute is one action match onto the session-memory authority."
+    )]
     async fn execute(
         &self,
         control: DashboardHttpRequestControlV1,
@@ -767,6 +771,10 @@ fn initial_cursor(request: &DashboardLcmReadRequestV1) -> Option<String> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "LCM retrieval query is one hydrate-and-page of the selected session store."
+)]
 fn retrieval_query(
     request: &DashboardLcmReadRequestV1,
     cursor: Option<String>,
@@ -941,9 +949,9 @@ mod tests {
         )
         .expect("project dashboard adapter");
         let control = DashboardHttpRequestControlV1::from_parts_for_test(
-            tracedecay_application::RequestId::new("request.dashboard-lcm-expired")
+            tracedecay_contracts::RequestId::new("request.dashboard-lcm-expired")
                 .expect("request identity"),
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(100))
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(100))
                 .expect("request deadline"),
             CancellationSignal::active("cancel.dashboard-lcm-expired")
                 .expect("request cancellation"),
@@ -1017,11 +1025,6 @@ mod tests {
             ),
             "lcm_temporal_budget_execution_work_exhausted"
         );
-    }
-
-    #[test]
-    fn summary_hydration_has_a_small_fixed_concurrency_bound() {
-        assert_eq!(SUMMARY_DESCRIBE_CONCURRENCY, 8);
     }
 
     #[test]

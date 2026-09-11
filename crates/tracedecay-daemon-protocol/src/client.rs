@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
     ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
     ApplicationResponse, CancellationContext, CancellationSignal, CancellationStage, Deadline,
@@ -25,10 +25,10 @@ use tracedecay_tool_catalog::{
     ProfileId, SchemaRef, SurfaceOperationName,
 };
 
-use tracedecay_application::feedback::observations::{
+use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 pub type ScopeSelector = InvocationTarget;
 
@@ -322,12 +322,12 @@ impl DaemonInvocationError {
         match self {
             Self::Cancelled { stage } => ApplicationProblem::Cancelled {
                 stage,
-                retry: tracedecay_application::RetryDirective::Never,
+                retry: tracedecay_contracts::RetryDirective::Never,
                 legal_actions: Vec::new(),
             },
             Self::TimedOut { stage } => ApplicationProblem::TimedOut {
                 stage,
-                retry: tracedecay_application::RetryDirective::Never,
+                retry: tracedecay_contracts::RetryDirective::Never,
                 legal_actions: Vec::new(),
             },
             Self::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
@@ -473,11 +473,32 @@ impl DaemonInvocationConnectionPool {
     }
 }
 
+/// What the pool does with a lease's stream when the lease drops.
+///
+/// A request-local failure proves only that *this* stream may be
+/// desynchronized; retiring unrelated idle streams on that evidence turns one
+/// broken socket into a reconnect storm for every concurrent caller. Only
+/// evidence that the daemon generation changed makes every pooled stream
+/// suspect, so only that evidence empties the pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaseDisposition {
+    /// The request settled on this stream; it is reusable.
+    Return,
+    /// Retire this stream only; idle siblings stay reusable.
+    DiscardOne,
+    /// Retire this stream and every idle stream: none of them can belong to
+    /// the current daemon generation.
+    InvalidatePool,
+}
+
 struct InvocationConnectionLease {
     pool: Arc<DaemonInvocationConnectionPool>,
     connection: Option<DaemonInvocationConnection>,
     permit: Option<OwnedSemaphorePermit>,
-    return_to_pool: bool,
+    /// Starts as [`LeaseDisposition::DiscardOne`]: a lease that is dropped
+    /// without settling (cancellation, timeout, an indeterminate effect, a
+    /// mid-request failure) never returns a possibly desynchronized stream.
+    disposition: LeaseDisposition,
 }
 
 impl InvocationConnectionLease {
@@ -492,29 +513,64 @@ impl InvocationConnectionLease {
     }
 
     fn release_to_pool(&mut self) {
-        self.return_to_pool = true;
+        self.disposition = LeaseDisposition::Return;
+    }
+
+    fn invalidate_pool(&mut self) {
+        self.disposition = LeaseDisposition::InvalidatePool;
     }
 }
 
 impl Drop for InvocationConnectionLease {
     fn drop(&mut self) {
-        if self.return_to_pool {
-            if let Some(connection) = self.connection.take() {
+        match self.disposition {
+            LeaseDisposition::Return => {
+                if let Some(connection) = self.connection.take() {
+                    self.pool
+                        .idle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(connection);
+                }
+            }
+            LeaseDisposition::DiscardOne => {
+                // The leased stream drops with the lease; idle siblings stay.
+                hotpath::gauge!("daemon.invocation.client.pool.discarded_total").inc(1u64);
+            }
+            LeaseDisposition::InvalidatePool => {
                 self.pool
                     .idle
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(connection);
+                    .clear();
+                hotpath::gauge!("daemon.invocation.client.pool.invalidated_total").inc(1u64);
             }
-        } else {
-            self.pool
-                .idle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
         }
         drop(self.permit.take());
     }
+}
+
+/// Whether a failed exchange proves the daemon generation changed, so no idle
+/// stream in the pool can belong to the daemon now behind `connection`.
+///
+/// Two sources of evidence qualify: the daemon itself refused this client's
+/// handshake (a wire-revision or credential rotation), or the authority record
+/// that named this endpoint is no longer current (a restart). Anything else —
+/// a reset or closed socket, a stalled or malformed response — is settled
+/// against the one stream that failed.
+async fn daemon_generation_changed(
+    connection: &crate::connection::DaemonConnection,
+    error: &tracedecay_domain::errors::TraceDecayError,
+    request_label: &str,
+) -> bool {
+    if let Some((code, _, _)) = error.project_route_context()
+        && (code == DAEMON_PROTOCOL_REVISION_SKEW || code == DAEMON_AUTHENTICATION_REJECTED)
+    {
+        return true;
+    }
+    crate::connection::ensure_daemon_connection_live(connection, request_label)
+        .await
+        .is_err()
 }
 
 /// Response plus same-connection delivery settlement authority when required.
@@ -635,13 +691,31 @@ impl DaemonInvocationClient {
                 pool: Arc::clone(&self.pool),
                 connection: Some(connection),
                 permit: Some(permit),
-                return_to_pool: false,
+                disposition: LeaseDisposition::DiscardOne,
             },
             in_flight,
         ))
     }
 
+    /// One request/response exchange on the leased stream, settling a failure
+    /// against the pool: generation-change evidence retires every idle
+    /// stream, any other failure retires only this one (the lease default).
     async fn invoke_on_connection(
+        &self,
+        lease: &mut InvocationConnectionLease,
+        request: crate::contract::DaemonInvocationRequest,
+    ) -> tracedecay_domain::errors::Result<crate::contract::DaemonInvocationResponse> {
+        let request_label = request.operation().as_str();
+        let result = self.exchange_on_connection(lease, request).await;
+        if let Err(error) = &result
+            && daemon_generation_changed(&self.connection, error, request_label).await
+        {
+            lease.invalidate_pool();
+        }
+        result
+    }
+
+    async fn exchange_on_connection(
         &self,
         lease: &mut InvocationConnectionLease,
         request: crate::contract::DaemonInvocationRequest,
@@ -1136,8 +1210,15 @@ impl DaemonInvocationDelivery {
             reason,
         )
         .await;
-        if result.is_ok() {
-            self.lease.release_to_pool();
+        match &result {
+            Ok(()) => self.lease.release_to_pool(),
+            Err(error) => {
+                if daemon_generation_changed(&daemon_connection, error, "invocation_delivery_ack")
+                    .await
+                {
+                    self.lease.invalidate_pool();
+                }
+            }
         }
         result
     }
@@ -1186,8 +1267,8 @@ impl DaemonInvocationExecutor for DaemonInvocationClient {
 fn configuration_request_from_surface_payload(
     operation: ApplicationSurfaceOperation,
     payload: serde_json::Value,
-) -> Result<tracedecay_application::ConfigurationWireRequestV1, InvocationError> {
-    tracedecay_application::configuration_wire_request_from_invocation_payload(
+) -> Result<tracedecay_contracts::ConfigurationWireRequestV1, InvocationError> {
+    tracedecay_contracts::configuration_wire_request_from_invocation_payload(
         operation.as_str(),
         payload,
     )
@@ -1196,10 +1277,10 @@ fn configuration_request_from_surface_payload(
 
 fn feedback_handle_from_surface_payload(
     payload: serde_json::Value,
-) -> Result<tracedecay_application::feedback::FeedbackHandleRequestV1, InvocationError> {
-    let request: tracedecay_application::feedback::FeedbackHandleRequestV1 =
+) -> Result<tracedecay_contracts::feedback::FeedbackHandleRequestV1, InvocationError> {
+    let request: tracedecay_contracts::feedback::FeedbackHandleRequestV1 =
         serde_json::from_value(payload).map_err(|_| InvocationError::InvalidRequest)?;
-    tracedecay_application::feedback::FeedbackHandleRequestV1::new(request.request_handle)
+    tracedecay_contracts::feedback::FeedbackHandleRequestV1::new(request.request_handle)
         .map_err(|_| InvocationError::InvalidRequest)
 }
 
@@ -1215,8 +1296,9 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                 ApplicationRequest::Surface { binding, payload } => {
                     let (_binding_id, surface, operation, result_contract, _page) =
                         binding.into_parts();
-                    let operation = ApplicationSurfaceOperation::from_tool_name(operation.as_str())
-                        .ok_or(InvocationError::InvalidRequest)?;
+                    let operation =
+                        ApplicationSurfaceOperation::from_surface_name(surface, operation.as_str())
+                            .ok_or(InvocationError::InvalidRequest)?;
                     let observed_at = invocation_now_micros();
                     let cancellation_context = cancellation.context();
                     let scope = match target {
@@ -1295,7 +1377,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
 /// would hide it from `src/commands`); the saturating clamp is the one
 /// shared definition.
 pub fn invocation_now_micros() -> UtcMicros {
-    tracedecay_application::clock::now_micros()
+    tracedecay_contracts::clock::now_micros()
 }
 
 pub fn application_delivery_route(surface: BindingSurface) -> FeedbackDeliveryRouteV1 {
@@ -1324,7 +1406,7 @@ pub fn map_invocation_error(error: DaemonInvocationError) -> InvocationError {
 
 pub fn application_response(
     request_id: RequestId,
-    result_contract: tracedecay_application::ResultContractRef,
+    result_contract: tracedecay_contracts::ResultContractRef,
     outcome: crate::contract::DaemonInvocationOutcome,
 ) -> Result<ApplicationResponse, InvocationError> {
     let envelope = match outcome {
@@ -1828,7 +1910,7 @@ mod tests {
         feedback_handle_from_surface_payload, semantic_evaluation_application_problem,
         semantic_qualification_application_problem,
     };
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemKind, CancellationStage, ConfigurationWireRequestV1,
         InvocationError, RequestId, ResultContractRef,
     };
@@ -2132,11 +2214,11 @@ mod tests {
     #[test]
     fn semantic_evaluation_client_prints_rejection_diagnostic() {
         let error = semantic_evaluation_application_problem(ApplicationProblem::InvalidRequest {
-            diagnostic: tracedecay_application::SafeDiagnostic {
+            diagnostic: tracedecay_contracts::SafeDiagnostic {
                 code: "semantic_evaluation.rejected".to_owned(),
                 message: "exact eligible chunks current expected 2170, measured 2184".to_owned(),
             },
-            retry: tracedecay_application::RetryDirective::Never,
+            retry: tracedecay_contracts::RetryDirective::Never,
             legal_actions: Vec::new(),
         });
         let message = error.to_string();

@@ -10,9 +10,12 @@ async fn retained_skill_writer_preserves_retrieval_and_defers_ledger_publication
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
     let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "The retained evidence does not warrant a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     let retained = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-        &cg,
+        &automation_project_context(&cg),
         &enabled_skill_writer_config(),
         &test_configuration_revision(),
         &backend,
@@ -56,7 +59,10 @@ fn skill_writer_options_have_no_storage_selector() {
 async fn skill_writer_runner_skips_when_task_is_disabled() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "The disabled task must not invoke this backend.",
+        "no_action",
+    ));
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -98,12 +104,15 @@ async fn skill_writer_fails_closed_on_denied_temporal_evidence() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "Denied evidence must not invoke this backend.",
+        "no_action",
+    ));
     let retrieval = RejectedAutomationSessionRetrieval::new("session_evidence_denied");
 
     let run =
         tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &enabled_skill_writer_config(),
             &test_configuration_revision(),
             &backend,
@@ -167,7 +176,10 @@ async fn skill_writer_default_provider_searches_all_providers() {
     )
     .await;
     let _global_db = isolate_global_db(&cg);
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "The provider-wide evidence does not warrant a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
@@ -221,7 +233,7 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
 
     let run =
         tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &cg,
+            &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
             &backend,
@@ -244,12 +256,15 @@ async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     let _global_db = isolate_global_db(&cg);
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "No retained evidence is available.",
+        "insufficient_repeated_evidence",
+    ));
     let retrieval = EmptyAutomationSessionRetrieval::new();
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -295,7 +310,10 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
     .await;
     let _global_db = isolate_global_db(&cg);
 
-    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let backend = SkillJsonBackend::new(no_skill_needed_output(
+        "The host-mode evidence does not warrant a managed skill mutation.",
+        "insufficient_repeated_evidence",
+    ));
     for (host_mode, query) in [
         (
             AutomationHostMode::Standalone,
@@ -346,11 +364,15 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
     let _global_db = isolate_global_db(&cg);
     let backend = SequentialJsonBackend::new(vec![
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [
                 {
                     "id": "automation-run-review",
                     "title": "Automation run review",
                     "summary": "Review self-improvement automation run ledgers and validation outcomes.",
+                    "routing_description": "Review self-improvement automation run ledgers and validation outcomes.",
+                    "routing_validation": skill_routing_validation("automation-run-review"),
                     "category": "workflow",
                     "targets": ["codex", "opencode"],
                     "body_markdown": "Use when reviewing TraceDecay self-improvement runs. Check evidence, rejected ops, and validation outcomes before applying changes.",
@@ -366,6 +388,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
                     "id": "automation-run-review",
                     "title": "Duplicate",
                     "summary": "Duplicate id should be rejected.",
+                    "routing_description": "Duplicate id should be rejected.",
                     "category": "workflow",
                     "body_markdown": "Duplicate body."
                 },
@@ -373,6 +396,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
                     "id": "bad/skill",
                     "title": "Unsafe",
                     "summary": "Unsafe id should be rejected.",
+                    "routing_description": "Unsafe id should be rejected.",
                     "category": "workflow",
                     "body_markdown": "Unsafe body."
                 },
@@ -381,16 +405,21 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
                     "id": "retired-draft-action",
                     "title": "Retired draft action",
                     "summary": "Draft is not a lifecycle state or compatibility alias.",
+                    "routing_description": "Draft is not a lifecycle state or compatibility alias.",
                     "category": "workflow",
                     "body_markdown": "This proposal must be repaired to an explicit create."
                 }
             ]
         }),
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [{
                 "id": "automation-run-review",
                 "title": "Automation run review",
                 "summary": "Review self-improvement automation run ledgers and validation outcomes.",
+                "routing_description": "Review self-improvement automation run ledgers and validation outcomes.",
+                "routing_validation": skill_routing_validation("automation-run-review"),
                 "category": "workflow",
                 "targets": ["codex", "opencode"],
                 "body_markdown": "Use when reviewing TraceDecay self-improvement runs. Check evidence, rejected ops, and validation outcomes before applying changes.",
@@ -579,7 +608,11 @@ async fn skill_writer_quarantines_output_after_bounded_repair_exhaustion() {
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     let _global_db = isolate_global_db(&cg);
-    let invalid = json!({"skills": [{"id": "bad/skill"}]});
+    let invalid = json!({
+        "outcome": "skills_proposed",
+        "decision": null,
+        "skills": [{"id": "bad/skill"}]
+    });
     let backend = SequentialJsonBackend::new(vec![invalid.clone(), invalid]);
 
     let error = run_skill_writer_with_backend(
@@ -626,6 +659,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
             summary: "Review self-improvement automation runs.".to_string(),
+            routing_description: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
@@ -672,7 +706,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -708,7 +742,7 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend_and_retrieval(
-        &cg,
+        &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
         &backend,
@@ -743,6 +777,7 @@ async fn skill_writer_runner_activates_validated_skills() {
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
             summary: "Review self-improvement automation runs.".to_string(),
+            routing_description: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
@@ -760,11 +795,15 @@ async fn skill_writer_runner_activates_validated_skills() {
     let base_checksum = active.metadata.checksum.clone();
     let backend = SequentialJsonBackend::new(vec![
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [
             {
                 "id": "scheduler-review",
                 "title": "Scheduler review",
                 "summary": "Review scheduler decisions before enabling automation.",
+                "routing_description": "Review scheduler decisions before enabling automation.",
+                "routing_validation": skill_routing_validation("scheduler-review"),
                 "category": "workflow",
                 "body_markdown": "Check interval gates, cooldowns, locks, and run ledgers before changing schedules.",
                 "reason": "Session evidence repeats scheduler review."
@@ -780,6 +819,8 @@ async fn skill_writer_runner_activates_validated_skills() {
             ]
         }),
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [{
                 "action": "update",
                 "id": "automation-run-review",
@@ -870,6 +911,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             id: "automation-run-review".to_string(),
             title: "Automation run review".to_string(),
             summary: "Review self-improvement automation runs.".to_string(),
+            routing_description: "Review self-improvement automation runs.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
@@ -893,6 +935,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             id: "user-owned-review".to_string(),
             title: "User-owned review".to_string(),
             summary: "User-authored workflow.".to_string(),
+            routing_description: "User-authored workflow.".to_string(),
             category: "workflow".to_string(),
             targets:
                 tracedecay_automation_runtime::automation::managed_skills::default_managed_skill_targets(),
@@ -909,6 +952,8 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     .unwrap();
     let backend = SequentialJsonBackend::new(vec![
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [
             {
                 "action": "update",
@@ -953,6 +998,8 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
             ]
         }),
         json!({
+            "outcome": "skills_proposed",
+            "decision": null,
             "skills": [{
                 "action": "update",
                 "id": "automation-run-review",
@@ -1101,7 +1148,7 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
     assert_eq!(records[0].task_key.as_deref(), Some("skill_writer"));
     assert_eq!(
         records[0].prompt_version.as_deref(),
-        Some("skill_writer:v2")
+        Some("skill_writer:v3")
     );
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
     assert_eq!(records[0].reviewed_count, 0);
@@ -1220,4 +1267,59 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
         "skill_writer",
         json!({ "skills": [] }),
     );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn skill_writer_runner_retains_no_skill_needed_without_deployment() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
+    let decision = json!({
+        "reason": "The recorded request is a one-off calculation with no repeated workflow failure.",
+        "remedy": "one_off_task"
+    });
+    let backend = SkillJsonBackend::new(json!({
+        "skills": [],
+        "outcome": "no_skill_needed",
+        "decision": decision.clone()
+    }));
+    let run = run_skill_writer_with_backend(
+        &cg,
+        &enabled_skill_writer_config(),
+        &backend,
+        manual_skill_writer_options(&profile_root),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(backend.calls(), 1);
+    assert_eq!(run.ledger_record.backend_attempt_count, 1);
+    assert_ne!(
+        run.ledger_record.error.as_deref(),
+        Some("session_evidence_unavailable")
+    );
+    assert_eq!(run.report["status"], "no_skill_needed");
+    assert_eq!(run.report["decision"], decision);
+    assert_eq!(run.report["created_skills"], json!([]));
+    assert_eq!(run.report["updated_skills"], json!([]));
+    assert_eq!(run.report["applied_consolidations"], json!([]));
+    assert!(run.report["deployment"].is_null());
+    assert!(!profile_root.join("agent_managed/skills").exists());
+
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, AutomationRunStatus::Succeeded);
+    assert_eq!(records[0].accepted_count, 0);
+    assert_eq!(records[0].rejected_count, 0);
+    assert!(records[0].applied_ops.is_none());
+    let proposed = records[0].proposed_ops.as_ref().unwrap();
+    assert_eq!(proposed["outcome"], "no_skill_needed");
+    assert_eq!(proposed["decision"], decision);
+    assert!(proposed["deployment"].is_null());
 }

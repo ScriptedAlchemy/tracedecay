@@ -8,14 +8,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_agent_hosts::hooks::hint_outcomes::HintOutcomeStats;
 use tracedecay_agent_hosts::hooks::hint_outcomes::settlement::{
     HintOutcomeSettlement, settle_project_hint_outcomes,
 };
-use tracedecay_application::{
-    ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
-};
+use tracedecay_application::observability::RegisteredObservabilityPortV1;
+use tracedecay_contracts::{ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1};
 use tracedecay_domain::{
     AdoptionOutcomeLinkedV1, CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
     ProjectId,
@@ -23,7 +22,6 @@ use tracedecay_domain::{
 use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_usecases::observability::RegisteredObservabilityPortV1;
 
 const HINT_TS: i64 = 1_000_000;
 /// Past `hooks::hint_outcomes::HORIZON_SECS` (30 minutes) after `HINT_TS`,

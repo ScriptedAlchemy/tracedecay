@@ -26,13 +26,18 @@ pub(crate) struct BackgroundRefreshRequest {
     pub(crate) freshness_probe_sink: Option<super::CodeIndexFreshnessProbeSink>,
 }
 
+pub(crate) enum BackgroundRefreshOutcome {
+    Admitted(Option<HashMap<String, u64>>),
+    LinkedWorktreeDisabled,
+}
+
 /// Injectable ownership boundary for detached reconciliation admission.
 /// Production returns no token map because scheduler acceptance is distinct
 /// from index publication; test writers may return one to verify injection.
 pub(crate) type BackgroundRefreshWriter = Arc<
     dyn Fn(
             BackgroundRefreshRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<HashMap<String, u64>>>> + Send>>
+        ) -> Pin<Box<dyn Future<Output = Result<BackgroundRefreshOutcome>> + Send>>
         + Send
         + Sync
         + 'static,
@@ -44,7 +49,7 @@ pub(crate) fn direct_background_refresh_writer() -> BackgroundRefreshWriter {
 
 pub(crate) async fn execute_background_refresh_direct(
     request: BackgroundRefreshRequest,
-) -> Result<Option<HashMap<String, u64>>> {
+) -> Result<BackgroundRefreshOutcome> {
     let canonical_root =
         request
             .project_root
@@ -64,9 +69,11 @@ pub(crate) async fn execute_background_refresh_direct(
         });
     }
     let accepted = match request.mode {
+        // The server's own catch-up and read refreshes are the daemon acting
+        // on its own; they never widen a route past its watch policy.
         BackgroundRefreshModeV1::ForceReconcile => request
             .reconcile_sink
-            .map(|sink| sink(canonical_root))
+            .map(|sink| sink(canonical_root, super::CodeIndexReconcileDemandV1::Automatic))
             .ok_or_else(|| {
                 TraceDecayError::project_route(
                     "code_index_scheduler_unavailable",
@@ -85,12 +92,15 @@ pub(crate) async fn execute_background_refresh_direct(
                 )
             })?,
     };
-    if !accepted.await {
-        return Err(TraceDecayError::project_route(
+    match accepted.await {
+        super::CodeIndexAdmission::Accepted => Ok(BackgroundRefreshOutcome::Admitted(None)),
+        super::CodeIndexAdmission::LinkedWorktreeDisabled => {
+            Ok(BackgroundRefreshOutcome::LinkedWorktreeDisabled)
+        }
+        super::CodeIndexAdmission::Unavailable => Err(TraceDecayError::project_route(
             "code_index_scheduler_unavailable",
             true,
             "background refresh was not accepted by the code-index scheduler",
-        ));
+        )),
     }
-    Ok(None)
 }

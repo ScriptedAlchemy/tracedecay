@@ -2,8 +2,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 pub struct HaskellExtractor;
@@ -52,7 +54,7 @@ impl<'s> ExtractionState<'s> {
         docstring: Option<String>,
     ) {
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&self.file_path, &kind, &name, start_line);
+        let id = local_node_id(&self.file_path, self.source, &kind, &name, node);
         let graph_node = Node {
             id: id.clone(),
             kind,
@@ -75,6 +77,7 @@ impl<'s> ExtractionState<'s> {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: self.timestamp,
             parent_id: None,
         };
@@ -125,7 +128,7 @@ impl HaskellExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -139,6 +142,7 @@ impl HaskellExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -266,7 +270,7 @@ impl HaskellExtractor {
             .to_string();
 
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
+        let id = local_node_id(&state.file_path, state.source, &NodeKind::Use, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
@@ -290,6 +294,7 @@ impl HaskellExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

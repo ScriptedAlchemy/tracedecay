@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tracedecay_application::context_scout::{
-    ContextScoutModelBackendV1, ContextScoutModelReceiptV1,
-};
+use tracedecay_contracts::context_scout::{ContextScoutModelBackendV1, ContextScoutModelReceiptV1};
 
 use super::context_scout_v2::{
     ContextScoutModelAssistantV1, ContextScoutModelCandidateV1, ContextScoutModelErrorV1,
@@ -348,7 +346,7 @@ mod tests {
                 super::super::context_scout_v2::ContextScoutModelCandidateInputV1 {
                     dedupe_key: [1; 32],
                     category:
-                        tracedecay_application::context_scout::ContextScoutCategoryV1::Verification,
+                        tracedecay_contracts::context_scout::ContextScoutCategoryV1::Verification,
                     suggestion_text: "Run the cited focused test.".to_string(),
                     citation_anchor_ids: vec![
                         tracedecay_domain::RetrievalAnchorId::new("anchor.model.fixture").unwrap(),
@@ -379,6 +377,15 @@ mod tests {
             max_input_tokens: 2_048,
             max_output_tokens: 256,
         }
+    }
+
+    #[cfg(feature = "token-counting")]
+    fn execution_with_ready_tokenizer() -> ContextScoutModelExecutionV1 {
+        // These fixtures check backend outcomes with a live budget. Measured cold
+        // vocabulary initialization dominates encoding this bounded request, so
+        // complete tokenizer setup before starting their unchanged deadline.
+        assert!(serialized_token_count(&request()).is_some_and(|tokens| tokens > 0));
+        execution(CancellationToken::new())
     }
 
     #[test]
@@ -434,7 +441,7 @@ mod tests {
             ContextScoutModelBackendV1::CodexAppServer,
         );
         assistant
-            .propose(request(), execution(CancellationToken::new()))
+            .propose(request(), execution_with_ready_tokenizer())
             .await
     }
 
@@ -509,7 +516,7 @@ mod tests {
         );
 
         let proposal = assistant
-            .propose(request(), execution(CancellationToken::new()))
+            .propose(request(), execution_with_ready_tokenizer())
             .await
             .unwrap();
 
@@ -549,7 +556,7 @@ mod tests {
         );
 
         let proposal = assistant
-            .propose(request(), execution(CancellationToken::new()))
+            .propose(request(), execution_with_ready_tokenizer())
             .await
             .unwrap();
 

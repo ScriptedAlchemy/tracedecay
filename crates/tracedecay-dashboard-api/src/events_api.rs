@@ -945,6 +945,7 @@ pub(crate) async fn dashboard_state_fixture(
 
     let state = DashboardState {
         build_version: "0.0.0-fixture+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        host_io: crate::test_support::fixture_host_io(),
         project_id: Some(project_identity.as_str().to_owned()),
         resolved_scope: crate::scope::resolve_dashboard_scope(
             &project_root,
@@ -975,14 +976,16 @@ pub(crate) async fn dashboard_state_fixture(
         code_index_freshness_reader: None,
         explorer_semantic_reader: None,
         feedback_status_reader: None,
+        pr_autotrack_reader: None,
         storage_mode: "profile_sharded".to_owned(),
         store_root,
         config_path: project.path().join("config.json"),
         dashboard_root,
-        retention_config: crate::config::RetentionConfig::default(),
+        retention_config: tracedecay_configuration::RetentionConfig::default(),
         user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
         profile_code_index_worker_settings: None,
         token_counts: Arc::new(crate::token_count::TokenCountCache::new()),
+        derived_snapshots: Arc::new(crate::snapshot_cache::DerivedSnapshotCaches::new()),
         code_diagnostics_authority: None,
         automation_authority: None,
         automation_observation: None,

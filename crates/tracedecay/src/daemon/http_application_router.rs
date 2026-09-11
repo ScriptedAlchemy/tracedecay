@@ -19,7 +19,7 @@ fn build_http_application_router(project_id: &str, project_path: &Path) -> Resul
         false,
     )?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
-    crate::application_surface::http_application_router(
+    tracedecay_daemon_service::application_surface::http_application_router(
         client,
         tracedecay_daemon_service::daemon_operation_event_authority(),
         project_id.clone(),
@@ -103,7 +103,7 @@ pub(super) async fn install_remote_http_application_router(
 ) -> Result<()> {
     let runtime = store_administration.registered_runtime_registry().await?;
     let credentials = runtime.remote_credential_authority();
-    let router = super::remote_protocol::build_daemon_remote_protocol_router(
+    let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         runtime.remote_replay_transaction(),
         invocation.service.clone(),

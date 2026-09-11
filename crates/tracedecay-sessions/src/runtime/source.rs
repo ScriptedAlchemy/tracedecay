@@ -197,7 +197,7 @@ pub enum TranscriptIngestError {
     #[error("transcript changed generation while scanning {path}")]
     ScanGenerationChanged { path: PathBuf },
     #[error(transparent)]
-    Privacy(#[from] tracedecay_runtime_core::privacy::PrivacySanitizerError),
+    Privacy(#[from] tracedecay_privacy::PrivacySanitizerError),
     #[error(transparent)]
     Domain(#[from] tracedecay_domain::DomainError),
     #[error(transparent)]
@@ -761,13 +761,13 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
         title,
         started_at,
         ended_at,
-        // The durable cursor key and the physical transcript path are
-        // separate identities: opaque keys (Codex's hashed key, Claude's
-        // non-Unicode encoding) address `parse_offsets`, while
-        // `transcript_path` stays the real source path that the ingest-health
-        // placeholder scan, the workflow-agent join and the session record
-        // itself all read as a path.
-        transcript_path: Some(path.to_string_lossy().into_owned()),
+        // A provider's opaque checkpoint is not the physical Unicode path.
+        // Preserve Codex/Claude's opaque identities for non-Unicode paths;
+        // rendering their bytes lossily would alias distinct files.
+        transcript_path: Some(
+            path.to_str()
+                .map_or_else(|| cursor_key.durable_text(), str::to_owned),
+        ),
         metadata_json,
         parent_session_id,
         is_subagent,
@@ -803,11 +803,9 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
 
 fn protect_parsed_transcript_structural_ids(
     parsed: &mut ParsedTranscript,
-) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
-    fn protect(
-        value: &mut String,
-    ) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
-        *value = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value)?;
+) -> Result<(), tracedecay_privacy::PrivacySanitizerError> {
+    fn protect(value: &mut String) -> Result<(), tracedecay_privacy::PrivacySanitizerError> {
+        *value = tracedecay_privacy::protect_sensitive_structural_id(value)?;
         Ok(())
     }
 
@@ -897,6 +895,11 @@ pub use discovery::{
 pub use crate::runtime::pipeline_metrics::{JsonlChangeKind, JsonlIoAccounting};
 #[cfg(test)]
 pub use jsonl::try_stream_new_jsonl_raw_strict;
+pub(in crate::runtime) use jsonl::try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit;
+pub(in crate::runtime) use jsonl::{
+    JsonlFileChangeToken, JsonlNativeFileIdentity, ResumeDigest, jsonl_file_change_token,
+    jsonl_native_file_identity, jsonl_prefix_digest,
+};
 pub use jsonl::{
     JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
     RawJsonlFrameReader, RawJsonlRecord, RawJsonlSkippedRange, RawJsonlSkippedReason,

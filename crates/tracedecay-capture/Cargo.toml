@@ -13,25 +13,10 @@ categories = ["development-tools", "parsing"]
 include = ["/src/**", "/tests/**", "/README.md"]
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "tracedecay-domain/hotpath",
-    "hotpath/hotpath",
-    "tracedecay-store/hotpath",
-]
-hotpath-alloc = [
-    "tracedecay-domain/hotpath-alloc",
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-store/hotpath-alloc",
-]
-hotpath-cpu = [
-    "tracedecay-domain/hotpath-cpu",
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-store/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features); this
+# feature only selects the on-mode hotpath test/bench targets of this crate.
+hotpath = ["hotpath/hotpath"]
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }

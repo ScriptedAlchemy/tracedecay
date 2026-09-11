@@ -18,9 +18,11 @@ use super::{
     next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
-use super::{binary_version, connect_with_restart_grace, log_daemon_event, version_skew_action};
+use super::{binary_version, connect_with_restart_grace};
 #[cfg(unix)]
 use tracedecay_daemon_identity::connection_for_socket_path;
+#[cfg(unix)]
+use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, version_skew_action};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
 #[cfg(not(unix))]
@@ -30,6 +32,8 @@ use tracedecay_mcp::transport::StdioTransport;
 use tracedecay_mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
 #[cfg(unix)]
 use tracedecay_mcp::{ErrorCode, JsonRpcResponse};
+#[cfg(unix)]
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///
@@ -193,7 +197,7 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 /// dispatch ceiling for that exact request — "nothing may run unbounded", per
 /// [`tool_dispatch_ceiling`](crate::mcp::tools::handlers::tool_dispatch_ceiling)
 /// — plus
-/// [`DAEMON_TOOL_RESPONSE_GRACE`](super::DAEMON_TOOL_RESPONSE_GRACE), the grace
+/// [`DAEMON_TOOL_RESPONSE_GRACE`](tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE), the grace
 /// this crate already keeps reading for beyond a request deadline. A daemon
 /// honouring its own contract always answers first, so the bound cannot cut
 /// short correct work, including a slow `tools/call` from a batch client. Only a
@@ -213,7 +217,7 @@ impl<'a> DaemonProxyRequest<'a> {
     fn new(raw: &'a str) -> Self {
         Self {
             raw,
-            parsed: serde_json::from_str(raw.trim()).ok(),
+            parsed: JsonRpcRequest::decode(raw.trim()).ok(),
         }
     }
 }
@@ -223,7 +227,7 @@ fn disconnect_drain_bound(request: &DaemonProxyRequest<'_>) -> Duration {
     let ceiling = request_tool_name(request.parsed.as_ref())
         .and_then(|tool| crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool).ok())
         .unwrap_or_else(|| crate::mcp::tools::handlers::tool_dispatch_ceiling(""));
-    ceiling.saturating_add(super::DAEMON_TOOL_RESPONSE_GRACE)
+    ceiling.saturating_add(DAEMON_TOOL_RESPONSE_GRACE)
 }
 
 /// The tool a `tools/call` line names, or `None` for any other method.
@@ -508,7 +512,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 // initialize-roots repos unable to open at all.
                 let allow_init = crate::config::cached_sync_config(&identity.worktree_root)
                     .map_or_else(
-                        |_| crate::config::SyncConfig::default().auto_init,
+                        |_| tracedecay_configuration::SyncConfig::default().auto_init,
                         |config| config.auto_init,
                     );
                 return Ok(Some(InitializeRouteMetadata {
@@ -576,7 +580,7 @@ async fn write_proxy_request_result(
                 &responses,
                 binary_version()?,
             ) {
-                eprintln!("[tracedecay] warning: {warning}");
+                log_daemon_event("core_proxy_warning", &[("warning", warning)]);
             }
             for response in responses {
                 writer.write_line(&response).await?;

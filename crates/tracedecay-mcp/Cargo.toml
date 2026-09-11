@@ -11,59 +11,15 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 doctest = false
 
 [features]
-# Opt-in profiling (never in `default`). Every hotpath macro is a no-op with
-# the feature off, so instrumented call sites compile identically both ways.
-hotpath = [
-    "hotpath/hotpath",
-    "hotpath/tokio",
-    "tracedecay-api/hotpath",
-    "tracedecay-application/hotpath",
-    "tracedecay-code-extraction/hotpath",
-    "tracedecay-code-index/hotpath",
-    "tracedecay-daemon-protocol/hotpath",
-    "tracedecay-domain/hotpath",
-    "tracedecay-framing/hotpath",
-    "tracedecay-graph-query/hotpath",
-    "tracedecay-hooks/hotpath",
-    "tracedecay-runtime-core/hotpath",
-    "tracedecay-session-memory/hotpath",
-    "tracedecay-sessions/hotpath",
-    "tracedecay-tool-catalog/hotpath",
-]
-hotpath-alloc = [
-    "hotpath",
-    "hotpath/hotpath-alloc",
-    "tracedecay-api/hotpath-alloc",
-    "tracedecay-application/hotpath-alloc",
-    "tracedecay-code-extraction/hotpath-alloc",
-    "tracedecay-code-index/hotpath-alloc",
-    "tracedecay-daemon-protocol/hotpath-alloc",
-    "tracedecay-domain/hotpath-alloc",
-    "tracedecay-framing/hotpath-alloc",
-    "tracedecay-graph-query/hotpath-alloc",
-    "tracedecay-hooks/hotpath-alloc",
-    "tracedecay-runtime-core/hotpath-alloc",
-    "tracedecay-session-memory/hotpath-alloc",
-    "tracedecay-sessions/hotpath-alloc",
-    "tracedecay-tool-catalog/hotpath-alloc",
-]
-hotpath-cpu = [
-    "hotpath",
-    "hotpath/hotpath-cpu",
-    "tracedecay-api/hotpath-cpu",
-    "tracedecay-application/hotpath-cpu",
-    "tracedecay-code-extraction/hotpath-cpu",
-    "tracedecay-code-index/hotpath-cpu",
-    "tracedecay-daemon-protocol/hotpath-cpu",
-    "tracedecay-domain/hotpath-cpu",
-    "tracedecay-framing/hotpath-cpu",
-    "tracedecay-graph-query/hotpath-cpu",
-    "tracedecay-hooks/hotpath-cpu",
-    "tracedecay-runtime-core/hotpath-cpu",
-    "tracedecay-session-memory/hotpath-cpu",
-    "tracedecay-sessions/hotpath-cpu",
-    "tracedecay-tool-catalog/hotpath-cpu",
-]
+# Opt-in profiling. Hotpath macros are no-ops until the *binary* selects the
+# `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
+# feature exists only for the `cfg(feature = "hotpath")` sites in this crate
+# that change compiled behaviour under profiling. It forwards nowhere else.
+# Type-coupled: `transport::ProfiledStdin`/`ProfiledStdout` name the on-mode
+# `hotpath::io::InstrumentedIo` (hotpath 0.24 has no mode-agnostic `wrap`
+# alias for I/O), so any build that selects the backend with this crate in
+# its graph must select this feature too.
+hotpath = ["hotpath/hotpath"]
 # Gates in-memory ChannelTransport. ReplayTransport stays on the default
 # graph because production initialize-root replay uses it.
 test-transport = []
@@ -72,42 +28,57 @@ test-transport = []
 # already part of the shipped code-index closure.
 source-analysis = [
     "dep:ignore",
-    "dep:tree-sitter",
     "tracedecay-code-extraction/lite",
 ]
 
 [dependencies]
+gix.workspace = true
 glob = "0.3"
 hotpath.workspace = true
 ignore = { version = "0.4", optional = true }
 libc = "0.2"
+rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.19", default-features = false }
 toml = "1"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite"] }
+tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0" }
+tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracing = "0.1"
-tree-sitter = { version = "0.26", optional = true }
+tree-sitter = "0.26"
 
 [dev-dependencies]
+rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

@@ -2,13 +2,14 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tracedecay_application::CancellationSignal;
+use tracedecay_contracts::CancellationSignal;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
-    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ContentDigest,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, PolicyRevisionId,
-    RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1,
+    ContentDigest, EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId,
+    PolicyRevisionId, RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision,
+    SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
+    SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphGenerationManifest, GraphNamespace, GraphProjectorRevision,
@@ -32,6 +33,17 @@ struct CancelledNow;
 impl GraphCancellation for CancelledNow {
     fn is_cancelled(&self) -> bool {
         true
+    }
+}
+
+struct CancelAfter {
+    observations: AtomicU64,
+    allowed: u64,
+}
+
+impl GraphCancellation for CancelAfter {
+    fn is_cancelled(&self) -> bool {
+        self.observations.fetch_add(1, Ordering::Relaxed) >= self.allowed
     }
 }
 
@@ -147,9 +159,13 @@ fn symbol_metadata(
         branches: 0,
         loops: 0,
         max_nesting: 0,
+        complexity_analysis: ComplexityAnalysisV1::Complete,
         line_span: 1,
         start_line: 0,
         signature: None,
+        docstring: None,
+        is_async: false,
+        derives: Vec::new(),
         skip_test_coverage: false,
         file_identity: digest('e'),
         content_digest: digest('d'),
@@ -254,6 +270,44 @@ fn production_manifest() -> GraphGenerationManifest {
     .expect("valid fixture manifest")
 }
 
+fn large_production_manifest(symbol_count: usize) -> GraphGenerationManifest {
+    let projection =
+        code_graph_projection_identity(GraphNamespace::new("code-graph").expect("namespace"))
+            .expect("projection identity");
+    let files = vec![file("file.f1", "src/alpha.rs")];
+    let mut chunks = Vec::with_capacity(symbol_count);
+    let mut symbols = Vec::with_capacity(symbol_count);
+    for index in 0..symbol_count {
+        let occurrence = format!("sym.bulk.{index:05}");
+        let qualified_name = if index % 2 == 0 {
+            format!("bulk::Needle{index}")
+        } else {
+            format!("bulk::Other{index}")
+        };
+        chunks.push(Arc::new(chunk(&occurrence, "file.f1", index as u32)));
+        let mut metadata = symbol_metadata(&occurrence, &qualified_name, "function", '1');
+        metadata.identity = id(&format!("sha256:{index:064x}"));
+        symbols.push(Arc::new(metadata));
+    }
+    let symbols =
+        GenerationSymbolIndexV1::new(generation(), symbols).expect("large fixture symbol index");
+    build_code_graph_manifest_inputs_checked(
+        projection,
+        &generation(),
+        &[],
+        &chunks,
+        Some(ProductionCodeGraphInputs {
+            files: &files,
+            symbols: &symbols,
+            imports: &[],
+        }),
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
+            .expect("projector revision"),
+        &|| Ok(()),
+    )
+    .expect("large fixture manifest")
+}
+
 fn store_for(manifest: GraphGenerationManifest) -> CodeGraphProjectionStore {
     let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled))
         .expect("open memory snapshot");
@@ -330,6 +384,50 @@ fn simple_name_resolution_matches_trailing_segment_case_insensitively() {
         .resolve_simple_name("runner", Some("struct"), 8, request())
         .expect("resolve runner");
     assert_eq!(occurrences(&runner), vec!["sym.beta.runner".to_owned()]);
+}
+
+#[test]
+fn symbol_find_is_bounded_ordered_and_cancellable_during_large_scans() {
+    let reader = reader(&store_for(large_production_manifest(5_000)));
+    reader
+        .symbols_page(None, 1, request())
+        .expect("warm large fixture catalog");
+
+    let hits = reader
+        .find_symbols(
+            &|_, _, metadata| {
+                metadata.is_some_and(|metadata| metadata.simple_name.starts_with("Needle"))
+            },
+            3,
+            request(),
+        )
+        .expect("bounded symbol find");
+    assert_eq!(
+        occurrences(&hits),
+        vec![
+            "sym.bulk.00000".to_owned(),
+            "sym.bulk.00002".to_owned(),
+            "sym.bulk.00004".to_owned(),
+        ]
+    );
+
+    let cancellation = Arc::new(CancelAfter {
+        observations: AtomicU64::new(0),
+        allowed: 4,
+    });
+    let error = reader
+        .find_symbols(&|_, _, _| false, 1, cancellation)
+        .expect_err("a long catalog scan must observe cancellation");
+    assert_eq!(error, CodeGraphProjectionError::Cancelled);
+}
+
+#[test]
+fn symbol_find_denies_a_pre_cancelled_read() {
+    let reader = reader(&store_for(production_manifest()));
+    let error = reader
+        .find_symbols(&|_, _, _| true, 1, Arc::new(CancelledNow))
+        .expect_err("cancelled symbol find must be refused");
+    assert_eq!(error, CodeGraphProjectionError::Cancelled);
 }
 
 #[test]

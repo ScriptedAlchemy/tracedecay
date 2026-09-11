@@ -1,6 +1,9 @@
 //! Per-subsystem `*RuntimeRegistrar` newtypes and their registration error enums.
 
 use super::*;
+use tracedecay_application::feedback::ProductionFeedbackCyclePartsV1;
+use tracedecay_contracts::AnalyzerAdmittedDiagnosticProviderV1;
+use tracedecay_contracts::diagnostics::FeedbackDiagnosticProviderAdmissionV1;
 
 mod lsp;
 pub use lsp::DaemonLspOwnerRegistrar;
@@ -387,6 +390,103 @@ pub struct DaemonFeedbackRuntimeRegistrar {
     publication_gate: Option<Arc<DaemonFeedbackPublicationTestGate>>,
 }
 
+#[derive(Clone)]
+pub struct FeedbackCycleRuntimeBuilderV1 {
+    feedback: Arc<FeedbackRuntime>,
+    code_index_schedulers:
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+}
+
+impl FeedbackCycleRuntimeBuilderV1 {
+    pub fn build(
+        &self,
+        project_root: &Path,
+        database: Database,
+        code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
+        parts: ProductionFeedbackCyclePartsV1,
+    ) -> Result<
+        (Arc<FeedbackCycleRuntime>, Arc<dyn FeedbackCycleRuntimePort>),
+        DaemonFeedbackRuntimeRegistrationError,
+    > {
+        let ProductionFeedbackCyclePartsV1 {
+            policy_context,
+            evidence_horizon,
+            evaluated_at,
+            provider_candidates,
+            affected_tests,
+            operation,
+            graph_operation,
+            tests_operation,
+            lsp_input,
+            proximity,
+            runtime_state,
+            ..
+        } = parts;
+        let policy = PolicyEvaluatorCompositionV1::from_application_catalog()?;
+        let correlation_state = evidence_horizon.routing_state();
+        let correlation_availability = match correlation_state {
+            TruthSourceStateV1::Fresh | TruthSourceStateV1::Partial => {
+                CapabilityAvailabilityV1::Available
+            }
+            TruthSourceStateV1::Stale => CapabilityAvailabilityV1::Stale,
+            TruthSourceStateV1::Unavailable => CapabilityAvailabilityV1::Unavailable,
+            TruthSourceStateV1::Unknown => CapabilityAvailabilityV1::Unknown,
+        };
+        let correlation_policy = operation.evaluate_local_live_policy(
+            &policy,
+            &policy_context,
+            correlation_availability,
+            ScopeMatchV1::Match,
+            correlation_state,
+            CapabilityEffectClassV1::Read,
+            TruthFreshnessRequirementV1::FreshOrPartial,
+            evidence_horizon,
+            evaluated_at,
+        )?;
+        let provider_admissions = provider_candidates
+            .into_iter()
+            .map(|candidate| match candidate {
+                tracedecay_application::feedback::cycle_production::ProductionDiagnosticProviderCandidateV1::Analyzer {
+                    identity,
+                    admission,
+                } => AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
+                    &policy,
+                    &policy_context,
+                    identity,
+                    admission,
+                )
+                .map(FeedbackDiagnosticProviderAdmissionV1::from),
+                tracedecay_application::feedback::cycle_production::ProductionDiagnosticProviderCandidateV1::StoredPublication(identity) => {
+                    FeedbackDiagnosticProviderAdmissionV1::from_stored_publication(identity)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let observations = self.feedback.observation_port();
+        let runtime = open_feedback_cycle_runtime(
+            database,
+            Arc::clone(&self.feedback),
+            runtime_state,
+            correlation_policy,
+            provider_admissions,
+            project_root.to_path_buf(),
+            code_graph,
+            affected_tests,
+            observations,
+            operation,
+            graph_operation,
+            tests_operation,
+            lsp_input,
+            Some(Arc::new(self.code_index_schedulers.clone())),
+        )?;
+        let production_input = production_proximity_feedback_cycle_input(
+            Arc::clone(&runtime),
+            runtime.lsp_input(),
+            proximity,
+        );
+        Ok((runtime, production_input))
+    }
+}
+
 impl DaemonFeedbackRuntimeRegistrar {
     pub fn new(service: &DaemonInvocationService) -> Self {
         Self {
@@ -467,90 +567,48 @@ impl DaemonFeedbackRuntimeRegistrar {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[hotpath::skip]
     pub async fn open_cycle_and_register(
         &self,
         project_root: PathBuf,
         database: Database,
-        runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
-        policy_context: PolicyEvaluationContextV1,
-        evidence_horizon: PolicyEvidenceHorizonV1,
-        evaluated_at: UtcMicros,
-        provider_candidates: Vec<(DiagnosticProviderIdentity, AnalyzerAdmissionInputV1)>,
         code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
-        affected_tests: Arc<dyn AffectedTestsRetrievalPort + Send + Sync>,
-        operation: ApplicationOperation,
-        graph_operation: ApplicationOperation,
-        tests_operation: ApplicationOperation,
-        lsp_input: FeedbackCycleLspInput,
-        proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
+        parts: ProductionFeedbackCyclePartsV1,
     ) -> Result<Arc<FeedbackCycleRuntime>, DaemonFeedbackRuntimeRegistrationError> {
-        let policy = PolicyEvaluatorCompositionV1::from_application_catalog()?;
-        let correlation_state = evidence_horizon.routing_state();
-        let correlation_availability = match correlation_state {
-            TruthSourceStateV1::Fresh | TruthSourceStateV1::Partial => {
-                CapabilityAvailabilityV1::Available
-            }
-            TruthSourceStateV1::Stale => CapabilityAvailabilityV1::Stale,
-            TruthSourceStateV1::Unavailable => CapabilityAvailabilityV1::Unavailable,
-            TruthSourceStateV1::Unknown => CapabilityAvailabilityV1::Unknown,
-        };
-        let correlation_policy = operation.evaluate_local_live_policy(
-            &policy,
-            &policy_context,
-            correlation_availability,
-            ScopeMatchV1::Match,
-            correlation_state,
-            CapabilityEffectClassV1::Read,
-            TruthFreshnessRequirementV1::FreshOrPartial,
-            evidence_horizon,
-            evaluated_at,
-        )?;
-        let provider_admissions = provider_candidates
-            .into_iter()
-            .map(|(identity, input)| {
-                AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
-                    &policy,
-                    &policy_context,
-                    identity,
-                    input,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let feedback = self
-            .service
-            .feedback_runtime(Some(&project_root))
+        let builder = self
+            .refresh_builder(&project_root)
             .await
             .ok_or(DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
-        let observations = feedback.observation_port();
-        let production_lsp_input = Arc::clone(&lsp_input);
-        let runtime = open_feedback_cycle_runtime(
-            database,
-            feedback,
-            runtime_state,
-            correlation_policy,
-            provider_admissions,
-            project_root.clone(),
-            code_graph,
-            affected_tests,
-            observations,
-            operation,
-            graph_operation,
-            tests_operation,
-            lsp_input,
-            Some(Arc::new(self.service.code_index_schedulers.clone())),
-        )?;
-        let production_input = production_proximity_feedback_cycle_input(
-            Arc::clone(&runtime),
-            production_lsp_input,
-            proximity,
-        );
+        let (runtime, production_input) =
+            builder.build(&project_root, database, code_graph, parts)?;
         self.service
             .project_runtimes
             .publish_feedback_cycle_atomically(project_root, Arc::clone(&runtime), production_input)
             .await?;
         Ok(runtime)
+    }
+
+    #[hotpath::skip]
+    pub async fn refresh_builder(
+        &self,
+        project_root: &Path,
+    ) -> Option<FeedbackCycleRuntimeBuilderV1> {
+        let feedback = self.service.feedback_runtime(Some(project_root)).await?;
+        Some(FeedbackCycleRuntimeBuilderV1 {
+            feedback,
+            code_index_schedulers: self.service.code_index_schedulers.clone(),
+        })
+    }
+
+    #[hotpath::skip]
+    pub async fn feedback_router(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<SwitchableFeedbackCycleRuntimeV1>> {
+        self.service
+            .project_runtimes
+            .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(project_root)
+            .await
     }
 }
 
@@ -699,6 +757,88 @@ impl tracedecay_dashboard_api::feedback_api::FeedbackStatusRuntime
 }
 
 #[derive(Clone)]
+pub struct DaemonSemanticOwnerRuntimeRegistrar {
+    service: DaemonInvocationService,
+}
+
+impl DaemonSemanticOwnerRuntimeRegistrar {
+    pub fn new(service: &DaemonInvocationService) -> Self {
+        Self {
+            service: service.clone(),
+        }
+    }
+
+    #[hotpath::skip]
+    pub async fn register(
+        &self,
+        project_root: &Path,
+    ) -> Result<RegisteredSemanticOwnerTaskV1, TraceDecayError> {
+        if let Some(registered) = self.registered(project_root).await {
+            if self
+                .service
+                .project_runtimes
+                .holds::<RegisteredConfigurationRuntime>(project_root)
+                .await
+            {
+                registered.mark_configuration_runtime_ready();
+            }
+            return Ok(registered);
+        }
+        let candidate = RegisteredSemanticOwnerTaskV1::new();
+        match self
+            .service
+            .project_runtimes
+            .register(project_root.to_path_buf(), candidate)
+            .await
+        {
+            Ok(()) | Err(ProjectRuntimeRegistryError::AlreadyRegistered) => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "semantic owner task registration failed for {}: {error}",
+                        project_root.display()
+                    ),
+                });
+            }
+        }
+        let registered =
+            self.registered(project_root)
+                .await
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "semantic owner task disappeared after registration".to_owned(),
+                })?;
+        if self
+            .service
+            .project_runtimes
+            .holds::<RegisteredConfigurationRuntime>(project_root)
+            .await
+        {
+            registered.mark_configuration_runtime_ready();
+        }
+        Ok(registered)
+    }
+
+    #[hotpath::skip]
+    pub async fn registered(&self, project_root: &Path) -> Option<RegisteredSemanticOwnerTaskV1> {
+        self.service.project_runtimes.get(project_root).await
+    }
+
+    #[hotpath::skip]
+    pub async fn state(
+        &self,
+        project_root: &Path,
+    ) -> Option<tracedecay_contracts::doctor::SemanticOwnerStateV1> {
+        self.service
+            .project_runtimes
+            .read::<RegisteredSemanticOwnerTaskV1, _, _>(
+                project_root,
+                RegisteredSemanticOwnerTaskV1::state,
+            )
+            .await
+    }
+}
+
+#[derive(Clone)]
 pub struct DaemonConfigurationRuntimeRegistrar {
     service: DaemonInvocationService,
 }
@@ -721,6 +861,15 @@ impl DaemonConfigurationRuntimeRegistrar {
                 message: "profile code-index worker plan was not installed during daemon bootstrap"
                     .to_owned(),
             })
+    }
+
+    fn mark_semantic_owner_configuration_ready(&self, project_root: &Path) {
+        let _marked = self
+            .service
+            .project_runtimes
+            .read_now::<RegisteredSemanticOwnerTaskV1, _, _>(project_root, |registered| {
+                registered.mark_configuration_runtime_ready();
+            });
     }
 
     /// Commit the daemon-wide worker selection through the exact retained
@@ -812,6 +961,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             .holds::<RegisteredConfigurationRuntime>(&project_root)
             .await
         {
+            self.mark_semantic_owner_configuration_ready(&project_root);
             return Ok(());
         }
         let policy_digest = AccessPolicyDigest::new(policy_manifest_digest.as_str().to_owned())
@@ -835,7 +985,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         let direct_layers = mounted_configuration_layers(
             &runtime.configuration_target().project_id,
             &profile_id,
-            &current.snapshot,
+            current.snapshot(),
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("configuration layer authority invalid: {error:?}"),
@@ -856,7 +1006,7 @@ impl DaemonConfigurationRuntimeRegistrar {
             }
         })?;
         runtime
-            .record_runtime_activation(Some(current.revision_id), None, current_micros())
+            .record_runtime_activation(Some(current.revision_id().clone()), None, current_micros())
             .await
             .map_err(|error| TraceDecayError::Config {
                 message: format!("configuration runtime activation could not be recorded: {error}"),
@@ -872,10 +1022,30 @@ impl DaemonConfigurationRuntimeRegistrar {
             scope.project_id.clone(),
             project_root.clone(),
         );
+        #[cfg(any(test, feature = "test-helpers"))]
+        let registration_return_pause = match self
+            .service
+            .take_configuration_runtime_registration_pause(&project_root)
+            .await
+        {
+            Some(pause) => {
+                let super::ConfigurationRuntimeRegistrationPauseV1 {
+                    before_registration,
+                    allow_registration,
+                    after_registration,
+                    allow_return,
+                    ..
+                } = pause;
+                let _ = before_registration.send(());
+                let _ = allow_registration.await;
+                Some((after_registration, allow_return))
+            }
+            None => None,
+        };
         self.service
             .project_runtimes
             .publish(
-                project_root,
+                project_root.clone(),
                 RegisteredConfigurationRuntime {
                     runtime,
                     scope,
@@ -884,6 +1054,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                     grants,
                     semantic_operation: Arc::new(OnceLock::new()),
                     semantic_activation_committed: Arc::new(Notify::new()),
+                    feedback_refresh: Arc::new(RwLock::new(None)),
                     semantic_evaluation_workers: Arc::new(
                         tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(
                             self.service
@@ -894,15 +1065,46 @@ impl DaemonConfigurationRuntimeRegistrar {
                 },
             )
             .await?;
+        self.mark_semantic_owner_configuration_ready(&project_root);
+        #[cfg(any(test, feature = "test-helpers"))]
+        if let Some((after_registration, allow_return)) = registration_return_pause {
+            let _ = after_registration.send(());
+            let _ = allow_return.await;
+        }
         Ok(())
     }
 
-    /// Install the semantic configuration operation beside the registered
-    /// configuration runtime. The operation is a pure function of that runtime
-    /// and its registered database, and the runtime is first-registration-wins
-    /// for the root's lifetime, so a reopen of the same root finding one
-    /// installed is the same authority: the incumbent stays and the reopen
-    /// proceeds.
+    pub async fn install_feedback_refresh(
+        &self,
+        project_root: &Path,
+        refresh: Arc<dyn ConfigurationRuntimeRefreshPort>,
+    ) -> Result<(), TraceDecayError> {
+        let registered = self
+            .service
+            .project_runtimes
+            .get::<RegisteredConfigurationRuntime>(project_root)
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "feedback configuration refresh requires a registered runtime".to_owned(),
+            })?;
+        let mut slot =
+            registered
+                .feedback_refresh
+                .write()
+                .map_err(|_| TraceDecayError::Config {
+                    message: "feedback configuration refresh authority is unavailable".to_owned(),
+                })?;
+        *slot = Some(refresh);
+        Ok(())
+    }
+
+    /// Installs this project's one semantic configuration operation.
+    ///
+    /// The registered configuration runtime this installs onto is already
+    /// keyed by the project's store authority, and registering it is itself
+    /// idempotent for a second route of the same project. So a second install
+    /// joins the incumbent operation instead of refusing: refusing degraded
+    /// every reopen of a route, which builds its own operation object.
     #[hotpath::skip]
     pub async fn install_semantic_operation(
         &self,
@@ -927,13 +1129,13 @@ impl DaemonConfigurationRuntimeRegistrar {
         &self,
         project_root: &Path,
         coordinator: Arc<
-            tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
+            tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
         >,
         lifecycle_events: tokio::sync::watch::Receiver<
             tracedecay_semantic_contracts::SemanticLifecycleVerifiedReadyEventV1,
         >,
     ) -> Result<
-        Arc<tracedecay_usecases::semantic_runtime::ProductionSemanticActivationCoordinatorV1>,
+        Arc<tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1>,
         TraceDecayError,
     > {
         let committed_activation_wake = self
@@ -949,6 +1151,8 @@ impl DaemonConfigurationRuntimeRegistrar {
                         .to_owned(),
             })?;
         let project_root = project_root.to_path_buf();
+        let semantic_project_root = project_root.clone();
+        let semantic_schedulers = self.service.code_index_schedulers.clone();
         self.service
             .project_runtimes
             .register_or_reconcile::<RegisteredSemanticActivationOwnerV1, TraceDecayError, _, _, _>(
@@ -960,6 +1164,8 @@ impl DaemonConfigurationRuntimeRegistrar {
                             Arc::clone(&coordinator),
                             lifecycle_events,
                             committed_activation_wake,
+                            semantic_project_root,
+                            semantic_schedulers,
                         ),
                     );
                     Ok(RegisteredSemanticActivationOwnerV1 {
@@ -981,6 +1187,28 @@ impl DaemonConfigurationRuntimeRegistrar {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "semantic activation owner disappeared after registration".to_owned(),
             })
+    }
+
+    #[hotpath::skip]
+    pub async fn remove_semantic_activation_owner_if_current(
+        &self,
+        project_root: &Path,
+        expected: &Arc<
+            tracedecay_application::semantic_runtime::ProductionSemanticActivationCoordinatorV1,
+        >,
+    ) -> bool {
+        match self
+            .service
+            .project_runtimes
+            .take_semantic_activation_owner_if_current(project_root, expected)
+        {
+            SemanticActivationOwnerWithdrawalV1::Removed(owner) => {
+                owner.reconciler.cancel_and_join().await;
+                true
+            }
+            SemanticActivationOwnerWithdrawalV1::Absent => true,
+            SemanticActivationOwnerWithdrawalV1::DifferentOwner => false,
+        }
     }
 }
 
@@ -1040,6 +1268,13 @@ impl DaemonWorkRuntimeRegistrar {
             .register_or_reconcile(
                 project_root.clone(),
                 |registered: &mut RegisteredWorkRuntime| {
+                    // Store authority only. The evidence-retrieval adapter is
+                    // built fresh by every route that mounts it, so comparing
+                    // its object identity refused the second route of one
+                    // project — a linked worktree, or a reopen of a route
+                    // whose server was replaced — and left it permanently
+                    // degraded. Its own project scope is already proven by
+                    // `grant.scope` and the authority digest.
                     if registered.actor == actor
                         && registered.grant.digest == grant.digest
                         && registered.grant.scope == grant.scope
@@ -1049,9 +1284,6 @@ impl DaemonWorkRuntimeRegistrar {
                         && registered
                             .proposal_routing
                             .same_configuration_as(&proposal_routing)
-                        && registered
-                            .evidence_retrieval
-                            .same_retrieval_authority(evidence_retrieval.as_ref())
                     {
                         // The same authority re-registering only renews its grant.
                         if registered.grant != grant {
@@ -1174,16 +1406,17 @@ impl DaemonRetainedRuntimeRegistrar {
         }
     }
 
-    /// Register the retained runtime for `project_root`, or rebind the
-    /// incumbent when it is the same canonical authority.
+    /// Registers this project's one retained runtime, or joins the incumbent.
     ///
-    /// `store` must be the authority of the project store `ports` were built
-    /// over. A route that reopens the same root constructs new ports and a
-    /// grant from the current configuration revision; when its scope, actor,
-    /// and store authority match the incumbent, the incumbent's grant and
-    /// ports are replaced together so requests execute through the live route
-    /// rather than the retired one. Any other incumbent is a foreign runtime
-    /// and the registration is refused.
+    /// Identity is the registered store authority — the exact authorized scope
+    /// and the actor whose grant issued it — never the identity of the ports
+    /// object. Every route builds its own `RetainedSurfacePortsV1`, so
+    /// comparing that object (or the grant digest it folds the current
+    /// configuration into) refused the second same-identity worktree route and
+    /// every reopen of a route whose ports had been rebuilt: project open then
+    /// degraded, for the life of the daemon. A matching route aliases the
+    /// incumbent and stamps its own grant on it; a foreign scope or actor is
+    /// still refused rather than given a second retained runtime.
     #[hotpath::skip]
     pub async fn register(
         &self,
@@ -1191,8 +1424,7 @@ impl DaemonRetainedRuntimeRegistrar {
         scope: ResolvedScope,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
-        store: RetainedRuntimeStoreAuthorityV1,
-        ports: Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+        ports: Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>>,
     ) -> Result<(), TraceDecayError> {
         if grant.scope != scope || grant.issuer != actor {
             return Err(TraceDecayError::Config {
@@ -1204,15 +1436,12 @@ impl DaemonRetainedRuntimeRegistrar {
             .register_or_reconcile(
                 project_root,
                 |registered: &mut RegisteredRetainedRuntime| {
-                    if registered.is_same_authority(&scope, &actor, &store) {
+                    if registered.scope == scope && registered.actor == actor {
                         registered.grant = grant.clone();
-                        registered.ports = Arc::clone(&ports);
                         Ok(())
                     } else {
                         Err(TraceDecayError::Config {
-                            message: "a retained runtime for a different project scope, actor, \
-                                      or store authority is already registered for this \
-                                      project root"
+                            message: "a different retained runtime is already registered for this project"
                                 .to_owned(),
                         })
                     }
@@ -1222,13 +1451,21 @@ impl DaemonRetainedRuntimeRegistrar {
                         scope: scope.clone(),
                         actor: actor.clone(),
                         grant: grant.clone(),
-                        store: store.clone(),
                         ports: Arc::clone(&ports),
                     })
                 },
             )
             .await
     }
+}
+
+/// Typed refusal from [`DaemonInvocationService::register_source_edit_owner`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DaemonSourceEditOwnerRegistrationError {
+    #[error(transparent)]
+    Registry(#[from] ProjectRuntimeRegistryError),
+    #[error("a source-edit owner for a different authorized scope is already registered")]
+    ForeignAuthority,
 }
 
 /// Registers one native-integration owner per exact project/repository identity.
@@ -1252,9 +1489,12 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         repository_id: tracedecay_domain::RepositoryId,
         policy_digest: ManifestDigest,
         observed_at: UtcMicros,
+        analysis: Arc<
+            dyn tracedecay_application::native_integration::NativeIntegrationAnalysisPort,
+        >,
     ) -> Result<
         tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner,
-        tracedecay_application::NativeIntegrationPortError,
+        tracedecay_contracts::NativeIntegrationPortError,
     > {
         self.registry
             .ensure(
@@ -1264,6 +1504,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
                 repository_id,
                 policy_digest,
                 observed_at,
+                analysis,
             )
             .await
     }
@@ -1274,7 +1515,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         repository_root: &Path,
     ) -> Result<
         Option<tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner>,
-        tracedecay_application::NativeIntegrationPortError,
+        tracedecay_contracts::NativeIntegrationPortError,
     > {
         self.registry.for_repository_root(repository_root).await
     }
@@ -1284,7 +1525,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         &self,
         project_id: &ProjectId,
         database_path: &Path,
-    ) -> Result<(), tracedecay_application::NativeIntegrationPortError> {
+    ) -> Result<(), tracedecay_contracts::NativeIntegrationPortError> {
         self.registry
             .retire_project_database(project_id, database_path)
             .await
@@ -1293,7 +1534,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
     #[hotpath::skip]
     pub async fn shutdown(
         &self,
-    ) -> Result<usize, tracedecay_application::NativeIntegrationPortError> {
+    ) -> Result<usize, tracedecay_contracts::NativeIntegrationPortError> {
         self.registry.shutdown().await
     }
 }

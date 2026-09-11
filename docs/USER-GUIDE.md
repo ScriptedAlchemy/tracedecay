@@ -281,8 +281,9 @@ identities. Removed Hermes install flags (`--profile`, `--all-profiles`, and
 When changing generated Hermes plugin or context-engine behavior, start with
 TraceDecay's read-only analysis tools before rebuilding or reinstalling
 anything: use `tracedecay_diff_context` to inspect modified symbols,
-dependencies, and affected tests; `tracedecay_simplify_scan` for complexity,
-duplication, dead-code, and coupling regressions; `tracedecay_test_risk` for
+dependencies, and affected tests; use `tracedecay_complexity`,
+`tracedecay_redundancy`, `tracedecay_dead_code`, and `tracedecay_coupling` for
+focused quality checks; `tracedecay_test_risk` for
 untested hot spots; `tracedecay_diagnostics` for structured compiler/type
 feedback; and `tracedecay_run_affected_tests` for the focused test set when test
 execution is appropriate.
@@ -672,7 +673,6 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 | Tool | What it does |
 |------|-------------|
 | `tracedecay_dead_code` | Find unreachable symbols — functions with no callers. |
-| `tracedecay_unused_imports` | Find import statements that are never referenced. |
 | `tracedecay_unmounted_files` | Find source files no build root reaches — indexed as healthy symbols, yet no compiler, bundler, or test runner ever loads them. Reports one section per ecosystem with its own verdict and blind spots. |
 | `tracedecay_circular` | Detect circular file dependencies. |
 | `tracedecay_recursion` | Detect recursive and mutually-recursive call cycles. |
@@ -680,7 +680,6 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 | `tracedecay_god_class` | Find classes with the most members — candidates for decomposition. |
 | `tracedecay_hotspots` | Find the most connected symbols (highest call count). These are high-risk areas. |
 | `tracedecay_doc_coverage` | Find public symbols missing documentation. |
-| `tracedecay_simplify_scan` | Quality analysis of changed files: duplications, dead code, complexity, coupling. |
 
 ### Health & quality signals
 

@@ -2,7 +2,7 @@ use super::*;
 use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
 use crate::hooks::daemon_ports::daemon_admission_response;
 use std::sync::Mutex;
-use tracedecay_application::context_scout::{
+use tracedecay_contracts::context_scout::{
     ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutFeedbackKindV1,
     ContextScoutFeedbackV1,
 };
@@ -145,7 +145,7 @@ fn daemon_admission_response_rejects_open_or_incoherent_actions() {
 
 #[test]
 fn daemon_feedback_notice_survives_into_host_delivery() {
-    let notice = tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
+    let notice = tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
             project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
             repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
@@ -200,13 +200,41 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     ));
     assert_eq!(admitted.feedback_notice, Some(notice.clone()));
 
-    let rendered = render_host_delivery(None, Some(&notice), false).unwrap();
+    let rendered = render_host_delivery(None, None, Some(&notice), false)
+        .expect("feedback notice serializes")
+        .expect("feedback notice renders");
     assert!(rendered.starts_with("TraceDecay feedback ready for authorized lookup: "));
     let encoded = rendered.split_once(": ").unwrap().1;
     assert_eq!(
-        serde_json::from_str::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(encoded)
-            .unwrap(),
+        serde_json::from_str::<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>(
+            encoded
+        )
+        .unwrap(),
         notice
+    );
+}
+
+#[test]
+fn context_scout_address_is_rendered_for_the_admitted_host() {
+    let address = ContextScoutAddressV1 {
+        profile_id: [1; 16],
+        provider_id: [2; 16],
+        protected_session_id: [3; 32],
+        thread_id: [4; 16],
+        turn_id: [5; 16],
+        agent_id: [6; 16],
+        logical_message_id: [7; 16],
+        project_id: [8; 16],
+    };
+    let rendered = render_host_delivery(None, Some(&address), None, false)
+        .expect("authorized Scout address serializes")
+        .expect("authorized Scout address renders");
+    let encoded = rendered
+        .strip_prefix("TraceDecay Context Scout address for authorized operations: ")
+        .expect("bounded address prefix");
+    assert_eq!(
+        serde_json::from_str::<ContextScoutAddressV1>(encoded).unwrap(),
+        address
     );
 }
 
@@ -225,7 +253,9 @@ fn github_stack_wakeup_is_content_free() {
     let admitted = daemon_admission_response(&response);
     assert!(admitted.github_stack_signal_available);
 
-    let rendered = render_host_delivery(None, None, true).expect("stack wakeup renders");
+    let rendered = render_host_delivery(None, None, None, true)
+        .expect("stack wakeup serialization succeeds")
+        .expect("stack wakeup renders");
 
     assert_eq!(
         rendered,
@@ -243,13 +273,13 @@ struct RecordingFeedbackDeliveryPort {
     calls: Mutex<usize>,
 }
 
-impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>
+impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>
     for RecordingFeedbackDeliveryPort
 {
     fn deliver_hook_v2<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
@@ -261,15 +291,15 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHook
     fn deliver_legacy<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
     }
 }
 
-fn sample_notice() -> tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
-    tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
+fn sample_notice() -> tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
+    tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
             project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
             repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
@@ -287,7 +317,7 @@ fn sample_notice() -> tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 
 }
 
 fn sample_envelope(
-    notice: &tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+    notice: &tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
 ) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
@@ -417,7 +447,10 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
             receipt: receipt.clone(),
         }),
         deadline,
-        &DaemonDeliveryReceiptPort::new(project.path()),
+        &DaemonDeliveryReceiptPort::new(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+        ),
     )
     .await
     .unwrap();
@@ -432,7 +465,10 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
         rollback,
         Some(commit.clone()),
         deadline,
-        &DaemonContextScoutFeedbackPort::new(project.path()),
+        &DaemonContextScoutFeedbackPort::new(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+        ),
     )
     .await
     .unwrap();
@@ -447,7 +483,10 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
         rollback,
         Some(notice.clone()),
         deadline,
-        &DaemonFeedbackNoticeDeliveryPort::new(project.path()),
+        &DaemonFeedbackNoticeDeliveryPort::new(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+        ),
     )
     .await
     .unwrap();
@@ -473,7 +512,7 @@ async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
     );
     assert_eq!(calls[2].1["action"], "hook_v2_feedback_notice_delivery");
     assert_eq!(
-        serde_json::from_value::<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>(
+        serde_json::from_value::<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>(
             calls[2].1["feedback_notice"].clone()
         )
         .unwrap(),
@@ -499,8 +538,23 @@ async fn scout_receipt_and_feedback_helpers_delegate_to_daemon_ports() {
         serde_json::json!({ "status": "duplicate" }),
     ]);
 
-    assert!(record_context_scout_delivery(project.path(), &receipt).await);
-    assert!(commit_context_scout_feedback(project.path(), &receipt, feedback).await);
+    assert!(
+        record_context_scout_delivery(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+            &receipt
+        )
+        .await
+    );
+    assert!(
+        commit_context_scout_feedback(
+            &crate::ports::hook_runtime::crate_test_runtime(),
+            project.path(),
+            &receipt,
+            feedback
+        )
+        .await
+    );
 
     let calls = guard.calls();
     assert_eq!(calls.len(), 2);
@@ -553,7 +607,13 @@ async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
         "status": "accepted",
     })]);
 
-    let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
+    let dispatch = dispatch_opencode_lsp_updated(
+        &crate::ports::hook_runtime::crate_test_runtime(),
+        &event_json,
+        project.path(),
+        None,
+    )
+    .await;
 
     assert!(matches!(
         dispatch,
@@ -578,7 +638,13 @@ async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
         "status": "rejected",
     })]);
 
-    let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
+    let dispatch = dispatch_opencode_lsp_updated(
+        &crate::ports::hook_runtime::crate_test_runtime(),
+        &event_json,
+        project.path(),
+        None,
+    )
+    .await;
     assert!(matches!(
         dispatch,
         HookDispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
@@ -602,7 +668,8 @@ async fn delivery_receipt_withheld_when_ineligible_or_foreign_envelope() {
         receipt_id: [3; 16],
         ..receipt.clone()
     };
-    let port = DaemonDeliveryReceiptPort::new(project.path());
+    let runtime = crate::ports::hook_runtime::crate_test_runtime();
+    let port = DaemonDeliveryReceiptPort::new(&runtime, project.path());
     let rollback = HookFeedbackRollbackSwitchV1 {
         configuration_revision: 1,
         route: HookFeedbackDeliveryRouteV1::HookV2,

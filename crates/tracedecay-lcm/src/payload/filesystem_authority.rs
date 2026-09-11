@@ -10,7 +10,9 @@ use std::os::windows::io::AsRawHandle;
 
 use super::LcmError;
 
+mod payload_stream;
 mod verified_read;
+pub use payload_stream::{PayloadStreamError, VerifiedPayloadStream};
 use verified_read::{
     authority_for_content, authority_for_content_with_checkpoint,
     read_stable_payload_bytes_bounded_with, read_stable_payload_bytes_bounded_with_checkpoint,
@@ -1500,11 +1502,14 @@ mod authority_tests {
         let path = temp.path().join("oversized.payload");
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_VERIFIED_PAYLOAD_FILE_BYTES + 1).unwrap();
+        // Close the creator handle before size-only admission. A held Windows
+        // handle reports sharing/lock violation instead of the size refusal.
+        drop(file);
 
-        assert!(matches!(
-            read_payload_file_for_verify(&path),
-            Err(LcmError::PayloadIntegrityMismatch)
-        ));
+        assert_eq!(
+            read_payload_file_for_verify(&path).expect_err("oversized payload"),
+            LcmError::PayloadIntegrityMismatch
+        );
     }
 
     #[test]

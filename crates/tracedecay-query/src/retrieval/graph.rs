@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::retrieval::{MAX_APPLICATION_PAGE_SIZE, MAX_CALLABLE_CODE_DEPTH};
+use tracedecay_contracts::retrieval::{MAX_APPLICATION_PAGE_SIZE, MAX_CALLABLE_CODE_DEPTH};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EdgeAuthorityV1, RelationEdgeKindV1,
     RetrievalBudget, RetrievalFailure, RetrievalRequest, RetrieverBatch, RetrieverContinuation,
@@ -28,7 +28,9 @@ mod projection;
 
 pub use self::projection::production_code_index_freshness;
 
-/// Live request authority consulted throughout one graph traversal.
+/// Live request authority consulted throughout one graph traversal and, via
+/// [`super::lexical::LexicalLaneRequest::control`], between the bounded row
+/// visits of one lexical scan.
 pub trait GraphExecutionControl: Send + Sync {
     fn is_cancelled(&self) -> bool;
     /// Monotonic elapsed time in the request-relative domain used by
@@ -411,13 +413,13 @@ fn compare_graph_candidates(
         .cmp(&left.0.raw_score)
         .then_with(|| {
             left.0
-                .source_occurrence_id
-                .cmp(&right.0.source_occurrence_id)
+                .retriever_evidence_anchor
+                .cmp(&right.0.retriever_evidence_anchor)
         })
         .then_with(|| {
             left.0
-                .retriever_evidence_anchor
-                .cmp(&right.0.retriever_evidence_anchor)
+                .source_occurrence_id
+                .cmp(&right.0.source_occurrence_id)
         })
 }
 

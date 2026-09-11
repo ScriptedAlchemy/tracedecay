@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeIndexCapabilityManifestV1,
-    CodeSearchChunkGrainV1, CoverageSummaryV1, DomainError, EdgeAuthorityV1,
-    ExactTechnicalTermKindV1, ExtractorRevision, GrammarRevision, LanguageId,
+    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeGenerationSourceCommitmentsV1,
+    CodeIndexCapabilityManifestV1, CodeSearchChunkGrainV1, CoverageSummaryV1, DomainError,
+    EdgeAuthorityV1, ExactTechnicalTermKindV1, ExtractorRevision, GrammarRevision, LanguageId,
     LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, ProjectionKeyV1, ProjectionKindV1,
     SanitizationReceiptId, SanitizerRevision, canonical_sha256,
 };
@@ -103,6 +103,7 @@ struct SealPayload<'a> {
     privacy_domain: &'a PrivacyDomainId,
     privacy_key_epoch: u64,
     parent_generation: &'a Option<CodeGenerationId>,
+    source_commitments: &'a Option<CodeGenerationSourceCommitmentsV1>,
 }
 
 #[derive(Serialize)]
@@ -118,6 +119,7 @@ struct LegacySealPayload<'a> {
     privacy_domain: &'a PrivacyDomainId,
     privacy_key_epoch: u64,
     parent_generation: &'a Option<CodeGenerationId>,
+    source_commitments: &'a Option<CodeGenerationSourceCommitmentsV1>,
 }
 
 /// The canonical expected digest a generation planner must seal before handing
@@ -139,6 +141,7 @@ pub fn expected_seal_digest(
             privacy_domain: &generation.privacy_domain,
             privacy_key_epoch: generation.privacy_key_epoch,
             parent_generation: &generation.parent_generation,
+            source_commitments: &generation.source_commitments,
         });
     }
     canonical_sha256(&SealPayload {
@@ -154,6 +157,7 @@ pub fn expected_seal_digest(
         privacy_domain: &generation.privacy_domain,
         privacy_key_epoch: generation.privacy_key_epoch,
         parent_generation: &generation.parent_generation,
+        source_commitments: &generation.source_commitments,
     })
 }
 
@@ -201,6 +205,32 @@ impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
     }
 }
 
+/// Whether a sealed generation carries exactly the registry, grammar, and
+/// extractor revisions supplied by its snapshot-scoped language registry.
+///
+/// Callers must supply the registry narrowed to the languages present in the
+/// generation's snapshot. An unavailable current descriptor must therefore be
+/// rejected while constructing that registry rather than omitted here.
+pub fn generation_language_revisions_match<R: LanguageRegistry>(
+    generation: &CodeGenerationManifestV1,
+    registry: &R,
+) -> bool {
+    let descriptors = registry.descriptors();
+    generation.registry_revision == registry.registry_revision()
+        && generation.grammar_revisions.len() == descriptors.len()
+        && generation.extractor_revisions.len() == descriptors.len()
+        && !generation.grammar_revisions.iter().zip(&descriptors).any(
+            |((language, revision), descriptor)| {
+                language != &descriptor.language || revision != &descriptor.grammar_revision
+            },
+        )
+        && !generation.extractor_revisions.iter().zip(&descriptors).any(
+            |((language, revision), descriptor)| {
+                language != &descriptor.language || revision != &descriptor.extractor_revision
+            },
+        )
+}
+
 impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R> {
     fn emit(
         &self,
@@ -221,23 +251,10 @@ impl<R: LanguageRegistry> CodeIndexCapabilityEmitter for BaseCapabilityEmitter<R
             return Err(CapabilityEmissionErrorV1::GenerationNotSealed);
         }
 
-        let descriptors = self.registry.descriptors();
-        if generation.registry_revision != self.registry.registry_revision()
-            || generation.grammar_revisions.len() != descriptors.len()
-            || generation.extractor_revisions.len() != descriptors.len()
-            || generation.grammar_revisions.iter().zip(&descriptors).any(
-                |((language, revision), descriptor)| {
-                    language != &descriptor.language || revision != &descriptor.grammar_revision
-                },
-            )
-            || generation.extractor_revisions.iter().zip(&descriptors).any(
-                |((language, revision), descriptor)| {
-                    language != &descriptor.language || revision != &descriptor.extractor_revision
-                },
-            )
-        {
+        if !generation_language_revisions_match(generation, &self.registry) {
             return Err(CapabilityEmissionErrorV1::MixedGeneration);
         }
+        let descriptors = self.registry.descriptors();
         let supported_languages: Vec<LanguageId> = descriptors
             .iter()
             .map(|descriptor| descriptor.language.clone())
@@ -422,6 +439,7 @@ mod tests {
             privacy_domain: PrivacyDomainId::new("privacy.fixture").expect("valid id"),
             privacy_key_epoch: 7,
             parent_generation: None,
+            source_commitments: None,
             seal: GenerationSealV1 {
                 expected_digest: digest('b'),
                 sealed_at: UtcMicros(1_000_000),

@@ -12,7 +12,7 @@ use crate::automation::backend::{
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::AgentTaskRunContext;
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus};
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub(super) fn evaluate_session_curation(

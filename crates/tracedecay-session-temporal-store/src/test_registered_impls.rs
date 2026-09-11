@@ -17,7 +17,7 @@ use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Connection, Error as EngineError, Executor, IntoParams, QueryExecutor, Rows, TestConnection,
 };
-use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimeWeakProxyV1;
+use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::handle::{

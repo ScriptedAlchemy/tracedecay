@@ -361,6 +361,10 @@ pub enum ReconcileFaultKindV1 {
     /// is shaped like a capacity refusal and is not one: no release by any
     /// other holder can ever admit it.
     OversizedCapacity,
+    /// A source observation superseded the active reconcile.
+    Cancelled,
+    /// The active reconcile exhausted its own deadline.
+    DeadlineExceeded,
     /// A refusal the same input reproduces forever.
     Permanent,
 }
@@ -372,6 +376,8 @@ pub struct ReconcileFaultInjectionV1 {
     /// Passes to fault before behaving normally; `usize::MAX` never recovers.
     faulting_passes: usize,
     attempts: std::sync::atomic::AtomicUsize,
+    paused: std::sync::Mutex<bool>,
+    resumed: std::sync::Condvar,
 }
 
 #[cfg(test)]
@@ -381,7 +387,21 @@ impl ReconcileFaultInjectionV1 {
             kind,
             faulting_passes,
             attempts: std::sync::atomic::AtomicUsize::new(0),
+            paused: std::sync::Mutex::new(false),
+            resumed: std::sync::Condvar::new(),
         }
+    }
+
+    /// Hold an admitted blocking pass until the retirement fixture releases it.
+    pub fn paused() -> Self {
+        let mut fault = Self::new(ReconcileFaultKindV1::Permanent, 0);
+        fault.paused = std::sync::Mutex::new(true);
+        fault
+    }
+
+    pub fn resume(&self) {
+        *self.paused.lock().expect("reconcile pause lock") = false;
+        self.resumed.notify_all();
     }
 
     /// Reconcile passes the worker actually dispatched, faulting or not.
@@ -394,6 +414,14 @@ impl ReconcileFaultInjectionV1 {
         let seen = self
             .attempts
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let mut paused = self.paused.lock().expect("reconcile pause lock");
+        while *paused {
+            paused = self
+                .resumed
+                .wait(paused)
+                .expect("resume admitted reconcile");
+        }
+        drop(paused);
         if seen >= self.faulting_passes {
             return Ok(());
         }
@@ -422,6 +450,18 @@ impl ReconcileFaultInjectionV1 {
                     },
                 ))
             }
+            ReconcileFaultKindV1::Cancelled => Err(
+                crate::code_index::production::CodeIndexProductionErrorV1::Interrupted(
+                    crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                )
+                .into(),
+            ),
+            ReconcileFaultKindV1::DeadlineExceeded => Err(
+                crate::code_index::production::CodeIndexProductionErrorV1::Interrupted(
+                    crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+                )
+                .into(),
+            ),
             ReconcileFaultKindV1::Permanent => Err(super::CodeIndexSchedulerErrorV1::Identity(
                 "injected permanent reconcile refusal".to_owned(),
             )),

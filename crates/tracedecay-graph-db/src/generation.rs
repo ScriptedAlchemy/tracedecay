@@ -54,7 +54,7 @@ pub use replay::{
     SemanticVectorGenerationReplay,
 };
 pub(crate) use replay::{
-    checked_decode_replay_source, metadata_manifest_from_replay, validate_metadata_binding,
+    checked_decode_replay_source, metadata_manifest_from_source, validate_metadata_binding,
     validate_supplied_manifest_binding,
 };
 
@@ -402,10 +402,22 @@ impl GraphGenerationManifest {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Self, GraphDbError> {
         check()?;
+        let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
+        Self::from_replay_source(publication, source, provider, check)
+    }
+
+    /// [`Self::from_replay`] over an already-decoded `source`, for callers
+    /// that inspect the source first and must not decode the payload twice.
+    pub(crate) fn from_replay_source(
+        publication: &GraphPublicationReplayV1,
+        source: GraphGenerationReplaySource,
+        provider: &dyn GraphGenerationManifestProvider,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Self, GraphDbError> {
+        check()?;
         publication
             .validate()
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let source = checked_decode_replay_source(&publication.canonical_replay_source, check)?;
         let manifest = match source {
             GraphGenerationReplaySource::InlineManifest(manifest) => *manifest,
             GraphGenerationReplaySource::MetadataOnlyManifest(_)
@@ -1034,7 +1046,7 @@ pub(crate) fn sealed_copy_proofs() -> usize {
     SEALED_COPY_PROOFS.with(std::cell::Cell::get)
 }
 
-#[cfg(all(test, feature = "graph-sealed-store"))]
+#[cfg(test)]
 pub(crate) fn reset_sealed_copy_marker_hits() {
     SEALED_COPY_MARKER_HITS.with(|count| count.set(0));
 }
@@ -1042,7 +1054,7 @@ pub(crate) fn reset_sealed_copy_marker_hits() {
 /// Sealed-copy opens on this thread that resolved their recovered-digest
 /// proof from a verified-generation marker over byte-identical container
 /// bytes instead of re-streaming the rows.
-#[cfg(all(test, feature = "graph-sealed-store"))]
+#[cfg(test)]
 pub(crate) fn sealed_copy_marker_hits() -> usize {
     SEALED_COPY_MARKER_HITS.with(std::cell::Cell::get)
 }

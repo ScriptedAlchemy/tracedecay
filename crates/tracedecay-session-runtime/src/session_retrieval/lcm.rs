@@ -2,7 +2,7 @@
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tracedecay_application::RequestContext;
+use tracedecay_contracts::RequestContext;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
@@ -161,8 +161,42 @@ impl DaemonSessionRetrievalService {
         })
     }
 
+    /// A session with no active temporal generation resolves as
+    /// `TemporalStoreUnavailable`. While the refresh worker is still
+    /// converging history (for example re-deriving a reset store from its
+    /// preserved transcripts) that label is untrue — the store is fine, the
+    /// projection is pending — so the worker's own serving state, with its
+    /// backlog and blocker, is the answer instead. Once the worker is current
+    /// the temporal outcome stands: nothing is going to project the session.
+    fn converging_projection_unavailable(
+        &self,
+        unavailable: &SessionRetrievalUnavailable,
+    ) -> Option<SessionRetrievalUnavailable> {
+        if unavailable.reason != SessionRetrievalUnavailableReason::TemporalStoreUnavailable {
+            return None;
+        }
+        self.refresh_not_current()
+    }
+
     #[hotpath::measure(label = "daemon.session_retrieval.lcm_describe", future = true)]
     pub(super) async fn execute_lcm_describe_admitted(
+        &self,
+        context: &RequestContext,
+        binding: &SessionRequestBinding,
+        command: LcmDescribeServiceCommand,
+    ) -> LcmDescribeServiceOutcome {
+        let outcome = self
+            .execute_lcm_describe_resolved(context, binding, command)
+            .await;
+        if let LcmDescribeServiceOutcome::Unavailable(unavailable) = &outcome
+            && let Some(converging) = self.converging_projection_unavailable(unavailable)
+        {
+            return LcmDescribeServiceOutcome::Unavailable(converging);
+        }
+        outcome
+    }
+
+    async fn execute_lcm_describe_resolved(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,
@@ -266,6 +300,20 @@ impl DaemonSessionRetrievalService {
                 };
                 (Some(result), retrieval)
             }
+            // Zero temporal rows for the session is only evidence of absence
+            // once the refresh worker is current; while it is still
+            // converging history the honest answer is that state, not a
+            // complete description at generation zero.
+            SessionRetrievalOutcome::CompleteZero { .. }
+                if direct.is_none() && self.refresh_not_current().is_some() =>
+            {
+                return describe_retrieval_outcome(
+                    outcome,
+                    command.grain(),
+                    self.empty_temporal(),
+                    self.root.store_scope,
+                );
+            }
             SessionRetrievalOutcome::CompleteZero { freshness } if direct.is_none() => (
                 None,
                 LcmRetrievalOutcome::complete(lcm_data_freshness(freshness)),
@@ -361,6 +409,23 @@ impl DaemonSessionRetrievalService {
 
     #[hotpath::measure(label = "daemon.session_retrieval.lcm_expand", future = true)]
     pub(super) async fn execute_lcm_expand_admitted(
+        &self,
+        context: &RequestContext,
+        binding: &SessionRequestBinding,
+        command: LcmExpandServiceCommand,
+    ) -> LcmExpandServiceOutcome {
+        let outcome = self
+            .execute_lcm_expand_resolved(context, binding, command)
+            .await;
+        if let LcmExpandServiceOutcome::Unavailable(unavailable) = &outcome
+            && let Some(converging) = self.converging_projection_unavailable(unavailable)
+        {
+            return LcmExpandServiceOutcome::Unavailable(converging);
+        }
+        outcome
+    }
+
+    async fn execute_lcm_expand_resolved(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,

@@ -1,9 +1,11 @@
 use super::*;
-use tracedecay_application::{
+use tracedecay_contracts::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
     CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeNavigationSurfaceRequest,
-    CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest,
+    CodePhraseSearchSurfaceRequest, CodeTimelineSurfaceRequest, RegisteredRootLocatorV1,
+    SharedProfileStoreLocatorV1,
 };
+use tracedecay_domain::{BrainId, RepositoryId, WorktreeId};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn lsp_deadline() -> Deadline {
@@ -12,6 +14,38 @@ fn lsp_deadline() -> Deadline {
 
 fn lsp_cancellation() -> CancellationContext {
     CancellationContext::active("cancel.lsp.dispatch-test").expect("LSP cancellation")
+}
+
+async fn open_authorized_workspace(
+    service: &DaemonInvocationService,
+    registry: &Arc<Mutex<LspSessionRegistry>>,
+    workspace: Option<AuthorizedLspWorkspace>,
+    request_id: &str,
+    root_uris: &[String],
+    owner: &DaemonLspInvocationOwner,
+) -> DaemonInvocationResponse {
+    service
+        .open_lsp_session(
+            registry,
+            workspace,
+            request_id.to_owned(),
+            "3.17".to_owned(),
+            root_uris.first().cloned(),
+            root_uris.to_vec(),
+            0,
+            Some(owner.clone()),
+        )
+        .await
+}
+
+fn assert_lsp_authorization_refusal(response: DaemonInvocationResponse, expected_request_id: &str) {
+    assert_eq!(response.request_id, expected_request_id);
+    assert_eq!(
+        response.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    );
 }
 
 #[test]
@@ -134,24 +168,24 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     let phrase = CodePhraseSearchSurfaceRequest {
         query: "daemon invocation".to_owned(),
         phrases: vec!["daemon invocation".to_owned()],
-        field_filters: vec![tracedecay_application::retrieval::CodeLexicalFieldFilter {
-            field: tracedecay_application::retrieval::CodeLexicalField::Path,
+        field_filters: vec![tracedecay_contracts::retrieval::CodeLexicalFieldFilter {
+            field: tracedecay_contracts::retrieval::CodeLexicalField::Path,
             include: true,
         }],
         fuzzy_budget: 7,
-        scope: tracedecay_application::CodeQueryScope::new(
+        scope: tracedecay_contracts::CodeQueryScope::new(
             tracedecay_domain::CodeGenerationId::new("generation.callable-code")
                 .expect("generation"),
             Some("src/daemon".to_owned()),
         )
         .expect("scope"),
         meta: CallableCodeSurfaceMeta {
-            projection: tracedecay_application::ResultProjection::Evidence,
-            order: tracedecay_application::RetrievalOrder::Relevance,
+            projection: tracedecay_contracts::ResultProjection::Evidence,
+            order: tracedecay_contracts::RetrievalOrder::Relevance,
             cursor: None,
         },
     };
-    let page = tracedecay_application::PageRequest::first(16).expect("page");
+    let page = tracedecay_contracts::PageRequest::first(16).expect("page");
     let canonical = phrase
         .clone()
         .into_application_request(
@@ -170,8 +204,8 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
     );
     assert_eq!(
         canonical.field_filters,
-        [tracedecay_application::retrieval::CodeLexicalFieldFilter {
-            field: tracedecay_application::retrieval::CodeLexicalField::Path,
+        [tracedecay_contracts::retrieval::CodeLexicalFieldFilter {
+            field: tracedecay_contracts::retrieval::CodeLexicalField::Path,
             include: true,
         }]
     );
@@ -214,14 +248,14 @@ fn callable_code_invocation_preserves_typed_request_and_transport_controls() {
 
 #[test]
 fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
-    let scope = tracedecay_application::CodeQueryScope::new(
+    let scope = tracedecay_contracts::CodeQueryScope::new(
         tracedecay_domain::CodeGenerationId::new("generation.callable-code").expect("generation"),
         None,
     )
     .expect("scope");
     let meta = CallableCodeSurfaceMeta {
-        projection: tracedecay_application::ResultProjection::Evidence,
-        order: tracedecay_application::RetrievalOrder::Relevance,
+        projection: tracedecay_contracts::ResultProjection::Evidence,
+        order: tracedecay_contracts::RetrievalOrder::Relevance,
         cursor: None,
     };
     #[derive(Clone, Copy)]
@@ -268,7 +302,7 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
             meta: meta.clone(),
         }),
         RequestCase::Facets => CallableCodeSurfaceRequest::Facets(CodeFacetSurfaceRequest {
-            dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
+            dimension: tracedecay_contracts::retrieval::CodeFacetDimension::Kind,
             scope: scope.clone(),
             meta: meta.clone(),
         }),
@@ -324,7 +358,7 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
             RequestCase::References,
         ),
     ];
-    let page = tracedecay_application::PageRequest::first(16).expect("page");
+    let page = tracedecay_contracts::PageRequest::first(16).expect("page");
     let deadline = Deadline::new(UtcMicros(90)).expect("deadline");
     let cancellation =
         CancellationContext::active("cancel.callable-code.matrix").expect("cancellation");
@@ -370,7 +404,13 @@ fn callable_code_validation_accepts_only_matching_operation_request_pairs() {
 #[tokio::test]
 async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root() {
     let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/authoritative");
+    let fixture = tempfile::tempdir().expect("LSP root fixture");
+    let project_root = fixture.path().join("authoritative");
+    let untrusted_root = fixture.path().join("untrusted");
+    std::fs::create_dir_all(&project_root).expect("authoritative LSP root");
+    std::fs::create_dir_all(&untrusted_root).expect("untrusted LSP root");
+    let project_root_uri = fixture_directory_uri(&project_root);
+    let untrusted_root_uri = fixture_directory_uri(&untrusted_root);
     DaemonLspOwnerRegistrar::new(&service)
         .register_factory_for_project(
             project_root.clone(),
@@ -386,14 +426,14 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                project_root_uri.clone(),
             ))),
             None,
             None,
             DaemonInvocationRequest::lsp_open(
                 "request.1",
                 "client.1",
-                Some("file:///untrusted".to_owned()),
+                Some(untrusted_root_uri.clone()),
                 Vec::new(),
                 lsp_deadline(),
                 lsp_cancellation(),
@@ -404,7 +444,16 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
         panic!("expected an admitted LSP session");
     };
 
-    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///untrusted","capabilities":{}}}"#;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "rootUri": untrusted_root_uri,
+            "capabilities": {}
+        }
+    })
+    .to_string();
     let response = service
         .invoke(
             &registry,
@@ -475,7 +524,20 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
         DaemonInvocationOutcome::LspAcknowledged { acknowledged: true }
     ));
 
-    let initialize = r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"rootUri":"file:///authoritative","capabilities":{"general":{"positionEncodings":["utf-16"]}}}}"#;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "initialize",
+        "params": {
+            "rootUri": project_root_uri,
+            "capabilities": {
+                "general": {
+                    "positionEncodings": ["utf-16"]
+                }
+            }
+        }
+    })
+    .to_string();
     let response = service
         .invoke(
             &registry,
@@ -531,7 +593,9 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
 async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
-    let project_root = PathBuf::from("/quarantined-multi-root");
+    let fixture = tempfile::tempdir().expect("multi-root fixture");
+    let project_root = fixture.path().join("quarantined-multi-root");
+    std::fs::create_dir_all(&project_root).expect("quarantined multi-root project");
     service
         .project_runtimes
         .publish(
@@ -559,7 +623,7 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
                 scope_set_id.clone(),
                 None,
                 vec![
-                    tracedecay_application::RegisteredRootSelectorV1::new(
+                    tracedecay_contracts::RegisteredRootSelectorV1::new(
                         ProjectId::new("project.quarantined").expect("project"),
                         project_root.clone(),
                     )
@@ -575,19 +639,19 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     let revision = ScopeSetRevision::new(1).expect("revision");
     let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("scope digest");
     for (index, operation) in [
-        tracedecay_application::MultiRootOperationV1::Work {
+        tracedecay_contracts::MultiRootOperationV1::Work {
             request: serde_json::json!({}),
         },
-        tracedecay_application::MultiRootOperationV1::Git {
+        tracedecay_contracts::MultiRootOperationV1::Git {
             request: serde_json::json!({}),
         },
-        tracedecay_application::MultiRootOperationV1::Feedback {
+        tracedecay_contracts::MultiRootOperationV1::Feedback {
             request: serde_json::json!({}),
         },
-        tracedecay_application::MultiRootOperationV1::Impact {
+        tracedecay_contracts::MultiRootOperationV1::Impact {
             request: serde_json::json!({}),
         },
-        tracedecay_application::MultiRootOperationV1::Query {
+        tracedecay_contracts::MultiRootOperationV1::Query {
             request: serde_json::json!({}),
         },
     ]
@@ -631,9 +695,209 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
 }
 
 #[tokio::test]
+async fn federated_lsp_admission_preserves_exact_profile_factory_and_root_pairing() {
+    let service = DaemonInvocationService::default();
+    let home = tempfile::tempdir().expect("workspace roots");
+    let profile = UserProfileId::new("profile.workspace").expect("profile");
+    let registrar = DaemonLspOwnerRegistrar::new(&service);
+    let mut roots = Vec::new();
+    let mut owners = Vec::new();
+    let mut grants = Vec::new();
+    for suffix in ["a", "b"] {
+        let root = home.path().join(suffix);
+        std::fs::create_dir(&root).expect("workspace root");
+        let root = root.canonicalize().expect("canonical workspace root");
+        let scope = ResolvedScope::new(
+            ProjectId::new(format!("project.workspace-{suffix}")).expect("project"),
+            RepositoryId::new(format!("repository.workspace-{suffix}")).expect("repository"),
+            WorktreeId::new(format!("worktree.workspace-{suffix}")).expect("worktree"),
+            None,
+        )
+        .expect("scope");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new(format!("grant.workspace-{suffix}")).expect("grant"),
+            1,
+            canonical_sha256(&("workspace grant", suffix)).expect("grant digest"),
+            ActorId::new("actor.workspace").expect("actor"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            std::collections::BTreeSet::from([
+                CapabilityId::new(LSP_WORKSPACE_CAPABILITY_ID_V1).expect("capability")
+            ]),
+            std::collections::BTreeSet::from([
+                UseCaseId::new(LSP_WORKSPACE_USE_CASE_ID_V1).expect("use case")
+            ]),
+            DisclosureClass::Sensitive,
+        )
+        .expect("grant");
+        let owner = DaemonLspInvocationOwner::for_test_project(
+            unavailable_lsp_session_factory(),
+            profile.clone(),
+            scope.project_id.clone(),
+            root.clone(),
+        )
+        .with_scope_grant(grant.clone());
+        registrar
+            .register_lsp_owner(root.clone(), owner.clone())
+            .await
+            .expect("register owner");
+        let locator = RegisteredRootLocatorV1::new(
+            scope.project_id.clone(),
+            SharedProfileStoreLocatorV1::new(
+                BrainId::new("brain.fixture").unwrap(),
+                profile.clone(),
+                "store.workspace",
+            )
+            .unwrap(),
+            root.clone(),
+        )
+        .expect("registered root");
+        let uri = url::Url::from_directory_path(&root)
+            .expect("root URI")
+            .to_string();
+        roots.push((root, uri, scope, locator));
+        owners.push(owner);
+        grants.push(grant);
+    }
+    assert!(roots[0].2.project_id < roots[1].2.project_id);
+    assert!(
+        roots[0].2.scope_digest > roots[1].2.scope_digest,
+        "the fixture must exercise distinct application and LSP canonical orders"
+    );
+
+    let workspace = service
+        .authorize_lsp_workspace(roots.clone(), UtcMicros(1))
+        .await
+        .expect("authorize registered workspace");
+    let root_uris = roots
+        .iter()
+        .map(|(_, uri, _, _)| uri.clone())
+        .collect::<Vec<_>>();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let opened = open_authorized_workspace(
+        &service,
+        &registry,
+        Some(workspace.clone()),
+        "request.workspace-ordered",
+        &root_uris,
+        &owners[0],
+    )
+    .await;
+    let DaemonInvocationOutcome::LspOpened {
+        scope_set_id: Some(_),
+        scope_set_digest: Some(opened_digest),
+        ..
+    } = opened.outcome
+    else {
+        panic!("federated workspace was not admitted");
+    };
+    assert_eq!(Some(&opened_digest), workspace.scope_set_digest());
+
+    let duplicate_root = roots[0].clone();
+    let duplicate_workspace = service
+        .authorize_lsp_workspace(vec![duplicate_root.clone(), duplicate_root], UtcMicros(1))
+        .await;
+    assert_lsp_authorization_refusal(
+        open_authorized_workspace(
+            &service,
+            &registry,
+            duplicate_workspace,
+            "request.workspace-duplicate-root",
+            &root_uris,
+            &owners[0],
+        )
+        .await,
+        "request.workspace-duplicate-root",
+    );
+
+    let missing_root_workspace = AuthorizedLspWorkspace::new(
+        workspace.scope_set_digest().cloned(),
+        vec![workspace.roots()[0].clone()],
+    )
+    .expect("one-root candidate");
+    assert_lsp_authorization_refusal(
+        open_authorized_workspace(
+            &service,
+            &registry,
+            Some(missing_root_workspace),
+            "request.workspace-missing-root",
+            &root_uris,
+            &owners[0],
+        )
+        .await,
+        "request.workspace-missing-root",
+    );
+
+    registrar
+        .register_lsp_owner(
+            roots[1].0.clone(),
+            DaemonLspInvocationOwner::for_test_project(
+                owners[1].factory(),
+                UserProfileId::new("profile.foreign").expect("foreign profile"),
+                roots[1].2.project_id.clone(),
+                roots[1].0.clone(),
+            )
+            .with_scope_grant(grants[1].clone()),
+        )
+        .await
+        .expect("replace owner with foreign profile");
+    assert_lsp_authorization_refusal(
+        open_authorized_workspace(
+            &service,
+            &registry,
+            Some(workspace.clone()),
+            "request.workspace-foreign-profile",
+            &root_uris,
+            &owners[0],
+        )
+        .await,
+        "request.workspace-foreign-profile",
+    );
+
+    registrar
+        .register_lsp_owner(roots[1].0.clone(), owners[1].clone())
+        .await
+        .expect("restore exact owner");
+    let substituted_factory = owners[0].factory();
+    assert!(!Arc::ptr_eq(&substituted_factory, &owners[1].factory()));
+    registrar
+        .register_lsp_owner(
+            roots[1].0.clone(),
+            DaemonLspInvocationOwner::for_test_project(
+                substituted_factory,
+                profile,
+                roots[1].2.project_id.clone(),
+                roots[1].0.clone(),
+            )
+            .with_scope_grant(grants[1].clone()),
+        )
+        .await
+        .expect("replace owner with another root's factory");
+    assert_lsp_authorization_refusal(
+        open_authorized_workspace(
+            &service,
+            &registry,
+            Some(workspace),
+            "request.workspace-substituted-factory",
+            &root_uris,
+            &owners[0],
+        )
+        .await,
+        "request.workspace-substituted-factory",
+    );
+
+    assert_eq!(registry.lock().await.active_sessions(), 1);
+    assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+}
+
+#[tokio::test]
 async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
     let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/authoritative");
+    let fixture = tempfile::tempdir().expect("LSP root fixture");
+    let project_root = fixture.path().join("authoritative");
+    std::fs::create_dir_all(&project_root).expect("authoritative LSP root");
+    let project_root_uri = fixture_directory_uri(&project_root);
     DaemonLspOwnerRegistrar::new(&service)
         .register_factory_for_project(
             project_root.clone(),
@@ -650,7 +914,7 @@ async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                project_root_uri,
             ))),
             None,
             None,
@@ -676,7 +940,10 @@ async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
 #[tokio::test]
 async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     let service = DaemonInvocationService::default();
-    let project_root = PathBuf::from("/authoritative");
+    let fixture = tempfile::tempdir().expect("LSP root fixture");
+    let project_root = fixture.path().join("authoritative");
+    std::fs::create_dir_all(&project_root).expect("authoritative LSP root");
+    let project_root_uri = fixture_directory_uri(&project_root);
     DaemonLspOwnerRegistrar::new(&service)
         .register_factory_for_project(
             project_root.clone(),
@@ -692,7 +959,7 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
             &registry,
             Some(&project_root),
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                "file:///authoritative",
+                project_root_uri.clone(),
             ))),
             None,
             None,
@@ -952,7 +1219,7 @@ fn feedback_observation_invocation_accepts_only_content_free_events() {
         subject,
         UtcMicros(1),
         FeedbackSourceEventV1::SseLifecycle {
-            lifecycle: tracedecay_application::feedback::observations::FeedbackSseLifecycleV1::Gap,
+            lifecycle: tracedecay_contracts::feedback::observations::FeedbackSseLifecycleV1::Gap,
             sequence: Some(1),
             item_count: 0,
             duration_micros: None,

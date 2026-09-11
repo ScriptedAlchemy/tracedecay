@@ -8,16 +8,14 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{
-    Mutex, OnceLock,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 
 use tracedecay_domain::configuration::{
     CodeIndexWorkerLimitingReasonV1, CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1,
 };
-use tracedecay_private_fs::background_cpu::{
-    BackgroundCpuInstallErrorV1, install_process_background_cpu, process_background_cpu,
-};
+pub use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 /// Operator override for the indexing width. It has higher precedence than
 /// the profile setting and must be a positive `u16`.
@@ -133,7 +131,6 @@ pub enum CodeIndexWorkerPlanInstallErrorV1 {
     PoolBuild {
         message: String,
     },
-    BackgroundCpu(BackgroundCpuInstallErrorV1),
     ConflictingPlan {
         existing: CodeIndexWorkerStatusV1,
         requested: CodeIndexWorkerStatusV1,
@@ -150,7 +147,6 @@ impl fmt::Display for CodeIndexWorkerPlanInstallErrorV1 {
                     "code-index worker pool could not start: {message}"
                 )
             }
-            Self::BackgroundCpu(error) => error.fmt(formatter),
             Self::ConflictingPlan {
                 existing,
                 requested,
@@ -170,9 +166,50 @@ impl From<CodeIndexWorkerPlanErrorV1> for CodeIndexWorkerPlanInstallErrorV1 {
     }
 }
 
+/// The process-resident worker runtime: the Rayon pool and the one background
+/// CPU authority sized to the same effective width. Pool and admission are one
+/// installation so leaf fan-outs on the pool always meter against the width
+/// the pool was built for.
 struct InstalledCodeIndexWorkerRuntimeV1 {
     plan: CodeIndexWorkerPlanV1,
     pool: rayon::ThreadPool,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
+}
+
+impl InstalledCodeIndexWorkerRuntimeV1 {
+    fn installed_plan(&self) -> InstalledCodeIndexWorkerPlanV1 {
+        InstalledCodeIndexWorkerPlanV1 {
+            status: self.plan.status(),
+            background_cpu: Arc::clone(&self.background_cpu),
+        }
+    }
+
+    /// Run a fan-out on the pool, yielding this thread's permits while it
+    /// waits so admitted units inside the fan-out can use them.
+    fn install<R, F>(&self, operation: F) -> R
+    where
+        F: FnOnce() -> R + Send,
+        R: Send,
+    {
+        self.background_cpu
+            .with_yielded_permits(|| self.pool.install(operation))
+    }
+
+    /// Run one admitted work unit of `requested_units` on the calling thread.
+    fn with_permits<R>(&self, requested_units: usize, operation: impl FnOnce() -> R) -> R {
+        self.background_cpu.with_permits(requested_units, operation)
+    }
+}
+
+/// Receipt of [`install_worker_plan`]: the configuration status projection
+/// and the process background CPU authority the plan installed. The
+/// composition root injects `background_cpu` into session preparation and
+/// host admission; index, semantic, and lexical fan-outs on the pool reach the
+/// same authority through this module's leaf admission helpers.
+#[derive(Clone, Debug)]
+pub struct InstalledCodeIndexWorkerPlanV1 {
+    pub status: CodeIndexWorkerStatusV1,
+    pub background_cpu: Arc<ProcessBackgroundCpuV1>,
 }
 
 static WORKER_RUNTIME: OnceLock<InstalledCodeIndexWorkerRuntimeV1> = OnceLock::new();
@@ -390,12 +427,13 @@ fn record_plan(plan: CodeIndexWorkerPlanV1) {
 }
 
 /// Install the process-resident plan before the first code-index build.
-/// Repeating the byte-identical plan is idempotent; a second owner asking for
-/// a different process-wide pool is refused.
+/// Repeating the byte-identical plan is idempotent and returns the same
+/// installed authority; a second owner asking for a different process-wide
+/// pool is refused.
 pub fn install_worker_plan(
     configured: CodeIndexWorkerSelectionV1,
     available_memory_bytes: u64,
-) -> Result<CodeIndexWorkerStatusV1, CodeIndexWorkerPlanInstallErrorV1> {
+) -> Result<InstalledCodeIndexWorkerPlanV1, CodeIndexWorkerPlanInstallErrorV1> {
     // Planning and pool construction are one initialization transaction. This
     // prevents concurrent registrars from constructing duplicate large pools
     // from different instantaneous memory snapshots before the OnceLock wins.
@@ -409,7 +447,7 @@ pub fn install_worker_plan(
         && installed.plan.environment_override_workers == environment_override_workers
     {
         record_plan(installed.plan);
-        return Ok(installed.plan.status());
+        return Ok(installed.installed_plan());
     }
     let requested = worker_plan_from(
         configured,
@@ -424,17 +462,21 @@ pub fn install_worker_plan(
         .map_err(|error| CodeIndexWorkerPlanInstallErrorV1::PoolBuild {
             message: error.to_string(),
         })?;
-    install_process_background_cpu(
+    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(
         NonZeroUsize::new(requested.effective_workers).unwrap_or(NonZeroUsize::MIN),
-    )
-    .map_err(CodeIndexWorkerPlanInstallErrorV1::BackgroundCpu)?;
+    ));
+    let installed_plan = InstalledCodeIndexWorkerPlanV1 {
+        status: requested.status(),
+        background_cpu: Arc::clone(&background_cpu),
+    };
     match WORKER_RUNTIME.set(InstalledCodeIndexWorkerRuntimeV1 {
         plan: requested,
         pool,
+        background_cpu,
     }) {
         Ok(()) => {
             record_plan(requested);
-            Ok(requested.status())
+            Ok(installed_plan)
         }
         Err(_) => {
             let Some(existing) = WORKER_RUNTIME.get() else {
@@ -444,7 +486,7 @@ pub fn install_worker_plan(
             };
             compare_installed_plan(&existing.plan, &requested)?;
             record_plan(existing.plan);
-            Ok(existing.plan.status())
+            Ok(existing.installed_plan())
         }
     }
 }
@@ -460,7 +502,6 @@ pub enum CodeIndexParallelismErrorV1 {
     PoolBuild {
         message: String,
     },
-    BackgroundCpuNotInstalled,
     /// A per-item unit fanned out on the indexing pool panicked. Per-file work
     /// runs over arbitrary user source, so a malformed input must be contained
     /// to its own unit and named, never allowed to unwind out of the pool and
@@ -492,12 +533,6 @@ impl fmt::Display for CodeIndexParallelismErrorV1 {
                 write!(
                     formatter,
                     "code-index worker pool is unavailable: {message}"
-                )
-            }
-            Self::BackgroundCpuNotInstalled => {
-                write!(
-                    formatter,
-                    "process background CPU authority is not installed"
                 )
             }
             Self::WorkerPanic { index, message } => {
@@ -546,13 +581,14 @@ pub fn clear_forced_indexing_workers_for_test() {
     FORCED_WORKERS.store(0, Ordering::Relaxed);
 }
 
-/// Run one active work unit under the process background CPU authority.
-/// Standalone callers without an installed daemon plan run directly.
+/// Run one active work unit under the installed worker runtime's background
+/// CPU authority. Standalone callers without an installed daemon plan run
+/// directly.
 pub fn with_background_cpu_permits<R>(requested_units: usize, operation: impl FnOnce() -> R) -> R {
-    if let Some(authority) = process_background_cpu() {
-        return authority.with_permits(requested_units, operation);
+    match WORKER_RUNTIME.get() {
+        Some(runtime) => runtime.with_permits(requested_units, operation),
+        None => operation(),
     }
-    operation()
 }
 
 /// One-unit convenience for ordinary index/session preparation work.
@@ -577,9 +613,7 @@ where
 {
     hotpath::gauge!("code_index_worker_count").set(indexing_workers());
     if let Some(runtime) = WORKER_RUNTIME.get() {
-        let authority = process_background_cpu()
-            .ok_or(CodeIndexParallelismErrorV1::BackgroundCpuNotInstalled)?;
-        return Ok(authority.with_yielded_permits(|| runtime.pool.install(operation)));
+        return Ok(runtime.install(operation));
     }
     let pool = standalone_pool()?;
     Ok(pool.install(operation))

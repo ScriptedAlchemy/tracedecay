@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
-use tracedecay_application::remote::{
+use tracedecay_contracts::remote::{
     capture::RemoteWriterAuthorityV1,
     protocol::RemoteProtocolRequestV1,
     recovery::{
@@ -77,7 +77,7 @@ pub trait RemoteRecoveryPhysicalEffectsV1: Send + Sync {
         expected: &RecoveryAuthorityExpectationV1,
         caller: &RemoteRecoveryCallerV1,
         control: &dyn RemoteRecoveryControlPortV1,
-        request_id: &tracedecay_application::RequestId,
+        request_id: &tracedecay_contracts::RequestId,
     ) -> Result<
         RemoteRecoveryPhysicalCommitV1<BackupOperationStateV1>,
         RemoteRecoveryPhysicalEffectErrorV1,
@@ -89,7 +89,7 @@ pub trait RemoteRecoveryPhysicalEffectsV1: Send + Sync {
         expected: &RecoveryAuthorityExpectationV1,
         caller: &RemoteRecoveryCallerV1,
         control: &dyn RemoteRecoveryControlPortV1,
-        request_id: &tracedecay_application::RequestId,
+        request_id: &tracedecay_contracts::RequestId,
     ) -> Result<
         RemoteRecoveryPhysicalCommitV1<StagedRestoreProgressV1>,
         RemoteRecoveryPhysicalEffectErrorV1,
@@ -104,7 +104,7 @@ pub trait RemoteRecoveryPhysicalEffectsV1: Send + Sync {
         required_sink_ids: &[String],
         caller: &RemoteRecoveryCallerV1,
         control: &dyn RemoteRecoveryControlPortV1,
-        request_id: &tracedecay_application::RequestId,
+        request_id: &tracedecay_contracts::RequestId,
     ) -> Result<
         RemoteRecoveryPhysicalCommitV1<PromotionCasReceiptV1>,
         RemoteRecoveryPhysicalEffectErrorV1,
@@ -397,7 +397,7 @@ struct RecoveryReconciliationControlV1;
 impl RemoteRecoveryControlPortV1 for RecoveryReconciliationControlV1 {
     fn interruption(
         &self,
-        _request_id: &tracedecay_application::RequestId,
+        _request_id: &tracedecay_contracts::RequestId,
     ) -> Option<RemoteRecoveryInterruptionV1> {
         None
     }

@@ -2,9 +2,10 @@ diff --git a/crates/tracedecay-code-index/tests/code_index_suite/production_orch
 index fd5258661..0ab758ee0 100644
 --- a/crates/tracedecay-code-index/tests/code_index_suite/production_orchestration.rs
 +++ b/crates/tracedecay-code-index/tests/code_index_suite/production_orchestration.rs
-@@ -2747,5 +2747,56 @@ fn partitioned_codec_fixture() -> (
+@@ -2747,6 +2747,57 @@ fn partitioned_codec_fixture() -> (
      (second.as_ref().clone(), manifest, segments)
  }
+
 +// Temporary archival export hook; never merged into the current writer.
 +#[test]
 +fn export_historical_partitioned_writer_fixture() {

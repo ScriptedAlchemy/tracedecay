@@ -141,8 +141,8 @@ fn user_settings_snapshot(
         required_unsigned(current, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY)?;
     Ok(UserSettingsSnapshotV1 {
         legacy_config_path: metadata.path,
-        configuration_snapshot_id: current.snapshot.snapshot_id.as_str().to_owned(),
-        configuration_revision_id: current.revision_id.as_str().to_owned(),
+        configuration_snapshot_id: current.snapshot().snapshot_id.as_str().to_owned(),
+        configuration_revision_id: current.revision_id().as_str().to_owned(),
         upload_enabled,
         watcher_debounce: format_duration_millis(watcher_debounce_ms),
         watcher_debounce_ms,
@@ -164,7 +164,7 @@ fn validate_profile_provenance(
     ] {
         let key = setting_key(raw_key)?;
         let candidates = current
-            .snapshot
+            .snapshot()
             .provenance
             .get(&key)
             .ok_or_else(|| unavailable(format!("provenance for {raw_key}")))?;
@@ -265,7 +265,7 @@ fn required_setting<'a>(
 ) -> Result<&'a ConfigurationValueV1, UserSettingsAuthorityError> {
     let key = setting_key(raw_key)?;
     current
-        .snapshot
+        .snapshot()
         .effective_values
         .get(&key)
         .ok_or_else(|| unavailable(format!("resolved user setting {raw_key}")))

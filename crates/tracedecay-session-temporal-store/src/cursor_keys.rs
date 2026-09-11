@@ -1,7 +1,10 @@
+#[cfg(test)]
+mod tests;
+
 use std::fmt;
 
 use thiserror::Error;
-use tracedecay_application::now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
     PrivacyDomainId, RetrievalCursorKeyId, SessionCursorKeyIdV1, SessionCursorVersionV1,
     SignedCursorKeyRefV1, canonical_sha256,

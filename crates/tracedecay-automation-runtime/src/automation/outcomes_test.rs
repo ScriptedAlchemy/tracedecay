@@ -335,6 +335,8 @@ async fn refresh_skill_outcomes_persists_snapshot() {
             id: "outcome-skill".to_string(),
             title: "Outcome skill".to_string(),
             summary: "Outcome tracking fixture.".to_string(),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "maintenance".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: "Use when checking outcomes.".to_string(),
@@ -348,7 +350,7 @@ async fn refresh_skill_outcomes_persists_snapshot() {
     )
     .await
     .unwrap();
-    let now = crate::tracedecay::current_timestamp();
+    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
     let outcomes = refresh_skill_outcomes(&profile_root, &dashboard_root, now)
         .await
         .unwrap();
@@ -374,6 +376,8 @@ async fn seed_activated_skill(profile_root: &Path) {
             id: "outcome-lock-skill".to_string(),
             title: "Outcome lock skill".to_string(),
             summary: "Outcome persistence fixture.".to_string(),
+            routing_description:
+                "Repeated repository workflows requiring this maintained procedure.".to_owned(),
             category: "maintenance".to_string(),
             targets: default_managed_skill_targets(),
             body_markdown: "Use when testing outcome persistence.".to_string(),
@@ -389,13 +393,13 @@ async fn seed_activated_skill(profile_root: &Path) {
     .unwrap();
 }
 
-async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database {
-    use crate::application::memory::MemoryApplication;
+async fn seed_applied_fact_database(database_path: &Path) -> tracedecay_runtime_core::db::Database {
     use crate::automation::AutomationRunControl;
     use crate::automation::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
-    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-    use crate::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactOwnerV1;
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
+    use tracedecay_session_memory::memory::MemoryApplication;
 
     crate::register_test_schema_installer();
     let authority =
@@ -440,9 +444,9 @@ async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database
 
 #[tokio::test]
 async fn concurrent_refreshes_preserve_both_snapshot_halves() {
-    use crate::application::memory::MemoryApplication;
-    use crate::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactOwnerV1;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
+    use tracedecay_session_memory::memory::MemoryApplication;
 
     let _database_guard = OUTCOME_PERSISTENCE_DB_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
@@ -452,7 +456,7 @@ async fn concurrent_refreshes_preserve_both_snapshot_halves() {
     let database = seed_applied_fact_database(&temp.path().join("memory.db")).await;
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
-    let now = crate::tracedecay::current_timestamp();
+    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
     let run_control = outcome_read_control();
 
     let (skills, facts) = tokio::join!(
@@ -471,9 +475,9 @@ async fn concurrent_refreshes_preserve_both_snapshot_halves() {
 
 #[tokio::test]
 async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
-    use crate::application::memory::MemoryApplication;
-    use crate::store::memory::DatabaseFactStore;
     use tracedecay_domain::FactOwnerV1;
+    use tracedecay_session_memory::fact_store::DatabaseFactStore;
+    use tracedecay_session_memory::memory::MemoryApplication;
 
     let _database_guard = OUTCOME_PERSISTENCE_DB_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
@@ -487,7 +491,7 @@ async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
     let malformed = b"{not-valid-json";
     tokio::fs::write(&path, malformed).await.unwrap();
-    let now = crate::tracedecay::current_timestamp();
+    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
     let run_control = outcome_read_control();
 
     let skill_error = refresh_skill_outcomes(&profile_root, &dashboard_root, now)

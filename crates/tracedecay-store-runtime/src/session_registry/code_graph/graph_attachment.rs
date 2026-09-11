@@ -5,7 +5,7 @@ use std::time::Instant;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1, GraphDbRegistration,
 };
-use tracedecay_runtime_core::store_runtime::registry::{
+use tracedecay_runtime_core::shard_runtime::registry::{
     CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey, StoreRuntimeRegistry,
 };
 use tracedecay_sessions::observation::ObservationCancellation;
@@ -130,6 +130,7 @@ pub async fn close_retained_for_shutdown(
     verified_locator: VerifiedStoreLocatorV1,
 ) -> Result<()> {
     let graph_registry = graph_registry.clone();
+    let shard_id = binding.shard_id.clone();
     // This close requires an unleased owner: the registry drain must already
     // have dropped the retained map-owner attachments and every owner-issued
     // graph client lease, and the reconciliation workers must already be
@@ -141,7 +142,12 @@ pub async fn close_retained_for_shutdown(
     .await
     .map_err(|error| session_registry_error("join graph shutdown close", error.to_string()))?
     .map(|_| ())
-    .map_err(|error| session_registry_error("close graph runtime for shutdown", error.to_string()))
+    .map_err(|error| {
+        session_registry_error(
+            "close graph runtime for shutdown",
+            format!("{error} (shard {shard_id:?})"),
+        )
+    })
 }
 
 impl super::RetainedVerifiedGraphRuntimeV1 {

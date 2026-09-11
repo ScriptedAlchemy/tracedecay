@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
     GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexTransactionPort,

@@ -16,11 +16,13 @@ use tracedecay_query::code_search;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
+use super::AutomationSchedulerHandle;
+#[cfg(unix)]
+use super::engine::DaemonEngine;
+#[cfg(unix)]
 use super::explicit_git_state;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
-#[cfg(unix)]
-use super::{AutomationSchedulerHandle, DaemonEngine};
 use super::{
     DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
     ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
@@ -40,6 +42,7 @@ mod remote_project_recovery;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;
+#[cfg(unix)]
 mod runtime_identity;
 mod scheduler_config;
 mod scheduler_shutdown;
@@ -116,7 +119,12 @@ async fn wait_for_mcp_routes(client_instance_id: &str, expected: &[ObservedMcpRo
                 .get(client_instance_id)
                 .cloned()
                 .unwrap_or_default();
-            if observed.len() >= expected.len() {
+            let replay_count = observed_first_request_replays()
+                .lock()
+                .expect("first request replay observer")
+                .get(client_instance_id)
+                .map_or(0, Vec::len);
+            if observed.len() >= expected.len() && replay_count >= expected.len() {
                 assert_eq!(observed, expected);
                 return;
             }
@@ -184,7 +192,7 @@ fn multi_root_git_generation_reads_each_explicit_root() {
 
 #[test]
 fn multi_root_families_refuse_cross_family_fallback() {
-    use tracedecay_application::MultiRootOperationV1;
+    use tracedecay_contracts::MultiRootOperationV1;
 
     let git = MultiRootOperationV1::Git { request: json!({}) };
     assert!(multi_root_family_allows(
@@ -242,6 +250,13 @@ fn test_store_administration_for_profile(profile_root: &std::path::Path) -> Stor
     StoreAdministration::default().with_profile_identity(profile_identity)
 }
 
+async fn prewarm_test_profile_runtime(store_administration: &StoreAdministration) {
+    store_administration
+        .registered_profile_database()
+        .await
+        .expect("prewarm exact test profile runtime");
+}
+
 #[cfg(unix)]
 fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngine {
     // Every handshake refusal the served engine writes advertises
@@ -266,6 +281,7 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     engine
         .invocation
         .install_worker_selection(
+            &engine.store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install test daemon profile worker plan");
@@ -385,11 +401,10 @@ fn test_handshake_defaults() -> DaemonHandshake {
 
 #[test]
 fn search_request_controls_distinguish_cancellation_and_timeout() {
-    let cancellation =
-        tracedecay_application::CancellationSignal::active("cancellation.search-test")
-            .expect("cancellation");
+    let cancellation = tracedecay_contracts::CancellationSignal::active("cancellation.search-test")
+        .expect("cancellation");
     let deadline =
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(10)).expect("deadline");
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(10)).expect("deadline");
 
     assert_eq!(
         super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 9),
@@ -621,7 +636,7 @@ async fn apply_project_setting_via_surface(
         .current()
         .await
         .expect("read pinned project configuration");
-    let (key, value) = setting(&current.snapshot);
+    let (key, value) = setting(current.snapshot());
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
@@ -639,34 +654,34 @@ async fn apply_project_setting_via_surface(
     );
     let operation = ApplicationSurfaceOperation::ConfigurationBatch;
     let application_operation =
-        tracedecay_application::configuration_surface_operation(operation.as_str())
+        tracedecay_contracts::configuration_surface_operation(operation.as_str())
             .expect("configuration operation contract")
             .expect("cataloged configuration operation");
-    let catalog =
-        crate::application_surface::application_surface_catalog_ref().expect("application catalog");
+    let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog_ref()
+        .expect("application catalog");
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
         .expect("configuration capability")
         .deadline()
         .maximum_millis();
     let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
-    let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+    let deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
     .expect("configuration deadline");
-    let request_id = tracedecay_application::request_identity::mint_global_request_id(
-        tracedecay_application::request_identity::GlobalRequestSurface::Cli,
+    let request_id = tracedecay_contracts::request_identity::mint_global_request_id(
+        tracedecay_contracts::request_identity::GlobalRequestSurface::Cli,
     )
     .expect("surface request id");
     let idempotency_key = tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
         format!("daemon-test-setting-{}", request_id.as_str()),
     )
     .expect("configuration idempotency key");
-    let request = crate::application_surface::ApplicationSurfaceRequest::Configuration(
-        tracedecay_application::ConfigurationWireRequestV1::Batch(
-            tracedecay_application::ConfigurationBatchRequestV1 {
+    let request = tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
+        tracedecay_contracts::ConfigurationWireRequestV1::Batch(
+            tracedecay_contracts::ConfigurationBatchRequestV1 {
                 mutations: vec![
-                    tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
+                    tracedecay_contracts::ConfigurationDirectMutationRequestV1::Set {
                         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
                             project_id: target.project_id,
                         },
@@ -674,33 +689,35 @@ async fn apply_project_setting_via_surface(
                         value: Box::new(value),
                     },
                 ],
-                expected_revision: current.revision_id,
+                expected_revision: current.revision_id().clone(),
                 idempotency_key,
             },
         ),
     );
-    let cancellation = tracedecay_application::CancellationSignal::active(format!(
+    let cancellation = tracedecay_contracts::CancellationSignal::active(format!(
         "cancellation.surface.{}",
         request_id.as_str()
     ))
     .expect("surface cancellation");
     let dispatched =
-        crate::application_surface::resolve_application_surface_dispatch_with_controls(
+        tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
             tracedecay_tool_catalog::BindingSurface::Cli,
             operation,
             request_id,
             request,
-            tracedecay_application::PageRequest::first(10).expect("surface page"),
+            tracedecay_contracts::PageRequest::first(10).expect("surface page"),
             Some(deadline),
             cancellation,
             tracedecay_daemon_protocol::RequestedOutputFormat::Json,
         )
         .expect("configuration batch dispatch");
-    Box::pin(crate::application_surface::execute_application_surface(
-        operation,
-        dispatched,
-        Some(&executor),
-    ))
+    Box::pin(
+        tracedecay_daemon_service::application_surface::execute_application_surface(
+            operation,
+            dispatched,
+            Some(&executor),
+        ),
+    )
     .await
     .expect("configuration batch application invocation")
     .result

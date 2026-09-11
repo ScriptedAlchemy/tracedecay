@@ -81,6 +81,8 @@ fn expected_import() -> CodeIndexImportEvidenceV1 {
         module_specifier: "pkg".to_owned(),
         imported_name: Some("Foo".to_owned()),
         local_name: Some("LocalFoo".to_owned()),
+        is_public: false,
+        is_glob: false,
         namespace: ImportNamespaceV1::Type,
         module_kind: ImportModuleKindV1::BareModule,
         span: SourceSpan {
@@ -129,10 +131,12 @@ fn projected_import(entity: &GraphEntity) -> CodeIndexImportEvidenceV1 {
         .find(|(name, _)| name.as_str() == IMPORT_RECORD_PROPERTY)
         .map(|(_, value)| value)
         .expect("CodeImport carries its exact parser-backed record");
-    let GraphProperty::Bytes(bytes) = property else {
-        panic!("CodeImport record must use the canonical byte property");
+    // Records travel as JSON text: the sealed compact store keeps byte
+    // payloads as marked hex in its dictionary, which would double them.
+    let GraphProperty::String(record) = property else {
+        panic!("CodeImport record must use the JSON string property");
     };
-    serde_json::from_slice(bytes).expect("CodeImport record decodes")
+    serde_json::from_str(record).expect("CodeImport record decodes")
 }
 
 fn verified_store(

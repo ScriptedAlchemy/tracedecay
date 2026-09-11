@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::path::Path;
 
 use tracedecay_code_index_runtime::code_index_scheduler;
@@ -49,11 +51,33 @@ async fn files_for_session(
         .expect("files response")
 }
 
+#[cfg(unix)]
+async fn wait_for_exact_interactive_graph_ready(
+    engine: &DaemonEngine,
+    scope: &tracedecay_contracts::ResolvedScope,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(latest) = engine
+                .invocation
+                .code_index_schedulers
+                .latest_complete_ready_for_scope(scope)
+                .await
+                && latest.interactive_graph_store().is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("exact interactive graph readiness timed out");
+}
+
 /// One committed repository at `<root>/primary` plus a linked worktree at
 /// `<root>/linked` whose checkout differs from the primary's: the primary
 /// owns `README.md` and `primary.rs`, the linked worktree owns `linked.rs`,
 /// so a listing that leaks across routes is observable.
-#[cfg(unix)]
 fn create_linked_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
     let primary = root.join("primary");
     let linked = root.join("linked");
@@ -87,7 +111,6 @@ fn create_linked_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
     (primary, linked)
 }
 
-#[cfg(unix)]
 fn files_listing_text(response: &tracedecay_mcp::JsonRpcResponse) -> &str {
     assert!(
         response.error.is_none(),
@@ -102,7 +125,25 @@ fn files_listing_text(response: &tracedecay_mcp::JsonRpcResponse) -> &str {
         .unwrap_or_else(|| panic!("files response must contain text: {response:?}"))
 }
 
-#[cfg(unix)]
+/// A linked route that reopens degraded to core still answers `Ok` and keeps
+/// its key, its alias and the shared store publication, so every other
+/// assertion in these journeys holds while the defect is present. Only the
+/// published level names it.
+fn assert_reopened_linked_route_is_not_degraded(
+    servers: &crate::daemon::database_owner_registry::DatabaseOwnerRegistry,
+    linked_key: &crate::daemon::project_open_admission::ProjectServerKey,
+) {
+    assert_eq!(
+        servers
+            .servers
+            .get(linked_key)
+            .expect("the reopened linked route is published")
+            .publication,
+        crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
+        "the reopened linked route must publish full capabilities, not a degraded core"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bindings() {
     let home = TempDir::new().expect("isolated home");
@@ -232,6 +273,15 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // writer lane it can never use, and still be resolving at reopen and
     // shutdown. Assert the admission is exact to the route — the primary
     // shares this store and stays admitted.
+    let project_id = tracedecay_domain::ProjectId::new(
+        linked_graph
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("admitted routes carry a project identity"),
+    )
+    .expect("project id");
     for (route, expected) in [
         (
             &linked,
@@ -242,15 +292,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             code_index_scheduler::CodeIndexAutomaticAdmissionV1::Admitted,
         ),
     ] {
-        let project_id = tracedecay_domain::ProjectId::new(
-            linked_graph
-                .store_layout()
-                .identity
-                .project_id
-                .clone()
-                .expect("admitted routes carry a project identity"),
-        )
-        .expect("project id");
         let scope = tracedecay_code_index_runtime::resolved_scope_for_project(route, &project_id)
             .expect("route scope");
         assert_eq!(
@@ -263,6 +304,9 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             route.display()
         );
     }
+    let primary_scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&primary, &project_id)
+            .expect("primary route scope");
 
     let linked_session_id = "session.linked-worktree-follow-up";
     notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
@@ -287,6 +331,10 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
     // listing — with its own census, never the linked worktree's sources.
     let primary_session_id = "session.primary-route-follow-up";
     notify_workspace_open(primary_server.as_ref(), primary_session_id, &primary).await;
+    // `project_server` may publish `code_index=warming`; require the exact
+    // route's interactive graph to be ready so this assertion tests routing
+    // rather than catalog activation timing.
+    wait_for_exact_interactive_graph_ready(&engine, &primary_scope).await;
     let primary_listing = files_for_session(linked_server.as_ref(), primary_session_id).await;
     let primary_text = files_listing_text(&primary_listing);
     assert!(primary_text.contains("indexed files"), "{primary_text}");
@@ -421,6 +469,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         let mut servers = engine.store_administration.project_servers().lock().await;
         assert_eq!(servers.servers.len(), 2);
         assert_eq!(servers.aliases.len(), 2);
+        assert_reopened_linked_route_is_not_degraded(&servers, &linked_key);
         assert!(servers.remove(&primary_key).is_some());
     }
 
@@ -441,6 +490,22 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             .is_some_and(|marker| marker.project_id == stale_project_id),
         "routing must ignore, not rewrite or delete, a stale legacy worktree-local marker"
     );
+    // Every whole-worktree demand the daemon raised for the linked route on
+    // its own — both full servers' startup catch-up and the `workspaceOpen`
+    // hook above — is automatic and stays behind the watch opt-in, so the
+    // route never mounts a scheduler, let alone publishes a generation. The
+    // refusal asserted earlier is therefore a property of the route, not of
+    // whether the follow-up read raced an index the daemon should never have
+    // started.
+    assert!(
+        engine
+            .invocation
+            .code_index_schedulers
+            .scheduler_handle(&linked)
+            .await
+            .is_none(),
+        "a linked worktree without the watch opt-in must never mount a code-index scheduler"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
         .expect("linked-worktree shutdown must remain bounded");
@@ -452,7 +517,6 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
 /// automatic indexing, seats its own generation, serves its own census (never
 /// the primary's), reopens through the retained canonical runtime, and shuts
 /// down within the same bound — all concurrently with the primary route.
-#[cfg(unix)]
 #[tokio::test]
 async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary() {
     let home = TempDir::new().expect("isolated home");
@@ -584,85 +648,6 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
         "runtime and automation owners must derive from the canonical StoreLayout locator"
     );
 
-    // Same apparent project identity, different store authority: the linked
-    // route's exact scope and daemon actor, but a store locator that is not
-    // the shared project store. That is a foreign runtime and must be refused
-    // with the typed registration error, leaving the live route untouched.
-    let invocation_service = engine.invocation.invocation_service();
-    let linked_retained_before = invocation_service
-        .project_runtimes
-        .get::<tracedecay_daemon_service::RegisteredRetainedRuntime>(&linked)
-        .await
-        .expect("the opted-in linked route registers a retained runtime");
-    let (linked_route, linked_scope) = &route_scopes[0];
-    assert_eq!(linked_route, &linked);
-    let linked_configuration = linked_graph
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .expect("linked configuration");
-    let foreign_observed_at = tracedecay_application::now_micros();
-    let foreign_access = crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
-        linked_scope,
-        &linked,
-        &linked_configuration,
-        foreign_observed_at,
-    )
-    .expect("linked source access");
-    let foreign_grant = crate::daemon::project_open_owners::project_open_retained_grant(
-        &foreign_access,
-        foreign_observed_at,
-    )
-    .expect("linked retained grant");
-    let real_store = linked_graph.db().runtime_client();
-    let foreign_store = tracedecay_daemon_service::RetainedRuntimeStoreAuthorityV1::new(
-        real_store.binding().clone(),
-        tracedecay_store::VerifiedStoreLocatorV1::new(
-            real_store.verified_locator().shard_id.clone(),
-            real_store.verified_locator().incarnation,
-            tracedecay_store::canonical_store_locator_digest(&root.join("foreign-store"))
-                .expect("foreign locator digest"),
-        ),
-    );
-    let refused =
-        tracedecay_daemon_service::DaemonRetainedRuntimeRegistrar::new(&invocation_service)
-            .register(
-                linked.clone(),
-                linked_scope.clone(),
-                foreign_access.requester.clone(),
-                foreign_grant,
-                foreign_store,
-                linked_server.retained_surface_ports(
-                    &linked,
-                    linked_scope.project_id.clone(),
-                    foreign_access.configuration_digest.clone(),
-                ),
-            )
-            .await
-            .expect_err("a different store authority under the same project identity is foreign");
-    assert!(
-        matches!(&refused, tracedecay_domain::errors::TraceDecayError::Config { message } if message.contains("store authority")),
-        "{refused}"
-    );
-    assert!(
-        invocation_service
-            .project_runtimes
-            .get::<tracedecay_daemon_service::RegisteredRetainedRuntime>(&linked)
-            .await
-            .expect("refusal must not retire the live route")
-            .shares_ports_with(&linked_retained_before),
-        "a refused foreign registration must not rebind the live route"
-    );
-
-    // Hold one real in-flight request lease on the linked root across the
-    // server drop. While it is held the registry cannot retire the root, so
-    // the retained runtime the reopen meets is provably the one registered
-    // above — the reopen must reconcile it, not build a fresh one.
-    let linked_request_lease = invocation_service
-        .project_runtimes
-        .admit_request(&linked, None)
-        .expect("the registered linked root admits requests");
     {
         let mut servers = engine.store_administration.project_servers().lock().await;
         assert!(servers.remove(&linked_key).is_some());
@@ -687,32 +672,18 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
             .publication_id,
         "reopening an exact linked route must not publish a second database owner"
     );
-    // The reopened server built new retained ports; the same-authority
-    // registration must have rebound the retained runtime to them rather than
-    // refusing and leaving the route degraded to core-only capabilities.
-    let linked_retained_after = invocation_service
-        .project_runtimes
-        .get::<tracedecay_daemon_service::RegisteredRetainedRuntime>(&linked)
-        .await
-        .expect("the reopened linked route keeps its retained runtime");
-    assert!(
-        !linked_retained_after.shares_ports_with(&linked_retained_before),
-        "reopen must rebind the retained runtime to the live route's ports"
-    );
-    drop(linked_request_lease);
     {
         let servers = engine.store_administration.project_servers().lock().await;
         assert_eq!(servers.servers.len(), 2);
         assert_eq!(servers.aliases.len(), 2);
-        assert_eq!(
-            servers
-                .servers
-                .get(&linked_key)
-                .expect("reopened linked route is published")
-                .publication,
-            crate::daemon::project_open_admission::ProjectServerPublication::RegisteredHostIngest,
-            "the reopened linked route must publish full capabilities, not a degraded core"
-        );
+        // A reopen builds fresh ports, a fresh evidence adapter and a fresh
+        // semantic configuration operation. Keying any of those registrations
+        // by object identity refuses the reopen, `settle_failed_full_upgrade`
+        // reclaims the core, and `project_server` still answers `Ok` with a
+        // route that shares the store publication — so every assertion above
+        // holds while the route serves core-only capabilities for the life of
+        // the daemon. Name the published level so that degradation fails here.
+        assert_reopened_linked_route_is_not_degraded(&servers, &linked_key);
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await

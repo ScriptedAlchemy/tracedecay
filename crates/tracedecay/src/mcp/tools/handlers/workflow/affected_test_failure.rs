@@ -1,11 +1,11 @@
 //! Typed terminal results for failed managed affected-test executions.
 
 use serde_json::{Value, json};
-use tracedecay_application::{Deadline, OperationTermination};
+use tracedecay_contracts::{Deadline, OperationTermination};
 use tracedecay_domain::UtcMicros;
 
+use tracedecay_application::operation_stream::OperationEmitter;
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::operation_stream::OperationEmitter;
 
 use super::{
     TestTarget, emit_observed_test_results, finish_test_run, managed_test_terminal,
@@ -14,6 +14,14 @@ use super::{
 use tracedecay_mcp::{TestRunFailure, TestRunOutput, ToolResult};
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.failure")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Failure settlement retains the admitted emitter and deadline alongside the exact dispatched target set and observed failure"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Terminal test-failure mapping is one runner-output classify into a typed problem."
+)]
 pub(super) async fn terminal_failure(
     emitter: &OperationEmitter,
     args: &Value,
@@ -126,13 +134,11 @@ pub(super) async fn terminal_failure(
     });
     let body = hotpath::measure_block!("mcp.workflow.affected_tests.assemble", {
         let mut body = run_affected_tests_body(
-            partial.exit_code.or(failure_exit_code),
+            &partial,
             &results,
             test_names,
             truncated,
             selected_targets,
-            &partial.stderr,
-            &partial.stdout,
             managed_test_terminal(emitter, &receipt),
         );
         body["error"] = json!({

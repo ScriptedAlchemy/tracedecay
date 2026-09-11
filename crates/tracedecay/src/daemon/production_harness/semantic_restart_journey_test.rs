@@ -9,25 +9,25 @@
 //! loading), and it must do so whether or not the restarted code index mints a
 //! new generation identifier for the unchanged source bytes.
 
-#![cfg(feature = "semantic-fastembed")]
+#![cfg(all(feature = "semantic-fastembed", not(windows)))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_semantic_contracts::DEFAULT_FASTEMBED_MODEL_ID;
-use tracedecay_usecases::semantic_runtime::{
+use tracedecay_application::semantic_runtime::{
     SemanticSourceCoherenceOutcomeV1, semantic_source_coherence,
 };
-use tracedecay_usecases::store::vector_generations::{
+use tracedecay_application::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
 };
 
 use super::journey_test_support::git;
 use super::semantic_activation_journey_test::{
-    assert_semantic_probe_contribution, evaluate_native_profile, installed_selection_material,
-    seed_distribution_fixture, selection, set_semantic_profile, wait_for_semantic_generation,
+    assert_semantic_probe_contribution, evaluate_native_profile,
+    install_project_distribution_fixture, installed_selection_material, selection,
+    set_semantic_profile, wait_for_semantic_generation,
 };
 use super::*;
 
@@ -189,6 +189,7 @@ async fn retained_vector_generation(
         .await
         .expect("retain the serving semantic vector graph");
     let store = GraphVectorGenerationStoreV1::read_only_generation(&retained, vector_id)
+        .await
         .expect("read the retained vector generation store")?;
     store
         .generation(vector_id, Arc::clone(retained.cancellation()))
@@ -215,19 +216,6 @@ async fn strict_semantic_answers_again_after_daemon_restart_without_rebuild() {
 
     // ---- Fresh install. ---------------------------------------------------
     let _profile = crate::config::PinnedUserDataDir::new();
-    let lifecycle_root =
-        tracedecay_semantic::default_lifecycle_root().expect("isolated lifecycle root");
-    let lifecycle =
-        tracedecay_semantic::default_shared_lifecycle_owner().expect("production lifecycle owner");
-    seed_distribution_fixture(&lifecycle_root, &fixture_root, &lifecycle);
-    lifecycle
-        .select_model(Some(DEFAULT_FASTEMBED_MODEL_ID), true)
-        .expect("select production semantic model");
-    lifecycle
-        .acquire_blocking_for_tests()
-        .expect("install verified distribution fixture");
-    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
-
     let isolation = tempfile::TempDir::new().expect("journey isolation");
     let project = isolation.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source directory");
@@ -256,6 +244,8 @@ async fn strict_semantic_answers_again_after_daemon_restart_without_rebuild() {
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("production composition");
+    let lifecycle = install_project_distribution_fixture(&harness, &project, &fixture_root).await;
+    let (artifact_digest, artifact_path) = installed_selection_material(&lifecycle);
     let code_id = harness
         .resources
         .as_ref()
@@ -346,7 +336,7 @@ async fn strict_semantic_answers_again_after_daemon_restart_without_rebuild() {
     );
     assert!(
         matches!(
-            semantic_source_coherence(&retained, &serving),
+            semantic_source_coherence(&retained, serving.manifest()),
             SemanticSourceCoherenceOutcomeV1::Coherent(_)
         ),
         "the retained vectors must be admitted for the restarted serving generation: \

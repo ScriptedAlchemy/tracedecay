@@ -59,19 +59,16 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::SourceBody
         | ApplicationSurfaceOperation::SourceOutline
         | ApplicationSurfaceOperation::ModuleApi
-        | ApplicationSurfaceOperation::FileMetadata
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
         | ApplicationSurfaceOperation::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
         ApplicationSurfaceOperation::ObservatoryRead => HttpApplicationOwnerKind::Observatory,
         ApplicationSurfaceOperation::ConfigurationList
-        | ApplicationSurfaceOperation::ConfigurationExplain
         | ApplicationSurfaceOperation::ConfigurationGet
         | ApplicationSurfaceOperation::ConfigurationSet
         | ApplicationSurfaceOperation::ConfigurationUnset
         | ApplicationSurfaceOperation::ConfigurationBatch
-        | ApplicationSurfaceOperation::ConfigurationWriteCredential
         | ApplicationSurfaceOperation::ConfigurationObservedState
         | ApplicationSurfaceOperation::ConfigurationProtectedPreview
         | ApplicationSurfaceOperation::ConfigurationProtectedApply

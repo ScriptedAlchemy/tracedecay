@@ -12,14 +12,14 @@ impl Database {
         self.client.is_writable()
     }
 
-    pub(crate) fn downgrade(&self) -> super::WeakDatabase {
+    pub fn downgrade(&self) -> super::WeakDatabase {
         super::WeakDatabase {
             inner: Arc::downgrade(&self.inner),
             client: Arc::downgrade(&self.client),
         }
     }
 
-    pub(crate) fn schedule_memory_graph_reconciliation<Operation, OperationFuture>(
+    pub fn schedule_memory_graph_reconciliation<Operation, OperationFuture>(
         &self,
         operation: Operation,
     ) -> super::MemoryGraphReconciliationTaskScheduleV1
@@ -41,13 +41,13 @@ impl Database {
         )
     }
 
-    pub(crate) fn project_memory_reconciliation_telemetry(
+    pub fn project_memory_reconciliation_telemetry(
         &self,
     ) -> &ProjectMemoryReconciliationTelemetryV1 {
         &self.inner.memory_graph_reconciliation_telemetry
     }
 
-    pub(crate) fn begin_project_memory_reconciliation_pass(
+    pub fn begin_project_memory_reconciliation_pass(
         &self,
     ) -> std::result::Result<ProjectMemoryReconciliationPassLeaseV1, &'static str> {
         Arc::clone(&self.inner.memory_graph_reconciliation_telemetry).begin_reconciliation_pass()
@@ -76,8 +76,18 @@ impl Database {
         )
     }
 
-    pub(crate) fn memory_graph_reconciliation_pending(&self) -> bool {
+    pub fn memory_graph_reconciliation_pending(&self) -> bool {
         self.inner.memory_graph_reconciliation.pending()
+    }
+
+    /// Admits one post-write reconciliation pass that runs in the caller's
+    /// task. The daemon's terminal shutdown owner joins admitted passes after
+    /// cancellation, so the pass never outlives the retained graph owner it
+    /// publishes through. `None` means the coordinator is closed or fenced.
+    pub fn begin_inline_memory_graph_reconciliation_pass(
+        &self,
+    ) -> Option<super::MemoryGraphReconciliationInlinePassV1> {
+        self.inner.memory_graph_reconciliation.begin_inline_pass()
     }
 
     /// Canonical path held by this database's verified runtime locator.

@@ -1,11 +1,11 @@
 //! Canonical project-memory add preflight and execution.
 
+use crate::memory::trust::DEFAULT_TRUST;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactOwnerV1, ProvenanceId, canonical_sha256,
 };
-use tracedecay_runtime_core::memory::trust::DEFAULT_TRUST;
 use tracedecay_store::{
     FactWriteControl, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddMaterialV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactStore,
@@ -166,7 +166,7 @@ pub fn automatic_fact_add_command(
         Some(run_id.to_owned()),
     )?
     .into_command(context.operation_id().clone())
-    .map_err(MemoryApplicationError::Store)
+    .map_err(MemoryApplicationError::from)
 }
 
 fn fact_add_material(
@@ -196,7 +196,7 @@ fn fact_add_material(
         trust,
         actor,
     )
-    .map_err(MemoryApplicationError::Store)
+    .map_err(MemoryApplicationError::from)
 }
 
 fn rejected_add_effect_material(
@@ -245,7 +245,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         )?;
         let command = material
             .into_command(context.operation_id().clone())
-            .map_err(MemoryApplicationError::Store)?;
+            .map_err(MemoryApplicationError::from)?;
         Ok(ProjectMemoryFactAddPreflight::Ready {
             effect_material,
             command: Box::new(command),

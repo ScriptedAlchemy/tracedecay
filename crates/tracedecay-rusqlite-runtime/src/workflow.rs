@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrant, TaskHandoffScope, WorkHandoffFrontierV1, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,
@@ -25,7 +25,7 @@ mod census;
 mod disposition;
 mod effect_holder;
 mod effect_mutation;
-mod run_journal;
+pub(crate) mod run_journal;
 mod schema;
 
 pub use schema::{

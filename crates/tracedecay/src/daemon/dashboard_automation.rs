@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracedecay_application::now_micros;
 use tracedecay_automation::managed_skills::validate_skill_id;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
 use tracedecay_automation_runtime::automation::config::{
     AutomationConfig, from_configuration_snapshot,
 };
+use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, apply_managed_skill_update, archive_managed_skill, disable_managed_skill,
     load_managed_skill, managed_skill_dir, preview_managed_skill_update, restore_managed_skill,
@@ -21,6 +21,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger,
 };
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_to_project;
+use tracedecay_contracts::now_micros;
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonInvocationService;
@@ -50,7 +51,7 @@ type DashboardAutomationProjectResolver =
 const USER_JOB_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 fn automation_run_observer(
-    producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    producer: Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     project_root: PathBuf,
     surface: &'static str,
 ) -> Box<dyn FnOnce(&AutomationRunLedgerRecord) + Send + 'static> {
@@ -84,7 +85,12 @@ impl DashboardAutomationRequestRuntime {
 
 pub(crate) fn dashboard_automation_observation_port(
     invocation_service: DaemonInvocationService,
-) -> tracedecay_dashboard_api::DashboardAutomationObservationPortV1 {
+) -> Arc<
+    dyn Fn(PathBuf) -> tracedecay_dashboard_api::DashboardAutomationObservationFuture
+        + Send
+        + Sync
+        + 'static,
+> {
     Arc::new(move |project_root| {
         let invocation_service = invocation_service.clone();
         Box::pin(async move {
@@ -240,6 +246,7 @@ fn dashboard_managed_skill_command_port(
             execute_serialized_dashboard_automation(&writer, move || async move {
                 let cg = project_resolver(invocation.project_root.clone()).await?;
                 execute_dashboard_managed_skill_command(
+                    &tracedecay_agent_hosts::host_io(),
                     &profile_root,
                     cg.project_root(),
                     invocation.command,
@@ -259,22 +266,19 @@ fn dashboard_automation_project_resolver(
         let daemon_user_profile_id = daemon_user_profile_id.clone();
         let retained_project_server_resolver = Arc::clone(&retained_project_server_resolver);
         Box::pin(async move {
-            let retained_server = retained_project_server_resolver
-                .resolve(RetainedProjectGraphRequest::for_mounted_root(
-                    requested_project_root.clone(),
-                ))
-                .await
-                .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
-                    detail: format!(
-                        "dashboard automation project authority is unavailable: {error}"
-                    ),
-                })?
-                .ok_or_else(|| DashboardAutomationAuthorityErrorV1::Unavailable {
-                    detail: format!(
-                        "dashboard automation project '{}' is not retained by the daemon",
-                        requested_project_root.display()
-                    ),
-                })?;
+            let retained_server = retained_project_server_resolver(
+                RetainedProjectGraphRequest::for_mounted_root(requested_project_root.clone()),
+            )
+            .await
+            .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
+                detail: format!("dashboard automation project authority is unavailable: {error}"),
+            })?
+            .ok_or_else(|| DashboardAutomationAuthorityErrorV1::Unavailable {
+                detail: format!(
+                    "dashboard automation project '{}' is not retained by the daemon",
+                    requested_project_root.display()
+                ),
+            })?;
             if retained_server
                 .profile_identity()
                 .is_none_or(|identity| identity.profile_id() != &daemon_user_profile_id)
@@ -355,6 +359,10 @@ where
 }
 
 #[hotpath::measure(label = "daemon.dashboard.automation.execute", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The observation producer and pinned configuration are admitted before any UserJob or retained effect is reserved."
+)]
 async fn execute_dashboard_automation_run(
     cg: &TraceDecay,
     profile_root: PathBuf,
@@ -379,12 +387,12 @@ async fn execute_dashboard_automation_run(
         .map_err(|error| DashboardAutomationAuthorityErrorV1::Unavailable {
             detail: format!("automation configuration authority is unavailable: {error}"),
         })?;
-    let config = from_configuration_snapshot(&pinned.snapshot).map_err(automation_failed)?;
+    let config = from_configuration_snapshot(pinned.snapshot()).map_err(automation_failed)?;
     let configuration_digest =
-        crate::daemon::automation_effect::pinned_automation_configuration_digest(
-            &pinned.revision_id,
-            &pinned.snapshot.effective_behavior_digest,
-            &pinned.snapshot.resolution_provenance_digest,
+        tracedecay_automation_runtime::automation::effect_runtime::pinned_automation_configuration_digest(
+            pinned.revision_id(),
+            &pinned.snapshot().effective_behavior_digest,
+            &pinned.snapshot().resolution_provenance_digest,
         )
         .map_err(automation_failed)?;
     let runtime = DashboardAutomationRequestRuntime::new(&config);
@@ -400,7 +408,7 @@ async fn execute_dashboard_automation_run(
             .ok_or_else(|| DashboardAutomationAuthorityErrorV1::NotFound {
                 detail: format!("automation job '{job_id}' was not found"),
             })?;
-            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+            let admission = crate::daemon::automation_effect::prepare(
                 invocation_service,
                 cg,
                 cg.project_root(),
@@ -418,14 +426,14 @@ async fn execute_dashboard_automation_run(
             .await
             .map_err(automation_failed)?;
             let effect = match admission {
-                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => effect,
-                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
+                tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Execute(effect) => effect,
+                tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Replay(terminal) => {
                     return automation_terminal_run(&terminal);
                 }
-                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(envelope) => {
+                tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::PreAdmissionProblem(envelope) => {
                     return Err(DashboardAutomationAuthorityErrorV1::ApplicationProblem(envelope));
                 }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+                tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission::Conflict => {
                     return Err(automation_admission_conflict());
                 }
             };
@@ -456,18 +464,18 @@ async fn execute_dashboard_automation_run(
                     (run.ledger_record, run.committed_receipt)
                 });
             match waiter.wait().await.map_err(automation_failed)? {
-                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Run {
+                tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Run {
                     terminal,
                     record: _record,
                 } => automation_terminal_run(&terminal)?,
-                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Problem {
+                tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Problem {
                     problem,
                     record: _record,
                 } => return Err(automation_problem(problem)),
-                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Reused {
+                tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::Reused {
                     record: _record,
                 }
-                | crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::AbandonedObserved {
+                | tracedecay_automation_runtime::automation::effect_runtime::RetainedAutomationSettlementOutcome::AbandonedObserved {
                     record: _record,
                 } => {
                     return Err(automation_failed(
@@ -482,6 +490,7 @@ async fn execute_dashboard_automation_run(
 
 #[hotpath::measure(label = "daemon.dashboard.automation.skill", future = true)]
 async fn execute_dashboard_managed_skill_command(
+    host_io: &HostIo,
     profile_root: &Path,
     project_root: &Path,
     command: DashboardManagedSkillCommandV1,
@@ -553,7 +562,7 @@ async fn execute_dashboard_managed_skill_command(
                 .map_err(|error| managed_skill_lifecycle_error(profile_root, &id, error))?
         }
     };
-    let deployment = deploy_managed_skills_to_project(profile_root, project_root);
+    let deployment = deploy_managed_skills_to_project(host_io, profile_root, project_root);
     Ok(DashboardManagedSkillCommandOutcomeV1 { skill, deployment })
 }
 
@@ -613,7 +622,7 @@ fn automation_admission_conflict() -> DashboardAutomationAuthorityErrorV1 {
 
 fn automation_terminal_run(
     terminal: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal,
-) -> DashboardAutomationResult<tracedecay_application::retained_surfaces::AutomationRunResultV1> {
+) -> DashboardAutomationResult<tracedecay_contracts::retained_surfaces::AutomationRunResultV1> {
     if let Some(run) = terminal.run_result() {
         return Ok(run.clone());
     }

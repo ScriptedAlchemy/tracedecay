@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const START: &str = "<!-- TRACEDECAY MEMORY DIGEST START -->";
 const END: &str = "<!-- TRACEDECAY MEMORY DIGEST END -->";

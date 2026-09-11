@@ -19,7 +19,7 @@ use tracedecay::query::temporal::resolution::{SummaryLineageRejection, SummaryOm
 use tracedecay::query::temporal::{
     TemporalKernelError, TemporalKernelRequest, TemporalKernelResult,
 };
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId,
 };

@@ -4,9 +4,8 @@ TraceDecay pins `hotpath`, `hotpath-macros`, and `hotpath-meta` 0.24.0. Prefer t
 
 ## Build lanes
 
-Run one lane at a time with plain `cargo` — cargo-conductor brokers it
-(see `AGENTS.md`). Do not set `CARGO_TARGET_DIR` or isolate builds. Keep
-product/default builds free of profiling features.
+Run one lane at a time, following the current build coordinator and target
+rules in `AGENTS.md`. Keep product/default builds free of profiling features.
 
 ```bash
 cargo build --locked --profile perf -p tracedecay-cli --bin tracedecay \
@@ -200,7 +199,7 @@ Disabled declarative macros preserve their primary expression but discard option
 
 ## TraceDecay-specific workflow
 
-1. Run `scripts/profile-hotpath-os-counters.sh --self-test` before relying on the OS harness.
+1. Run `scripts/profile-hotpath-os-counters.sh --self-test` when changing the OS harness or investigating unreliable harness output.
 2. Capture a fresh child process per worker-width benchmark because the indexing Rayon pool is process-wide and initialized once.
 3. Keep cold catch-up, warm incremental, no-op, and idle samples separate.
 4. For indexing/extraction, use an outer generation/sweep wall span as the latency authority. Inner parse/traverse totals are aggregate worker service demand.

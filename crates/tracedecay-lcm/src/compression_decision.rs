@@ -34,12 +34,20 @@ pub struct PreflightDecision {
 #[derive(Debug, Clone, Copy)]
 pub struct CompressionPlanInput<'a> {
     pub request: &'a LcmCompressionRequest,
+    /// The effective assembly cap from [`effective_assembly_token_cap`]; the
+    /// raw `request.max_assembly_tokens` is never read for pressure decisions.
+    pub assembly_token_cap: Option<i64>,
     pub backlog: &'a [LcmRawMessage],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Pure policy decisions over a backlog the caller keeps owning.
+///
+/// `selected_len` is the validated prefix length of the input backlog that
+/// this compression pass summarizes; consumers slice the owning backlog
+/// (`&backlog[..selected_len]`) instead of receiving a copy of those records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionPlan {
-    pub selected_backlog: Vec<LcmRawMessage>,
+    pub selected_len: usize,
     pub forced_overflow_recovery: bool,
     pub leaf_chunk_tokens: Option<i64>,
 }
@@ -155,7 +163,8 @@ pub fn preflight_decision(input: PreflightDecisionInput<'_>) -> PreflightDecisio
 }
 
 pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
-    let forced_overflow_recovery = should_force_overflow_recovery(input.request);
+    let forced_overflow_recovery =
+        forced_overflow_pressure(input.request.current_tokens, input.assembly_token_cap);
     let leaf_chunk_tokens = effective_leaf_chunk_tokens(
         input.request.leaf_chunk_tokens,
         input.request.dynamic_leaf_chunk_enabled,
@@ -168,7 +177,7 @@ pub fn compression_plan(input: CompressionPlanInput<'_>) -> CompressionPlan {
         input.request.max_source_messages,
     );
     CompressionPlan {
-        selected_backlog: input.backlog[..selected_len].to_vec(),
+        selected_len,
         forced_overflow_recovery,
         leaf_chunk_tokens,
     }
@@ -179,10 +188,6 @@ pub fn frontier_has_maintenance_debt(frontier: &LcmLifecycleState) -> bool {
         .maintenance_debt
         .iter()
         .any(|debt| matches!(debt, LcmMaintenanceDebt::RawBacklog { .. }))
-}
-
-fn should_force_overflow_recovery(request: &LcmCompressionRequest) -> bool {
-    forced_overflow_pressure(request.current_tokens, request.max_assembly_tokens)
 }
 
 #[cfg(test)]

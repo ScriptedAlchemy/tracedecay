@@ -45,8 +45,8 @@ use tracedecay_domain::canonical_sha256;
 use super::backend::AgentTaskFailureClass;
 use super::config::{AutomationBackend, AutomationConfig};
 use super::config_error;
-use crate::errors::Result;
 use crate::ports::codex_app_server::SummaryConfig as CodexAppServerSummaryConfig;
+use tracedecay_domain::errors::Result;
 
 /// Skip reason published when a settled deterministic backend failure
 /// suppresses a task under an unchanged backend/configuration identity.
@@ -66,12 +66,14 @@ pub const BACKEND_IDENTITY_SUPPRESSED: &str = "backend_identity_suppressed";
 /// re-admitted on the next tick, which is exactly the intended effect of
 /// shipping a transport fix.
 ///
-/// `v2` holds the client's stdin open for the whole turn. `v1` closed it
+/// `v3` sends the task's canonical response schema as `turn/start.outputSchema`
+/// and preserves failed turn terminals. `v2` held the client's stdin open for
+/// the whole turn. `v1` closed it
 /// immediately after `turn/start`, which `codex app-server` reads as a client
 /// disconnect: it shut the session down within 70ms, cancelled the in-flight
 /// turn, and exited 0, so every run failed as
 /// `codex app-server closed stdout before completing`.
-const AGENT_BACKEND_PROTOCOL_REVISION: &str = "codex-app-server.v2.stdin-held-through-turn";
+const AGENT_BACKEND_PROTOCOL_REVISION: &str = "codex-app-server.v3.output-schema-and-failed-turns";
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct ExecutableDigestCacheKey {
@@ -147,7 +149,7 @@ fn locate_backend_executable(spec: &str) -> Result<Option<PathBuf>> {
     if spec_path.is_absolute() || spec.contains(std::path::MAIN_SEPARATOR) {
         return Ok(spec_path.is_file().then(|| spec_path.to_path_buf()));
     }
-    crate::agents::host_cli::resolve_on_path(spec, std::env::var_os("PATH").as_deref())
+    super::executable_lookup::resolve_on_path(spec, std::env::var_os("PATH").as_deref())
 }
 
 fn unreadable_executable_identity(spec: &str, path: Option<&Path>) -> Value {
@@ -303,7 +305,7 @@ pub(crate) struct CodexBinEnvGuard {
 #[cfg(test)]
 impl CodexBinEnvGuard {
     pub(crate) fn set(path: &std::path::Path) -> Self {
-        let lock = crate::config::lock_user_data_dir_test_env();
+        let lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let previous = std::env::var_os("TRACEDECAY_CODEX_BIN");
         // SAFETY: the shared user-data-dir lock is held for the guard
         // lifetime, so sibling env tests cannot observe this override.
@@ -348,7 +350,7 @@ mod tests {
         // `TRACEDECAY_CODEX_BIN` is process-global. Hold the canonical test
         // environment lock across both reads so an executable-replacement
         // test cannot change the authority between them.
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let config = config();
         assert_eq!(
             backend_identity(&config).unwrap(),
@@ -358,7 +360,7 @@ mod tests {
 
     #[test]
     fn identity_changes_when_the_configuration_revision_changes() {
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let before = backend_identity(&config()).unwrap();
         let after_config = AutomationConfig {
             timeout_secs: config().timeout_secs.saturating_add(1),
@@ -369,7 +371,7 @@ mod tests {
 
     #[test]
     fn identity_changes_when_the_backend_changes() {
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let before = backend_identity(&config()).unwrap();
         let after_config = AutomationConfig {
             backend: AutomationBackend::Disabled,
@@ -384,7 +386,7 @@ mod tests {
         // broken transport must not survive the build that fixes it. Only the
         // protocol-revision component can carry that, because the crate
         // version never moves.
-        let _env_lock = crate::config::lock_user_data_dir_test_env();
+        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let identity = backend_identity(&config()).unwrap();
         let with_other_revision = canonical_sha256(&json!({
             "kind": "automation.backend_identity.v1",

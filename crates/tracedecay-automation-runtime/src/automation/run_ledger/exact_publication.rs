@@ -13,7 +13,7 @@ use super::{
     validate_run_id_component,
 };
 use crate::automation::config_error;
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const EXACT_RUN_SPOOL_DIR: &str = "automation_run_spool";
 const EXACT_RUN_SPOOL_LOCK: &str = "automation_run_spool.lock";
@@ -37,23 +37,23 @@ fn replace_file_atomically(
         temporary_file.sync_all()?;
         drop(temporary_file);
     }
-    crate::db::DatabaseAuthority::replace_file_atomically(temporary, destination, label)
-        .map_err(std::io::Error::other)?;
+    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
+        temporary,
+        destination,
+        label,
+    )
+    .map_err(std::io::Error::other)?;
     #[cfg(windows)]
     tracedecay_runtime_core::windows_security::validate_private_file(destination)?;
     Ok(())
 }
 
 pub(super) fn acquire_run_ledger_lock(path: &Path) -> std::io::Result<std::fs::File> {
-    let lock_path = crate::storage::append_lock_path(path);
+    let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
     acquire_nofollow_lock(&lock_path)
 }
 
 fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
-    if let Some(parent) = lock_path.parent() {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
-    }
-    crate::storage::reject_symlink_components(lock_path, "automation run ledger lock")?;
     let parent = lock_path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -66,6 +66,13 @@ fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
             "automation run ledger lock has no filename",
         )
     })?;
+    // Resolve directory aliases without trusting the final lock entry.
+    let parent = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(parent);
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&parent)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &parent.join(name),
+        "automation run ledger lock",
+    )?;
     let directory = Dir::open_ambient_dir(parent, ambient_authority())?;
     let mut options = CapOpenOptions::new();
     options
@@ -73,7 +80,10 @@ fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create(true)
         .follow(FollowSymlinks::No);
-    let file = directory.open_with(name, &options)?;
+    // Concurrent writers race the first creation of this lock; the shared
+    // helper absorbs the spurious Darwin `ENOENT` the losers are handed.
+    let file =
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -92,12 +102,6 @@ pub(super) fn open_run_ledger_nofollow(
     append: bool,
     create: bool,
 ) -> std::io::Result<Option<std::fs::File>> {
-    if let Some(parent) = path.parent()
-        && create
-    {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
-    }
-    crate::storage::reject_symlink_components(path, "automation run ledger")?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -110,6 +114,16 @@ pub(super) fn open_run_ledger_nofollow(
             "automation run ledger has no filename",
         )
     })?;
+    // cap-std ambient opens need the resolved macOS `/var` directory alias.
+    // Resolve only the parent: resolving the final entry would bypass no-follow.
+    let parent = tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(parent);
+    if create {
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&parent)?;
+    }
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &parent.join(name),
+        "automation run ledger",
+    )?;
     let directory = match Dir::open_ambient_dir(parent, ambient_authority()) {
         Ok(directory) => directory,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => return Ok(None),
@@ -122,7 +136,12 @@ pub(super) fn open_run_ledger_nofollow(
         .append(append)
         .create(create)
         .follow(FollowSymlinks::No);
-    match directory.open_with(name, &options) {
+    let opened = if create {
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)
+    } else {
+        directory.open_with(name, &options)
+    };
+    match opened {
         Ok(file) => {
             let metadata = file.metadata()?;
             if !metadata.is_file() {
@@ -261,7 +280,7 @@ fn bind_staged_run_record_exact_with_publisher<T>(
         let result = (|| {
             ensure_no_exact_append_intent(dashboard_root).map_err(TraceDecayError::from)?;
             let durable_identity =
-                match super::exact_lookup::open_stabilized_run_ledger(&ledger_path, false)? {
+                match super::exact_lookup::open_committed_run_ledger(&ledger_path, false)? {
                     Some(ledger) => super::exact_lookup::read_exact_run_identity_from_file(
                         &ledger,
                         &ledger_path,
@@ -461,7 +480,7 @@ fn publish_staged_run_record_exact_blocking_with_publisher(
     publication.validate()?;
     let ledger = run_ledger_path(dashboard_root);
     if let Some(parent) = ledger.parent() {
-        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(parent)
             .map_err(TraceDecayError::from)?;
     }
     let spool = spool_path(dashboard_root, run_id, publication)?;
@@ -608,7 +627,7 @@ where
         let ledger_lock = acquire_run_ledger_lock(&ledger_path).map_err(TraceDecayError::from)?;
         let result = (|| {
             ensure_no_exact_append_intent(dashboard_root).map_err(TraceDecayError::from)?;
-            let ledger = super::exact_lookup::open_stabilized_run_ledger(&ledger_path, false)?
+            let ledger = super::exact_lookup::open_committed_run_ledger(&ledger_path, false)?
                 .ok_or_else(|| {
                     config_error(
                         "automation run spool cleanup has no durable exact ledger authority",
@@ -643,7 +662,7 @@ fn remove_canonical_spool_durable(path: &Path) -> Result<()> {
     if let Some(file) = open_regular_nofollow(path)? {
         drop(file);
     }
-    crate::storage::PrivateStoreIo::remove_file_durable(path)
+    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
         .map(|_| ())
         .map_err(TraceDecayError::from)
 }
@@ -656,7 +675,7 @@ fn publish_under_ledger_lock(
     publication: &ExactRunPublication,
     publish_file: &AtomicFilePublisher<'_>,
 ) -> Result<ExactRunPublishOutcome> {
-    let mut ledger = super::exact_lookup::open_stabilized_run_ledger(ledger_path, true)?
+    let mut ledger = super::exact_lookup::open_committed_run_ledger(ledger_path, true)?
         .ok_or_else(|| config_error("automation run ledger disappeared during durable open"))?;
     let recovered_intent = recover_matching_append_intent(
         dashboard_root,
@@ -731,6 +750,7 @@ fn publish_under_ledger_lock(
     sync_run_ledger_file_and_parent(ledger_path, &ledger)?;
     verify_published_range(&mut ledger, &mut spool, &intent)?;
     clear_append_intent(dashboard_root)?;
+    super::lifecycle_index::record_durable_run_ledger_append(&ledger, ledger_path, pre_append_eof);
     Ok(ExactRunPublishOutcome::Published)
 }
 
@@ -790,12 +810,19 @@ fn recover_matching_append_intent(
         verify_published_range(ledger, &mut spool, &intent)?;
         sync_run_ledger_file_and_parent(ledger_path, ledger)?;
         clear_append_intent(dashboard_root)?;
+        super::lifecycle_index::record_durable_run_ledger_append(
+            ledger,
+            ledger_path,
+            intent.pre_append_eof,
+        );
         return Ok(None);
     }
     ledger
         .set_len(intent.pre_append_eof)
         .map_err(TraceDecayError::from)?;
     sync_run_ledger_file_and_parent(ledger_path, ledger)?;
+    // Recovery rewrote the tail: the next read revalidates the whole history.
+    super::lifecycle_index::discard_run_ledger_index(ledger_path);
     // The republished intent stays durable and owns the upcoming append; the
     // caller resumes under it instead of clearing and rewriting the same
     // bytes with a second atomic publication.
@@ -896,7 +923,7 @@ fn open_bound_spool(
     run_id: &str,
     publication: &ExactRunPublication,
 ) -> Result<Option<std::fs::File>> {
-    crate::storage::reject_symlink_components(path, "automation run exact spool")
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation run exact spool")
         .map_err(TraceDecayError::from)?;
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1070,8 +1097,11 @@ fn read_append_intent_state(dashboard_root: &Path) -> Result<LedgerAppendIntentS
 
 fn read_append_intent_bytes(dashboard_root: &Path) -> Result<Option<Vec<u8>>> {
     let path = append_intent_path(dashboard_root);
-    crate::storage::reject_symlink_components(&path, "automation run append intent")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &path,
+        "automation run append intent",
+    )
+    .map_err(TraceDecayError::from)?;
     let Some(file) = open_regular_nofollow(&path)? else {
         return Ok(None);
     };
@@ -1097,9 +1127,11 @@ fn read_append_intent_bytes(dashboard_root: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 fn clear_append_intent(dashboard_root: &Path) -> Result<()> {
-    crate::storage::PrivateStoreIo::remove_file_durable(&append_intent_path(dashboard_root))
-        .map(|_| ())
-        .map_err(TraceDecayError::from)
+    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&append_intent_path(
+        dashboard_root,
+    ))
+    .map(|_| ())
+    .map_err(TraceDecayError::from)
 }
 
 fn quarantine_corrupt_append_intent(dashboard_root: &Path, bytes: &[u8]) -> Result<()> {
@@ -1118,7 +1150,7 @@ fn quarantine_corrupt_append_intent_impl(
 ) -> Result<()> {
     let digest = Sha256::digest(bytes);
     let directory = dashboard_root.join(EXACT_RUN_APPEND_INTENT_QUARANTINE_DIR);
-    crate::storage::PrivateStoreIo::create_dir_all_durable(&directory)
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&directory)
         .map_err(TraceDecayError::from)?;
     cleanup_abandoned_corrupt_append_intent_quarantine_temps(
         &directory,
@@ -1126,8 +1158,11 @@ fn quarantine_corrupt_append_intent_impl(
         quarantine_io,
     )?;
     let path = directory.join(format!("{}.json", hex::encode(digest)));
-    crate::storage::reject_symlink_components(&path, "automation run append-intent quarantine")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &path,
+        "automation run append-intent quarantine",
+    )
+    .map_err(TraceDecayError::from)?;
     let mut count = 0_usize;
     for entry in std::fs::read_dir(&directory).map_err(TraceDecayError::from)? {
         let entry = entry.map_err(TraceDecayError::from)?;
@@ -1207,13 +1242,15 @@ fn cleanup_abandoned_corrupt_append_intent_quarantine_temps(
 }
 
 fn remove_corrupt_append_intent_quarantine_debris(path: &Path) -> Result<()> {
-    crate::storage::PrivateStoreIo::remove_file_durable(path)
+    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
         .map(|_| ())
         .map_err(TraceDecayError::from)
 }
 
 fn is_private_store_durable_removal_tombstone_name(name: &str) -> bool {
-    let Some(random) = name.strip_prefix(crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX) else {
+    let Some(random) =
+        name.strip_prefix(tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX)
+    else {
         return false;
     };
     random.len() == 6 && random.bytes().all(|byte| byte.is_ascii_alphanumeric())
@@ -1394,6 +1431,8 @@ fn repair_corrupt_append_intent(
     }
     ledger.set_len(clean_eof).map_err(TraceDecayError::from)?;
     sync_run_ledger_file_and_parent(ledger_path, ledger)?;
+    // Recovery rewrote the tail: the next read revalidates the whole history.
+    super::lifecycle_index::discard_run_ledger_index(ledger_path);
     clear_corrupt_append_intent_if_unchanged(dashboard_root, corrupt_bytes)
 }
 
@@ -1494,7 +1533,7 @@ fn discard_unbound_spools_for_run(dashboard_root: &Path, run_id: &str) -> Result
     visit_spool_rows(&directory, |_, _| Ok(()))?;
     visit_spool_rows(&directory, |path, identity| {
         if identity.run_id == run_id {
-            crate::storage::PrivateStoreIo::remove_file_durable(path)
+            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
                 .map_err(TraceDecayError::from)?;
         }
         Ok(())
@@ -1571,7 +1610,7 @@ fn validate_same_run_spool_history(
 
 fn with_spool_lock<T>(dashboard_root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let directory = dashboard_root.join(EXACT_RUN_SPOOL_DIR);
-    crate::storage::PrivateStoreIo::create_dir_all_durable(&directory)
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&directory)
         .map_err(TraceDecayError::from)?;
     let lock_path = dashboard_root.join(EXACT_RUN_SPOOL_LOCK);
     let lock = acquire_nofollow_lock(&lock_path).map_err(TraceDecayError::from)?;
@@ -1593,7 +1632,7 @@ fn cleanup_abandoned_exact_spool_temps(directory: &Path) -> Result<()> {
         if !is_exact_spool_owned_temp_name(name) {
             continue;
         }
-        crate::storage::PrivateStoreIo::remove_file_durable(&entry.path())
+        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&entry.path())
             .map_err(TraceDecayError::from)?;
     }
     Ok(())
@@ -1638,7 +1677,7 @@ fn is_canonical_decimal(value: &str, maximum: u64) -> bool {
 }
 
 fn digest_regular_file(path: &Path) -> Result<Option<(ManifestDigest, u64)>> {
-    crate::storage::reject_symlink_components(path, "automation run exact spool")
+    tracedecay_runtime_core::storage::reject_symlink_components(path, "automation run exact spool")
         .map_err(TraceDecayError::from)?;
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1765,6 +1804,86 @@ mod tests {
         let mut conflicting = record;
         conflicting.backend = "claude_cli".to_owned();
         assert!(stage_run_record_exact(temp.path(), &conflicting).is_err());
+    }
+
+    #[test]
+    fn terminal_publication_decodes_rows_proportional_to_its_run() {
+        use super::super::exact_lookup::scan_receipt;
+        use super::super::find_run_record_exact_bounded_blocking;
+
+        const UNRELATED_RUNS: u64 = 4_000;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = run_ledger_path(temp.path());
+        let mut history = String::new();
+        for index in 0..UNRELATED_RUNS {
+            let mut unrelated = record(&format!("unrelated-{index}"));
+            unrelated.status = AutomationRunStatus::Running;
+            history.push_str(&serde_json::to_string(&unrelated).expect("unrelated row"));
+            history.push('\n');
+        }
+        std::fs::create_dir_all(temp.path()).expect("dashboard root");
+        std::fs::write(&ledger, history).expect("seed history");
+
+        let cold = scan_receipt::snapshot();
+        assert!(
+            find_run_record_exact_bounded_blocking(temp.path(), "proportional-terminal")
+                .expect("cold lookup")
+                .is_none()
+        );
+        let cold = scan_receipt::snapshot().since(cold);
+        assert!(
+            cold.rows_decoded >= UNRELATED_RUNS,
+            "index recovery decodes the complete history once: {cold:?}"
+        );
+
+        let terminal = record("proportional-terminal");
+        let bound = scan_receipt::snapshot();
+        let (publication, ()) =
+            bind_staged_run_record_exact(temp.path(), &terminal, |_| Ok(())).expect("bind");
+        let bound = scan_receipt::snapshot().since(bound);
+        assert_eq!(
+            bound.rows_decoded, 0,
+            "binding a new run decodes no ledger rows"
+        );
+        assert_eq!(
+            bound.syncs, 0,
+            "an unchanged ledger is not resynced while binding"
+        );
+
+        let published = scan_receipt::snapshot();
+        assert_eq!(
+            publish_staged_run_record_exact_blocking(temp.path(), &terminal.run_id, &publication)
+                .expect("publish"),
+            ExactRunPublishOutcome::Published
+        );
+        let published = scan_receipt::snapshot().since(published);
+        assert_eq!(
+            published.rows_decoded, 2,
+            "publication decodes only the spool row and the appended row: {published:?}"
+        );
+        assert_eq!(published.syncs, 1, "the append commit is the only sync");
+
+        let replayed = scan_receipt::snapshot();
+        assert_eq!(
+            publish_staged_run_record_exact_blocking(temp.path(), &terminal.run_id, &publication)
+                .expect("replay"),
+            ExactRunPublishOutcome::Published
+        );
+        let replayed = scan_receipt::snapshot().since(replayed);
+        assert_eq!(
+            replayed.rows_decoded, 0,
+            "an exact replay check decodes no rows"
+        );
+        assert_eq!(replayed.syncs, 0);
+
+        let looked_up = scan_receipt::snapshot();
+        let found = find_run_record_exact_bounded_blocking(temp.path(), &terminal.run_id)
+            .expect("lookup")
+            .expect("published run");
+        assert_eq!(found, terminal);
+        let looked_up = scan_receipt::snapshot().since(looked_up);
+        assert_eq!(looked_up.rows_decoded, 1);
+        assert_eq!(looked_up.syncs, 0);
     }
 
     #[test]
@@ -1973,6 +2092,53 @@ mod tests {
         assert_eq!(
             digest_regular_file(&spool).expect("republished spool"),
             Some((actual.ledger_digest, actual.payload_len))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ledger_and_lock_open_through_parent_alias_without_following_final_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let directory = temp.path().join("dashboard");
+        std::fs::create_dir(&directory).expect("dashboard");
+        let alias = temp.path().join("dashboard-alias");
+        symlink(&directory, &alias).expect("directory alias");
+        let ledger = run_ledger_path(&alias);
+        let mut file = open_run_ledger_nofollow(&ledger, true, true, false, true)
+            .expect("create through alias")
+            .expect("ledger");
+        file.write_all(b"retained ledger").expect("write ledger");
+        drop(file);
+        drop(acquire_run_ledger_lock(&ledger).expect("lock through alias"));
+        let mut file = open_run_ledger_nofollow(&ledger, true, false, false, false)
+            .expect("reopen through alias")
+            .expect("ledger");
+        let mut payload = String::new();
+        file.read_to_string(&mut payload).expect("read ledger");
+        assert_eq!(payload, "retained ledger");
+        drop(file);
+
+        let lock = tracedecay_runtime_core::storage::append_lock_path(&ledger);
+        std::fs::remove_file(&lock).expect("remove lock");
+        symlink(&ledger, &lock).expect("final lock symlink");
+        let error = acquire_run_ledger_lock(&ledger).expect_err("refuse final lock symlink");
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(
+            std::fs::read(&ledger).expect("unchanged target"),
+            b"retained ledger"
+        );
+
+        let target = directory.join("retained.jsonl");
+        std::fs::rename(&ledger, &target).expect("move ledger");
+        symlink(&target, &ledger).expect("final ledger symlink");
+        let error = open_run_ledger_nofollow(&ledger, true, true, false, false)
+            .expect_err("refuse final ledger symlink through parent alias");
+        assert!(error.to_string().contains("symlink"));
+        assert_eq!(
+            std::fs::read(&target).expect("unchanged target"),
+            b"retained ledger"
         );
     }
 
@@ -2440,7 +2606,7 @@ mod tests {
             std::fs::write(&owned, retired_bytes).expect("owned temp");
             let tombstone = directory.join(format!(
                 "{}Ab12Z9",
-                crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+                tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
             ));
 
             let failure = repair_corrupt_run_ledger_append_intent_with(
@@ -2473,7 +2639,7 @@ mod tests {
 
             let retry_tombstone = directory.join(format!(
                 "{}Z9Ab12",
-                crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+                tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
             ));
             let recursive_failure = repair_corrupt_run_ledger_append_intent_with(
                 temp.path(),
@@ -2555,14 +2721,14 @@ mod tests {
             (
                 directory.join(format!(
                     "{}Ab12Z",
-                    crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+                    tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
                 )),
                 corrupt.as_slice(),
             ),
             (
                 directory.join(format!(
                     "{}Ab12_9",
-                    crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+                    tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
                 )),
                 corrupt.as_slice(),
             ),
@@ -2593,7 +2759,7 @@ mod tests {
         std::fs::write(&quarantine_path, corrupt).expect("existing quarantine");
         let near_miss = directory.join(format!(
             "{}Ab12_9",
-            crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+            tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
         ));
         std::fs::write(&near_miss, b"foreign tombstone near-miss").expect("foreign entry");
 
@@ -2619,7 +2785,7 @@ mod tests {
         std::fs::create_dir_all(directory).expect("quarantine directory");
         let tombstone = directory.join(format!(
             "{}Ab12Z9",
-            crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+            tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
         ));
         std::fs::write(&tombstone, vec![b'x'; MAX_APPEND_INTENT_BYTES as usize + 1])
             .expect("oversized tombstone");
@@ -2646,7 +2812,7 @@ mod tests {
         std::fs::create_dir_all(directory).expect("quarantine directory");
         let tombstone = directory.join(format!(
             "{}Ab12Z9",
-            crate::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
+            tracedecay_runtime_core::storage::DURABLE_REMOVAL_TOMBSTONE_PREFIX
         ));
         symlink(&intent_path, &tombstone).expect("nonregular tombstone");
 

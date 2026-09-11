@@ -10,7 +10,7 @@ enum SemanticExecutionOutcomeV1 {
     Qualified {
         qualification: tracedecay_daemon_protocol::CanonicalQualificationBlob,
     },
-    Published(Box<tracedecay_usecases::semantic_runtime::SemanticEvaluatedProfilePublicationV1>),
+    Published(Box<tracedecay_application::semantic_runtime::SemanticEvaluatedProfilePublicationV1>),
 }
 
 #[derive(Clone)]
@@ -61,7 +61,7 @@ impl SemanticInvocationControlV1 {
     pub fn interruption(&self, now: UtcMicros) -> Option<ApplicationProblem> {
         if self.cancellation.is_cancelled() {
             return Some(ApplicationProblem::Cancelled {
-                stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                stage: tracedecay_contracts::CancellationStage::BeforeAdmission,
                 retry: RetryDirective::Never,
                 legal_actions: Vec::new(),
             });
@@ -243,6 +243,10 @@ impl DaemonInvocationService {
         let scope = registered.scope.clone();
         let scheduler = self.code_index_schedulers.clone();
         let workers = Arc::clone(&registered.semantic_evaluation_workers);
+        let lifecycle_owner = scheduler.semantic_lifecycle_owner_for_scope(&scope).await;
+        // Daemon-lifetime immutable projection payloads, shared by every
+        // qualification request for this project (#838).
+        let projection_batch_cache = workers.projection_batch_cache();
         let execution = match input {
             SemanticExecutionInputV1::Qualify(evaluated_profile_id) => {
                 workers
@@ -262,8 +266,10 @@ impl DaemonInvocationService {
                                 scheduler,
                                 candidate.clone(),
                                 control,
+                                lifecycle_owner,
+                                projection_batch_cache,
                             );
-                            let qualification = tracedecay_usecases::semantic_runtime::ProductionSemanticConfigurationOperationV1::qualify_profile(
+                            let qualification = tracedecay_application::semantic_runtime::ProductionSemanticConfigurationOperationV1::qualify_profile(
                                 &authority,
                                 &canonical_root,
                                 candidate.clone(),
@@ -342,6 +348,8 @@ impl DaemonInvocationService {
                                 scheduler,
                                 candidate.clone(),
                                 control,
+                                lifecycle_owner,
+                                projection_batch_cache,
                             );
                             let authority = tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationPublicationAuthorityV1::new(snapshot);
                             operation
@@ -366,7 +374,7 @@ fn semantic_execution_interruption(
     request_cancellation
         .is_cancelled()
         .then(|| ApplicationProblem::Cancelled {
-            stage: tracedecay_application::CancellationStage::DuringRead,
+            stage: tracedecay_contracts::CancellationStage::DuringRead,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         })
@@ -374,8 +382,8 @@ fn semantic_execution_interruption(
 }
 
 fn semantic_qualification_key(
-    candidate: &tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
-    snapshot: &tracedecay_usecases::semantic_runtime::SemanticEvaluationPublicationSnapshotV1,
+    candidate: &tracedecay_application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+    snapshot: &tracedecay_application::semantic_runtime::SemanticEvaluationPublicationSnapshotV1,
     report: &tracedecay_query::search_quality::DirectEvaluationReportV1,
 ) -> Result<
     tracedecay_query::search_quality::NativeQualificationKeyV1,
@@ -459,7 +467,7 @@ fn semantic_execution_response(
 fn semantic_evaluation_response(
     request_id: String,
     evaluation: Result<
-        tracedecay_usecases::semantic_runtime::SemanticEvaluatedProfilePublicationV1,
+        tracedecay_application::semantic_runtime::SemanticEvaluatedProfilePublicationV1,
         tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationExecutionErrorV1,
     >,
 ) -> DaemonInvocationResponse {
@@ -497,7 +505,7 @@ fn semantic_evaluation_response(
         Err(DaemonSemanticEvaluationExecutionErrorV1::Cancelled) => application_problem(
             request_id,
             ApplicationProblem::Cancelled {
-                stage: tracedecay_application::CancellationStage::DuringRead,
+                stage: tracedecay_contracts::CancellationStage::DuringRead,
                 retry: RetryDirective::Never,
                 legal_actions: Vec::new(),
             },
@@ -505,7 +513,7 @@ fn semantic_evaluation_response(
         Err(DaemonSemanticEvaluationExecutionErrorV1::TimedOut) => application_problem(
             request_id,
             ApplicationProblem::TimedOut {
-                stage: tracedecay_application::CancellationStage::DuringRead,
+                stage: tracedecay_contracts::CancellationStage::DuringRead,
                 retry: RetryDirective::Never,
                 legal_actions: Vec::new(),
             },
@@ -524,7 +532,7 @@ fn semantic_evaluation_response(
                     message: "The semantic evaluation target changed before publication".to_owned(),
                 },
                 retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![tracedecay_application::LegalAction::Refresh],
+                legal_actions: vec![tracedecay_contracts::LegalAction::Refresh],
             },
         ),
         Err(DaemonSemanticEvaluationExecutionErrorV1::Coordination(
@@ -642,7 +650,7 @@ mod tests {
 
     #[test]
     fn indexing_cannot_be_published_as_an_empty_semantic_candidate() {
-        let state = tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1::Indexing {
+        let state = tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Indexing {
             completed_units: 7,
             total_units: 11,
         };

@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use tracedecay_lcm::LcmRelationProjectionStatus;
 
+use crate::ports::hook_runtime::HookRuntimeV1;
+
 /// A hook only waits for the daemon's typed pressure acknowledgement; the
 /// daemon owns any eventual transcript capture and compaction work. The budget
 /// covers one handshake plus one hook-runtime round trip, matching the
@@ -47,12 +49,16 @@ impl CursorPreCompactOutcome {
     }
 }
 
-pub async fn cursor_pre_compact_via_daemon(event_json: &str) -> CursorPreCompactOutcome {
-    cursor_pre_compact_via_daemon_with_telemetry(event_json, None).await
+pub async fn cursor_pre_compact_via_daemon(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+) -> CursorPreCompactOutcome {
+    cursor_pre_compact_via_daemon_with_telemetry(runtime, event_json, None).await
 }
 
 #[hotpath::measure(future = true, label = "agent_hosts.hooks.cursor.compact_via_daemon")]
 pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
+    runtime: &HookRuntimeV1,
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> CursorPreCompactOutcome {
@@ -61,7 +67,7 @@ pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
     }
     if let Ok(outcome) = tokio::time::timeout(
         CURSOR_PRE_COMPACT_BUDGET,
-        cursor_pre_compact_via_daemon_inner(event_json, telemetry),
+        cursor_pre_compact_via_daemon_inner(runtime, event_json, telemetry),
     )
     .await
     {
@@ -78,6 +84,7 @@ pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
 }
 
 async fn cursor_pre_compact_via_daemon_inner(
+    runtime: &HookRuntimeV1,
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) -> CursorPreCompactOutcome {
@@ -89,6 +96,7 @@ async fn cursor_pre_compact_via_daemon_inner(
         return CursorPreCompactOutcome::skipped("no project root");
     };
     let result = match super::daemon_hook_action(
+        runtime,
         Some(&root),
         serde_json::json!({
             "action": "cursor_compact",
@@ -118,8 +126,11 @@ mod tests {
     async fn native_compaction_routes_once_to_daemon_within_hook_budget() {
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
-        crate::storage::pin_fixture_repository_identity(&project_root, "proj_cursor_compaction")
-            .unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            &project_root,
+            "proj_cursor_compaction",
+        )
+        .unwrap();
         let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
             "status": "scheduled",
             "reason": "accepted",
@@ -135,7 +146,8 @@ mod tests {
         .to_string();
 
         let started = std::time::Instant::now();
-        let outcome = cursor_pre_compact_via_daemon(&event_json).await;
+        let runtime = crate::ports::hook_runtime::crate_test_runtime();
+        let outcome = cursor_pre_compact_via_daemon(&runtime, &event_json).await;
 
         assert!(
             started.elapsed() < Duration::from_millis(100),

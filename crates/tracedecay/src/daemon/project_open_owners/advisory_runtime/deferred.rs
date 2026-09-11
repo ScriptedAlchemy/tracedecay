@@ -1,13 +1,27 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::super::{project_open_lsp_scope_grant, register_production_lsp_owner};
+use tokio::sync::{broadcast, watch};
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexGenerationPublishedV1;
+
+use super::super::{
+    install_semantic_activation_runtime_owner, project_open_lsp_scope_grant,
+    register_production_lsp_owner,
+};
 use super::{
     DaemonInvocationState, ProjectOpenDependentOwnerState, register_production_advisory_owner,
     register_production_feedback_and_advisory, register_production_feedback_cycle,
+    selected_feedback_generation,
 };
-use crate::daemon::log_daemon_event;
-use tracedecay_application::now_micros;
+use tracedecay_contracts::doctor::{
+    SemanticOwnerDegradedReasonV1, SemanticOwnerPrerequisiteV1, SemanticOwnerStateV1,
+};
+use tracedecay_contracts::now_micros;
+use tracedecay_daemon_service::ProjectRuntimePublicationAttemptV1;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// The deferred advisory owner is a detached background task: when it gives up
 /// (or never sees a publication) nothing in the request path reports it, and a
@@ -24,6 +38,172 @@ fn log_deferred_attempt(project_root: &Path, phase: &str, attempt: &str) {
     );
 }
 
+fn pending_semantic_owner_state(
+    configuration_ready: bool,
+    production_runtime_ready: bool,
+) -> SemanticOwnerStateV1 {
+    let mut missing = Vec::new();
+    if !configuration_ready {
+        missing.push(SemanticOwnerPrerequisiteV1::ConfigurationRuntime);
+    }
+    if !production_runtime_ready {
+        missing.push(SemanticOwnerPrerequisiteV1::ProductionSemanticRuntime);
+    }
+    SemanticOwnerStateV1::PendingPrerequisites { missing }
+}
+
+fn cancelled_semantic_owner_state(detail: &'static str) -> SemanticOwnerStateV1 {
+    SemanticOwnerStateV1::Degraded {
+        reason: SemanticOwnerDegradedReasonV1::TaskCancelled,
+        detail: detail.to_owned(),
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Deferred semantic registration is one background bind that must stay ordered with mount."
+)]
+pub(in crate::daemon) async fn spawn_semantic_owner_registration(
+    invocation: DaemonInvocationState,
+    project_root: PathBuf,
+    configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
+    scope: tracedecay_contracts::ResolvedScope,
+    mut production_runtime_ready: tokio::sync::watch::Receiver<bool>,
+    route_registered: Arc<AtomicBool>,
+    route_cancellation: CancellationToken,
+) -> Result<ProjectRuntimePublicationAttemptV1> {
+    let registration = invocation
+        .semantic_owner_runtime_registrar()
+        .register(&project_root)
+        .await?;
+    let publication = invocation
+        .service
+        .project_runtimes
+        .begin_publication(&project_root)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "semantic owner disappeared before project publication began".to_owned(),
+        })?;
+    let task_signals = registration.signals();
+    let mut configuration_ready = task_signals.subscribe_configuration_ready();
+    let task_cancellation = task_signals.cancellation();
+    let task_project_root = project_root.clone();
+    let task_invocation = invocation.clone();
+    let spawned = registration.spawn(hotpath::future!(
+        async move {
+            loop {
+                if task_cancellation.is_cancelled() {
+                    task_signals.set_state(cancelled_semantic_owner_state(
+                        "semantic owner registration was cancelled by project shutdown",
+                    ));
+                    return;
+                }
+                if route_cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
+                    task_signals.set_state(cancelled_semantic_owner_state(
+                        "semantic owner registration was cancelled with its project route",
+                    ));
+                    return;
+                }
+                let configuration_is_ready = *configuration_ready.borrow_and_update();
+                let production_is_ready = *production_runtime_ready.borrow_and_update();
+                if configuration_is_ready && production_is_ready {
+                    match install_semantic_activation_runtime_owner(
+                        &task_invocation,
+                        &task_project_root,
+                        Arc::clone(&configuration_runtime),
+                        scope.clone(),
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            if task_cancellation.is_cancelled()
+                                || route_cancellation.is_cancelled()
+                                || !route_registered.load(Ordering::Acquire)
+                            {
+                                task_signals.set_state(cancelled_semantic_owner_state(
+                                    "semantic owner registration completed after its project route was cancelled",
+                                ));
+                                return;
+                            }
+                            task_signals.set_state(SemanticOwnerStateV1::Ready);
+                            log_daemon_event(
+                                "semantic_owner_registration",
+                                &[
+                                    ("project", task_project_root.display().to_string()),
+                                    ("outcome", "ready".to_owned()),
+                                ],
+                            );
+                            return;
+                        }
+                        Ok(false) => {
+                            task_signals.set_state(pending_semantic_owner_state(true, false));
+                        }
+                        Err(error) => {
+                            let state = error.into_state();
+                            log_daemon_event(
+                                "semantic_owner_registration",
+                                &[
+                                    ("project", task_project_root.display().to_string()),
+                                    ("outcome", "degraded".to_owned()),
+                                    ("state", format!("{state:?}")),
+                                ],
+                            );
+                            task_signals.set_state(state);
+                            return;
+                        }
+                    }
+                } else {
+                    task_signals.set_state(pending_semantic_owner_state(
+                        configuration_is_ready,
+                        production_is_ready,
+                    ));
+                }
+                tokio::select! {
+                    biased;
+                    () = task_cancellation.cancelled() => {
+                        task_signals.set_state(cancelled_semantic_owner_state(
+                            "semantic owner registration was cancelled by project shutdown",
+                        ));
+                        return;
+                    }
+                    () = route_cancellation.cancelled() => {
+                        task_signals.set_state(cancelled_semantic_owner_state(
+                            "semantic owner registration was cancelled with its project route",
+                        ));
+                        return;
+                    }
+                    changed = configuration_ready.changed() => {
+                        if changed.is_err() {
+                            task_signals.set_state(cancelled_semantic_owner_state(
+                                "semantic owner configuration readiness authority closed",
+                            ));
+                            return;
+                        }
+                    }
+                    changed = production_runtime_ready.changed() => {
+                        if changed.is_err() {
+                            task_signals.set_state(cancelled_semantic_owner_state(
+                                "semantic owner production-runtime readiness authority closed",
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
+        },
+        label = "daemon.project.owners.semantic_deferred"
+    ));
+    if spawned {
+        log_daemon_event(
+            "semantic_owner_registration",
+            &[
+                ("project", project_root.display().to_string()),
+                ("outcome", "scheduled".to_owned()),
+            ],
+        );
+    }
+    Ok(publication)
+}
+
 pub(super) fn spawn(
     owner: &crate::mcp::McpServer,
     invocation: DaemonInvocationState,
@@ -33,29 +213,41 @@ pub(super) fn spawn(
     // Nothing user-facing may wait on a layer this route disables by contract.
     // With no code index there is no generation to defer to, so the wait below
     // has no terminal state of its own: name it here instead.
-    if super::super::code_index_disabled_for_scope(&invocation, &state.scope) {
+    if tracedecay_code_index_runtime::project_reads::code_index_disabled_for_scope(
+        &invocation.code_index_schedulers,
+        &state.scope,
+    ) {
         log_deferred_attempt(&project_root, "code_index_disabled", "terminal");
         return false;
     }
+    // Project-open schedules this owner before code-index activation. Capture
+    // the registry-wide seat cursor now so a retained generation seated before
+    // the background task's first poll remains observable. The exact project
+    // and scope are still revalidated by `try_mount` after every wake.
+    let mut serving_seats = invocation.code_index_schedulers.subscribe_serving_seats();
     owner.spawn_background_task(hotpath::future!(
         async move {
             let mut publications = invocation
                 .code_index_schedulers
                 .subscribe_generation_publications();
-            // A publication is announced before its generation is seated in
-            // the slot `try_mount` reads, and a retained `Noop` restore seats
-            // without announcing at all. On a cold project the first
-            // generation therefore becomes exact with no publication left to
-            // wake this owner: it slept forever and the project served
-            // indefinitely with the typed-unavailable feedback cycle. Wait on
-            // the serving-seat signal beside the subscription: every slot
-            // write records a seat, so a woken waiter reads the seated
-            // generation. Subscribe before the first attempt so a seat that
-            // lands during it is not lost. The task dies with its project
-            // server.
-            let mut seats = invocation.code_index_schedulers.subscribe_serving_seats();
+            let mut serving_changes = None;
             let mut partial_publication_retried = false;
             loop {
+                // Sealing announces durable source before the complete serving
+                // owner is installed. Subscribe before probing that owner so a
+                // later serving swap can finish this mount without another edit.
+                if serving_changes.is_none() {
+                    serving_changes = invocation
+                        .code_index_schedulers
+                        .subscribe_serving_generation_changes(&project_root)
+                        .await;
+                    if serving_changes.is_some() {
+                        let _ = invocation
+                            .code_index_schedulers
+                            .request_complete_generation(&project_root)
+                            .await;
+                    }
+                }
                 match try_mount(&invocation, &project_root, &mut state).await {
                     Attempt::Terminal => return,
                     Attempt::RetryPartialPublication if !partial_publication_retried => {
@@ -64,48 +256,55 @@ pub(super) fn spawn(
                         continue;
                     }
                     Attempt::RetryPartialPublication => return,
-                    Attempt::AwaitNextPublication => {}
-                }
-                break;
-            }
-            log_deferred_attempt(
-                &project_root,
-                "generation_unavailable",
-                "await_next_publication",
-            );
-            loop {
-                tokio::select! {
-                    publication = publications.recv() => match publication {
-                        Ok(publication) if publication.project_root == project_root => {}
-                        Ok(_) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            log_deferred_attempt(
-                                &project_root,
-                                "publications_closed",
-                                "terminal",
-                            );
-                            return;
-                        }
-                    },
-                    Ok(()) = seats.changed() => {}
-                }
-                match try_mount(&invocation, &project_root, &mut state).await {
-                    Attempt::Terminal => return,
-                    Attempt::AwaitNextPublication => {}
-                    Attempt::RetryPartialPublication => {
-                        tokio::task::yield_now().await;
-                        if try_mount(&invocation, &project_root, &mut state).await
-                            != Attempt::AwaitNextPublication
-                        {
-                            return;
-                        }
+                    Attempt::AwaitNextPublication => {
+                        tracing::info!(
+                            event = "advisory_deferred_generation_unavailable",
+                            project = %project_root.display(),
+                            serving_watch_registered = serving_changes.is_some(),
+                            "waiting after exact complete-generation admission declined"
+                        );
                     }
                 }
+                if !wait_for_generation_change(
+                    &project_root,
+                    &mut publications,
+                    &mut serving_changes,
+                    &mut serving_seats,
+                )
+                .await
+                {
+                    return;
+                }
+                partial_publication_retried = false;
             }
         },
         label = "daemon.project.owners.advisory_deferred"
     ))
+}
+
+async fn wait_for_generation_change(
+    project_root: &Path,
+    publications: &mut broadcast::Receiver<CodeIndexGenerationPublishedV1>,
+    serving_changes: &mut Option<watch::Receiver<()>>,
+    serving_seats: &mut watch::Receiver<u64>,
+) -> bool {
+    loop {
+        tokio::select! {
+            publication = publications.recv() => match publication {
+                Ok(publication) if publication.project_root == project_root => return true,
+                Ok(_) => {},
+                Err(broadcast::error::RecvError::Lagged(_)) => return true,
+                Err(broadcast::error::RecvError::Closed) => return false,
+            },
+            serving = async {
+                match serving_changes.as_mut() {
+                    Some(changes) => changes.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => return serving.is_ok(),
+            seat = serving_seats.changed() => return seat.is_ok(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -116,17 +315,27 @@ enum Attempt {
 }
 
 #[hotpath::measure(label = "daemon.project.owners.advisory_retry", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Deferred semantic mount is one generation-ready attach of the query authority."
+)]
 async fn try_mount(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &mut ProjectOpenDependentOwnerState,
 ) -> Attempt {
-    if let Some(lsp_session_factory) = state.lsp_session_factory.as_ref() {
+    if let Some(lsp_session_factory) = state.lsp_session_factory.clone() {
+        let Some(indexed_generation) =
+            selected_feedback_generation(invocation, project_root, &state.scope).await
+        else {
+            return Attempt::AwaitNextPublication;
+        };
         return match register_production_feedback_and_advisory(
             invocation,
             project_root,
             state,
-            Arc::clone(lsp_session_factory),
+            lsp_session_factory,
+            indexed_generation,
         )
         .await
         {
@@ -134,42 +343,19 @@ async fn try_mount(
             Err(_) => classify_failure(invocation, project_root, state).await,
         };
     }
-    // Two lookups, in this order, because passive waiting alone deadlocks a
-    // fresh project. The decoded-for-root-scope probe is the cheap arm: it
+    // The shared selection ladder prevents passive waiting from deadlocking a
+    // fresh project. Its decoded-for-root-scope probe is the cheap arm: it
     // reads an already-seated complete generation and asks the scheduler for
     // nothing. When nothing is seated it answers `None` and demands nothing,
     // so a deferred owner that only ever took this arm waited for a
     // publication that only demand produces — the project then served
     // indefinitely with the typed-unavailable feedback cycle.
-    // `latest_complete_ready_for_scope` is the authenticated demand boundary
-    // every other first-generation consumer resolves through, so take it
-    // before giving up and going back to sleep.
-    let indexed = match invocation
+    // Its demand and recovered-text arms both require current source evidence
+    // before this owner may admit their generation.
+    let indexed = invocation
         .code_index_schedulers
-        .latest_complete_ready_decoded_for_root_scope(project_root, &state.scope)
-        .await
-    {
-        Some(generation) => Some(generation.text_generation_handle()),
-        None => match invocation
-            .code_index_schedulers
-            .latest_complete_ready_for_scope(&state.scope)
-            .await
-        {
-            Some(generation) => Some(generation.text_generation_handle()),
-            // A clean restart that recovered its retained revision-7 graph
-            // head serves through the text projection and never seats the
-            // sealed slot, so no publication edge follows for a quiet
-            // checkout. Feedback, session and LSP availability must not wait
-            // on full code-index publication: take that recovered level,
-            // which carries the same sealed snapshot this owner reads.
-            None => {
-                invocation
-                    .code_index_schedulers
-                    .latest_text_serving_for_scope(&state.scope)
-                    .await
-            }
-        },
-    };
+        .latest_feedback_generation_for_scope(project_root, &state.scope)
+        .await;
     // Deliberately unlogged: the poll in `spawn` re-enters here once a second
     // while a cold project indexes, and one event per second per warming
     // project is noise, not evidence. `spawn` records the wait once instead.
@@ -199,7 +385,9 @@ async fn try_mount(
     // go. The cycle depends only on the sealed generation this attempt already
     // holds, not on the session factory — only the advisory owner needs that.
     let (feedback_cycle, feedback_scope) =
-        match register_production_feedback_cycle(invocation, project_root, state).await {
+        match register_production_feedback_cycle(invocation, project_root, state, indexed.clone())
+            .await
+        {
             Ok(mounted) => mounted,
             Err(error) => {
                 tracing::warn!(
@@ -344,4 +532,115 @@ async fn classify_failure(
         },
     );
     attempt
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    use tracedecay_domain::{CodeGenerationId, ContentDigest, RepositoryId};
+
+    use super::{CodeIndexGenerationPublishedV1, broadcast, wait_for_generation_change, watch};
+
+    #[tokio::test]
+    async fn serving_installation_wakes_after_sealed_publication_was_consumed() {
+        let root = tempfile::tempdir().expect("project root");
+        let foreign = tempfile::tempdir().expect("foreign project root");
+        let (publication_sender, mut publications) = broadcast::channel(4);
+        let (serving_sender, serving_receiver) = watch::channel(());
+        let mut serving_changes = Some(serving_receiver);
+        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
+        let publication = CodeIndexGenerationPublishedV1 {
+            project_root: root.path().to_path_buf(),
+            repository_id: RepositoryId::new("repository.deferred").expect("repository"),
+            generation_id: CodeGenerationId::new("generation.deferred").expect("generation"),
+            snapshot_content_identity: ContentDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("content digest"),
+            observation_time_micros: 1,
+        };
+        publication_sender
+            .send(publication.clone())
+            .expect("sealed publication");
+        assert!(
+            wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut serving_changes,
+                &mut serving_seats,
+            )
+            .await
+        );
+
+        let mut waiting = Box::pin(wait_for_generation_change(
+            root.path(),
+            &mut publications,
+            &mut serving_changes,
+            &mut serving_seats,
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+        publication_sender
+            .send(CodeIndexGenerationPublishedV1 {
+                project_root: foreign.path().to_path_buf(),
+                ..publication
+            })
+            .expect("foreign publication");
+        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+
+        serving_sender.send_replace(());
+        assert!(matches!(
+            waiting.as_mut().poll(&mut context),
+            Poll::Ready(true)
+        ));
+        drop(waiting);
+        drop(serving_sender);
+        assert!(
+            !wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut serving_changes,
+                &mut serving_seats,
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_seat_wakes_after_subscription_precedes_scheduler_enrollment() {
+        let root = tempfile::tempdir().expect("project root");
+        let (publication_sender, mut publications) = broadcast::channel(1);
+        let (seat_sender, mut serving_seats) = watch::channel(0_u64);
+
+        // The deferred owner subscribes while no per-project scheduler exists.
+        // A retained generation then seats without a new-generation broadcast.
+        seat_sender.send_modify(|seats| *seats += 1);
+        assert!(
+            wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut None,
+                &mut serving_seats,
+            )
+            .await
+        );
+        drop(publication_sender);
+    }
+
+    #[tokio::test]
+    async fn publication_channel_closure_stops_a_wait_before_scheduler_mount() {
+        let root = tempfile::tempdir().expect("project root");
+        let (sender, mut publications) = broadcast::channel(1);
+        let (_seat_sender, mut serving_seats) = watch::channel(0_u64);
+        drop(sender);
+        assert!(
+            !wait_for_generation_change(
+                root.path(),
+                &mut publications,
+                &mut None,
+                &mut serving_seats,
+            )
+            .await
+        );
+    }
 }

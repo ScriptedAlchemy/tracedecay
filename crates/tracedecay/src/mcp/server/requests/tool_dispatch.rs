@@ -3,7 +3,7 @@
 use super::*;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 
-use super::super::read_coalescing::{ReadFlightClaim, tool_allows_identical_read_coalescing};
+use tracedecay_mcp::server::{ReadFlightClaim, tool_allows_identical_read_coalescing};
 
 impl McpServer {
     #[hotpath::skip]
@@ -138,15 +138,15 @@ impl McpServer {
                 application_invocation_executor,
                 application_invocation_target,
                 Some(
-                    tracedecay_application::RequestId::new("request.mcp.test-transport")
+                    tracedecay_contracts::RequestId::new("request.mcp.test-transport")
                         .expect("static test-transport request identity"),
                 ),
                 Some(
-                    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
+                    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
                         .expect("static test-transport deadline"),
                 ),
                 Some(
-                    tracedecay_application::CancellationSignal::active(
+                    tracedecay_contracts::CancellationSignal::active(
                         "cancellation.mcp.test-transport",
                     )
                     .expect("static test-transport cancellation"),
@@ -163,7 +163,7 @@ impl McpServer {
         routed: RoutedToolCall,
         timings_enabled: bool,
         publish_activity: bool,
-        application_request_id: Option<tracedecay_application::RequestId>,
+        application_request_id: Option<tracedecay_contracts::RequestId>,
         dispatch_control: DispatchControl,
     ) -> DispatchedToolCall {
         let handler_start = timings_enabled.then(std::time::Instant::now);
@@ -242,6 +242,10 @@ impl McpServer {
 
     #[allow(clippy::too_many_arguments)]
     #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Tool dispatch is one registry match onto the owning handler future."
+    )]
     pub(super) async fn execute_tool_dispatch(
         &self,
         cg: &TraceDecay,
@@ -252,13 +256,17 @@ impl McpServer {
         application_invocation_executor: Option<
             &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
         >,
-        application_invocation_target: tracedecay_application::InvocationTarget,
-        application_request_id: Option<tracedecay_application::RequestId>,
-        application_deadline: Option<tracedecay_application::Deadline>,
-        application_cancellation: Option<tracedecay_application::CancellationSignal>,
+        application_invocation_target: tracedecay_contracts::InvocationTarget,
+        application_request_id: Option<tracedecay_contracts::RequestId>,
+        application_deadline: Option<tracedecay_contracts::Deadline>,
+        application_cancellation: Option<tracedecay_contracts::CancellationSignal>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
-        let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
+        let read_flight = tool_allows_identical_read_coalescing(tool_name, |tool_name| {
+            crate::mcp::tools::mcp_dispatch_contract(tool_name)
+                .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
+        })
+        .then(|| {
             self.identical_read_coalescer.claim(
                 engine_identity.to_string_lossy().as_ref(),
                 tool_name,
@@ -282,8 +290,8 @@ impl McpServer {
                 global_db: self.registry_db.as_ref(),
                 project_registry_reads: self.project_registry_reads.as_deref(),
                 accounting_db: self.accounting_db.as_deref(),
-                registered_project_session_db: self.registered_session_db.clone(),
-                registered_profile_session_db: self.registered_user_session_db.clone(),
+                registered_project_session_db: self.project_session_db.clone(),
+                registered_profile_session_db: self.profile_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
                 dashboard_session_retrieval_service: self
                     .project_application_retrieval
@@ -306,8 +314,7 @@ impl McpServer {
                 code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
                 explorer_semantic_reader: self.dashboard_explorer_semantic_reader.clone(),
                 feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
-                diagnostics_cache: Some(&self.diagnostics_cache),
-                diagnostics_change_generation: self.diagnostics_change_generation.clone(),
+                pr_autotrack_reader: self.dashboard_pr_autotrack_reader.clone(),
                 diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_executor,
                 application_invocation_target,
@@ -323,13 +330,8 @@ impl McpServer {
                 code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
                 code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
-                source_edit_executor: self.source_edit_executor.get().cloned(),
-                source_edit_reconciliation_executor: self
-                    .source_edit_reconciliation_executor
-                    .get()
-                    .cloned(),
-                source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
+                admitted_project_scope: self.admitted_project_scope.clone(),
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
                 code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
                 verified_graph_query_port: self.verified_graph_query_port.clone(),
@@ -341,19 +343,17 @@ impl McpServer {
                 session_sync_service: session_sync_service.as_deref(),
                 served_stale_graph_generation: std::sync::Arc::new(std::sync::OnceLock::new()),
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
-                    self.session_db.as_ref(),
-                    self.user_session_db.as_ref(),
+                    self.project_session_db.as_ref(),
+                    self.profile_session_db.as_ref(),
                 )
                 .with_profile_identity(self.profile_identity.clone())
+                .with_background_cpu(self.background_cpu.clone())
                 .with_profile_retained_authority(self.profile_retained_authority.as_ref())
-                .with_registered_databases(
-                    self.registered_session_db.as_ref(),
-                    self.registered_user_session_db.as_ref(),
-                )
                 .with_lcm_authorities(
                     self.project_lcm_authority.as_deref(),
                     self.user_lcm_authority.as_deref(),
-                ),
+                )
+                .with_profile_session_refresh(self.profile_session_refresh_service.as_deref()),
             },
         );
         if let Some(read_flight) = read_flight {

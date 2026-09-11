@@ -19,7 +19,7 @@ use tracedecay_store::{
     ObservationStoreResult,
 };
 
-use tracedecay_runtime_core::privacy::{ClaudeSanitizerPolicyV1, parse_claude_record_v1};
+use tracedecay_privacy::{ClaudeSanitizerPolicyV1, parse_claude_record_v1};
 
 use super::*;
 

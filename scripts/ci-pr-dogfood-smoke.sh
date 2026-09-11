@@ -40,16 +40,25 @@ print_compact_file() {
   fi
 }
 
-# One line of code-index progress from a status payload, for the attempts
-# log: which phase the index is in and how far along, so a timeout report
-# shows where the journey stalled without rerunning it.
+# One line of code-index attribution from a status payload, for the attempts
+# log. Strict readiness is several distinct phases -- source capture and seal
+# (no progress phase yet), the bounded text projection, its finalization, then
+# the optional native graph seat -- and a timeout must name the one it died
+# in. So besides the phase and its counters this records the identities that
+# tell them apart: the sealed source digest and generation the text projection
+# is building, the coverage/staleness pair that gates `status=current`, the
+# graph seat state with its typed reason, and the graph-statistics state the
+# strict validator requires. Text readiness and graph seating stay separate
+# columns on purpose: a complete text projection waiting on the graph must
+# never read as a stalled text build (issue #917).
 summarize_status_progress() {
   local path="$1"
+  local progress
   [[ -s "$path" ]] || {
     echo "progress=unavailable"
     return 0
   }
-  python3 -S - "$path" <<'PY' 2>/dev/null || echo "progress=unparsed"
+  progress="$(python3 -S - "$path" <<'PY' 2>/dev/null || echo "progress=unparsed"
 import json, sys
 
 try:
@@ -58,45 +67,207 @@ try:
 except (OSError, ValueError):
     print("progress=unparsed")
     raise SystemExit(0)
+
+
+def tail(value, width=12):
+    if not isinstance(value, str) or not value:
+        return None
+    return value[-width:]
+
+
 freshness = payload.get("code_index_freshness") or {}
 worktree = freshness.get("worktree") or {}
 progress = worktree.get("progress") or {}
 serving = worktree.get("code_graph_serving") or {}
+statistics = payload.get("graph_statistics") or {}
+graph = serving.get("state")
+if serving.get("reason"):
+    graph = "%s:%s" % (graph, str(serving["reason"]).replace(" ", "_")[:48])
+elapsed_micros = progress.get("elapsed_micros")
+commit_micros = progress.get("last_commit_latency_micros")
 print(
-    "status=%s serving=%s phase=%s files=%s/%s pages=%s blocked=%s"
+    "status=%s coverage=%s staleness=%s rebuild=%s gen=%s digest=%s graph=%s "
+    "gstats=%s phase=%s files=%s/%s pages=%s payload_mb=%s elapsed_s=%s "
+    "commit_ms=%s blocked=%s"
     % (
         freshness.get("status"),
-        serving.get("state"),
+        worktree.get("coverage"),
+        worktree.get("staleness_state"),
+        worktree.get("rebuild_in_flight"),
+        tail(worktree.get("latest_generation_id")),
+        tail(progress.get("sealed_source_digest")),
+        graph,
+        statistics.get("state"),
         progress.get("phase"),
         progress.get("completed_files"),
         progress.get("total_files"),
         progress.get("committed_pages"),
+        None
+        if progress.get("committed_payload_bytes") is None
+        else int(progress["committed_payload_bytes"]) // 1_000_000,
+        None if elapsed_micros is None else int(elapsed_micros) // 1_000_000,
+        None if commit_micros is None else int(commit_micros) // 1_000,
         progress.get("blocked_reason"),
+    )
+)
+PY
+)"
+  echo "$progress"
+}
+
+# The daemon's resident memory at this probe, in MiB, plus the peak the kernel
+# reports where it has one. The harness exports TRACEDECAY_DAEMON_PID; without
+# it (or once the daemon is gone) the sample says so instead of failing the
+# probe. Memory is part of the readiness evidence: on a 16 GiB runner the
+# native graph seat, not the text projection, is what can exhaust the host.
+summarize_daemon_memory() {
+  local pid="${TRACEDECAY_DAEMON_PID:-}"
+  [[ -n "$pid" ]] || {
+    echo "daemon_rss_mb=unavailable daemon_peak_rss_mb=unavailable"
+    return 0
+  }
+  python3 -S - "$PROCESS_HELPER" "$pid" <<'PY' 2>/dev/null || echo "daemon_rss_mb=unavailable daemon_peak_rss_mb=unavailable"
+import subprocess, sys
+
+completed = subprocess.run(
+    [sys.executable, "-S", sys.argv[1], "resident-memory", "--pid", sys.argv[2]],
+    check=False,
+    capture_output=True,
+    text=True,
+    timeout=10,
+)
+values = dict(
+    field.split("=", 1) for field in completed.stdout.split() if "=" in field
+)
+
+
+def mib(key):
+    raw = values.get(key)
+    return str(int(raw) // 1024) if raw and raw.isdigit() else "unavailable"
+
+
+print("daemon_rss_mb=%s daemon_peak_rss_mb=%s" % (mib("rss_kib"), mib("peak_rss_kib")))
+PY
+}
+
+# Attribute the readiness journey from the attempts log: when progress first
+# became visible, when the text projection reached its complete state, when
+# the graph seat became ready, the peak daemon memory observed, and the last
+# phase/graph state. Printed on success and on timeout alike, so a PASS
+# carries its phase timings and peak memory rather than only a verdict, and a
+# timeout says whether it died sealing, projecting text, or seating the graph.
+report_readiness_phases() {
+  local attempts_path="$1"
+  local outcome="$2"
+  [[ -s "$attempts_path" ]] || {
+    echo "tracedecay_ci_readiness_phases outcome=$outcome attempts=0"
+    return 0
+  }
+  python3 -S - "$attempts_path" "$outcome" <<'PY' 2>/dev/null || echo "tracedecay_ci_readiness_phases outcome=$outcome parse=failed"
+import sys
+
+first = {}
+peak_rss = None
+last = {}
+attempts = 0
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        fields = dict(
+            field.split("=", 1) for field in line.split() if "=" in field
+        )
+        if "attempt" not in fields:
+            continue
+        attempts += 1
+        elapsed = fields.get("elapsed_ms")
+        last = fields
+        phase = fields.get("phase")
+        graph = fields.get("graph", "")
+        if phase not in (None, "None") and "first_progress_ms" not in first:
+            first["first_progress_ms"] = elapsed
+        if fields.get("gen") not in (None, "None") and "first_generation_ms" not in first:
+            first["first_generation_ms"] = elapsed
+        if (
+            phase == "ready" or fields.get("coverage") == "complete"
+        ) and "text_complete_ms" not in first:
+            first["text_complete_ms"] = elapsed
+        if graph.startswith("ready") and "graph_ready_ms" not in first:
+            first["graph_ready_ms"] = elapsed
+        if fields.get("status") == "current" and "status_current_ms" not in first:
+            first["status_current_ms"] = elapsed
+        for key in ("daemon_peak_rss_mb", "daemon_rss_mb"):
+            raw = fields.get(key)
+            if raw and raw.isdigit():
+                peak_rss = max(peak_rss or 0, int(raw))
+                break
+print(
+    "tracedecay_ci_readiness_phases outcome=%s attempts=%d first_progress_ms=%s "
+    "first_generation_ms=%s text_complete_ms=%s graph_ready_ms=%s status_current_ms=%s "
+    "peak_daemon_rss_mb=%s last_phase=%s last_files=%s last_graph=%s last_coverage=%s"
+    % (
+        sys.argv[2],
+        attempts,
+        first.get("first_progress_ms"),
+        first.get("first_generation_ms"),
+        first.get("text_complete_ms"),
+        first.get("graph_ready_ms"),
+        first.get("status_current_ms"),
+        "unavailable" if peak_rss is None else peak_rss,
+        last.get("phase"),
+        last.get("files"),
+        last.get("graph"),
+        last.get("coverage"),
     )
 )
 PY
 }
 
+# True when the daemon refused this phase with a typed, self-declared retryable
+# terminal. The MCP boundary renders every routed refusal as
+# `reason_code=<code> retryable=<bool>` (crates/tracedecay-mcp/src/tool_errors.rs),
+# so the retryability bit is read from the contract rather than guessed from
+# prose. A tool whose bounded deadline expired while its admitted worker was
+# still settling is exactly this: the daemon declined to wait, said so, and
+# said the call may be re-issued (issue #1203).
+retryable_daemon_refusal() {
+  local path="$1"
+  [[ -s "$path" ]] || return 1
+  grep -q 'reason_code=[^ ]* retryable=true' "$path"
+}
+
+# Run one journey phase, honouring a typed retryable refusal exactly once.
+#
+# The retry is not a workaround for a slow daemon: a refusal that repeats is
+# still a failed journey, and every attempt keeps its own timing line so a
+# reader sees the refusal happened. What it stops is a green daemon losing the
+# whole journey to a bounded budget it deliberately declined to exceed.
 run_timed() {
   local label="$1"
   local timeout_seconds="$2"
   local stdout_path="$3"
   local stderr_path="$4"
   shift 4
-  local started_ms status duration_ms
-  started_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
-  status=0
-  python3 -S "$PROCESS_HELPER" run \
-    --timeout "$timeout_seconds" --kill-after 5 -- "$@" \
-    >"$stdout_path" 2>"$stderr_path" || status=$?
-  duration_ms="$(elapsed_ms "$started_ms")"
-  echo "tracedecay_ci_timing phase=$label elapsed_ms=$duration_ms status=$status"
-  if ((status != 0)); then
+  local started_ms status duration_ms attempt
+  for attempt in 1 2; do
+    started_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
+    status=0
+    python3 -S "$PROCESS_HELPER" run \
+      --timeout "$timeout_seconds" --kill-after 5 -- "$@" \
+      >"$stdout_path" 2>"$stderr_path" || status=$?
+    duration_ms="$(elapsed_ms "$started_ms")"
+    echo "tracedecay_ci_timing phase=$label elapsed_ms=$duration_ms status=$status"
+    if ((status == 0)); then
+      break
+    fi
+    if ((attempt == 1)) && retryable_daemon_refusal "$stderr_path"; then
+      echo "tracedecay_ci_retryable_refusal phase=$label attempt=$attempt"
+      print_compact_file "$label stderr" "$stderr_path"
+      continue
+    fi
     echo "error: TraceDecay PR dogfood phase '$label' failed" >&2
     print_compact_file "$label stdout" "$stdout_path"
     print_compact_file "$label stderr" "$stderr_path"
     return "$status"
-  fi
+  done
   cat "$stdout_path"
   if [[ -s "$stderr_path" ]]; then
     cat "$stderr_path" >&2
@@ -198,9 +369,10 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
           2>"$output_dir/status.validation.stderr" || validation_status=$?
       fi
     fi
-    printf 'attempt=%s elapsed_ms=%s probe_ms=%s status_rc=%s validation_rc=%s %s\n' \
+    printf 'attempt=%s elapsed_ms=%s probe_ms=%s status_rc=%s validation_rc=%s %s %s\n' \
       "$attempts" "$(elapsed_ms "$started_ms")" "$probe_ms" "$command_status" \
       "$validation_status" "$(summarize_status_progress "$output_dir/status.json")" \
+      "$(summarize_daemon_memory)" \
       >>"$output_dir/status.attempts.log"
     if ((command_status == 0 && validation_status == 0)); then
       duration_ms="$(elapsed_ms "$started_ms")"
@@ -209,6 +381,7 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
       cat "$output_dir/status.validation.stdout"
       echo "tracedecay_ci_timing phase=status elapsed_ms=$duration_ms status=0"
       echo "tracedecay_ci_readiness attempts=$attempts elapsed_ms=$duration_ms"
+      report_readiness_phases "$output_dir/status.attempts.log" ready
       return 0
     fi
 
@@ -221,6 +394,7 @@ raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
 
   duration_ms="$(elapsed_ms "$started_ms")"
   echo "tracedecay_ci_timing phase=status elapsed_ms=$duration_ms status=1"
+  report_readiness_phases "$output_dir/status.attempts.log" timeout
   echo "error: TraceDecay PR dogfood did not reach strict index readiness within ${timeout_seconds}s" >&2
   print_compact_file "status readiness attempts" "$output_dir/status.attempts.log"
   print_compact_file "last complete status output" "$output_dir/status.json"
@@ -317,7 +491,13 @@ main() {
 
   started_ms="$(python3 -S "$PROCESS_HELPER" monotonic-ms)"
   status=0
-  HOME="$WORK_DIR/home" \
+  # The daemon's stderr defaults to WARN, which hides every phase boundary the
+  # scheduler reports at INFO (reconcile pass started / interrupted, generation
+  # published, serving generation seated). A timeout report needs those
+  # timestamps to attribute the warming window, so enable exactly that target
+  # unless the operator already chose a filter.
+  RUST_LOG="${RUST_LOG:-warn,tracedecay_code_index_runtime::code_index_scheduler=info}" \
+    HOME="$WORK_DIR/home" \
     XDG_DATA_HOME="$WORK_DIR/home/.local/share" \
     XDG_CONFIG_HOME="$WORK_DIR/home/.config" \
     TRACEDECAY_BIN="$binary" \

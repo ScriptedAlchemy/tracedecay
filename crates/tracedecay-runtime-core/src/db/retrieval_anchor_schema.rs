@@ -103,7 +103,20 @@ pub(super) const AUTHORITY_SCHEMA: &str = "
     );
 ";
 
-pub(super) const IMMUTABILITY_TRIGGERS: &str = "
+/// Delete guards on the anchor identity and alias tables.
+///
+/// A scoped observation-authority reset drops exactly these two inside its
+/// maintenance transaction, removes the anchors the reset observation stream
+/// bound, and reinstalls every guard from
+/// [`RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL`] before it commits.
+pub const RETRIEVAL_ANCHOR_DELETE_GUARD_TRIGGERS: &[&str] = &[
+    "retrieval_anchors_immutable_delete",
+    "retrieval_anchor_aliases_immutable_delete",
+];
+
+/// Idempotent DDL for every retrieval-anchor immutability trigger; the single
+/// authority both schema installation and scoped maintenance reinstall from.
+pub const RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL: &str = "
     CREATE TRIGGER IF NOT EXISTS retrieval_anchors_immutable_update
     BEFORE UPDATE ON retrieval_anchors BEGIN
         SELECT RAISE(ABORT, 'retrieval anchors are immutable');
@@ -113,8 +126,23 @@ pub(super) const IMMUTABILITY_TRIGGERS: &str = "
         SELECT RAISE(ABORT, 'retrieval anchors are immutable');
     END;
     CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_update
-    BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
-        SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+    BEFORE UPDATE ON retrieval_anchor_aliases
+    WHEN NEW.owner_json != OLD.owner_json
+      OR NEW.alias_kind != OLD.alias_kind
+      OR NEW.locator_digest != OLD.locator_digest
+      OR NOT EXISTS (
+          SELECT 1 FROM retrieval_anchor_dispositions AS disposition
+          WHERE disposition.anchor_id = OLD.anchor_id
+            AND disposition.state = 'superseded'
+            AND disposition.reason_class = 'correction'
+            AND disposition.superseded_by = NEW.anchor_id
+            AND disposition.sequence = (
+                SELECT MAX(latest.sequence) FROM retrieval_anchor_dispositions AS latest
+                WHERE latest.anchor_id = OLD.anchor_id
+            )
+      )
+    BEGIN
+        SELECT RAISE(ABORT, 'retrieval anchor alias requires exact supersession');
     END;
     CREATE TRIGGER IF NOT EXISTS retrieval_anchor_aliases_immutable_delete
     BEFORE DELETE ON retrieval_anchor_aliases BEGIN
@@ -304,28 +332,40 @@ async fn validate_legacy_alias_ownership(
     Ok(())
 }
 
+/// The two directions an owner-unbound alias row can collide with a canonical
+/// one: same owner key under a different anchor, or same anchor key under a
+/// different owner.
+///
+/// These live outside the loop below because an array literal iterated in
+/// place leaves a `std::array::IntoIter` alive across the query `await`, and
+/// that iterator's `MaybeDangling`/`ManuallyDrop`/`MaybeUninit` layers are
+/// re-entered for every auto-trait obligation raised on the enclosing future —
+/// at the deepest point of the schema-install chain that daemon project-open
+/// awaits. Borrowing a promoted slice keeps a plain `slice::Iter` there.
+const ALIAS_COPY_CONFLICT_QUERIES: &[&str] = &[
+    "SELECT 1
+     FROM retrieval_anchor_aliases_owner_unbound_v1 AS legacy
+     JOIN retrieval_anchor_aliases AS current
+       ON current.owner_json = legacy.owner_json
+      AND current.alias_kind = legacy.alias_kind
+      AND current.locator_digest = legacy.locator_digest
+     WHERE current.anchor_id <> legacy.anchor_id
+     LIMIT 1",
+    "SELECT 1
+     FROM retrieval_anchor_aliases_owner_unbound_v1 AS legacy
+     JOIN retrieval_anchor_aliases AS current
+       ON current.anchor_id = legacy.anchor_id
+      AND current.alias_kind = legacy.alias_kind
+      AND current.locator_digest = legacy.locator_digest
+     WHERE current.owner_json <> legacy.owner_json
+     LIMIT 1",
+];
+
 async fn validate_alias_copy_conflicts(
     conn: &(impl Executor + Sync),
     operation: &str,
 ) -> Result<()> {
-    for sql in [
-        "SELECT 1
-         FROM retrieval_anchor_aliases_owner_unbound_v1 AS legacy
-         JOIN retrieval_anchor_aliases AS current
-           ON current.owner_json = legacy.owner_json
-          AND current.alias_kind = legacy.alias_kind
-          AND current.locator_digest = legacy.locator_digest
-         WHERE current.anchor_id <> legacy.anchor_id
-         LIMIT 1",
-        "SELECT 1
-         FROM retrieval_anchor_aliases_owner_unbound_v1 AS legacy
-         JOIN retrieval_anchor_aliases AS current
-           ON current.anchor_id = legacy.anchor_id
-          AND current.alias_kind = legacy.alias_kind
-          AND current.locator_digest = legacy.locator_digest
-         WHERE current.owner_json <> legacy.owner_json
-         LIMIT 1",
-    ] {
+    for &sql in ALIAS_COPY_CONFLICT_QUERIES {
         let mut rows = conn
             .query(sql, ())
             .await
@@ -724,6 +764,11 @@ async fn upgrade_dispositions_if_needed(
 /// Existing one-column alias foreign keys are upgraded with a resumable,
 /// validated copy; conflicting or ownerless rows are retained and reported
 /// rather than discarded.
+///
+/// The two upgrade phases are awaited through a box. Each is a deep tree of
+/// nested `async fn` validators, and async lowering would otherwise expand
+/// those trees into the future of every migration, admission, and store-open
+/// path that installs this schema.
 #[hotpath::measure(label = "runtime_core.db.anchor_schema_install")]
 pub async fn install_retrieval_anchor_schema(
     conn: &(impl Executor + Sync),
@@ -733,17 +778,18 @@ pub async fn install_retrieval_anchor_schema(
         .await
         .map_err(|error| database_error(operation, error))?;
     validate_anchor_table_columns(conn, operation).await?;
-    upgrade_aliases_if_needed(conn, operation).await?;
-    upgrade_dispositions_if_needed(conn, operation).await?;
+    Box::pin(upgrade_aliases_if_needed(conn, operation)).await?;
+    Box::pin(upgrade_dispositions_if_needed(conn, operation)).await?;
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS retrieval_anchors_no_update;
          DROP TRIGGER IF EXISTS retrieval_anchors_no_delete;
          DROP TRIGGER IF EXISTS retrieval_anchor_aliases_no_update;
-         DROP TRIGGER IF EXISTS retrieval_anchor_aliases_no_delete;",
+         DROP TRIGGER IF EXISTS retrieval_anchor_aliases_no_delete;
+         DROP TRIGGER IF EXISTS retrieval_anchor_aliases_immutable_update;",
     )
     .await
     .map_err(|error| database_error(operation, error))?;
-    conn.execute_batch(IMMUTABILITY_TRIGGERS)
+    conn.execute_batch(RETRIEVAL_ANCHOR_IMMUTABILITY_TRIGGERS_SQL)
         .await
         .map_err(|error| database_error(operation, error))
 }
@@ -779,6 +825,29 @@ mod tests {
         )
         .await
         .expect("insert anchor");
+    }
+
+    /// Async lowering embeds an awaited future inside its caller, so the alias
+    /// and disposition upgrade phases would expand into every migration,
+    /// admission, and store-open future that installs this schema. Both phases
+    /// stay behind pointers at this boundary; the probe fails if either is
+    /// inlined back into the install future.
+    ///
+    /// Measured under `--features hotpath`, where each measured `async fn`
+    /// embeds its body a second time: 2,144 B with both phases boxed, 7,664 B
+    /// with either one inlined.
+    #[test]
+    fn schema_install_holds_its_upgrade_phases_behind_pointers() {
+        const CEILING: usize = 4 * 1024;
+        let directory = tempfile::tempdir().expect("create anchor future probe fixture");
+        let connection = TestConnection::open(&directory.path().join("anchors.db"));
+        let install = install_retrieval_anchor_schema(&connection, "probe anchor schema future");
+        let size = std::mem::size_of_val(&install);
+        drop(install);
+        assert!(
+            size <= CEILING,
+            "install_retrieval_anchor_schema future is {size} B; ceiling {CEILING} B"
+        );
     }
 
     #[tokio::test]
@@ -824,6 +893,79 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn alias_target_promotion_requires_exact_current_supersession() {
+        let (_directory, conn) = connection().await;
+        install_retrieval_anchor_schema(&conn, "install alias transition fixture")
+            .await
+            .unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER retrieval_anchor_aliases_immutable_update;
+             CREATE TRIGGER retrieval_anchor_aliases_immutable_update
+             BEFORE UPDATE ON retrieval_anchor_aliases BEGIN
+                 SELECT RAISE(ABORT, 'retrieval anchor aliases are immutable');
+             END;",
+        )
+        .await
+        .unwrap();
+        install_retrieval_anchor_schema(&conn, "upgrade shipped alias trigger")
+            .await
+            .unwrap();
+        conn.execute(
+            "INSERT INTO retrieval_anchors(anchor_id, anchor_json, owner_json, projection_generation)
+             VALUES ('old', '{}', '{}', 'g'), ('new', '{}', '{}', 'g'), ('other', '{}', '{}', 'g')", (),
+        ).await.unwrap();
+        conn.execute(
+            "INSERT INTO retrieval_anchor_aliases(owner_json, alias_kind, locator_digest, anchor_id)
+             VALUES ('{}', 'native', 'digest', 'old')", (),
+        ).await.unwrap();
+        let promote =
+            "UPDATE retrieval_anchor_aliases SET anchor_id = 'new' WHERE anchor_id = 'old'";
+        assert!(conn.execute(promote, ()).await.is_err());
+        conn.execute(
+            "INSERT INTO retrieval_anchor_dispositions(disposition_id, anchor_id, owner_json,
+                state, superseded_by, reason_class, effective_at, record_json)
+             VALUES ('wrong', 'old', '{}', 'superseded', 'other', 'correction', 1, '{}')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(conn.execute(promote, ()).await.is_err());
+        conn.execute(
+            "INSERT INTO retrieval_anchor_dispositions(disposition_id, anchor_id, owner_json,
+                state, superseded_by, reason_class, effective_at, record_json)
+             VALUES ('exact', 'old', '{}', 'superseded', 'new', 'correction', 2, '{}')",
+            (),
+        )
+        .await
+        .unwrap();
+        assert!(conn.execute(
+            "UPDATE retrieval_anchor_aliases SET anchor_id = 'new', locator_digest = 'changed' WHERE anchor_id = 'old'", (),
+        ).await.is_err());
+        assert_eq!(conn.execute(promote, ()).await.unwrap(), 1);
+        assert!(
+            conn.execute("DELETE FROM retrieval_anchor_aliases", ())
+                .await
+                .is_err()
+        );
+        install_retrieval_anchor_schema(&conn, "reopen promoted aliases")
+            .await
+            .unwrap();
+        let mut rows = conn
+            .query("SELECT anchor_id FROM retrieval_anchor_aliases", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "new"
         );
     }
 

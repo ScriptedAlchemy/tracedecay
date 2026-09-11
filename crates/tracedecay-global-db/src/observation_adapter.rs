@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_application::clock::now_micros;
+use tracedecay_contracts::clock::now_micros;
 use tracing::Instrument;
 
 use tracedecay_domain::{
@@ -10,34 +10,38 @@ use tracedecay_domain::{
     EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, ManifestDigest,
     ObservationCollisionOutcomeV1, ObservationIdentityMaterialV1, ObservationScopeV1,
     PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, SanitizationReceiptV1, canonical_json_bytes_and_sha256,
-    canonical_sha256, classify_observation_collision, is_canonical_payload_revision_replay,
+    RetrievalAnchorRecordV2, SanitizationReceiptV1, canonical_json_bytes,
+    canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
+    cline_native_source_successor_id, cline_task_native_observation_id,
+    is_canonical_payload_revision_replay, prove_cline_native_source_transition,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
     ObservationIdentityCollisionDispositionV1,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, CommandDigestV1, ConsistencyModeV1,
-    CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1, DurabilityClassV1,
-    IdempotencyIdentityV1, ObservationBatchFallbackCause, ObservationBatchPersistOutcome,
-    ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStatus,
-    ObservationProjectionStore, ObservationReadOperationV1, ObservationReadResultV1,
-    ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationStoreResult,
-    OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1, ProjectionCheckpoint,
-    ProjectionPersistOutcome, ProjectionPredecessorConvergence, ProjectionRebuildOutcome,
-    ProjectionStoreResult, RepositoryOperationEnvelopeV1, RepositoryProvenanceAttachmentV1,
-    RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
-    RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
-    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StorageRuntimeErrorV1, StoreClientIdV1, StoreIdempotencyKeyV1,
-    StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
+    BACKGROUND_BATCH_MAX_BYTES, BACKGROUND_BATCH_MAX_OPERATIONS, CommandDigestV1,
+    ConsistencyModeV1, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
+    DurabilityClassV1, FOREGROUND_BATCH_MAX_BYTES, IdempotencyIdentityV1,
+    ObservationBatchFallbackCause, ObservationBatchPersistOutcome, ObservationCommitReceipt,
+    ObservationPersistOutcome, ObservationProjectionStatus, ObservationProjectionStore,
+    ObservationReadOperationV1, ObservationReadResultV1, ObservationReplayRequest,
+    ObservationStore, ObservationStoreError, ObservationStoreResult, OperationPriorityV1,
+    ProjectReadOperationV1, ProjectReadResultV1, ProjectionCheckpoint, ProjectionPersistOutcome,
+    ProjectionPredecessorConvergence, ProjectionRebuildOutcome, ProjectionStoreResult,
+    RepositoryOperationEnvelopeV1, RepositoryProvenanceAttachmentV1, RepositoryReadOperationV1,
+    RepositoryReadResultV1, RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1,
+    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+    RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
+    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
+    RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1,
+    StorageRuntimeErrorV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
+    StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
 };
 
 use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot, DatabaseRuntimeClientV1};
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
+use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
     COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL,
     RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
@@ -556,11 +560,13 @@ impl GlobalDbObservationStore {
                             ObservationBatchFallbackCause::IntraBatchRetrievalAnchorAliasCollision,
                     });
                 }
-                return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
-                    alias: Box::new(alias.clone()),
-                    existing_anchor_id: Box::new(existing.anchor_id),
-                    candidate_anchor_id: Box::new(write.retrieval_anchor_id().clone()),
-                });
+                if !preflight.accepts_pending_cline_alias(&write, &existing.anchor_id)? {
+                    return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
+                        alias: Box::new(alias.clone()),
+                        existing_anchor_id: Box::new(existing.anchor_id),
+                        candidate_anchor_id: Box::new(write.retrieval_anchor_id().clone()),
+                    });
+                }
             }
         }
         let covered_duplicate =
@@ -618,6 +624,7 @@ struct ObservationPreflightSnapshot {
     admission_refusals: HashMap<(String, String), PayloadDigestV1>,
     stored_observations: HashMap<String, StoredObservation>,
     retrieval_aliases: HashMap<(String, String, String), RetrievalAnchorId>,
+    cline_supersessions: HashMap<RetrievalAnchorId, RetrievalAnchorId>,
     source_cursors: HashMap<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>,
 }
 
@@ -654,6 +661,54 @@ impl ObservationPreflightSnapshot {
         observation_id: &CanonicalObservationIdV1,
     ) -> Option<&StoredObservation> {
         self.stored_observations.get(observation_id.as_str())
+    }
+
+    fn accepts_pending_cline_alias(
+        &self,
+        write: &AnchoredObservationWrite,
+        existing_anchor: &RetrievalAnchorId,
+    ) -> ObservationStoreResult<bool> {
+        let Some(predecessor_id) = cline_task_native_observation_id(write.observation())
+            .map_err(|error| runtime_storage_error("derive Cline native source identity", error))?
+        else {
+            let Some(successor_id) = cline_native_source_successor_id(write.observation())
+                .map_err(|error| {
+                    runtime_storage_error("derive Cline native source identity", error)
+                })?
+            else {
+                return Ok(false);
+            };
+            let Some(successor) = self.stored_observation(&successor_id) else {
+                return Ok(false);
+            };
+            return Ok(successor.retrieval_anchor_id() == existing_anchor
+                && self.cline_supersessions.get(write.retrieval_anchor_id())
+                    == Some(existing_anchor)
+                && prove_cline_native_source_transition(
+                    write.observation(),
+                    successor.observation(),
+                )
+                .is_some());
+        };
+        let Some(predecessor) = self.stored_observation(&predecessor_id) else {
+            return Ok(false);
+        };
+        let prior_anchor = predecessor.retrieval_anchor();
+        let next_anchor = write.retrieval_anchor();
+        let prior_auth = prior_anchor.authorization();
+        let next_auth = next_anchor.authorization();
+        Ok(prior_anchor.anchor_id() == existing_anchor
+            && prior_anchor.owner() == next_anchor.owner()
+            && prior_anchor.aliases() == next_anchor.aliases()
+            && prior_anchor.payload_access() == next_anchor.payload_access()
+            && prior_anchor.retention_class() == next_anchor.retention_class()
+            && prior_anchor.durability() == next_anchor.durability()
+            && prior_auth.resolved_scope_id == next_auth.resolved_scope_id
+            && prior_auth.privacy_domain_id == next_auth.privacy_domain_id
+            && prior_auth.access_policy_digest == next_auth.access_policy_digest
+            && prior_auth.capability_id == next_auth.capability_id
+            && prove_cline_native_source_transition(predecessor.observation(), write.observation())
+                .is_some())
     }
 
     fn source_cursor(
@@ -789,12 +844,30 @@ async fn load_observation_preflight(
         {
             observation_ids.push(observation.observation_id().clone());
         }
+        for counterpart in [
+            cline_task_native_observation_id(observation).map_err(|error| {
+                runtime_storage_error("derive Cline native source identity", error)
+            })?,
+            cline_native_source_successor_id(observation).map_err(|error| {
+                runtime_storage_error("derive Cline native source identity", error)
+            })?,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if seen_observation_ids.insert(counterpart.as_str().to_owned()) {
+                observation_ids.push(counterpart);
+            }
+        }
     }
     let stored_observations =
         read_stored_observations_from_snapshot(&snapshot, &observation_ids, OPERATION).await?;
     let retrieval_aliases =
         read_retrieval_aliases_from_snapshot(&snapshot, writes, OPERATION).await?;
     let source_cursors = read_source_cursors_from_snapshot(&snapshot, writes, OPERATION).await?;
+    let cline_supersessions =
+        read_cline_supersessions_from_snapshot(&snapshot, &stored_observations, writes, OPERATION)
+            .await?;
     snapshot
         .commit()
         .await
@@ -803,8 +876,73 @@ async fn load_observation_preflight(
         admission_refusals,
         stored_observations,
         retrieval_aliases,
+        cline_supersessions,
         source_cursors,
     })
+}
+
+async fn read_cline_supersessions_from_snapshot(
+    snapshot: &DatabaseEngineReadSnapshot,
+    stored: &HashMap<String, StoredObservation>,
+    writes: &[AnchoredObservationWrite],
+    operation: &'static str,
+) -> ObservationStoreResult<HashMap<RetrievalAnchorId, RetrievalAnchorId>> {
+    let mut anchors = HashMap::new();
+    for write in writes {
+        if let Some(successor_id) = cline_native_source_successor_id(write.observation())
+            .map_err(|error| runtime_storage_error("derive Cline native source identity", error))?
+            && let Some(successor) = stored.get(successor_id.as_str())
+            && prove_cline_native_source_transition(write.observation(), successor.observation())
+                .is_some()
+        {
+            anchors.insert(
+                write.retrieval_anchor_id().clone(),
+                write.retrieval_anchor().owner().clone(),
+            );
+        }
+    }
+    if anchors.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let keys = serde_json::to_string(
+        &anchors
+            .keys()
+            .map(RetrievalAnchorId::as_str)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| runtime_storage_error(operation, error))?;
+    let mut rows = snapshot.query(
+        "SELECT disposition.record_json FROM json_each(?1) AS requested
+         JOIN retrieval_anchor_dispositions AS disposition ON disposition.anchor_id = requested.value
+         WHERE disposition.sequence = (
+             SELECT MAX(current.sequence) FROM retrieval_anchor_dispositions AS current
+             WHERE current.anchor_id = disposition.anchor_id
+         )", tracedecay_runtime_core::db::engine::params![keys],
+    ).await.map_err(|error| runtime_storage_error(operation, error))?;
+    let mut supersessions = HashMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| runtime_storage_error(operation, error))?
+    {
+        let json = row
+            .get::<String>(0)
+            .map_err(|error| runtime_storage_error(operation, error))?;
+        let record: tracedecay_store::RetrievalAnchorDispositionRecordV1 =
+            serde_json::from_str(&json).map_err(|error| runtime_storage_error(operation, error))?;
+        record
+            .validate()
+            .map_err(|error| runtime_storage_error(operation, error))?;
+        if let Some(owner) = anchors.get(record.anchor_id())
+            && record.owner().v2() == Some(&tracedecay_domain::FactOwnerV1::from(owner.clone()))
+            && record.state() == AnchorDispositionStateV1::Superseded
+            && record.reason_class() == AnchorDispositionReasonClassV1::Correction
+            && let Some(successor) = record.superseded_by()
+        {
+            supersessions.insert(record.anchor_id().clone(), successor.clone());
+        }
+    }
+    Ok(supersessions)
 }
 
 async fn read_admission_refusals_from_snapshot(
@@ -1218,7 +1356,7 @@ impl ObservationStore for GlobalDbObservationStore {
         &self,
         write: AnchoredObservationWrite,
     ) -> ObservationStoreResult<ObservationPersistOutcome> {
-        let mut outcomes = self.persist_observations(vec![write]).await?;
+        let mut outcomes = Box::pin(self.persist_observations(vec![write])).await?;
         if outcomes.len() != 1 {
             return Err(runtime_storage_error(
                 "persist_observation",
@@ -1707,12 +1845,81 @@ async fn submit_observation_writes(
     writes: Vec<(usize, AnchoredObservationWrite)>,
     deferred_exact_duplicates: Vec<(usize, AnchoredObservationWrite)>,
 ) -> ObservationStoreResult<Vec<(usize, ObservationBatchPersistOutcome)>> {
+    let batches = partition_observation_writes(writes)?;
+    let mut deferred_exact_duplicates = Some(deferred_exact_duplicates);
+    let mut outcomes = Vec::new();
+    let batch_count = batches.len();
+    for (index, batch) in batches.into_iter().enumerate() {
+        let deferred = if index + 1 == batch_count {
+            deferred_exact_duplicates.take().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        outcomes.extend(submit_observation_write_batch(database, runtime, batch, deferred).await?);
+    }
+    Ok(outcomes)
+}
+
+fn partition_observation_writes(
+    writes: Vec<(usize, AnchoredObservationWrite)>,
+) -> ObservationStoreResult<Vec<Vec<(usize, AnchoredObservationWrite)>>> {
+    let empty_command = serde_json::json!({
+        "kind": "observation_batch",
+        "writes": Vec::<serde_json::Value>::new(),
+    });
+    let envelope_bytes = canonical_json_bytes(&empty_command)
+        .map_err(|error| {
+            runtime_storage_error("derive observation runtime identity", error.to_string())
+        })?
+        .len();
+    let max_bytes = usize::try_from(BACKGROUND_BATCH_MAX_BYTES).unwrap_or(usize::MAX);
+    let max_operations = BACKGROUND_BATCH_MAX_OPERATIONS as usize;
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = envelope_bytes;
+    for write in writes {
+        let command_bytes = canonical_json_bytes(&runtime_observation_command(&write.1))
+            .map_err(|error| {
+                runtime_storage_error("derive observation runtime identity", error.to_string())
+            })?
+            .len();
+        let separator_bytes = usize::from(!batch.is_empty());
+        let added_bytes = command_bytes.saturating_add(separator_bytes);
+        if envelope_bytes.saturating_add(command_bytes) > max_bytes {
+            return Err(runtime_storage_error(
+                "submit observation batch",
+                format!(
+                    "one observation runtime command requires {} bytes, above the {}-byte background admission limit",
+                    envelope_bytes.saturating_add(command_bytes),
+                    max_bytes
+                ),
+            ));
+        }
+        if !batch.is_empty()
+            && (batch.len() == max_operations
+                || batch_bytes.saturating_add(added_bytes) > max_bytes)
+        {
+            batches.push(std::mem::take(&mut batch));
+            batch_bytes = envelope_bytes;
+        }
+        batch_bytes = batch_bytes
+            .saturating_add(command_bytes)
+            .saturating_add(usize::from(!batch.is_empty()));
+        batch.push(write);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+async fn submit_observation_write_batch(
+    database: &Database,
+    runtime: &DatabaseRuntimeClientV1,
+    writes: Vec<(usize, AnchoredObservationWrite)>,
+    deferred_exact_duplicates: Vec<(usize, AnchoredObservationWrite)>,
+) -> ObservationStoreResult<Vec<(usize, ObservationBatchPersistOutcome)>> {
     let admitted_at = now_micros();
-    let priority = if writes.len() == 1 {
-        OperationPriorityV1::Foreground
-    } else {
-        OperationPriorityV1::Background
-    };
     let command = serde_json::json!({
         "kind": "observation_batch",
         "writes": writes
@@ -1724,6 +1931,13 @@ async fn submit_observation_writes(
         canonical_json_bytes_and_sha256(&command).map_err(|error| {
             runtime_storage_error("derive observation runtime identity", error.to_string())
         })?;
+    let priority = if writes.len() == 1
+        && u64::try_from(command_bytes.len()).unwrap_or(u64::MAX) <= FOREGROUND_BATCH_MAX_BYTES
+    {
+        OperationPriorityV1::Foreground
+    } else {
+        OperationPriorityV1::Background
+    };
     let digest_suffix = runtime_digest_suffix(&command_digest)?;
     let metadata = observation_submit_metadata(
         runtime,
@@ -1761,6 +1975,20 @@ async fn submit_observation_writes(
         "submit observation batch",
     )
     .await?;
+    if !matches!(
+        outcome,
+        RuntimeSubmitOutcomeV1::Committed { .. }
+            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            | RuntimeSubmitOutcomeV1::ExactReplay { .. }
+    ) {
+        return Err(runtime_storage_error(
+            "submit anchored observation",
+            format!(
+                "runtime rejected {}-byte observation batch: {outcome:?}",
+                command_bytes.len()
+            ),
+        ));
+    }
     const READBACK_OPERATION: &str = "read committed observation batch";
     let observation_ids = writes
         .iter()
@@ -2152,22 +2380,5 @@ fn projection_runtime_error(
     tracedecay_store::ProjectionStoreError::Storage {
         operation: "dispatch observation projection runtime operation",
         source: Box::new(error),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn adapter_contains_only_guarded_database_client() {
-        fn assert_exact_fields(store: &GlobalDbObservationStore) {
-            let GlobalDbObservationStore {
-                database: _,
-                runtime: _,
-            } = store;
-        }
-
-        let _ = assert_exact_fields;
     }
 }

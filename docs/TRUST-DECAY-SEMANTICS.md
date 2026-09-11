@@ -8,10 +8,10 @@ An earlier version of this document was written against a single-crate
 `src/memory/{retrieval,store,trust}.rs` layout, a `src/db/migrations.rs`
 schema, and MCP/dashboard modules under `src/mcp` / `src/dashboard` — none of
 which exist anymore. The relevant logic is now split across
-`crates/tracedecay-runtime-core/src/memory/trust.rs` (trust constants and
-bucketing), `crates/tracedecay-runtime-core/src/store/memory/scoring.rs`
-(the ranking-time decay formula), `crates/tracedecay-runtime-core/src/store/
-memory/crud/{commands.rs,feedback.rs,lineage.rs}` (the writers of trust),
+`crates/tracedecay-session-memory/src/memory/trust.rs` (trust constants and
+bucketing), `crates/tracedecay-session-memory/src/fact_store/scoring.rs`
+(the ranking-time decay formula), `crates/tracedecay-session-memory/src/
+fact_store/crud/{commands.rs,feedback.rs,lineage.rs}` (the writers of trust),
 and the `memory_v2_*` tables in
 `crates/tracedecay-runtime-core/src/db/memory_v2/schema/`. The policy
 conclusion this document previously reached still holds, and is restated
@@ -52,7 +52,7 @@ by `(fact_id, owner_kind, project_id)`:
 |---|---|---|
 | `trust_score` | persisted per-fact trust, `CHECK`-constrained to `[0, 1]` (or `NULL`) | replayed from lineage events on every commit (see §2) |
 | `updated_at` | last mutation time — the input to the ranking decay factor | every commit that touches this fact (create, edit, feedback, curation) |
-| `retrieval_count` / `access_count` | scan count vs. returned-count | `project_memory_update_retrieval_projection_tx`, on every search/probe/reason/related hit |
+| `retrieval_count` / `access_count` | scan count vs. returned-count | `project_memory_update_retrieval_projection_tx`, on search hits via `track_explicit_search` |
 | `last_retrieved_at` / `last_recalled_at` | last scan / last time a search actually returned the fact | the same retrieval-projection update |
 | `helpful_count` / `unhelpful_count` / `last_feedback_at` | feedback tallies | `project_memory_update_feedback_projection_tx`, on every feedback event |
 
@@ -89,7 +89,7 @@ The complete, current set of writers:
    and also bumps `helpful_count`/`unhelpful_count`/`last_feedback_at` via
    `project_memory_update_feedback_projection_tx` and appends a row to
    `memory_v2_feedback_history`. These deltas match the constants in
-   `crates/tracedecay-runtime-core/src/memory/trust.rs`
+   `crates/tracedecay-session-memory/src/memory/trust.rs`
    (`HELPFUL_DELTA = 0.05`, `UNHELPFUL_DELTA = -0.10`).
 
 That is the complete set — there is no separate "manual trust bump" tool with
@@ -100,7 +100,7 @@ none runs on a schedule.
 ## 3. Where temporal decay is actually applied: retrieval, dynamically
 
 The only live decay is in recall ranking, in
-`crates/tracedecay-runtime-core/src/store/memory/scoring.rs`:
+`crates/tracedecay-session-memory/src/fact_store/scoring.rs`:
 
 ```rust
 pub(super) fn project_memory_temporal_decay(updated_at: UtcMicros, now: UtcMicros) -> f64 {

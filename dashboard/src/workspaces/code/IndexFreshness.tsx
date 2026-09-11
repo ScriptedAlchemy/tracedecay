@@ -174,7 +174,7 @@ function BuildProgressReading({
 }) {
   const percentage = progressPercentage(progress);
   const hasRate =
-    progress.files_per_second != null && progress.lexical_bytes_per_second != null;
+    progress.files_per_second != null && progress.lexical_units_per_second != null;
   return (
     <div
       className="flex flex-col gap-1.5 border-b border-edge-subtle pb-1.5 text-3xs leading-snug"
@@ -207,8 +207,8 @@ function BuildProgressReading({
           {`${formatCount(progress.current_batch_pages)} pages · ${formatBytes(progress.current_batch_payload_bytes)}`}
         </Row>
         <Row label="throughput">
-          {progress.files_per_second != null && progress.lexical_bytes_per_second != null
-            ? `${formatCount(progress.files_per_second)} files/s · ${formatBytes(progress.lexical_bytes_per_second)} lexical bytes/s`
+          {progress.files_per_second != null && progress.lexical_units_per_second != null
+            ? `${formatCount(progress.files_per_second)} files/s · ${formatCount(progress.lexical_units_per_second)} lexical units/s`
             : 'throughput unavailable'}
         </Row>
         <Row label="ETA">
@@ -289,8 +289,8 @@ function isCurrentOrNewerProgress(
 
 function progressPercentage(progress: CodeIndexBuildProgress): number {
   const completed =
-    progress.total_lexical_bytes > 0
-      ? progress.completed_lexical_bytes / progress.total_lexical_bytes
+    progress.total_lexical_units > 0
+      ? progress.completed_lexical_units / progress.total_lexical_units
       : progress.phase === 'ready'
         ? 1
         : 0;

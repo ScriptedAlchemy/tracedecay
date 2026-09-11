@@ -5,12 +5,13 @@
 //! graph reads hydrate an accepted identity only when one canonical attempt row
 //! exists for it, so no second binding journal or table is needed.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     WorkAttemptInsertOutcome, WorkAttemptStorageError, WorkProductAttemptAdmissionErrorV1,
     WorkProductAttemptAdmissionOutcomeV1, WorkProductAttemptAdmissionPortV1,
     WorkProductAttemptAdmissionV1, WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1,
     WorkProductEventPortErrorV1, WorkProductRetryAdmissionV1, WorkProductSynthesisAdmissionV1,
-    WorkRetryAttemptOutcomeV1, WorkSynthesisInsertOutcome,
+    WorkRetryAttemptOutcomeV1, WorkSynthesisInsertOutcome, WorkflowRunAppendOutcome,
+    WorkflowRunStorageError,
 };
 use tracedecay_domain::{WorkProductAuthorizedRelationScopeV1, WorkProductGraphV1};
 
@@ -187,16 +188,35 @@ fn admit_retry_in_transaction(
         &admission.admission.concurrency,
     )
     .map_err(map_attempt_error)?;
-    match (product, retry) {
+    let workflow = admission
+        .workflow_rebind
+        .as_ref()
+        .map(|request| crate::workflow::run_journal::append_in_transaction(transaction, request))
+        .transpose()
+        .map_err(map_workflow_error)?;
+    match (product, retry, workflow) {
         (
             WorkProductEventCommitOutcomeV1::Appended(product),
             retry @ WorkRetryAttemptOutcomeV1::Created { .. },
+            None | Some(WorkflowRunAppendOutcome::Appended(_)),
         ) => Ok((product, retry)),
         (
             WorkProductEventCommitOutcomeV1::Replayed(product),
             retry @ WorkRetryAttemptOutcomeV1::Replayed { .. },
+            None | Some(WorkflowRunAppendOutcome::Replayed(_)),
         ) => Ok((product, retry)),
         _ => Err(AdmissionError::IdentityConflict),
+    }
+}
+
+fn map_workflow_error(error: WorkflowRunStorageError) -> AdmissionError {
+    match error {
+        WorkflowRunStorageError::NotFound => AdmissionError::NotFoundOrNotAuthorized,
+        WorkflowRunStorageError::VersionConflict => AdmissionError::VersionConflict,
+        WorkflowRunStorageError::IdempotencyConflict => AdmissionError::IdempotencyConflict,
+        WorkflowRunStorageError::InvalidHistory | WorkflowRunStorageError::Unavailable => {
+            AdmissionError::Unavailable
+        }
     }
 }
 
@@ -250,7 +270,7 @@ fn product_commit(outcome: &WorkProductEventCommitOutcomeV1) -> &WorkProductEven
 
 fn graph_for_product(
     transaction: &ExactSqlTransaction,
-    context: &tracedecay_application::WorkProductPortContextV1,
+    context: &tracedecay_contracts::WorkProductPortContextV1,
     product: &WorkProductEventCommitV1,
 ) -> Result<WorkProductGraphV1, AdmissionError> {
     let journal =
@@ -335,7 +355,7 @@ fn map_graph_admission_error(error: tracedecay_domain::WorkRuntimeContractError)
 }
 
 fn require_request_active(
-    context: &tracedecay_application::WorkProductPortContextV1,
+    context: &tracedecay_contracts::WorkProductPortContextV1,
 ) -> Result<(), AdmissionError> {
     if context.cancellation().is_cancelled() {
         return Err(AdmissionError::Cancelled);

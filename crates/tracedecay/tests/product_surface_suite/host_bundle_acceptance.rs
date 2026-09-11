@@ -4,12 +4,12 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay::agents::host_bundle_registry::{
+use tracedecay_agent_hosts::agents::host_bundle_registry::{
     HostBundleRegistryError, RECEIPT_BACKED_HOST_KINDS, default_components,
     unsupported_host_component_set_reason, verified_embedded_default_host_component_set,
     verified_embedded_host_bundle, verified_embedded_host_component_set,
 };
-use tracedecay::agents::host_bundle_v2::{
+use tracedecay_agent_hosts::agents::host_bundle_v2::{
     ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
     HostBundleComponentV1, HostBundleError, HostBundleExecutionRequestV1,
     HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleLifecycleRequestV1,
@@ -23,8 +23,8 @@ use tracedecay::agents::host_bundle_v2::{
     stock_host_kinds, stock_host_registration_evidence,
     supported_host_edit_stop_conformance_evidence,
 };
-use tracedecay::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
-use tracedecay::agents::{
+use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
+use tracedecay_agent_hosts::agents::{
     AgentIntegration, HealthcheckContext, KimiIntegration, OpenCodeIntegration,
     inspect_receipt_backed_host_components,
 };

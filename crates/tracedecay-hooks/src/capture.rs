@@ -5,6 +5,7 @@
 //! session, memory, sync, or indexing authority.
 
 use std::path::Path;
+use std::time::Duration;
 
 use tracedecay_domain::UtcMicros;
 
@@ -43,6 +44,7 @@ pub enum NativeHookCaptureOutcomeV1 {
     Full,
     ResetRequired,
     Unavailable,
+    AdmissionTimedOut,
 }
 
 /// Single entry point for every native hook payload a host captures. This is
@@ -56,11 +58,21 @@ pub fn capture_native_event_for_replay(
     payload: &[u8],
     material: NativeEnvelopeMaterialV1,
     now: UtcMicros,
+    wait_budget: Duration,
 ) -> NativeHookCaptureOutcomeV1 {
-    let outcome = capture_native_event_for_replay_inner(data_root, source, payload, material, now);
+    let outcome = capture_native_event_for_replay_inner(
+        data_root,
+        source,
+        payload,
+        material,
+        now,
+        wait_budget,
+    );
     #[cfg(feature = "hotpath")]
     {
         hotpath::gauge!(match outcome {
+            NativeHookCaptureOutcomeV1::AdmissionTimedOut =>
+                "hooks.capture.outcome.admission_timed_out",
             NativeHookCaptureOutcomeV1::Captured => "hooks.capture.outcome.captured",
             NativeHookCaptureOutcomeV1::Unsupported => "hooks.capture.outcome.unsupported",
             NativeHookCaptureOutcomeV1::Unbound => "hooks.capture.outcome.unbound",
@@ -80,6 +92,7 @@ fn capture_native_event_for_replay_inner(
     payload: &[u8],
     material: NativeEnvelopeMaterialV1,
     now: UtcMicros,
+    wait_budget: Duration,
 ) -> NativeHookCaptureOutcomeV1 {
     let host = source.host();
     let decoded_result = match source {
@@ -107,8 +120,16 @@ fn capture_native_event_for_replay_inner(
         Err(_) => return NativeHookCaptureOutcomeV1::Rejected,
     };
     let spool_root = data_root.join("hook-v2-spool").join(host.hook_key());
-    let mut spool = match HookSpoolV1::open(spool_root, HookSpoolConfigV1::stock(host), now) {
+    let mut spool = match HookSpoolV1::open_within(
+        spool_root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        wait_budget,
+    ) {
         Ok((spool, _)) => spool,
+        Err(HookSpoolError::AdmissionTimedOut) => {
+            return NativeHookCaptureOutcomeV1::AdmissionTimedOut;
+        }
         Err(HookSpoolError::SpoolFull) => return NativeHookCaptureOutcomeV1::Full,
         Err(HookSpoolError::ResetRequired { .. }) => {
             return NativeHookCaptureOutcomeV1::ResetRequired;

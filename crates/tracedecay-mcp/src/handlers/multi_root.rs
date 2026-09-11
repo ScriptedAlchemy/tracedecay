@@ -2,8 +2,8 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tracedecay_application::multi_root::MultiRootApplicationOperation;
-use tracedecay_application::{
+use tracedecay_contracts::multi_root::MultiRootApplicationOperation;
+use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
     CancellationSignal, Deadline, LegalAction, MultiRootExecuteRequestV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetReadRequestV1, ProblemOwningLayer, RequestId,
@@ -13,7 +13,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
 use crate::ToolResult;
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
     DaemonInvocationExecutor, InvocationCancellationPolicy, invocation_now_micros,
 };
@@ -203,7 +203,7 @@ fn render_response(
 fn success_result<T>(
     operation: MultiRootApplicationOperation,
     request_id: RequestId,
-    scope: tracedecay_application::ResolvedScope,
+    scope: tracedecay_contracts::ResolvedScope,
     outcome: ApplicationOutcome<T>,
 ) -> Result<ToolResult>
 where
@@ -327,7 +327,7 @@ fn result_contract(operation: MultiRootApplicationOperation) -> Result<ResultCon
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
-    use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective};
+    use tracedecay_contracts::{ApplicationProblem, LegalAction, RetryDirective};
     use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
     use super::{daemon_problem, handle_multi_root};

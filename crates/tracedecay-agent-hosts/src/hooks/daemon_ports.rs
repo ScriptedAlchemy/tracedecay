@@ -10,9 +10,9 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use tracedecay_application::context_scout::ContextScoutDeliveryReceiptV1;
 #[cfg(test)]
-use tracedecay_application::context_scout::ContextScoutFeedbackV1;
+use tracedecay_contracts::context_scout::ContextScoutFeedbackV1;
+use tracedecay_contracts::context_scout::{ContextScoutAddressV1, ContextScoutDeliveryReceiptV1};
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{
     AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HookAdmissionFutureV1,
@@ -22,15 +22,21 @@ use tracedecay_hooks::{
 };
 
 use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
+use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::analytics::HookTimingSpan;
 use super::dispatch::NativeContextScoutLifecycleV1;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DaemonAdmissionRetentionUnavailable;
+
 pub(crate) struct DaemonAdmissionPort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
     session_id: Option<&'a str>,
     lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
-    feedback_notice: Mutex<Option<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>>,
+    context_scout_address: Mutex<Option<ContextScoutAddressV1>>,
+    feedback_notice: Mutex<Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>>,
     github_stack_signal_available: Mutex<bool>,
     /// The caller's hook span, so the admission round trip is attributed like
     /// every other hook/daemon call. Passing `None` here reported hosts that
@@ -40,24 +46,36 @@ pub(crate) struct DaemonAdmissionPort<'a> {
 
 impl<'a> DaemonAdmissionPort<'a> {
     pub(crate) fn new(
+        runtime: &'a HookRuntimeV1,
         project_root: &'a Path,
         session_id: Option<&'a str>,
         lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
         telemetry: Option<&'a HookTimingSpan>,
     ) -> Self {
         Self {
+            runtime,
             project_root,
             session_id,
             lifecycle,
+            context_scout_address: Mutex::new(None),
             feedback_notice: Mutex::new(None),
             github_stack_signal_available: Mutex::new(false),
             telemetry,
         }
     }
 
+    pub(crate) fn take_context_scout_address(
+        &self,
+    ) -> Result<Option<ContextScoutAddressV1>, DaemonAdmissionRetentionUnavailable> {
+        self.context_scout_address
+            .lock()
+            .map_err(|_| DaemonAdmissionRetentionUnavailable)
+            .map(|mut address| address.take())
+    }
+
     pub(crate) fn take_feedback_notice(
         &self,
-    ) -> Option<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1> {
+    ) -> Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1> {
         self.feedback_notice
             .lock()
             .ok()
@@ -75,7 +93,9 @@ impl<'a> DaemonAdmissionPort<'a> {
 
 pub(crate) struct DaemonAdmissionResponseV1 {
     pub(crate) immediate: HookImmediateAdmissionV1,
-    pub(crate) feedback_notice: Option<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>,
+    pub(crate) context_scout_address: Option<ContextScoutAddressV1>,
+    pub(crate) feedback_notice:
+        Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     pub(crate) github_stack_signal_available: bool,
 }
 
@@ -97,8 +117,9 @@ struct DaemonAdmissionResponseWireV1 {
     status: DaemonAdmissionStatusV1,
     disposition: Option<HookTransportDispositionV1>,
     orchestration: Option<serde_json::Value>,
+    context_scout_address: Option<ContextScoutAddressV1>,
     ready_guidance: Option<HookReadyGuidanceV1>,
-    feedback_notice: Option<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>,
+    feedback_notice: Option<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>,
     github_stack_signal_available: Option<bool>,
     reason: Option<String>,
 }
@@ -116,6 +137,7 @@ pub(crate) fn now_utc() -> UtcMicros {
 pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonAdmissionResponseV1 {
     let unavailable = || DaemonAdmissionResponseV1 {
         immediate: HookImmediateAdmissionV1::Unavailable,
+        context_scout_address: None,
         feedback_notice: None,
         github_stack_signal_available: false,
     };
@@ -130,6 +152,7 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
         (DaemonAdmissionStatusV1::Rejected, Some(HookTransportDispositionV1::CatchupRequired)) => {
             DaemonAdmissionResponseV1 {
                 immediate: HookImmediateAdmissionV1::CatchupRequired,
+                context_scout_address: None,
                 feedback_notice: None,
                 github_stack_signal_available: false,
             }
@@ -152,12 +175,14 @@ pub(crate) fn daemon_admission_response(response: &serde_json::Value) -> DaemonA
                     admitted_at: now_utc(),
                     ready_guidance: wire.ready_guidance,
                 },
+                context_scout_address: wire.context_scout_address,
                 feedback_notice: wire.feedback_notice,
                 github_stack_signal_available: wire.github_stack_signal_available.unwrap_or(false),
             }
         }
         (DaemonAdmissionStatusV1::Backpressured, None) => DaemonAdmissionResponseV1 {
             immediate: HookImmediateAdmissionV1::Backpressured,
+            context_scout_address: None,
             feedback_notice: None,
             github_stack_signal_available: false,
         },
@@ -179,6 +204,7 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
             let response = tokio::time::timeout(
                 Duration::from_micros(deadline.remaining_micros()),
                 super::daemon_hook_action(
+                    self.runtime,
                     Some(self.project_root),
                     serde_json::json!({
                         "action": "hook_v2_admit",
@@ -194,6 +220,12 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
                 return HookImmediateAdmissionV1::Unavailable;
             };
             let response = daemon_admission_response(&response);
+            if let Some(address) = response.context_scout_address {
+                let Ok(mut retained) = self.context_scout_address.lock() else {
+                    return HookImmediateAdmissionV1::Unavailable;
+                };
+                *retained = Some(address);
+            }
             if let Some(notice) = response.feedback_notice
                 && let Ok(mut retained) = self.feedback_notice.lock()
             {
@@ -221,6 +253,7 @@ fn delivery_outcome_from_status(status: Option<&str>) -> HookFeedbackDeliveryOut
 
 #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.timed_daemon_action")]
 async fn timed_daemon_hook_action(
+    runtime: &HookRuntimeV1,
     project_root: &Path,
     action: serde_json::Value,
     deadline: HookSynchronousDeadlineV1,
@@ -228,7 +261,7 @@ async fn timed_daemon_hook_action(
 ) -> HookFeedbackDeliveryOutcomeV1 {
     let response = tokio::time::timeout(
         Duration::from_micros(deadline.remaining_micros()),
-        super::daemon_hook_action(Some(project_root), action, telemetry),
+        super::daemon_hook_action(runtime, Some(project_root), action, telemetry),
     )
     .await;
     let Ok(Ok(response)) = response else {
@@ -240,26 +273,31 @@ async fn timed_daemon_hook_action(
 /// Daemon-backed Hook feedback-notice delivery. Acknowledgement crosses the
 /// local daemon boundary; finding content stays in the feedback publication store.
 pub(crate) struct DaemonFeedbackNoticeDeliveryPort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
 }
 
 impl<'a> DaemonFeedbackNoticeDeliveryPort<'a> {
-    pub(crate) fn new(project_root: &'a Path) -> Self {
-        Self { project_root }
+    pub(crate) fn new(runtime: &'a HookRuntimeV1, project_root: &'a Path) -> Self {
+        Self {
+            runtime,
+            project_root,
+        }
     }
 }
 
-impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1>
+impl AsyncHookFeedbackDeliveryPortV1<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>
     for DaemonFeedbackNoticeDeliveryPort<'_>
 {
     fn deliver_hook_v2<'a>(
         &'a self,
         envelope: &'a HookEventEnvelopeV2,
-        feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async move {
             timed_daemon_hook_action(
+                self.runtime,
                 self.project_root,
                 serde_json::json!({
                     "action": "hook_v2_feedback_notice_delivery",
@@ -276,7 +314,7 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHook
     fn deliver_legacy<'a>(
         &'a self,
         _envelope: &'a HookEventEnvelopeV2,
-        _feedback: &'a tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1,
+        _feedback: &'a tracedecay_application::advisory::AdvisoryHookLookupNoticeV1,
         _deadline: HookSynchronousDeadlineV1,
     ) -> HookDeliveryFutureV1<'a> {
         Box::pin(async { HookFeedbackDeliveryOutcomeV1::Unavailable })
@@ -285,12 +323,16 @@ impl AsyncHookFeedbackDeliveryPortV1<tracedecay_usecases::advisory::AdvisoryHook
 
 /// Daemon-backed Context Scout delivery-receipt commit.
 pub(crate) struct DaemonDeliveryReceiptPort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
 }
 
 impl<'a> DaemonDeliveryReceiptPort<'a> {
-    pub(crate) fn new(project_root: &'a Path) -> Self {
-        Self { project_root }
+    pub(crate) fn new(runtime: &'a HookRuntimeV1, project_root: &'a Path) -> Self {
+        Self {
+            runtime,
+            project_root,
+        }
     }
 
     #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.post_receipt")]
@@ -300,6 +342,7 @@ impl<'a> DaemonDeliveryReceiptPort<'a> {
         deadline: HookSynchronousDeadlineV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
         timed_daemon_hook_action(
+            self.runtime,
             self.project_root,
             serde_json::json!({
                 "action": "hook_v2_delivery_receipt",
@@ -345,13 +388,17 @@ pub(crate) struct ContextScoutFeedbackCommitV1 {
 /// Daemon-backed Context Scout explicit-feedback commit.
 #[cfg(test)]
 pub(crate) struct DaemonContextScoutFeedbackPort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
 }
 
 #[cfg(test)]
 impl<'a> DaemonContextScoutFeedbackPort<'a> {
-    pub(crate) fn new(project_root: &'a Path) -> Self {
-        Self { project_root }
+    pub(crate) fn new(runtime: &'a HookRuntimeV1, project_root: &'a Path) -> Self {
+        Self {
+            runtime,
+            project_root,
+        }
     }
 
     pub(crate) async fn post_feedback(
@@ -361,6 +408,7 @@ impl<'a> DaemonContextScoutFeedbackPort<'a> {
         deadline: HookSynchronousDeadlineV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
         timed_daemon_hook_action(
+            self.runtime,
             self.project_root,
             serde_json::json!({
                 "action": "hook_v2_feedback",
@@ -402,13 +450,19 @@ impl AsyncHookFeedbackDeliveryPortV1<ContextScoutFeedbackCommitV1>
 
 /// Daemon-backed `OpenCode` LSP update submission.
 pub(crate) struct DaemonOpenCodeLspUpdatePort<'a> {
+    runtime: &'a HookRuntimeV1,
     project_root: &'a Path,
     telemetry: Option<&'a HookTimingSpan>,
 }
 
 impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
-    pub(crate) fn new(project_root: &'a Path, telemetry: Option<&'a HookTimingSpan>) -> Self {
+    pub(crate) fn new(
+        runtime: &'a HookRuntimeV1,
+        project_root: &'a Path,
+        telemetry: Option<&'a HookTimingSpan>,
+    ) -> Self {
         Self {
+            runtime,
             project_root,
             telemetry,
         }
@@ -417,6 +471,7 @@ impl<'a> DaemonOpenCodeLspUpdatePort<'a> {
     #[hotpath::measure(future = true, label = "agent_hosts.hook_ports.opencode_lsp_submit")]
     pub(crate) async fn submit_updated_event(&self, event: &serde_json::Value) -> bool {
         let response = super::daemon_hook_action(
+            self.runtime,
             Some(self.project_root),
             serde_json::json!({
                 "action": "opencode_lsp_updated",
@@ -471,7 +526,7 @@ mod tests {
 
     #[test]
     fn daemon_feedback_notice_survives_admission_decode() {
-        let notice = tracedecay_usecases::advisory::AdvisoryHookLookupNoticeV1 {
+        let notice = tracedecay_application::advisory::AdvisoryHookLookupNoticeV1 {
             scope: FeedbackScopeV1 {
                 project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
                 repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),

@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_application::{ApplicationContractError, ResolvedScope};
+use tracedecay_contracts::{ApplicationContractError, ResolvedScope};
 use tracedecay_domain::{CommitId, ProjectId, RefId, RepositoryId, TreeId, WorktreeId};
 
 /// Failure to resolve an exact indexing identity from a checkout.

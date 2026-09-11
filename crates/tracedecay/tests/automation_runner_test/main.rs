@@ -9,10 +9,7 @@
 //! keeps the automation_runner_test name because automation artifacts embed
 //! `cargo test --test automation_runner_test ...` replay commands.
 
-// Full-journey Hotpath builds compose several measured automation futures in
-// each test body; keep the expanded query budget local to this test crate.
-#![recursion_limit = "256"]
-
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

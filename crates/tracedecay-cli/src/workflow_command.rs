@@ -3,7 +3,7 @@
 use std::io::Read;
 
 use serde_json::Value;
-use tracedecay_application::ApplicationResult;
+use tracedecay_contracts::ApplicationResult;
 
 use crate::cli::WorkflowInvocationArgs;
 
@@ -14,7 +14,7 @@ pub(crate) async fn run(
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.workflow.operation").set(&invocation.operation.operation_key());
     let body = read_request(&invocation.request_file)?;
-    let project_root = tracedecay::config::resolve_path_with_discovery(invocation.project);
+    let project_root = tracedecay_configuration::resolve_path_with_discovery(invocation.project);
     let operation = invocation.operation;
     let outcome =
         crate::workflow_cli::invoke_workflow_cli(project_root.clone(), operation, body).await?;
@@ -59,7 +59,7 @@ fn read_request(path: &std::path::Path) -> tracedecay_domain::errors::Result<Val
 #[cfg(test)]
 mod tests {
     use super::workflow_json_line;
-    use tracedecay_application::{
+    use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, RequestId,
         ResultContractRef, RetryDirective,
     };

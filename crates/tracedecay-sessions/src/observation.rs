@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::task::JoinSet;
-use tracedecay_application::clock::now_micros;
+use tracedecay_contracts::clock::now_micros;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ManifestDigest, ObservationContractError,
     ObservationIdentityMaterialV1, ObservationSourceCursorV1, ProjectionGenerationId,
@@ -23,11 +23,11 @@ use tracedecay_store::{
 };
 
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
-use tracedecay_private_fs::background_cpu::ProcessBackgroundCpuV1;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     ObservationSanitizationOutcomeV1, ParsedObservationRecordV1, PrivacySanitizerError,
     RecordSanitizerV1, SanitizationFindingV1, SanitizedObservationRecordV1,
 };
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 /// Cloneable, operation-local cancellation shared by application adapters.
 #[derive(Clone, Debug, Default)]

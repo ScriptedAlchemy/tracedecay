@@ -13,6 +13,7 @@ use super::compression_decision::{
     CondensationDecision, CondensationDecisionInput, OverflowRecoveryCapInput,
     PreflightDecisionInput,
 };
+use super::compression_policy::is_policy_anchor_role;
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
 use super::types::{LcmExtractionResult, LcmRelationProjectionStatus, LcmSummarySourceRange};
@@ -72,10 +73,11 @@ struct CompressionTransactionWriteRequest<'a> {
     forced_overflow_recovery: bool,
 }
 
-struct CompressionTransactionWriteResult {
+struct CompressionTransactionWriteResult<'a> {
     created_summaries: Vec<LcmSummaryNode>,
     frontier: LcmLifecycleState,
-    remaining_backlog: Vec<LcmRawMessage>,
+    /// The unsummarized suffix of the request's backlog slice.
+    remaining_backlog: &'a [LcmRawMessage],
 }
 
 struct CompressionTransactionContext {
@@ -84,11 +86,21 @@ struct CompressionTransactionContext {
     raw_messages: Vec<LcmRawMessage>,
     window: CompressionWindow,
     plan: compression_decision::CompressionPlan,
+    /// Effective assembly cap for this pass; the borrowed request keeps its
+    /// raw `max_assembly_tokens` so one request can run several passes.
+    assembly_token_cap: Option<i64>,
     overflow_assembly_cap: Option<i64>,
     raw_rows_scanned: usize,
     raw_bytes_scanned: u64,
     raw_has_more: bool,
     retained: bool,
+}
+
+impl CompressionTransactionContext {
+    /// The backlog prefix the plan selected, borrowed from the owning window.
+    fn selected_backlog(&self) -> &[LcmRawMessage] {
+        &self.window.backlog[..self.plan.selected_len]
+    }
 }
 
 #[derive(Clone)]
@@ -368,12 +380,18 @@ fn canonical_replay_messages(raw_messages: &[LcmRawMessage]) -> Vec<Value> {
     replay_transactions::normalize_replay_tool_pairs(&replay)
 }
 
+/// Runs canonical compression for one request.
+///
+/// The request is borrowed: a daemon journey that needs an authoritative
+/// summary runs a planning pass and a commit pass over the same message
+/// corpus, changing only `summarizer` in between, so the corpus is owned
+/// once by the caller rather than cloned per pass.
 #[hotpath::measure(label = "sessions.lcm.compress", future = true)]
 pub async fn compress(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
-    request: LcmCompressionRequest,
+    request: &LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<LcmCompressionResponse, LcmError> {
     let response = compress_inner(
@@ -403,7 +421,7 @@ pub async fn compress_retained_page(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
-    request: LcmCompressionRequest,
+    request: &LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
     guard: RetainedCompressionGuard,
 ) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
@@ -426,17 +444,15 @@ async fn compress_inner(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
-    request: LcmCompressionRequest,
+    request: &LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
     retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-    let mut request = request;
-    request.max_assembly_tokens =
-        compression_decision::effective_assembly_token_cap(AssemblyCapInput {
-            max_assembly_tokens: request.max_assembly_tokens,
-            context_length: request.context_length,
-            reserve_tokens_floor: request.reserve_tokens_floor,
-        });
+    let assembly_token_cap = compression_decision::effective_assembly_token_cap(AssemblyCapInput {
+        max_assembly_tokens: request.max_assembly_tokens,
+        context_length: request.context_length,
+        reserve_tokens_floor: request.reserve_tokens_floor,
+    });
     if let Some(reason) = filtered_session_reason(
         &request.session_id,
         &request.ignore_session_patterns,
@@ -454,10 +470,10 @@ async fn compress_inner(
                 "ok",
                 reason,
                 Vec::new(),
-                request.messages,
+                request.messages.clone(),
                 frontier,
                 None,
-                request.max_assembly_tokens,
+                assembly_token_cap,
             )),
             rows_scanned: 0,
             bytes_scanned: 0,
@@ -494,7 +510,7 @@ async fn compress_inner(
             ingested.replay_messages,
             frontier,
             None,
-            request.max_assembly_tokens,
+            assembly_token_cap,
         );
         return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
             response: record_compression_gauges(response),
@@ -504,8 +520,15 @@ async fn compress_inner(
         });
     }
 
-    let (response, rows_scanned, bytes_scanned, has_more) =
-        compress_in_transaction(conn, publisher, request, &summarizer, retained_scan).await?;
+    let (response, rows_scanned, bytes_scanned, has_more) = compress_in_transaction(
+        conn,
+        publisher,
+        request,
+        assembly_token_cap,
+        &summarizer,
+        retained_scan,
+    )
+    .await?;
     Ok(super::summary_convergence::LcmBoundedCompressionResponse {
         response: record_compression_gauges(response),
         rows_scanned,
@@ -526,7 +549,8 @@ fn record_compression_gauges(response: LcmCompressionResponse) -> LcmCompression
 async fn compress_in_transaction(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
-    request: LcmCompressionRequest,
+    request: &LcmCompressionRequest,
+    assembly_token_cap: Option<i64>,
     summarizer: &CompressionSummarizerAdapter,
     retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<(LcmCompressionResponse, usize, u64, bool), LcmError> {
@@ -534,18 +558,12 @@ async fn compress_in_transaction(
         .as_ref()
         .and_then(|guard| guard.expected_summary_source_range.as_ref())
         .cloned();
-    let context = prepare_compression_context(conn, &request, retained_scan).await?;
+    let context =
+        prepare_compression_context(conn, request, assembly_token_cap, retained_scan).await?;
     if let Some(expected) = &expected_summary_source_range {
-        let actual_from = context
-            .plan
-            .selected_backlog
-            .first()
-            .map(|message| message.store_id);
-        let actual_to = context
-            .plan
-            .selected_backlog
-            .last()
-            .map(|message| message.store_id);
+        let selected_backlog = context.selected_backlog();
+        let actual_from = selected_backlog.first().map(|message| message.store_id);
+        let actual_to = selected_backlog.last().map(|message| message.store_id);
         if actual_from != Some(expected.from_store_id) || actual_to != Some(expected.to_store_id) {
             return Err(LcmError::StaleSummarySourceRange {
                 expected_from: expected.from_store_id,
@@ -560,18 +578,18 @@ async fn compress_in_transaction(
         context.raw_bytes_scanned,
         context.raw_has_more,
     );
-    if let Some(response) = frontier_changed_response(&request, &context) {
+    if let Some(response) = frontier_changed_response(request, &context) {
         return Ok((response, scan.0, scan.1, scan.2));
     }
     if let Some(response) =
-        no_backlog_compression_response(conn, publisher, &request, summarizer, &context).await?
+        no_backlog_compression_response(conn, publisher, request, summarizer, &context).await?
     {
         return Ok((response, scan.0, scan.1, scan.2));
     }
-    if let Some(response) = backlog_below_threshold_response(conn, &request, &context).await? {
+    if let Some(response) = backlog_below_threshold_response(conn, request, &context).await? {
         return Ok((response, scan.0, scan.1, scan.2));
     }
-    if let Some(response) = auxiliary_summary_response(&request, summarizer, &context) {
+    if let Some(response) = auxiliary_summary_response(request, summarizer, &context) {
         return Ok((response, scan.0, scan.1, scan.2));
     }
 
@@ -588,6 +606,7 @@ async fn compress_in_transaction(
 async fn prepare_compression_context(
     conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
+    assembly_token_cap: Option<i64>,
     retained_scan: Option<RetainedCompressionGuard>,
 ) -> Result<CompressionTransactionContext, LcmError> {
     let conversation_id = request.session_id.clone();
@@ -630,12 +649,13 @@ async fn prepare_compression_context(
     );
     let plan = compression_decision::compression_plan(CompressionPlanInput {
         request,
+        assembly_token_cap,
         backlog: &window.backlog,
     });
     let overflow_assembly_cap =
         compression_decision::overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
             current_tokens: request.current_tokens,
-            max_assembly_tokens: request.max_assembly_tokens,
+            max_assembly_tokens: assembly_token_cap,
             messages: &request.messages,
         });
 
@@ -645,6 +665,7 @@ async fn prepare_compression_context(
         raw_messages,
         window,
         plan,
+        assembly_token_cap,
         overflow_assembly_cap,
         raw_rows_scanned,
         raw_bytes_scanned,
@@ -676,7 +697,7 @@ fn frontier_changed_response(
         replay_messages,
         context.existing_frontier.clone(),
         None,
-        request.max_assembly_tokens,
+        context.assembly_token_cap,
     ))
 }
 
@@ -702,7 +723,7 @@ async fn no_backlog_compression_response(
             ),
             context.existing_frontier.clone(),
             None,
-            request.max_assembly_tokens,
+            context.assembly_token_cap,
         )));
     }
     if context.plan.forced_overflow_recovery {
@@ -710,17 +731,8 @@ async fn no_backlog_compression_response(
             overflow_recovery_no_backlog_response(conn, request, context).await?,
         ));
     }
-    if let Some(response) = condense_summary_nodes_if_ready(
-        conn,
-        publisher,
-        request,
-        summarizer,
-        &context.conversation_id,
-        &context.existing_frontier,
-        &context.window,
-        &context.raw_messages,
-    )
-    .await?
+    if let Some(response) =
+        condense_summary_nodes_if_ready(conn, publisher, request, summarizer, context).await?
     {
         return Ok(Some(response));
     }
@@ -735,7 +747,7 @@ async fn no_backlog_compression_response(
             deferred_backlog: &[],
             fresh_tail: &context.window.fresh_tail,
         },
-        request.max_assembly_tokens,
+        context.assembly_token_cap,
     )
     .await?;
     Ok(Some(compression_response(
@@ -745,7 +757,7 @@ async fn no_backlog_compression_response(
         replay_messages,
         context.existing_frontier.clone(),
         None,
-        request.max_assembly_tokens,
+        context.assembly_token_cap,
     )))
 }
 
@@ -829,7 +841,7 @@ async fn backlog_below_threshold_response(
                 deferred_backlog: &context.window.backlog,
                 fresh_tail: &context.window.fresh_tail,
             },
-            request.max_assembly_tokens,
+            context.assembly_token_cap,
         )
         .await?
     };
@@ -840,7 +852,7 @@ async fn backlog_below_threshold_response(
         replay_messages,
         context.existing_frontier.clone(),
         None,
-        request.max_assembly_tokens,
+        context.assembly_token_cap,
     )))
 }
 
@@ -853,7 +865,7 @@ fn auxiliary_summary_response(
         &request.provider,
         &request.session_id,
         request.focus_topic.clone(),
-        &context.plan.selected_backlog,
+        context.selected_backlog(),
     )?;
     let replay_messages =
         replay_without_summary(&context.window.pinned_anchors, &context.window.fresh_tail);
@@ -865,14 +877,14 @@ fn auxiliary_summary_response(
         replay_messages,
         context.existing_frontier.clone(),
         Some(summary_request),
-        request.max_assembly_tokens,
+        context.assembly_token_cap,
     ))
 }
 
 async fn persist_and_replay_backlog_compression(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
-    request: LcmCompressionRequest,
+    request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: CompressionTransactionContext,
 ) -> Result<LcmCompressionResponse, LcmError> {
@@ -885,7 +897,7 @@ async fn persist_and_replay_backlog_compression(
         conn,
         publisher,
         CompressionTransactionWriteRequest {
-            request: &request,
+            request,
             conversation_id: &context.conversation_id,
             existing_frontier: &context.existing_frontier,
             summary_text: &summary_invocation.summary_text,
@@ -901,13 +913,13 @@ async fn persist_and_replay_backlog_compression(
     // uncondensed summary history (hermes-lcm `_assemble_context`).
     let replay_parts = ReplayWindowParts {
         pinned_anchors: &context.window.pinned_anchors,
-        deferred_backlog: &write_result.remaining_backlog,
+        deferred_backlog: write_result.remaining_backlog,
         fresh_tail: &context.window.fresh_tail,
     };
     let replay_messages = if context.retained {
         retained_replay_messages(
             &context.window.pinned_anchors,
-            &write_result.remaining_backlog,
+            write_result.remaining_backlog,
             &context.window.fresh_tail,
         )
     } else if context.plan.forced_overflow_recovery {
@@ -927,7 +939,7 @@ async fn persist_and_replay_backlog_compression(
             &request.session_id,
             &context.raw_messages,
             replay_parts,
-            request.max_assembly_tokens,
+            context.assembly_token_cap,
         )
         .await?
     };
@@ -963,7 +975,7 @@ async fn persist_and_replay_backlog_compression(
             max_assembly_tokens: if context.plan.forced_overflow_recovery {
                 context.overflow_assembly_cap
             } else {
-                request.max_assembly_tokens
+                context.assembly_token_cap
             },
         },
         CompressionAttemptState {
@@ -976,17 +988,17 @@ async fn persist_and_replay_backlog_compression(
 // The summary-publication transaction: chunk selection, immutable summary
 // publication, and the lifecycle/debt writes that commit the new frontier.
 #[hotpath::measure(label = "sessions.lcm.compress.persist", future = true)]
-async fn persist_compression_transaction_writes(
+async fn persist_compression_transaction_writes<'a>(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
-    write: CompressionTransactionWriteRequest<'_>,
-) -> Result<CompressionTransactionWriteResult, LcmError> {
+    write: CompressionTransactionWriteRequest<'a>,
+) -> Result<CompressionTransactionWriteResult<'a>, LcmError> {
     let pass_limit = if write.forced_overflow_recovery {
         MAX_FORCED_CATCHUP_PASSES
     } else {
         1
     };
-    let mut remaining_backlog = write.backlog.to_vec();
+    let mut remaining_backlog = write.backlog;
     let mut created_summaries = Vec::new();
     let mut new_frontier = write.existing_frontier.current_frontier_store_id;
 
@@ -995,14 +1007,14 @@ async fn persist_compression_transaction_writes(
             write.request.leaf_chunk_tokens,
             write.request.dynamic_leaf_chunk_enabled,
             write.request.dynamic_leaf_chunk_max,
-            source_token_count(&remaining_backlog),
+            source_token_count(remaining_backlog),
         );
         let selected_len = compression_decision::progress_leaf_chunk_len(
-            &remaining_backlog,
+            remaining_backlog,
             leaf_chunk_tokens,
             write.request.max_source_messages,
         );
-        let selected_backlog = remaining_backlog[..selected_len].to_vec();
+        let (selected_backlog, deferred_backlog) = remaining_backlog.split_at(selected_len);
 
         let summary = dag::insert_summary_node(
             publisher,
@@ -1013,7 +1025,7 @@ async fn persist_compression_transaction_writes(
                 write.summary_text,
                 write.route.clone(),
                 write.extraction_result.as_ref(),
-                &selected_backlog,
+                selected_backlog,
             ),
         )
         .await?;
@@ -1022,7 +1034,7 @@ async fn persist_compression_transaction_writes(
             .map(|message| message.store_id)
             .or(new_frontier);
         created_summaries.push(summary);
-        remaining_backlog = remaining_backlog[selected_len..].to_vec();
+        remaining_backlog = deferred_backlog;
 
         if !write.forced_overflow_recovery {
             break;
@@ -1036,7 +1048,7 @@ async fn persist_compression_transaction_writes(
         current_frontier_store_id: new_frontier,
         last_finalized_session_id: write.existing_frontier.last_finalized_session_id.clone(),
         last_finalized_frontier_store_id: write.existing_frontier.last_finalized_frontier_store_id,
-        maintenance_debt: debt_for_deferred_backlog(&remaining_backlog),
+        maintenance_debt: debt_for_deferred_backlog(remaining_backlog),
     };
     upsert_lifecycle_state(conn, &update).await?;
     replace_maintenance_debt(
@@ -1173,11 +1185,11 @@ fn compression_window(
     threshold_tokens: Option<i64>,
 ) -> CompressionWindow {
     let frontier_store_id = current_frontier_store_id.unwrap_or(0);
-    let unsummarized = raw_messages
-        .iter()
-        .filter(|message| message.store_id > frontier_store_id)
-        .cloned()
-        .collect::<Vec<_>>();
+    // Both raw loaders order by `store_id`, so everything past the frontier is
+    // one contiguous suffix; borrow it instead of copying every record.
+    let unsummarized_start =
+        raw_messages.partition_point(|message| message.store_id <= frontier_store_id);
+    let unsummarized = &raw_messages[unsummarized_start..];
     let configured_fresh_tail_count = fresh_tail_count.unwrap_or(LCM_DEFAULT_FRESH_TAIL_COUNT);
     let effective_fresh_tail_count = if unsummarized.len() > 1
         && compression_decision::threshold_pressure(current_tokens, threshold_tokens)
@@ -1189,7 +1201,7 @@ fn compression_window(
     let backlog_len = unsummarized
         .len()
         .saturating_sub(effective_fresh_tail_count);
-    let backlog_len = replay_transactions::atomic_tail_start(&unsummarized, backlog_len);
+    let backlog_len = replay_transactions::atomic_tail_start(unsummarized, backlog_len);
     let (older_unsummarized, fresh_tail) = unsummarized.split_at(backlog_len);
     let fresh_tail_start_store_id = fresh_tail
         .first()
@@ -1226,10 +1238,6 @@ fn filtered_session_reason(
     } else {
         None
     }
-}
-
-fn is_policy_anchor_role(role: &str) -> bool {
-    matches!(role, "system" | "developer")
 }
 
 fn replay_without_summary(
@@ -1783,17 +1791,16 @@ fn condensation_draft(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn condense_summary_nodes_if_ready(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
-    conversation_id: &str,
-    existing_frontier: &LcmLifecycleState,
-    window: &CompressionWindow,
-    raw_messages: &[LcmRawMessage],
+    context: &CompressionTransactionContext,
 ) -> Result<Option<LcmCompressionResponse>, LcmError> {
+    let conversation_id = context.conversation_id.as_str();
+    let existing_frontier = &context.existing_frontier;
+    let window = &context.window;
     let CondensationDecision::QueryCandidates(policy) =
         compression_decision::condensation_policy_decision(CondensationDecisionInput {
             has_backlog: !window.backlog.is_empty(),
@@ -1861,13 +1868,13 @@ async fn condense_summary_nodes_if_ready(
         conn,
         &request.provider,
         &request.session_id,
-        raw_messages,
+        &context.raw_messages,
         ReplayWindowParts {
             pinned_anchors: &window.pinned_anchors,
             deferred_backlog: &[],
             fresh_tail: &window.fresh_tail,
         },
-        request.max_assembly_tokens,
+        context.assembly_token_cap,
     )
     .await?;
     Ok(Some(compression_response(
@@ -1877,7 +1884,7 @@ async fn condense_summary_nodes_if_ready(
         replay_messages,
         frontier,
         None,
-        request.max_assembly_tokens,
+        context.assembly_token_cap,
     )))
 }
 
@@ -2385,6 +2392,10 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
 fn active_replay_for_metadata(replay: &Value) -> Value {
     let mut replay = replay.clone();
     if let Some(object) = replay.as_object_mut() {
+        // This locator is regenerated from the canonical raw row at replay.
+        // Persisting it makes our own replay look like a source metadata edit
+        // and invalidates otherwise unchanged summary lineage on re-ingest.
+        object.remove("store_id");
         replay_transactions::strip_disposable_assistant_replay_sidecars(object, "");
     }
     replay

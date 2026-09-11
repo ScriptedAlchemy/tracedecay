@@ -1,6 +1,6 @@
 use std::path::{Component, PathBuf};
 
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::SnapshotFileDispositionV1;
 use tracedecay_lsp::{
     AdmittedRoot, IndexedWorkspaceDocument, IndexedWorkspaceDocuments, LspRuntimeFailure,
@@ -8,8 +8,8 @@ use tracedecay_lsp::{
 };
 use url::Url;
 
+use tracedecay_application::lsp_runtime::LspWorkspaceDocumentIndexPort;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
-use tracedecay_usecases::lsp_runtime::LspWorkspaceDocumentIndexPort;
 
 #[derive(Clone)]
 pub(crate) struct PublishedCodeIndexWorkspaceDocuments {

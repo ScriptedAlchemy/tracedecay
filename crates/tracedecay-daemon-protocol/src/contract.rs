@@ -22,7 +22,7 @@ use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use serde::{Deserialize, Serialize};
-use tracedecay_application::{
+use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
     AdmitWorkSynthesisCommand, ApplicationContractError, ApplicationOutcome, ApplicationProblem,
     AuthorityReceipt, AuthorizedScopeSet, CancelWorkAttemptCommand, CancellationContext,
@@ -38,10 +38,11 @@ use tracedecay_application::{
     PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1, PreviewId,
     PreviewResult, ReconciliationState, ReleaseWorkPlacementCommand, RequestId, ResolvedScope,
     ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetrieverContribution,
-    RetryWorkAttemptCommandV1, StartWorkAttemptCommand, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState, WorkArtifactHydrationRequestV1,
-    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    RetryWorkAttemptCommandV1, SourceEditInvocationV1, SourceEditReconciliationInvocationV1,
+    SourceEditRollbackInvocationV1, StartWorkAttemptCommand, TaskHandoffGrant,
+    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
@@ -66,14 +67,15 @@ use crate::lsp_wire::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
     MAX_LSP_WORKSPACE_ROOTS,
 };
-use crate::surface::{ContextScoutSurfaceRequest, GitReadSurfaceRequest};
-use tracedecay_application::ConfigurationWireRequestV1;
-use tracedecay_application::feedback::observations::{
+use crate::surface::GitReadSurfaceRequest;
+use tracedecay_contracts::ConfigurationWireRequestV1;
+use tracedecay_contracts::context_scout::ContextScoutSurfaceRequestV1;
+use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
 };
-use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
-use tracedecay_application::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
-use tracedecay_application::retrieval::PrimitiveRequest;
+use tracedecay_contracts::git::GitHubStackSignalExpandSurfaceRequest;
+use tracedecay_contracts::git::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
+use tracedecay_contracts::retrieval::PrimitiveRequest;
 
 /// Request-field character rules. The contract accepts opaque handles and ids
 /// only in a shape it can echo back safely, so validation travels with the
@@ -440,6 +442,9 @@ pub enum DaemonInvocationOperation {
     LspAcknowledge,
     LspReconnect,
     LspDetach,
+    SourceEdit,
+    SourceEditReconcile,
+    SourceEditRollback,
 }
 
 impl DaemonInvocationOperation {
@@ -505,6 +510,9 @@ impl DaemonInvocationOperation {
             Self::LspAcknowledge => "lsp_acknowledge",
             Self::LspReconnect => "lsp_reconnect",
             Self::LspDetach => "lsp_detach",
+            Self::SourceEdit => "source_edit",
+            Self::SourceEditReconcile => "source_edit_reconcile",
+            Self::SourceEditRollback => "source_edit_rollback",
         }
     }
 }
@@ -641,11 +649,11 @@ pub enum WorkflowApplicationInvocation {
     DiffDefinition(WorkflowDefinitionDiffRequest),
     HandoffIssue(TaskHandoffIssueRequest),
     HandoffRedeem(TaskHandoffRedeemRequest),
-    StartRun(Box<tracedecay_application::WorkflowRunStartRequest>),
-    PauseRun(tracedecay_application::WorkflowRunPauseRequest),
-    ResumeRun(tracedecay_application::WorkflowRunResumeRequest),
-    CancelRun(tracedecay_application::WorkflowRunCancelRequest),
-    GetRun(tracedecay_application::WorkflowRunGetRequest),
+    StartRun(Box<tracedecay_contracts::WorkflowRunStartRequest>),
+    PauseRun(tracedecay_contracts::WorkflowRunPauseRequest),
+    ResumeRun(tracedecay_contracts::WorkflowRunResumeRequest),
+    CancelRun(tracedecay_contracts::WorkflowRunCancelRequest),
+    GetRun(tracedecay_contracts::WorkflowRunGetRequest),
 }
 
 impl WorkflowApplicationInvocation {
@@ -736,7 +744,7 @@ pub enum DaemonInvocationPayload {
     },
     NativeIntegration {
         surface_operation: ApplicationSurfaceOperation,
-        request: tracedecay_application::NativeIntegrationSurfaceRequest,
+        request: tracedecay_contracts::NativeIntegrationSurfaceRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -791,13 +799,13 @@ pub enum DaemonInvocationPayload {
         event: FeedbackSourceEventV1,
     },
     PrimitiveImpact {
-        request: tracedecay_application::retrieval::GraphImpactPrimitiveRequest,
+        request: tracedecay_contracts::retrieval::GraphImpactPrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
     },
     PrimitiveAffectedTests {
-        request: tracedecay_application::retrieval::AffectedFileTestsPrimitiveRequest,
+        request: tracedecay_contracts::retrieval::AffectedFileTestsPrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -817,7 +825,7 @@ pub enum DaemonInvocationPayload {
     },
     PrimitiveCode {
         surface_operation: ApplicationSurfaceOperation,
-        request: tracedecay_application::PrimitiveCodeSurfaceRequest,
+        request: tracedecay_contracts::PrimitiveCodeSurfaceRequest,
         page: PageRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
@@ -825,7 +833,7 @@ pub enum DaemonInvocationPayload {
     },
     CallableCode {
         surface_operation: ApplicationSurfaceOperation,
-        request: tracedecay_application::CallableCodeSurfaceRequest,
+        request: tracedecay_contracts::CallableCodeSurfaceRequest,
         page: PageRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
@@ -842,7 +850,7 @@ pub enum DaemonInvocationPayload {
     },
     ContextScout {
         surface_operation: ApplicationSurfaceOperation,
-        request: ContextScoutSurfaceRequest,
+        request: ContextScoutSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -856,7 +864,7 @@ pub enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     RetainedApplication {
-        request: tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1,
+        request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -956,6 +964,24 @@ pub enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    SourceEdit {
+        request: SourceEditInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    SourceEditReconcile {
+        request: SourceEditReconciliationInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    SourceEditRollback {
+        request: SourceEditRollbackInvocationV1,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
 }
 
 impl DaemonInvocationRequest {
@@ -966,7 +992,7 @@ impl DaemonInvocationRequest {
     pub fn native_integration(
         request_id: impl Into<String>,
         surface_operation: ApplicationSurfaceOperation,
-        request: tracedecay_application::NativeIntegrationSurfaceRequest,
+        request: tracedecay_contracts::NativeIntegrationSurfaceRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1049,7 +1075,6 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::SourceBody
             | ApplicationSurfaceOperation::SourceOutline
             | ApplicationSurfaceOperation::ModuleApi
-            | ApplicationSurfaceOperation::FileMetadata
             | ApplicationSurfaceOperation::HealthRead
             | ApplicationSurfaceOperation::HealthDelta
             | ApplicationSurfaceOperation::StorageStatus
@@ -1098,12 +1123,10 @@ impl DaemonInvocationRequest {
                 unreachable!("native worktree operations use their typed constructor")
             }
             ApplicationSurfaceOperation::ConfigurationList
-            | ApplicationSurfaceOperation::ConfigurationExplain
             | ApplicationSurfaceOperation::ConfigurationGet
             | ApplicationSurfaceOperation::ConfigurationSet
             | ApplicationSurfaceOperation::ConfigurationUnset
             | ApplicationSurfaceOperation::ConfigurationBatch
-            | ApplicationSurfaceOperation::ConfigurationWriteCredential
             | ApplicationSurfaceOperation::ConfigurationObservedState
             | ApplicationSurfaceOperation::ConfigurationProtectedPreview
             | ApplicationSurfaceOperation::ConfigurationProtectedApply
@@ -1243,10 +1266,6 @@ impl DaemonInvocationRequest {
                 request @ PrimitiveRequest::ModuleApi(_),
             )
             | (
-                surface_operation @ ApplicationSurfaceOperation::FileMetadata,
-                request @ PrimitiveRequest::FileMetadata(_),
-            )
-            | (
                 surface_operation @ ApplicationSurfaceOperation::HealthRead,
                 request @ PrimitiveRequest::HealthRead(_),
             )
@@ -1306,7 +1325,7 @@ impl DaemonInvocationRequest {
     pub fn context_scout(
         request_id: impl Into<String>,
         surface_operation: ApplicationSurfaceOperation,
-        request: ContextScoutSurfaceRequest,
+        request: ContextScoutSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1328,7 +1347,7 @@ impl DaemonInvocationRequest {
 
     pub fn retained_application(
         request_id: impl Into<String>,
-        request: tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1,
+        request: tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1563,7 +1582,7 @@ impl DaemonInvocationRequest {
     pub fn callable_code(
         request_id: impl Into<String>,
         surface_operation: ApplicationSurfaceOperation,
-        request: tracedecay_application::CallableCodeSurfaceRequest,
+        request: tracedecay_contracts::CallableCodeSurfaceRequest,
         page: PageRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
@@ -1572,31 +1591,31 @@ impl DaemonInvocationRequest {
         debug_assert!(matches!(
             (&request, surface_operation),
             (
-                tracedecay_application::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::ExactOccurrence(_),
                 ApplicationSurfaceOperation::CodeExactOccurrence,
             ) | (
-                tracedecay_application::CallableCodeSurfaceRequest::PhraseSearch(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::PhraseSearch(_),
                 ApplicationSurfaceOperation::CodePhraseSearch,
             ) | (
-                tracedecay_application::CallableCodeSurfaceRequest::Callees(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::Callees(_),
                 ApplicationSurfaceOperation::CodeCallees,
             ) | (
-                tracedecay_application::CallableCodeSurfaceRequest::Facets(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::Facets(_),
                 ApplicationSurfaceOperation::CodeFacets,
             ) | (
-                tracedecay_application::CallableCodeSurfaceRequest::Timeline(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::Timeline(_),
                 ApplicationSurfaceOperation::CodeTimeline,
             ) | (
-                tracedecay_application::CallableCodeSurfaceRequest::Declaration(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::Declaration(_),
                 ApplicationSurfaceOperation::CodeDeclaration,
             ) | (
-                tracedecay_application::CallableCodeSurfaceRequest::Definition(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::Definition(_),
                 ApplicationSurfaceOperation::CodeDefinition,
             ) | (
-                tracedecay_application::CallableCodeSurfaceRequest::TypeDefinition(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),
                 ApplicationSurfaceOperation::CodeTypeDefinition,
             ) | (
-                tracedecay_application::CallableCodeSurfaceRequest::References(_),
+                tracedecay_contracts::CallableCodeSurfaceRequest::References(_),
                 ApplicationSurfaceOperation::CodeReferences,
             )
         ));
@@ -1619,7 +1638,7 @@ impl DaemonInvocationRequest {
     pub fn primitive_code(
         request_id: impl Into<String>,
         surface_operation: ApplicationSurfaceOperation,
-        request: tracedecay_application::PrimitiveCodeSurfaceRequest,
+        request: tracedecay_contracts::PrimitiveCodeSurfaceRequest,
         page: PageRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
@@ -1893,39 +1912,39 @@ impl DaemonInvocationRequest {
                 DaemonInvocationOperation::PrimitiveRead
             }
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::ExactOccurrence(_),
                 ..
             } => DaemonInvocationOperation::CodeExactOccurrence,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::PhraseSearch(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::PhraseSearch(_),
                 ..
             } => DaemonInvocationOperation::CodePhraseSearch,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::Callees(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Callees(_),
                 ..
             } => DaemonInvocationOperation::CodeCallees,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::Facets(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Facets(_),
                 ..
             } => DaemonInvocationOperation::CodeFacets,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::Timeline(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Timeline(_),
                 ..
             } => DaemonInvocationOperation::CodeTimeline,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::Declaration(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Declaration(_),
                 ..
             } => DaemonInvocationOperation::CodeDeclaration,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::Definition(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::Definition(_),
                 ..
             } => DaemonInvocationOperation::CodeDefinition,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::TypeDefinition(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),
                 ..
             } => DaemonInvocationOperation::CodeTypeDefinition,
             DaemonInvocationPayload::CallableCode {
-                request: tracedecay_application::CallableCodeSurfaceRequest::References(_),
+                request: tracedecay_contracts::CallableCodeSurfaceRequest::References(_),
                 ..
             } => DaemonInvocationOperation::CodeReferences,
             DaemonInvocationPayload::Configuration { .. } => {
@@ -1973,6 +1992,13 @@ impl DaemonInvocationRequest {
             }
             DaemonInvocationPayload::LspReconnect { .. } => DaemonInvocationOperation::LspReconnect,
             DaemonInvocationPayload::LspDetach { .. } => DaemonInvocationOperation::LspDetach,
+            DaemonInvocationPayload::SourceEdit { .. } => DaemonInvocationOperation::SourceEdit,
+            DaemonInvocationPayload::SourceEditReconcile { .. } => {
+                DaemonInvocationOperation::SourceEditReconcile
+            }
+            DaemonInvocationPayload::SourceEditRollback { .. } => {
+                DaemonInvocationOperation::SourceEditRollback
+            }
         }
     }
 
@@ -2033,6 +2059,9 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::SemanticActivate
                 | DaemonInvocationOperation::SemanticQualify
                 | DaemonInvocationOperation::LspOpen
+                | DaemonInvocationOperation::SourceEdit
+                | DaemonInvocationOperation::SourceEditReconcile
+                | DaemonInvocationOperation::SourceEditRollback
         )
     }
 
@@ -2177,6 +2206,24 @@ impl DaemonInvocationRequest {
                 deadline,
                 cancellation,
                 ..
+            }
+            | DaemonInvocationPayload::SourceEdit {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::SourceEditReconcile {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::SourceEditRollback {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
             } => {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
@@ -2232,19 +2279,19 @@ impl DaemonInvocationRequest {
                     (surface_operation, request),
                     (
                         ApplicationSurfaceOperation::CodeSymbolSearch,
-                        tracedecay_application::PrimitiveCodeSurfaceRequest::SymbolSearch(_),
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::SymbolSearch(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeSignatureSearch,
-                        tracedecay_application::PrimitiveCodeSurfaceRequest::SignatureSearch(_),
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::SignatureSearch(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeImplementations,
-                        tracedecay_application::PrimitiveCodeSurfaceRequest::Implementations(_),
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::Implementations(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeTypeHierarchy,
-                        tracedecay_application::PrimitiveCodeSurfaceRequest::TypeHierarchy(_),
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::TypeHierarchy(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeCallers,
-                        tracedecay_application::PrimitiveCodeSurfaceRequest::Callers(_),
+                        tracedecay_contracts::PrimitiveCodeSurfaceRequest::Callers(_),
                     )
                 );
                 if !matches {
@@ -2309,31 +2356,31 @@ impl DaemonInvocationRequest {
                     (surface_operation, request),
                     (
                         ApplicationSurfaceOperation::CodeExactOccurrence,
-                        tracedecay_application::CallableCodeSurfaceRequest::ExactOccurrence(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::ExactOccurrence(_),
                     ) | (
                         ApplicationSurfaceOperation::CodePhraseSearch,
-                        tracedecay_application::CallableCodeSurfaceRequest::PhraseSearch(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::PhraseSearch(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeCallees,
-                        tracedecay_application::CallableCodeSurfaceRequest::Callees(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Callees(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeFacets,
-                        tracedecay_application::CallableCodeSurfaceRequest::Facets(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Facets(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeTimeline,
-                        tracedecay_application::CallableCodeSurfaceRequest::Timeline(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Timeline(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeDeclaration,
-                        tracedecay_application::CallableCodeSurfaceRequest::Declaration(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Declaration(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeDefinition,
-                        tracedecay_application::CallableCodeSurfaceRequest::Definition(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::Definition(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeTypeDefinition,
-                        tracedecay_application::CallableCodeSurfaceRequest::TypeDefinition(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::TypeDefinition(_),
                     ) | (
                         ApplicationSurfaceOperation::CodeReferences,
-                        tracedecay_application::CallableCodeSurfaceRequest::References(_),
+                        tracedecay_contracts::CallableCodeSurfaceRequest::References(_),
                     )
                 );
                 if !matches {
@@ -2354,8 +2401,8 @@ impl DaemonInvocationRequest {
                     || !request.matches(*surface_operation)
                     || matches!(
                         request,
-                        ContextScoutSurfaceRequest::Recent(request)
-                            | ContextScoutSurfaceRequest::Explain(request)
+                        ContextScoutSurfaceRequestV1::Recent(request)
+                            | ContextScoutSurfaceRequestV1::Explain(request)
                             if !(1..=32).contains(&request.limit)
                     )
                 {
@@ -2728,6 +2775,46 @@ pub enum DaemonInvocationProblem {
     Unavailable,
 }
 
+impl DaemonInvocationProblem {
+    /// Preserve the typed refusal as a reason-coded error. Never format the
+    /// variant with `Debug` into a user-facing message.
+    pub fn into_trace_decay_error(self) -> tracedecay_domain::errors::TraceDecayError {
+        let (reason_code, retryable, detail) = match self {
+            Self::InvalidRequest => (
+                "daemon_invocation.invalid_request",
+                false,
+                "The daemon invocation request is invalid",
+            ),
+            Self::UnsupportedRevision => (
+                "daemon_invocation.unsupported_revision",
+                false,
+                "The daemon invocation revision is unsupported",
+            ),
+            Self::NotFoundOrNotAuthorized => (
+                "daemon_invocation.not_found_or_not_authorized",
+                false,
+                "The requested daemon invocation was not found or is not authorized",
+            ),
+            Self::ResetRequired => (
+                "daemon_invocation.reset_required",
+                false,
+                "The daemon invocation store must be reset",
+            ),
+            Self::ApplicationContractViolation => (
+                "daemon_invocation.application_contract_violation",
+                false,
+                "The daemon invocation violated its application contract",
+            ),
+            Self::Unavailable => (
+                "daemon_invocation.unavailable",
+                true,
+                "The daemon invocation is unavailable",
+            ),
+        };
+        tracedecay_domain::errors::TraceDecayError::project_route(reason_code, retryable, detail)
+    }
+}
+
 #[cfg(test)]
 mod invocation_wire_revision_tests {
     use super::{
@@ -2899,7 +2986,7 @@ struct DaemonEffectReceipt {
     configuration_digest: ManifestDigest,
     catalog_digest: ManifestDigest,
     privacy_digest: ManifestDigest,
-    outcome: tracedecay_application::EffectTermination,
+    outcome: tracedecay_contracts::EffectTermination,
     committed_state: Option<ManifestDigest>,
     external_proof: Option<RetrievalAnchorId>,
 }
@@ -3201,7 +3288,7 @@ pub enum DaemonInvocationOutcome {
     RetainedApplication {
         scope: ResolvedScope,
         outcome:
-            ApplicationOutcome<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>,
+            ApplicationOutcome<tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1>,
     },
     RetainedApplicationProblem {
         scope: ResolvedScope,
@@ -3217,8 +3304,7 @@ pub enum DaemonInvocationOutcome {
     },
     MultiRootQueryPage {
         scope: ResolvedScope,
-        outcome:
-            ApplicationOutcome<tracedecay_application::MultiRootQueryPageV1<serde_json::Value>>,
+        outcome: ApplicationOutcome<tracedecay_contracts::MultiRootQueryPageV1<serde_json::Value>>,
     },
     WorkApplication {
         scope: ResolvedScope,
@@ -3287,6 +3373,10 @@ pub enum DaemonInvocationOutcome {
         session: DaemonLspSessionAccess,
     },
     LspDetached,
+    SourceEdit {
+        scope: ResolvedScope,
+        result: tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+    },
     Problem {
         problem: DaemonInvocationProblem,
     },
@@ -3305,7 +3395,7 @@ pub enum WorkApplicationOutcomeV1 {
     AttemptStatus(ApplicationOutcome<WorkAttemptV1>),
     CancelAttempt(ApplicationOutcome<WorkAttemptV1>),
     ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
-    RetryAttempt(Box<ApplicationOutcome<tracedecay_application::WorkRetryAttemptOutcomeV1>>),
+    RetryAttempt(Box<ApplicationOutcome<tracedecay_contracts::WorkRetryAttemptOutcomeV1>>),
     ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
     ExecutionHistory(ApplicationOutcome<WorkExecutionHistoryV1>),
     HydrateArtifacts(ApplicationOutcome<WorkArtifactHydrationV1>),

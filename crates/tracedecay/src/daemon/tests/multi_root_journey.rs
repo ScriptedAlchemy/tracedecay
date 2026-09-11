@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationProblemKind, CancellationContext, Deadline, MultiRootExecuteRequestV1,
     MultiRootOperationV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1,
     MultiRootScopeSetReadRequestV1, RegisteredRootSelectorV1,
@@ -24,7 +24,7 @@ use crate::daemon::{
 };
 use tracedecay_daemon_service::{
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
-    DaemonInvocationRequest, cancel, parse_daemon_invocation_request,
+    DaemonInvocationRequest, parse_daemon_invocation_request,
 };
 
 fn git(root: &Path, args: &[&str]) {
@@ -166,9 +166,10 @@ async fn run_multi_root_quiescence() {
     let cancelled_read_id = "request.multi-root.cancelled-read";
     let cancelled_cas_id = "request.multi-root.cancelled-cas";
     let cancelled_execute_id = "request.multi-root.cancelled-execute";
-    assert!(!cancel(cancelled_read_id));
-    assert!(!cancel(cancelled_cas_id));
-    assert!(!cancel(cancelled_execute_id));
+    let request_cancellations = engine.invocation.service.request_cancellations();
+    assert!(!request_cancellations.cancel(cancelled_read_id));
+    assert!(!request_cancellations.cancel(cancelled_cas_id));
+    assert!(!request_cancellations.cancel(cancelled_execute_id));
     let interrupted = [
         (
             DaemonInvocationRequest::multi_root_scope_set_read(
@@ -592,7 +593,7 @@ async fn run_authenticated_multi_root_journey() {
     else {
         panic!("multi-root CAS must reach the executor: {:?}", cas.outcome);
     };
-    let tracedecay_application::ApplicationOutcome::Evidence(packet) = outcome else {
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
         panic!("multi-root CAS must return evidence");
     };
     let cas_result = packet
@@ -640,7 +641,7 @@ async fn run_authenticated_multi_root_journey() {
             read.outcome
         );
     };
-    let tracedecay_application::ApplicationOutcome::Evidence(packet) = outcome else {
+    let tracedecay_contracts::ApplicationOutcome::Evidence(packet) = outcome else {
         panic!("multi-root read must return evidence");
     };
     assert_eq!(packet.payload.clone().flatten().as_ref(), Some(&stored));

@@ -5,12 +5,14 @@ argument-hint: "[subject]"
 
 # Curate memory
 
-Interpret `$ARGUMENTS` as the fact, entity, query, or curation scope. If absent,
-resolve the active project and run the canonical agent-managed curator.
+Interpret `$ARGUMENTS` as the fact, entity, query, curation scope, or existing run.
+For requested broad curation without a scope, use the active registered project.
+For inspection, read the existing run without launching another; for an exact
+fact change, use the direct administration operation below.
 
 1. Resolve scope: confirm the active project root/store with `tracedecay_active_project` before touching memory.
-2. Start read-only with `tracedecay_fact_store_search`, `tracedecay_fact_store_list`, `tracedecay_fact_store_get`, `tracedecay_fact_store_probe`, `tracedecay_fact_store_related`, `tracedecay_fact_store_reason`, or `tracedecay_fact_store_contradict`. Use `tracedecay_memory_status` only when the user asks for its read-only canonical fact/entity/trust/feedback/holographic-algebra status snapshot. Open `tracedecay_dashboard` (`action: "start"`) only when the user wants visual curation.
-3. Run the sole public semantic launcher, `fact_store_curate`, through the MCP
+2. When fact evidence is needed, use `tracedecay_fact_store_search`, `tracedecay_fact_store_list`, `tracedecay_fact_store_get`, `tracedecay_fact_store_probe`, `tracedecay_fact_store_related`, `tracedecay_fact_store_reason`, or `tracedecay_fact_store_contradict`. Use `tracedecay_memory_status` only when the user asks for its read-only canonical fact/entity/trust/feedback/holographic-algebra status snapshot. Open `tracedecay_dashboard` (`action: "start"`) only when the user wants visual curation.
+3. For broad curation, run the sole public semantic launcher, `fact_store_curate`, through the MCP
    adapter `tracedecay_fact_store_curate` or generic CLI adapter `tracedecay
    tool fact_store_curate`, with only `fact_review_limit` and
    `min_confidence_millionths`. Capture the returned run id. The request

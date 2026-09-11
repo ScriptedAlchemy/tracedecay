@@ -34,13 +34,11 @@ use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
     try_stream_new_jsonl_raw_strict_with_resume,
 };
-#[cfg(test)]
-use tracedecay_private_fs::background_cpu::install_process_background_cpu;
-use tracedecay_private_fs::background_cpu::{ProcessBackgroundCpuV1, process_background_cpu};
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     ObservationRecordParseErrorV1, ParsedObservationRecordV1, PreparedObservationRecordV1,
     prepare_observation_record_v1,
 };
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessSharedMemoryReservationV1, ResidentMemoryComponentIdV1,
 };
@@ -85,6 +83,7 @@ pub(in crate::runtime) struct JsonlObservationAdmissionRequest<'request> {
     scope: ObservationScopeV1,
     retention_class: RetentionClass,
     max_new_bytes: Option<u64>,
+    max_frames: Option<usize>,
     required_start_cursor: Option<Option<ObservationSourceCursorV1>>,
     max_end_offset: Option<u64>,
     persisted_cursor_update: PersistedCursorUpdate,
@@ -109,6 +108,7 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
             scope,
             retention_class,
             max_new_bytes: None,
+            max_frames: None,
             required_start_cursor: None,
             max_end_offset: None,
             persisted_cursor_update: PersistedCursorUpdate::Monotonic,
@@ -119,6 +119,11 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
 
     pub(in crate::runtime) fn with_max_new_bytes(mut self, max_new_bytes: Option<u64>) -> Self {
         self.max_new_bytes = max_new_bytes;
+        self
+    }
+
+    pub(in crate::runtime) fn with_max_frames(mut self, max_frames: usize) -> Self {
+        self.max_frames = Some(max_frames);
         self
     }
 
@@ -316,8 +321,8 @@ impl JsonlCheckpoint {
 
 /// Bounded persist window: flush consecutive durables before this many
 /// frames so one `persist_observations` call stays a scan-sized batch.
-const MAX_CAPTURE_WINDOW: usize = 256;
-const MAX_CAPTURE_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
+pub(in crate::runtime) const MAX_CAPTURE_WINDOW: usize = 256;
+pub(in crate::runtime) const MAX_CAPTURE_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const SHARED_JSONL_PAGE_MAX_NEW_BYTES: u64 = MAX_JSONL_RECORD_BYTES as u64 + 1;
 // One page reads at most 16 MiB. In the adversarial dense-value shape, that
 // encoding can hold roughly eight million JSON values across many individually
@@ -328,10 +333,15 @@ pub(crate) const SHARED_JSONL_PAGE_MAX_NEW_BYTES: u64 = MAX_JSONL_RECORD_BYTES a
 // shrunk to the structural meter once transient parser allocations are gone.
 const SHARED_JSONL_WORKER_RESERVATION_BYTES: u64 = 544 * 1024 * 1024;
 
+/// The process resources JSONL page preparation meters against: the
+/// resident-memory authority its page reservations charge and the background
+/// CPU authority its parse workers are admitted through. Both are injected by
+/// the composition root once the process worker plan is installed.
 #[derive(Clone)]
 struct SharedJsonlPreparationAuthority {
     memory: Arc<ProcessResidentMemoryV1>,
     component: ResidentMemoryComponentIdV1,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
 }
 
 static SHARED_JSONL_PREPARATION_AUTHORITY: OnceLock<SharedJsonlPreparationAuthority> =
@@ -340,27 +350,32 @@ static SHARED_JSONL_PREPARATION_AUTHORITY: OnceLock<SharedJsonlPreparationAuthor
 /// Mount the process-wide JSONL page-preparation authority.
 ///
 /// The first successful install wins. Later calls — including concurrent
-/// `OnceLock::set` losers and fixtures that carry a distinct
-/// [`ProcessResidentMemoryV1`] Arc — are no-ops. `InvalidFrameState` is a
-/// frame-parse failure, not "another caller already mounted preparation".
-/// Treating a second installer as a frame error poisons every later
-/// host-admission fixture in the same process (the `mcp_suite` cascade).
+/// `OnceLock::set` losers and fixtures that carry distinct
+/// [`ProcessResidentMemoryV1`] / [`ProcessBackgroundCpuV1`] Arcs — are no-ops.
+/// `InvalidFrameState` is a frame-parse failure, not "another caller already
+/// mounted preparation". Treating a second installer as a frame error poisons
+/// every later host-admission fixture in the same process (the `mcp_suite`
+/// cascade).
 pub(crate) fn install_shared_jsonl_preparation_authority(
     memory: Arc<ProcessResidentMemoryV1>,
+    background_cpu: Arc<ProcessBackgroundCpuV1>,
 ) -> TranscriptIngestResult<()> {
     let authority = SharedJsonlPreparationAuthority {
         memory,
         component: ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages")
             .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: "codex" })?,
+        background_cpu,
     };
     let _ = SHARED_JSONL_PREPARATION_AUTHORITY.set(authority);
     Ok(())
 }
 
 pub(crate) fn shared_jsonl_preparation_workers() -> usize {
-    process_background_cpu().map_or(1, |authority| {
-        shared_jsonl_preparation_workers_from(authority.width().get())
-    })
+    SHARED_JSONL_PREPARATION_AUTHORITY
+        .get()
+        .map_or(1, |authority| {
+            shared_jsonl_preparation_workers_from(authority.background_cpu.width().get())
+        })
 }
 
 const fn shared_jsonl_preparation_workers_from(installed_width: usize) -> usize {
@@ -415,10 +430,13 @@ const fn shared_jsonl_speculative_capacity_from(total_capacity: usize) -> usize 
 
 pub(in crate::runtime) fn shared_jsonl_background_cpu()
 -> TranscriptIngestResult<Arc<ProcessBackgroundCpuV1>> {
-    process_background_cpu().ok_or(TranscriptIngestError::BackgroundResourceUnavailable {
-        provider: "codex",
-        resource: "process background CPU authority",
-    })
+    SHARED_JSONL_PREPARATION_AUTHORITY
+        .get()
+        .map(|authority| Arc::clone(&authority.background_cpu))
+        .ok_or(TranscriptIngestError::BackgroundResourceUnavailable {
+            provider: "codex",
+            resource: "process background CPU authority",
+        })
 }
 
 pub(in crate::runtime) fn reserve_shared_jsonl_page()
@@ -466,8 +484,8 @@ pub(in crate::runtime) fn install_test_shared_jsonl_preparation_authority() {
             NonZeroU64::new(32 * 1024 * 1024 * 1024).unwrap(),
         ))
     }));
-    install_process_background_cpu(NonZeroUsize::new(48).unwrap()).unwrap();
-    install_shared_jsonl_preparation_authority(memory).unwrap();
+    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::new(48).unwrap()));
+    install_shared_jsonl_preparation_authority(memory, background_cpu).unwrap();
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -476,6 +494,7 @@ struct SharedJsonlPageKey {
     position: u64,
     generation: u64,
     max_new_bytes: Option<u64>,
+    max_frames: Option<usize>,
     resume: Option<(u64, u64, u64)>,
     preparation: SharedJsonlFramePreparation,
 }
@@ -991,10 +1010,29 @@ struct SharedJsonlBuildOptions {
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
+#[cfg(test)]
 fn build_shared_jsonl_page(
     path: PathBuf,
     previous: StoredCursor,
     max_new_bytes: Option<u64>,
+    resume_state: Option<JsonlResumeState>,
+    options: SharedJsonlBuildOptions,
+) -> TranscriptIngestResult<Arc<SharedJsonlPage>> {
+    build_shared_jsonl_page_with_frame_limit(
+        path,
+        previous,
+        max_new_bytes,
+        None,
+        resume_state,
+        options,
+    )
+}
+
+fn build_shared_jsonl_page_with_frame_limit(
+    path: PathBuf,
+    previous: StoredCursor,
+    max_new_bytes: Option<u64>,
+    max_frames: Option<usize>,
     resume_state: Option<JsonlResumeState>,
     options: SharedJsonlBuildOptions,
 ) -> TranscriptIngestResult<Arc<SharedJsonlPage>> {
@@ -1031,13 +1069,24 @@ fn build_shared_jsonl_page(
         };
         hotpath::gauge!("jsonl_shared_prep_active").inc(1.0);
         let _active = SharedJsonlPreparationActiveGuard;
-        try_stream_new_jsonl_raw_strict_with_resume(
-            &path,
-            previous,
-            max_new_bytes,
-            MAX_JSONL_RECORD_BYTES,
-            resume_state,
-        )?
+        if let Some(max_frames) = max_frames {
+            crate::runtime::source::try_stream_new_jsonl_raw_strict_with_resume_and_frame_limit(
+                &path,
+                previous,
+                max_new_bytes,
+                MAX_JSONL_RECORD_BYTES,
+                resume_state,
+                max_frames,
+            )?
+        } else {
+            try_stream_new_jsonl_raw_strict_with_resume(
+                &path,
+                previous,
+                max_new_bytes,
+                MAX_JSONL_RECORD_BYTES,
+                resume_state,
+            )?
+        }
     };
     #[cfg(test)]
     let preparation_file_identity = raw.file_identity;
@@ -1384,6 +1433,37 @@ async fn shared_jsonl_page_with_cancellation(
     cancellation: SharedJsonlCancellation,
     speculative: bool,
 ) -> TranscriptIngestResult<(Arc<SharedJsonlPage>, bool)> {
+    shared_jsonl_page_with_frame_limit_and_cancellation(
+        path,
+        previous,
+        max_new_bytes,
+        None,
+        resume_state,
+        preparation,
+        cancellation,
+        speculative,
+    )
+    .await
+}
+
+// The two limits, the resume state and the speculative flag are independent
+// admission controls, and the caller chooses each one; folding them into a
+// struct would let a caller build a half-specified admission and discover it
+// at the await rather than at the call.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent admission control chosen per call"
+)]
+async fn shared_jsonl_page_with_frame_limit_and_cancellation(
+    path: &Path,
+    previous: StoredCursor,
+    max_new_bytes: Option<u64>,
+    max_frames: Option<usize>,
+    resume_state: Option<JsonlResumeState>,
+    preparation: impl Into<SharedJsonlFramePreparation>,
+    cancellation: SharedJsonlCancellation,
+    speculative: bool,
+) -> TranscriptIngestResult<(Arc<SharedJsonlPage>, bool)> {
     let preparation = preparation.into();
     let SharedJsonlCancellation {
         blocking: cancellation,
@@ -1416,6 +1496,7 @@ async fn shared_jsonl_page_with_cancellation(
         position: previous.position,
         generation: previous.file_id,
         max_new_bytes,
+        max_frames,
         resume: resume_state
             .map(|resume| (resume.generation, resume.file_identity, resume.fingerprint)),
         preparation,
@@ -1541,10 +1622,11 @@ async fn shared_jsonl_page_with_cancellation(
     };
     let scan_path = path.to_path_buf();
     let page = tokio::task::spawn_blocking(move || {
-        build_shared_jsonl_page(
+        build_shared_jsonl_page_with_frame_limit(
             scan_path,
             previous,
             max_new_bytes,
+            max_frames,
             resume_state,
             SharedJsonlBuildOptions {
                 prepare_frames: prepare_frames_eagerly,
@@ -2123,6 +2205,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         scope,
         retention_class,
         mut max_new_bytes,
+        max_frames,
         required_start_cursor,
         max_end_offset,
         persisted_cursor_update,
@@ -2180,10 +2263,11 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         })
     });
     let had_expected_cursor = expected_cursor.is_some();
-    let (raw, shared_page_hit) = shared_jsonl_page_with_cancellation(
+    let (raw, shared_page_hit) = shared_jsonl_page_with_frame_limit_and_cancellation(
         path,
         previous,
         max_new_bytes,
+        max_frames,
         resume_state,
         shared_frame_preparation,
         SharedJsonlCancellation {

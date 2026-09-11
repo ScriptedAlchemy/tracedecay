@@ -28,6 +28,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
                 "id": "../ambient-skill",
                 "title": "Invalid skill",
                 "summary": "Must not escape the managed profile root.",
+                "routing_description": "Must not escape the managed profile root.",
                 "category": "workflow",
                 "body_markdown": "invalid"
             }),
@@ -43,6 +44,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             "id": "repo-hygiene",
             "title": "Repo Hygiene",
             "summary": "Keep repository maintenance tasks consistent.",
+            "routing_description": "Use when cleaning generated changes before review.",
             "category": "workflow",
             "body_markdown": "Use this when cleaning generated changes.",
             "support_files": [
@@ -60,6 +62,8 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
         let (status, created) = post_json_body(&agent, &skills_url, &draft);
         assert_eq!(status, 200);
         assert_eq!(created["skill"]["metadata"]["id"], "repo-hygiene");
+        assert_eq!(created["skill"]["metadata"]["routing_description"],
+            "Use when cleaning generated changes before review.");
         assert_eq!(created["skill"]["metadata"]["state"], "active");
         assert!(created["skill"]["metadata"]["created_at"]
             .as_i64()
@@ -128,6 +132,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             "id": "repo-hygiene",
             "title": "Overwrite attempt",
             "summary": "This should not replace the active skill.",
+            "routing_description": "This should not replace the active skill.",
             "category": "workflow",
             "body_markdown": "Duplicate drafts must not bypass PATCH staging.",
             "support_files": [
@@ -250,6 +255,7 @@ fn managed_skills_are_dashboard_controllable_with_direct_activation() {
             "id": "repo-hygiene",
             "title": "Repository hygiene",
             "summary": "Keep repository checks focused.",
+            "routing_description": "Keep repository checks focused.",
             "category": "maintenance",
             "body_markdown": "Run focused tests before broad suites.",
             "pinned": true
@@ -410,6 +416,7 @@ fn managed_skill_dashboard_api_persists_and_updates_lifecycle() {
             "id": "repo-hygiene",
             "title": "Repository hygiene",
             "summary": "Keep repository maintenance guidance current.",
+            "routing_description": "Keep repository maintenance guidance current.",
             "category": "maintenance",
             "body_markdown": "Use focused checks before changing generated files.",
             "support_files": [
@@ -512,6 +519,7 @@ fn managed_skill_dashboard_api_applies_updates_immediately() {
             "id": "repo-hygiene",
             "title": "Repository hygiene",
             "summary": "Keep repository maintenance guidance current.",
+            "routing_description": "Keep repository maintenance guidance current.",
             "category": "maintenance",
             "body_markdown": "Use focused checks before changing generated files.",
             "support_files": [

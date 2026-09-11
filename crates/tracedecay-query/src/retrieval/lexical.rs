@@ -17,6 +17,7 @@ use tracedecay_domain::{
     RetrieverOutcome, ScoreDomainId, split_subtokens, technical_tokens,
 };
 
+use super::graph::GraphExecutionControl;
 use super::ports::{
     CodeCandidateBindingV1, LaneBoundEvidence, LaneEvidenceRejections, LexicalPostingReadPort,
     RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest, contract_error,
@@ -63,6 +64,75 @@ pub const MAX_FUZZY_TERM_EXPANSIONS_V1: u32 = 64;
 
 /// Maximum UTF-8 bytes in one lexical whole term, subtoken, or phrase.
 pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
+
+/// Summed document-frequency budget for lexical term-source admission. Every
+/// candidate is decoded from its row and scored, so the union of the request's
+/// term sources — not the winner cap — decides the lane's transient allocation
+/// and wall time: unbounded, a natural-language task whose terms include
+/// common words hydrated ~74k rows of a 472k-chunk corpus per read (~0.95 GB
+/// decoded, 5.7 s) and missed the context deadline. Term sources are admitted
+/// in ascending document-frequency order until their summed frequencies would
+/// exceed this bound; the most selective source is always admitted so a
+/// single common-term query still answers. Phrase sources are admitted separately.
+/// This is a recall/latency policy, not a hard document or allocation ceiling:
+/// documents matching only pruned terms cannot rank. The initial 16,384 value
+/// retains the measured policy (~100 MiB decode churn at ~6.6 KiB per row);
+/// changing the reader cache must not change candidate eligibility.
+pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize = 16_384;
+
+/// Admit `(document_frequency, source)` pairs rarest-first while the summed
+/// frequency stays within [`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`]; the rarest
+/// nonempty source is always admitted. Ties keep request order so admission
+/// is deterministic. Sources past the bound still weigh admitted candidates
+/// through scoring; a document matching only those sources is never hydrated.
+pub(crate) fn admit_candidate_sources<S>(
+    mut sources: Vec<(usize, S)>,
+    mut on_pruned: impl FnMut(usize, &S),
+) -> Vec<S> {
+    sources.retain(|(frequency, _)| *frequency > 0);
+    sources.sort_by_key(|(frequency, _)| *frequency);
+    let total = sources.len();
+    let mut admitted_documents = 0usize;
+    let mut admitted = Vec::with_capacity(total);
+    for (ordinal, (frequency, source)) in sources.into_iter().enumerate() {
+        let next = admitted_documents.saturating_add(frequency);
+        if ordinal > 0 && next > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 {
+            on_pruned(frequency, &source);
+            continue;
+        }
+        admitted_documents = next;
+        admitted.push(source);
+    }
+    hotpath::gauge!("query.lane.lexical.candidate_sources_total").inc(total as u64);
+    hotpath::gauge!("query.lane.lexical.candidate_sources_pruned")
+        .inc((total - admitted.len()) as u64);
+    hotpath::gauge!("query.lane.lexical.candidate_documents_admitted")
+        .set(admitted_documents as u64);
+    admitted
+}
+
+fn candidate_admission_outcome<E>(
+    batch: RetrieverBatch<E>,
+    term_sources: Vec<(String, u64)>,
+) -> RetrieverOutcome<RetrieverBatch<E>> {
+    if term_sources.is_empty() {
+        RetrieverOutcome::Complete(batch)
+    } else {
+        tracing::debug!(
+            pruned_source_count = term_sources.len(),
+            source_document_frequencies = ?term_sources.iter().map(|(_, frequency)| *frequency).collect::<Vec<_>>(),
+            document_frequency_budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
+            "lexical candidate term sources pruned by retrieval policy"
+        );
+        RetrieverOutcome::Partial {
+            value: batch,
+            reason: RetrievalFailure::CandidateSourcesPruned {
+                term_sources,
+                document_frequency_budget: MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
+            },
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LexicalQueryPartsV1 {
@@ -156,7 +226,6 @@ pub struct LexicalFieldFilterV1 {
 
 /// Typed lexical-lane request for identifier, phrase, token, field, and
 /// bounded fuzzy retrieval.
-#[derive(Debug, PartialEq, Eq)]
 pub struct LexicalLaneRequest<'a> {
     pub base: RetrievalRequest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
@@ -171,6 +240,29 @@ pub struct LexicalLaneRequest<'a> {
     pub lexical_profile_revision: ComponentRevision,
     pub score_domain: ScoreDomainId,
     pub budget: RetrievalBudget,
+    /// The live request authority the lane consults between bounded units of
+    /// row work ([`lexical_checkpoint`]). The candidate-source bound keeps one
+    /// request's hydration finite, but a caller that has already settled —
+    /// cancelled, past its deadline, or revoked — must not keep the shared
+    /// search execution permit occupied while the remaining rows decode and
+    /// score. Cancellation unwinds the scan with
+    /// [`RetrievalPortError::Cancelled`] instead of an empty or partial batch.
+    pub control: &'a dyn GraphExecutionControl,
+}
+
+/// The lexical lane's cooperative cancellation checkpoint.
+///
+/// Called before each candidate row is decoded and scored, and between the
+/// scan's phases, so cancellation performs at most one further row visit
+/// after the signal. An uncancelled request never observes it, which keeps
+/// candidate order, evidence, and coverage identical to an unchecked scan.
+pub(crate) fn lexical_checkpoint(
+    control: &dyn GraphExecutionControl,
+) -> Result<(), RetrievalPortError> {
+    if control.is_cancelled() {
+        return Err(RetrievalPortError::Cancelled);
+    }
+    Ok(())
 }
 
 /// Per-occurrence lexical-lane evidence with its field score breakdown.
@@ -462,6 +554,7 @@ where
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
         request.validate()?;
+        lexical_checkpoint(request.control)?;
         let outcome = match self.postings.read_lexical_postings(request) {
             Ok(outcome) => outcome,
             // A missing lexical authority rejects the request as a typed

@@ -3,7 +3,7 @@ members = [
     "crates/tracedecay",
     "crates/tracedecay-agent-hosts",
     "crates/tracedecay-api",
-    "crates/tracedecay-application",
+    "crates/tracedecay-contracts",
     "crates/tracedecay-automation",
     "crates/tracedecay-automation-runtime",
     "crates/tracedecay-capture",
@@ -31,6 +31,7 @@ members = [
     "crates/tracedecay-maintenance",
     "crates/tracedecay-mcp",
     "crates/tracedecay-policy",
+    "crates/tracedecay-privacy",
     "crates/tracedecay-private-fs",
     "crates/tracedecay-query",
     "crates/tracedecay-runtime-core",
@@ -48,9 +49,10 @@ members = [
     "crates/tracedecay-store",
     "crates/tracedecay-store-runtime",
     "crates/tracedecay-tool-catalog",
-    "crates/tracedecay-usecases",
+    "crates/tracedecay-application",
 ]
 exclude = [
+    "vendor/hotpath-macros",
     ".worktrees",
     ".codex-worktrees",
 ]
@@ -68,6 +70,9 @@ version = "0.1.0-beta.37"
 # the macros must always resolve, and with no profiling feature selected the
 # crate pulls only `hotpath-macros` and expands every macro to a no-op, so the
 # explicit feature-off comparison build carries no measurable profiler weight.
+# Backend selection (`hotpath/hotpath`, `-alloc`, `-cpu`, `-mcp`) lives on the
+# roots (`tracedecay-cli`, `tracedecay`); cargo unifies the one proc-macro
+# build across the graph, so no member needs a feature just to be measured.
 hotpath = { version = "0.24", default-features = false, features = ["threads"] }
 grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
 grafeo-common = { version = "=0.5.42", default-features = false }
@@ -75,6 +80,10 @@ grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg"
 grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
 grafeo-storage = { version = "=0.5.42", default-features = false, features = ["wal"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
+# Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
+# resolve the same object database and status implementation, so a feature
+# added for one is never missing for the other.
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 tracedecay-semantic-contracts = { path = "crates/tracedecay-semantic-contracts", version = "0.1.0" }
 
 [profile.bench]
@@ -92,12 +101,11 @@ incremental = false
 # shrink several-fold — measured 764–966 MiB per root-lib cache entry at
 # debug=1 against 45.7 MiB without debuginfo, which was blowing the shared
 # build-cache budget and turning evictions into repeat 5-minute misses.
+#
+# `test` (built-in, inherits `dev`) and `perf` (below) inherit every setting
+# and package override declared here, so per-package overrides live only on
+# `dev`.
 [profile.dev]
-debug = "line-tables-only"
-incremental = true
-opt-level = 1
-
-[profile.test]
 debug = "line-tables-only"
 incremental = true
 opt-level = 1
@@ -120,29 +128,27 @@ debug = 0
 [profile.dev.package.tracedecay-daemon-protocol]
 opt-level = 0
 
-[profile.test.package."*"]
-debug = 0
+# The first token count pays a one-time BPE model load (embedded-vocabulary
+# base64 decode + BPE regex compile) that costs seconds in unoptimized
+# builds; the dashboard token-count warm task and its tests hit it on every
+# test-process start, and `context_scout_model` gives its proposal one second
+# in total. Optimize the loader wherever tests run, not only under `perf`.
+[profile.dev.package.tiktoken-rs]
+opt-level = 2
 
-[profile.test.package.tracedecay-daemon-protocol]
-opt-level = 0
+[profile.dev.package.regex]
+opt-level = 2
 
-# Opt-in profile for hot-kernel runs: `cargo test --profile perf ...` or
-# `cargo build --profile perf ...`. It mirrors dev/test (line tables for
-# workspace crates, no dependency debuginfo) but keeps the critical-path
-# kernels below optimized. Default `cargo build` / `cargo test` no longer
-# optimize any specific package, so ordinary edit-compile loops stay cheap;
-# reach for this profile when running the generation-scale code-index or
-# graph-publication suites at production-like speed. The full-suite gates
-# (`cargo test-all` / `cargo test-ci` in .cargo/config.toml) pin it via
-# `--cargo-profile perf` so those suites keep their kernel opt-levels.
+# The full-suite profile. Ordinary `cargo build` / `cargo test` (dev/test)
+# optimize no specific workspace package so edit-compile loops stay cheap;
+# this profile inherits dev and additionally keeps the critical-path kernels
+# below optimized so the generation-scale code-index and graph-publication
+# suites run at production-like speed. Hosted CI (`.github/workflows/ci.yml`)
+# and the local full-suite aliases (`cargo test-ci` / `cargo test-all` in
+# .cargo/config.toml) all build support binaries, archives and tests with
+# this one profile, so they share artifacts and assertions stay on.
 [profile.perf]
 inherits = "dev"
-
-[profile.perf.package."*"]
-debug = 0
-
-[profile.perf.package.tracedecay-daemon-protocol]
-opt-level = 0
 
 # Code-index lifecycle tests exercise six-figure production generations under
 # the same bounded readiness contracts as the daemon. Keep the owning kernels
@@ -189,34 +195,6 @@ opt-level = 2
 [profile.perf.package.serde_json]
 opt-level = 2
 
-# The first token count pays a one-time BPE model load (embedded-vocabulary
-# base64 decode + BPE regex compile) that costs seconds in unoptimized
-# builds; the dashboard token-count warm task and its tests hit it on every
-# test-process start.
-[profile.perf.package.tiktoken-rs]
-opt-level = 2
-
-[profile.perf.package.regex]
-opt-level = 2
-
-# CI runs `cargo nextest run --profile ci`, which is a nextest profile: the
-# cargo profile stays `test`, so the `perf` overrides above never applied to
-# the gate. That left the seconds-long unoptimized BPE load inside deadlines
-# that bound a model call — `context_scout_model` gives its proposal one
-# second in total, and the cold tokenizer spent it before the backend was
-# ever raced. Optimize the loader wherever tests run, not only under `perf`.
-[profile.dev.package.tiktoken-rs]
-opt-level = 2
-
-[profile.dev.package.regex]
-opt-level = 2
-
-[profile.test.package.tiktoken-rs]
-opt-level = 2
-
-[profile.test.package.regex]
-opt-level = 2
-
 # Graph publication digest checks hash multi-megabyte canonical replay
 # sources on every durable read/write; unoptimized sha2 alone exceeds the
 # exact-SQL test transaction budget.
@@ -228,7 +206,15 @@ opt-level = 3
 # `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
 # pinned to the PR head commit, until the fix lands upstream.
 [patch.crates-io]
+# Keep profiled async bodies in one frame; see vendor/hotpath-macros/PATCH.md.
+hotpath-macros = { path = "vendor/hotpath-macros" }
 tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
+# The vendored COBOL external scanner in 0.5.0 spins forever at end of input
+# whenever a token starts in the sequence-number area with no six-column line
+# before EOF, and no parse deadline can interrupt a scanner call. This fork is
+# v0.5.0 plus the upstream fix (yutaro-sakamoto/tree-sitter-cobol#42), which
+# is still unmerged upstream (#1104).
+tokensave-large-treesitters = { git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters", rev = "102d0103b6fd093c1e5989cceede1ed9f08fe6a9" }
 # FastEmbed's user-defined constructor owns the ORT SessionBuilder but did not
 # expose rc.12's load canceler. This reviewed fork publishes that existing
 # handle immediately before CreateSessionFromArray so TraceDecay can enforce
@@ -255,11 +241,16 @@ fastembed = { git = "https://github.com/ScriptedAlchemy/fastembed-rs.git", rev =
 # only address a single 1 MiB chunk, which caps an epoch near 32 Ki node
 # records and then panics; the fork spans epochs across chunks and types the
 # exhaustion errors. The fork also carries graph correctness and bounded WAL
-# group-write fixes. Its workspace resolves sibling crates by path, so every
+# group-write fixes, and (ScriptedAlchemy/grafeo#4) the direct compact build:
+# `IncrementalCompactStoreBuilder` + `GrafeoDB::write_compact_container`
+# turn a verified row stream into a compacted container with one columnar
+# copy in memory and one container write — no staging LPG, WAL, or
+# in-memory `compact()` copy — which is how sealed generation stores are
+# built. Its workspace resolves sibling crates by path, so every
 # grafeo crate must come from the same revision — a mixed registry/git graph
 # would build type-incompatible instances of the patched crates.
-grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
-grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "38654a67ec9e8c4fdab43c00b41f04aa696b52ed" }
+grafeo-adapters = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }
+grafeo-common = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }
+grafeo-core = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }
+grafeo-engine = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }
+grafeo-storage = { git = "https://github.com/ScriptedAlchemy/grafeo.git", rev = "4dc04db299bb63269a2c216c66aa94fab40d9819" }

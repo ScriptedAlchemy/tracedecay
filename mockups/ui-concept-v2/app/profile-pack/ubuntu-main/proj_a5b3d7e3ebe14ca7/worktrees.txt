@@ -1,0 +1,22 @@
+/fast/projects/tracedecay                      78c53d7290 [codex/tracedecay-total-redesign-plan-reopened]
+/fast/projects/tracedecay/.worktrees/topology  d4f2ddbf30 [perf/crate-topology-cache] locked
+/fast/tmp/td-activation-churn                  db8aa5843f [perf/activation-churn] locked
+/fast/tmp/td-bind-retry                        18bb5aa5dc [td-bind-retry] locked
+/fast/tmp/td-ci-fix                            aaefd9d2f6 [td-ci-fix-707]
+/fast/tmp/td-cicascade                         f39813f53e [fix/ci-daemon-authority-cascade] locked
+/fast/tmp/td-clippysweep                       8587d7353a [fix/workspace-clippy-sweep] locked
+/fast/tmp/td-decode-clone                      fe45c37bd4 [td-decode-clone] locked
+/fast/tmp/td-factstore                         412e5d6617 [fix/factstore-surface]
+/fast/tmp/td-gate                              f0d74c9353 [td-gate]
+/fast/tmp/td-gate-split                        d4f2ddbf30 [td-gate-split] locked
+/fast/tmp/td-gdb-typed                         549dfc64c0 [refactor/global-db-typed-reads] locked
+/fast/tmp/td-orphan-complete                   7ced8de3bd [td-orphan-complete] locked
+/fast/tmp/td-retention2                        363ab0c020 [fix/code-index-retention-convergence] locked
+/fast/tmp/td-retriever                         3ebc4f2577 [fix/lifecycle-retriever-unavailable] locked
+/fast/tmp/td-review-fixes                      78c53d7290 (detached HEAD) locked
+/fast/tmp/td-sem-journey                       5603b2642d [fix/semantic-activation-journey] locked
+/fast/tmp/td-skew-crash                        b49e6e426c [td/skew-crash-regression] locked
+/fast/tmp/td-slice8-hygiene                    8ecf2441dd [fix/mcp-port-hygiene] locked
+/fast/tmp/td-slice8b                           46a1091f87 [refactor/mcp-server-extraction]
+/fast/tmp/td-typed-park                        d4f2ddbf30 [td-typed-park] locked
+/fast/tmp/topology-verify                      92ddd3fb6c (detached HEAD) locked

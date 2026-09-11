@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowEvidenceKindV1,
@@ -982,11 +982,8 @@ async fn workflow_projection_rolls_back_rebuilds_restarts_and_audits() {
     raw_conn
         .execute("DROP TRIGGER fail_workflow_projection", ())
         .unwrap();
-    // A storage failure arms the durable retry backoff on this mount, so the
-    // very next call on the same store is `RetryDeferred` by design — that
-    // bound is what keeps a persistently failing projection from spinning.
-    // Removing the injected failure does not rewind the backoff clock, so
-    // recovery is proved the way production reaches it: through a remount.
+    // The failing mount retains its retry backoff. Reopening re-arms the
+    // durable queue after the storage failure has been removed.
     drop(store);
     drop(runtime);
     let runtime = profile_runtime(&tmp).await;

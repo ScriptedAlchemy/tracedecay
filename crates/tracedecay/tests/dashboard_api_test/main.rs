@@ -5,6 +5,7 @@
 //! `dashboard_api_test` name because CI invokes it directly via
 //! `cargo nextest run --test dashboard_api_test`.
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 mod runtime;

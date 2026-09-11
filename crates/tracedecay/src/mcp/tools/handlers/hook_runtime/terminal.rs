@@ -30,10 +30,7 @@ pub(super) fn retain_codex_stop(
         .profile_identity
         .clone()
         .ok_or_else(|| config_error("daemon profile identity is unavailable"))?;
-    let profile_registered = session_authorities
-        .profile_registered
-        .cloned()
-        .ok_or_else(|| config_error("daemon profile admission authority is unavailable"))?;
+    let background_cpu = session_authorities.background_cpu.clone();
     let profile_root = profile_root.to_path_buf();
     let weak_registry = Arc::downgrade(session_runtime_registry);
     let task_session_id = session_id.clone();
@@ -58,7 +55,7 @@ pub(super) fn retain_codex_stop(
                     });
                     let authorities = SessionAuthorities::new(None, Some(&user_sessions))
                         .with_profile_identity(Some(std::sync::Arc::clone(&profile_identity)))
-                        .with_registered_databases(None, Some(&profile_registered));
+                        .with_background_cpu(background_cpu.clone());
                     let ingested = ingest_transcript_with_cancellation(
                         None,
                         &ingest_args,
@@ -107,7 +104,7 @@ pub(super) fn retain_codex_stop(
 }
 
 pub(super) async fn await_terminal_operation<T>(
-    cancellation: &tracedecay_usecases::observation::ObservationCancellation,
+    cancellation: &tracedecay_application::observation::ObservationCancellation,
     operation: impl Future<Output = T>,
 ) -> Option<T> {
     tokio::pin!(operation);

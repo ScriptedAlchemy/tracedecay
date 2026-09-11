@@ -6,15 +6,86 @@
 //! here unchanged from the per-language copies so extraction output stays
 //! byte-identical.
 
-use tree_sitter::Node as TsNode;
+use tree_sitter::{Node as TsNode, Tree};
 
-use crate::types::{EdgeKind, UnresolvedRef};
+use crate::types::{EdgeKind, NodeKind, UnresolvedRef, generate_node_id, generate_node_id_at};
 
 /// Gets the text of a tree-sitter node from the source.
 fn node_text(source: &[u8], node: TsNode<'_>) -> String {
     node.utf8_text(source)
         .unwrap_or("<invalid utf8>")
         .to_string()
+}
+
+/// `end_line` of the file root: the zero-based index of the file's last line
+/// under the `str::lines` convention every extractor has always used, i.e.
+/// `source.lines().count().saturating_sub(1)`. `lines` yields one line per
+/// `\n` plus an unterminated tail, so the value is the newline count, minus one
+/// when the source ends in `\n`.
+///
+/// The newline count is read off the parsed tree instead of rescanning the
+/// source, which kept a changed-region walk of one tiny item paying for the
+/// whole file. Tree-sitter advances a row only on `\n`, and the root node ends
+/// at the EOF token, whose padding carries all trailing trivia, so
+/// `root.end_position().row` is the file's newline count. Any bytes past the
+/// root (none for a complete parse) are counted directly so the value is exact
+/// even for a grammar whose root stops short. Composite adapters hand in their
+/// mask, which preserves every `\n` byte and the length of the real source.
+pub(crate) fn file_end_line(source: &str, tree: &Tree) -> u32 {
+    let root = tree.root_node();
+    let covered = root.end_byte().min(source.len());
+    let newlines = root.end_position().row
+        + source.as_bytes()[covered..]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count();
+    newlines.saturating_sub(usize::from(source.ends_with('\n'))) as u32
+}
+
+/// [`file_end_line`] for a source Tree-sitter produced no tree for; the only
+/// path left is the scan.
+#[cfg(any(
+    feature = "lang-lean",
+    feature = "lang-markdown",
+    feature = "lang-quint",
+    feature = "lang-toml",
+    test
+))]
+pub(crate) fn unparsed_file_end_line(source: &str) -> u32 {
+    source.lines().count().saturating_sub(1) as u32
+}
+
+/// Mints the extraction-local ID for the construct rooted at `node`.
+///
+/// Every edge and unresolved reference an extractor emits while visiting the
+/// construct is keyed by this ID, so two constructs must never share one. A
+/// construct that begins its line (only blanks precede it) keeps the line-keyed
+/// [`generate_node_id`], leaving indentation and one-construct lines
+/// identity-neutral; a construct preceded by other source on its line also
+/// carries its start column, which distinguishes `impl A { fn run() {} } impl
+/// B { fn run() {} }` before relation endpoints are bound.
+pub(crate) fn local_node_id(
+    file_path: &str,
+    source: &[u8],
+    kind: &NodeKind,
+    name: &str,
+    node: TsNode<'_>,
+) -> String {
+    let start = node.start_position();
+    let line = start.row as u32;
+    let start_byte = node.start_byte().min(source.len());
+    let line_start = source[..start_byte]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    let begins_line = source[line_start..start_byte]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'));
+    if begins_line {
+        generate_node_id(file_path, kind, name, line)
+    } else {
+        generate_node_id_at(file_path, kind, name, line, start.column as u32)
+    }
 }
 
 /// Strip comment markers from a single C-style comment text
@@ -142,5 +213,133 @@ pub(crate) fn extract_call_expression_sites(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use tree_sitter::{Parser, Tree};
+
+    use super::{file_end_line, unparsed_file_end_line};
+    use crate::{LanguageRegistry, ts_provider};
+
+    /// Sources on which a raw newline count and `str::lines` disagree: empty,
+    /// terminated, unterminated, blank-only, repeated trailing blank lines,
+    /// bare `\r`, CRLF, and multi-byte text.
+    const LINE_ENDING_SHAPES: &[&str] = &[
+        "",
+        "\n",
+        "\n\n",
+        "\r",
+        "\r\n",
+        " \n\t\n",
+        "x",
+        "x\n",
+        "x\n\n",
+        "x\n\n\n",
+        "x\ny",
+        "x\ny\n",
+        "x\r\ny",
+        "x\r\ny\r\n",
+        "x\r\ny\r\n\r\n",
+        "x\ry\n",
+        "é\n界",
+        "é\n界\n",
+        "é\r\n界\r\n",
+        "x // é界\ny\n",
+    ];
+
+    /// Grammars with distinct end-of-input behaviour: plain lexers (`rust`,
+    /// `cpp`), an indentation scanner that synthesizes tokens at EOF
+    /// (`python`), the grammar composite adapters parse their masks with
+    /// (`typescript`), the Markdown block grammar, and `cobol`, whose external
+    /// scanner skips the sequence-number area and used to spin at EOF on every
+    /// shape here shorter than six columns (#1104). Grammars a feature set
+    /// does not link are skipped; the caller decides whether that is vacuous.
+    /// Degenerate inputs are not fed to every bundled grammar because an
+    /// external scanner that never terminates on them cannot be interrupted by
+    /// any parse deadline.
+    fn linked_grammar_keys() -> Vec<&'static str> {
+        ["rust", "cpp", "python", "typescript", "markdown", "cobol"]
+            .into_iter()
+            .filter(|key| ts_provider::try_language(key).is_ok())
+            .collect()
+    }
+
+    fn parse(grammar_key: &str, source: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&ts_provider::try_language(grammar_key).expect("registered grammar"))
+            .expect("configure parser");
+        parser.parse(source, None).expect("parse")
+    }
+
+    #[test]
+    fn file_end_line_matches_the_lines_convention_for_every_line_ending_shape() {
+        let keys = linked_grammar_keys();
+        assert!(
+            !keys.is_empty() || ts_provider::try_language("rust").is_err(),
+            "a build with a grammar bundle must exercise at least one grammar"
+        );
+        for key in keys {
+            for source in LINE_ENDING_SHAPES {
+                let tree = parse(key, source);
+                assert_eq!(
+                    file_end_line(source, &tree),
+                    unparsed_file_end_line(source),
+                    "{key}: {source:?}"
+                );
+            }
+        }
+    }
+
+    /// The tree-derived value must equal the source scan for every checked-in
+    /// extraction fixture, through the grammar its extractor really selects,
+    /// and the root must end at EOF so no trailing bytes are ever rescanned.
+    /// Composite adapters are checked against both the real source and the
+    /// mask their retained tree was parsed from.
+    #[test]
+    fn file_end_line_matches_the_lines_convention_for_every_checked_in_fixture() {
+        let registry = LanguageRegistry::new();
+        let mut checked = Vec::new();
+        for directory in ["../../tests/fixtures", "fixtures"] {
+            let mut entries = std::fs::read_dir(Path::new(directory))
+                .unwrap_or_else(|error| panic!("{directory}: {error}"))
+                .map(|entry| entry.expect("fixture entry").path())
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>();
+            entries.sort();
+            for path in entries {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("fixture file name");
+                let Some(extractor) = registry.extractor_for_file(name) else {
+                    continue;
+                };
+                let key = extractor.retained_grammar_key(name);
+                if ts_provider::try_language(&key).is_err() {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read fixture");
+                let mask = extractor.prepare_parse_source(&source);
+                let tree = parse(&key, &mask);
+                let expected = unparsed_file_end_line(&source);
+                assert_eq!(
+                    tree.root_node().end_byte(),
+                    source.len(),
+                    "{name}: the {key} root must end at EOF"
+                );
+                assert_eq!(file_end_line(&source, &tree), expected, "{name}");
+                assert_eq!(file_end_line(&mask, &tree), expected, "{name} (mask)");
+                checked.push(name.to_owned());
+            }
+        }
+        assert!(
+            !checked.is_empty() || ts_provider::try_language("rust").is_err(),
+            "a build with a grammar bundle must exercise the fixtures"
+        );
     }
 }

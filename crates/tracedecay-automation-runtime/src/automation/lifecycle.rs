@@ -25,9 +25,9 @@ use super::scheduler::{
     AutomationScheduleDecision, AutomationTaskLock, load_session_activity, schedule_decision,
     stale_lock_secs,
 };
-use crate::errors::{Result, TraceDecayError};
-use crate::tracedecay::current_timestamp;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryAutomaticFactApplyResultV1,
     ProjectMemoryFactCurationReceiptV1,

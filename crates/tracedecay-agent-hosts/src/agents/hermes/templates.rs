@@ -4,8 +4,8 @@
 //! `tracedecay install --agent hermes`, keeping the installer flow in
 //! `super::write_plugin_files` focused on filesystem orchestration.
 
-use crate::errors::{Result, TraceDecayError};
 use crate::ports::mcp_tools::{AdvertisedToolV1, format_capable_tool_names};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) fn plugin_manifest(
     generator_commit: &str,
@@ -56,6 +56,9 @@ pub(super) fn plugin_schemas_json(advertised_tools: &[AdvertisedToolV1]) -> Resu
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.input_schema,
+                // `readOnlyHint`: the plugin derives which tools may be routed
+                // at another registered project from this, not from its own list.
+                "read_only": tool.read_only,
             })
         })
         .collect::<Vec<_>>();

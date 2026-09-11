@@ -617,11 +617,6 @@ impl UserConfig {
         self.save()
     }
 
-    /// Returns true if this is a fresh config (file did not exist before).
-    pub fn is_fresh() -> bool {
-        config_path().is_none_or(|p| !p.exists())
-    }
-
     /// Returns true when the user-level config file already exists.
     pub fn exists() -> bool {
         config_path().is_some_and(|p| p.exists())
@@ -862,12 +857,6 @@ mod tests {
             matches!(err, ConfigSaveError::ExistingUnreadable { .. }),
             "expected ExistingUnreadable, got: {err}"
         );
-    }
-
-    #[test]
-    fn path_unavailable_error_displays() {
-        let err = ConfigSaveError::PathUnavailable;
-        assert!(err.to_string().contains("user config path"));
     }
 
     #[test]

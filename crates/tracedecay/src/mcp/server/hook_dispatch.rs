@@ -29,11 +29,14 @@ impl McpServer {
                     };
                 }
             };
+        // A host hook is the daemon's own plumbing reacting to a host event,
+        // not an operator naming the route: it stays behind the automatic
+        // admission gate exactly like an after-edit path hint.
         match &self.code_index_reconcile_sink {
-            Some(sink) if sink(root).await => HostAdmissionOutcome::replay_completed(true, false),
-            Some(_) | None => {
-                HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable")
-            }
+            Some(sink) => sink(root, CodeIndexReconcileDemandV1::Automatic)
+                .await
+                .host_outcome(),
+            None => HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable"),
         }
     }
 
@@ -93,10 +96,8 @@ impl McpServer {
                     return HostAdmissionOutcome::replay_completed(false, true);
                 }
                 match self.code_index_hook_sink.as_ref() {
-                    Some(sink) if sink(root.to_path_buf(), rel_paths).await => {
-                        HostAdmissionOutcome::replay_completed(true, false)
-                    }
-                    Some(_) | None => HostAdmissionOutcome::retained_unavailable(
+                    Some(sink) => sink(root.to_path_buf(), rel_paths).await.host_outcome(),
+                    None => HostAdmissionOutcome::retained_unavailable(
                         "code_index_scheduler_unavailable",
                     ),
                 }
@@ -204,10 +205,13 @@ impl McpServer {
                 "code_index_scheduler_unavailable",
             ));
         };
-        if !sink(cg.project_root().to_path_buf()).await {
-            return Err(HostAdmissionOutcome::retained_unavailable(
-                "code_index_scheduler_unavailable",
-            ));
+        let admission = sink(
+            cg.project_root().to_path_buf(),
+            CodeIndexReconcileDemandV1::Automatic,
+        )
+        .await;
+        if admission != super::CodeIndexAdmission::Accepted {
+            return Err(admission.host_outcome());
         }
         hook_events::write_sync_marker(&marker, now);
         Ok(true)

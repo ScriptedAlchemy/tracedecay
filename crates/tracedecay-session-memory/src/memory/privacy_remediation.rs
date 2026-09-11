@@ -11,7 +11,7 @@
 //! executes a scanner binary or touches the network.
 
 use tracedecay_domain::Confidence;
-use tracedecay_runtime_core::privacy::{
+use tracedecay_privacy::{
     MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1, sanitize_memory_fact_payload,
 };
 use tracedecay_store::{
@@ -48,6 +48,22 @@ pub struct ProjectMemoryPrivacyRemediationReceiptV1 {
     pub clean_facts: u64,
     pub quarantined_facts: u64,
     pub curation_receipts: Vec<ProjectMemoryFactCurationReceiptV1>,
+}
+
+impl From<ProjectMemoryPrivacyRemediationReceiptV1>
+    for tracedecay_privacy::PrivacyMemoryRemediationOutcomeV1
+{
+    fn from(receipt: ProjectMemoryPrivacyRemediationReceiptV1) -> Self {
+        Self {
+            detector_revision: receipt.detector_revision,
+            superseded_payloads_scanned: receipt.superseded_payloads_scanned,
+            superseded_payloads_purged: receipt.superseded_payloads_purged,
+            scanned_facts: receipt.scanned_facts,
+            clean_facts: receipt.clean_facts,
+            quarantined_facts: receipt.quarantined_facts,
+            curation_batches: receipt.curation_receipts.len(),
+        }
+    }
 }
 
 /// One page of currently served facts per authority read.

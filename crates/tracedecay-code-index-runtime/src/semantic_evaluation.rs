@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
-use tracedecay_application::ResolvedScope;
+use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, ComponentRevision, ManifestDigest,
     SemanticSearchIndexProfileV1, VectorGenerationIdV1, canonical_sha256,
@@ -31,13 +31,13 @@ use crate::search_eval::{
     ProductionCandidateNativeQueryInputsV1, ProductionCandidateNativeResourceContextV1,
     evaluate_default_activation_candidate,
 };
-use tracedecay_usecases::semantic_runtime::{
+use tracedecay_application::semantic_runtime::{
     SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
     SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationProfileCandidateV1,
     SemanticEvaluationPublicationSnapshotPortV1, SemanticEvaluationPublicationSnapshotV1,
     SemanticEvaluationSnapshotPortV1, SemanticRuntimeBackendErrorV1, SemanticRuntimeFuture,
 };
-use tracedecay_usecases::store::vector_generations::{
+use tracedecay_application::store::vector_generations::{
     BaseGenerationIncompatibilityV1, GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
     VectorGenerationStoreErrorV1,
 };
@@ -239,23 +239,13 @@ pub async fn build_daemon_semantic_evaluation_candidate(
     control: Arc<DaemonSemanticEvaluationControlV1>,
 ) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
     control.checkpoint()?;
-    let snapshot = control
+    let (snapshot, code) = control
         .interruptible(hotpath::future!(
-            scheduler.semantic_evaluation_snapshot_for_scope(scope),
+            scheduler.semantic_evaluation_generation_for_scope(project_root, scope),
             label = "daemon.semantic.evaluation.candidate.code_snapshot"
         ))
         .await?
-        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
-    let serving = control
-        .interruptible(hotpath::future!(
-            scheduler.serving_code_scope(project_root),
-            label = "daemon.semantic.evaluation.candidate.serving_code"
-        ))
-        .await?
-        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
-    let code = serving
-        .serving_generation
-        .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
+        .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
     if code.manifest().generation_id != snapshot.source_generation
         || code.projection().request().changes.manifest_digest != snapshot.source_manifest_digest
         || code.manifest().snapshot_digest != snapshot.snapshot_digest
@@ -266,7 +256,7 @@ pub async fn build_daemon_semantic_evaluation_candidate(
 
     let status = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.runtime_status",
-        tracedecay_usecases::semantic_runtime::project_semantic_application_status(
+        tracedecay_application::semantic_runtime::project_semantic_application_status(
             project_root,
             None,
         )
@@ -287,10 +277,11 @@ pub async fn build_daemon_semantic_evaluation_candidate(
         ))
         .await?
         .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;
-    let store = hotpath::measure_block!(
-        "daemon.semantic.evaluation.candidate.vector_store",
-        GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_generation_id)
+    let store = hotpath::future!(
+        GraphVectorGenerationStoreV1::read_only_generation(&retained, &vector_generation_id),
+        label = "daemon.semantic.evaluation.candidate.vector_store"
     )
+    .await
     .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?
     .ok_or(SemanticActivationCoordinationErrorV1::Conflict)?;
     let vector = control
@@ -333,7 +324,7 @@ pub async fn build_daemon_semantic_evaluation_candidate(
     }
     let runtime = hotpath::measure_block!(
         "daemon.semantic.evaluation.candidate.production_runtime",
-        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(project_root)
+        tracedecay_application::semantic_runtime::project_semantic_production_runtime(project_root)
     );
     let Some(runtime) = runtime else {
         tracing::warn!("semantic evaluation candidate production runtime is unavailable");
@@ -432,9 +423,9 @@ fn record_vector_generation_failure(error: &VectorGenerationStoreErrorV1) {
 }
 
 pub fn semantic_publication_generation(
-    state: &tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1,
+    state: &tracedecay_application::semantic_runtime::SemanticRuntimeStateV1,
 ) -> Result<VectorGenerationIdV1, SemanticActivationCoordinationErrorV1> {
-    use tracedecay_usecases::semantic_runtime::SemanticRuntimeStateV1;
+    use tracedecay_application::semantic_runtime::SemanticRuntimeStateV1;
 
     match state {
         SemanticRuntimeStateV1::Current { receipt } => Ok(receipt.activated_generation.clone()),
@@ -512,13 +503,15 @@ fn daemon_semantic_evaluation_candidate(
         // certifying reader recomputes the identical bound from the same
         // immutable generation, so exact-equality certification still holds.
         maximum_distance_micros:
-            tracedecay_usecases::semantic_runtime::measure_acceptance_calibration(vector.vectors())
-                .maximum_distance_micros,
+            tracedecay_application::semantic_runtime::measure_acceptance_calibration(
+                vector.vectors(),
+            )
+            .maximum_distance_micros,
         minimum_margin_micros: 0,
     };
     Ok(SemanticEvaluationProfileCandidateV1 {
         evaluated_profile_id: evaluated_profile_id.to_owned(),
-        profile: tracedecay_usecases::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
+        profile: tracedecay_application::semantic_runtime::SemanticEvaluationFusionCandidateV1 {
             profile_id: material.profile.profile_id.clone(),
             calibrations: material.profile.calibrations.clone(),
             score_domain_calibrations: material.profile.score_domain_calibrations.clone(),
@@ -531,16 +524,17 @@ fn daemon_semantic_evaluation_candidate(
             rerank_policy_id: material.profile.rerank_policy_id.clone(),
             retrieval_budget: material.profile.retrieval_budget,
         },
-        diversity: tracedecay_usecases::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
-            policy_id: material.diversity.policy_id.clone(),
-            per_source_namespace: material.diversity.per_source_namespace,
-            per_source_instance: material.diversity.per_source_instance,
-            per_repository: material.diversity.per_repository,
-            per_file: material.diversity.per_file,
-            per_session_or_thread: material.diversity.per_session_or_thread,
-            per_copy_cluster: material.diversity.per_copy_cluster,
-            per_evidence_role: material.diversity.per_evidence_role,
-        },
+        diversity:
+            tracedecay_application::semantic_runtime::SemanticEvaluationDiversityCandidateV1 {
+                policy_id: material.diversity.policy_id.clone(),
+                per_source_namespace: material.diversity.per_source_namespace,
+                per_source_instance: material.diversity.per_source_instance,
+                per_repository: material.diversity.per_repository,
+                per_file: material.diversity.per_file,
+                per_session_or_thread: material.diversity.per_session_or_thread,
+                per_copy_cluster: material.diversity.per_copy_cluster,
+                per_evidence_role: material.diversity.per_evidence_role,
+            },
         rerank: None,
         compatibility: RetrievalCompatibilityPinsV1 {
             semantic: Some(SemanticCompatibilityPinsV1 {
@@ -611,6 +605,20 @@ impl Default for SemanticEvaluationWorkersV1 {
 pub struct DaemonSemanticEvaluationWorkerOwnerV1 {
     workers: Mutex<SemanticEvaluationWorkersV1>,
     scheduler_admission: Arc<tokio::sync::Semaphore>,
+    /// Completed projection batches, retained for the life of this project's
+    /// worker owner rather than for one request (#838).
+    ///
+    /// Every activation request re-runs the full native qualification, and
+    /// clean projection of the packaged corpus is the overwhelming majority of
+    /// its wall clock. The payload is immutable: canonical vectors for an
+    /// exact composed embedding input under an exact admitted projection
+    /// identity, which pins the model, tokenizer, runtime build, tensor shape,
+    /// chunker revision and privacy partition. Nothing request-scoped is
+    /// retained here -- cancellation, leases, query factories and publication
+    /// bindings are all rebuilt per request -- and the cache is byte-bounded
+    /// for completed batches, accounts its in-flight and borrowed allocations
+    /// separately, and is irreversibly retired on shutdown.
+    projection_batch_store: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchStoreV1>,
 }
 
 impl Default for DaemonSemanticEvaluationWorkerOwnerV1 {
@@ -639,7 +647,19 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
         Self {
             workers: Mutex::new(SemanticEvaluationWorkersV1::default()),
             scheduler_admission,
+            projection_batch_store:
+                tracedecay_semantic::SemanticEvaluationProjectionBatchStoreV1::new(),
         }
+    }
+
+    /// One request's handle on the daemon-lifetime projection batch store
+    /// every qualification request for this project shares. The handle pins
+    /// the batches its request touches until the request drops it.
+    #[must_use]
+    pub fn projection_batch_cache(
+        &self,
+    ) -> Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1> {
+        Arc::new(self.projection_batch_store.request_cache())
     }
 
     #[hotpath::measure(label = "daemon.semantic.evaluation.execute", future = true)]
@@ -806,6 +826,22 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
                 .workers
                 .extend(pending);
         }
+        // Retirement clears completed batches and fences every late claim or
+        // installation. Outliving builders and warm-hit clones remain visible
+        // in the accounting until their guards and request handles settle.
+        self.projection_batch_store.release();
+        let cache_memory = self.projection_batch_store.memory_usage();
+        tracing::info!(
+            retired = cache_memory.retired,
+            retained_batch_bytes = cache_memory.retained_batch_bytes,
+            in_flight_key_bytes = cache_memory.in_flight_key_bytes,
+            active_lookup_key_bytes = cache_memory.active_lookup_key_bytes,
+            active_hit_vector_bytes = cache_memory.active_hit_vector_bytes,
+            total_accounted_bytes = cache_memory.total_accounted_bytes,
+            peak_accounted_bytes = cache_memory.peak_accounted_bytes,
+            remaining_workers,
+            "semantic evaluation projection cache retired"
+        );
         SemanticEvaluationShutdownReceiptV1 {
             joined_workers,
             failed_workers,
@@ -843,6 +879,7 @@ type SemanticIncrementalProjectionKeyV1 = (CodeGenerationId, CodeGenerationId);
 
 #[derive(Clone)]
 pub struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
+    lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
     project_root: PathBuf,
     scope: ResolvedScope,
     scheduler: CodeIndexSchedulerRegistryV1,
@@ -853,7 +890,7 @@ pub struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
         Mutex<
             BTreeMap<
                 CodeGenerationId,
-                Arc<tracedecay_usecases::semantic_runtime::PreparedSemanticEvaluationGenerationV1>,
+                Arc<tracedecay_application::semantic_runtime::PreparedSemanticEvaluationGenerationV1>,
             >,
         >,
     >,
@@ -876,22 +913,30 @@ pub struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
 }
 
 impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
+    /// Bind one request to the daemon-lifetime projection batch cache.
+    ///
+    /// Only the immutable projection payload is shared. The prepared native
+    /// generations, incremental projection measurements and projection-case
+    /// measurements below stay request-scoped: they carry this request's
+    /// cancellation authority and query factory, or they are this request's
+    /// measurement results.
     pub fn new(
         project_root: PathBuf,
         scope: ResolvedScope,
         scheduler: CodeIndexSchedulerRegistryV1,
         candidate: SemanticEvaluationProfileCandidateV1,
         control: Arc<DaemonSemanticEvaluationControlV1>,
+        lifecycle_owner: Option<Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>>,
+        projection_batch_cache: Arc<tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1>,
     ) -> Self {
         Self {
+            lifecycle_owner,
             project_root,
             scope,
             scheduler,
             candidate,
             control,
-            projection_batch_cache: Arc::new(
-                tracedecay_semantic::SemanticEvaluationProjectionBatchCacheV1::new(),
-            ),
+            projection_batch_cache,
             prepared_native: Arc::new(Mutex::new(BTreeMap::new())),
             projection_cases: Arc::new(Mutex::new(BTreeMap::new())),
             incremental_projections: Arc::new(Mutex::new(BTreeMap::new())),
@@ -979,7 +1024,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 .next()
                 .map(|generation| generation.query_factory().clone());
             let runtime =
-                tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                     &self.project_root,
                 )
                 .ok_or_else(|| {
@@ -1022,7 +1067,8 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             .rerank
             .as_ref()
             .and_then(|pins| {
-                crate::semantic_code::shared_lifecycle_owner()
+                self.lifecycle_owner
+                    .as_ref()
                     .and_then(|owner| owner.mount_reranker(pins.clone()).ok())
             });
         let result = hotpath::measure_block!("search_eval.native_query.inputs", {
@@ -1057,7 +1103,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                     .next()
                     .map(|generation| generation.query_factory().clone());
                 let runtime =
-                    tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                    tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                         &self.project_root,
                     )
                     .ok_or_else(|| {
@@ -1103,7 +1149,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 )
             })?;
             let runtime =
-                tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                     &self.project_root,
                 )
                 .ok_or_else(|| {
@@ -1389,7 +1435,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                                 )
                             })?;
                         let runtime =
-                        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                        tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                             &self.project_root,
                         )
                         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?;
@@ -1567,7 +1613,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1
                     vector_generation_id,
                 ) {
                     (Some(verification), Some(revision), Some(generation)) => Some((
-                        tracedecay_usecases::semantic_runtime::project_semantic_production_runtime(
+                        tracedecay_application::semantic_runtime::project_semantic_production_runtime(
                             &self.snapshot.project_root,
                         )
                         .ok_or(SemanticActivationCoordinationErrorV1::Unavailable)?,
@@ -1786,6 +1832,64 @@ mod lifecycle_tests {
             !work_started.load(Ordering::Acquire),
             "cancelled semantic evaluation must not bypass scheduler admission"
         );
+    }
+
+    #[tokio::test]
+    async fn shared_scheduler_admission_bounds_parallel_project_evaluations() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let first_owner = Arc::new(
+            DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(Arc::clone(&admission)),
+        );
+        let second_owner = Arc::new(
+            DaemonSemanticEvaluationWorkerOwnerV1::with_scheduler_admission(Arc::clone(&admission)),
+        );
+        let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+        let first = {
+            let owner = Arc::clone(&first_owner);
+            tokio::spawn(async move {
+                owner
+                    .execute(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                        CancellationToken::new(),
+                        move |_control| async move {
+                            let _ = first_started_tx.send(());
+                            let _ = release_first_rx.await;
+                            Ok::<(), SemanticActivationCoordinationErrorV1>(())
+                        },
+                    )
+                    .await
+            })
+        };
+        first_started_rx.await.expect("first project admitted");
+
+        let (second_started_tx, mut second_started_rx) = tokio::sync::oneshot::channel();
+        let second = {
+            let owner = Arc::clone(&second_owner);
+            tokio::spawn(async move {
+                owner
+                    .execute(
+                        tokio::time::Instant::now() + Duration::from_secs(5),
+                        CancellationToken::new(),
+                        move |_control| async move {
+                            let _ = second_started_tx.send(());
+                            Ok::<(), SemanticActivationCoordinationErrorV1>(())
+                        },
+                    )
+                    .await
+            })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second_started_rx)
+                .await
+                .is_err(),
+            "a second project's evaluation must wait for the shared owner admission"
+        );
+
+        release_first_tx.send(()).expect("release first project");
+        assert_eq!(first.await.expect("first task"), Ok(()));
+        second_started_rx.await.expect("second project admitted");
+        assert_eq!(second.await.expect("second task"), Ok(()));
     }
 
     #[test]

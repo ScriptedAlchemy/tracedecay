@@ -2,9 +2,9 @@
 
 use super::*;
 use futures_util::FutureExt;
-use tracedecay_application::RegisteredRootLocatorV1;
+use tracedecay_contracts::RegisteredRootLocatorV1;
 
-pub use tracedecay_application::HookOrchestrationAdmissionV1;
+pub use tracedecay_contracts::HookOrchestrationAdmissionV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookOrchestrationTriggerV1 {
@@ -715,71 +715,18 @@ impl RegisteredWorkRuntime {
     }
 }
 
-/// The exact project store a retained runtime's ports answer for.
+/// One project's retained application runtime, shared by every route that
+/// answers to the same store authority.
 ///
-/// Retained-runtime identity is canonical authority, never object identity:
-/// every project open constructs fresh ports, so two registrations for one
-/// root are the same runtime exactly when their scope, actor, and this store
-/// authority agree. The verified locator names the physical store and the
-/// binding names its live publication; two stores that share a project id are
-/// distinct authorities, as are two publications of one store. The grant is
-/// deliberately not identity: it is minted per open from the then-current
-/// configuration revision, so the live route's grant supersedes the retired
-/// route's.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RetainedRuntimeStoreAuthorityV1 {
-    binding: tracedecay_store::StoreRuntimeBindingV1,
-    verified_locator: tracedecay_store::VerifiedStoreLocatorV1,
-}
-
-impl RetainedRuntimeStoreAuthorityV1 {
-    pub fn new(
-        binding: tracedecay_store::StoreRuntimeBindingV1,
-        verified_locator: tracedecay_store::VerifiedStoreLocatorV1,
-    ) -> Self {
-        Self {
-            binding,
-            verified_locator,
-        }
-    }
-}
-
+/// A linked worktree of the same project, and a reopen of a route whose ports
+/// were rebuilt, join this runtime instead of registering a second one. It is
+/// released with the whole root (`retire_roots`), never per route.
 #[derive(Clone)]
 pub struct RegisteredRetainedRuntime {
     pub(super) scope: ResolvedScope,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
-    pub(super) store: RetainedRuntimeStoreAuthorityV1,
-    pub(super) ports:
-        Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
-}
-
-impl RegisteredRetainedRuntime {
-    /// Whether this registration is the same runtime as one described by
-    /// `scope`, `actor`, and `store`.
-    pub(super) fn is_same_authority(
-        &self,
-        scope: &ResolvedScope,
-        actor: &ActorId,
-        store: &RetainedRuntimeStoreAuthorityV1,
-    ) -> bool {
-        self.scope == *scope && self.actor == *actor && self.store == *store
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ports_ptr_eq(
-        &self,
-        ports: &Arc<tracedecay_application::retained_surfaces::RetainedSurfacePortsV1<'static>>,
-    ) -> bool {
-        Arc::ptr_eq(&self.ports, ports)
-    }
-
-    /// Whether two registration snapshots execute through the same ports —
-    /// false once a same-authority reopen has rebound the route.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn shares_ports_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.ports, &other.ports)
-    }
+    pub(super) ports: Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>>,
 }
 
 pub struct RegisteredFeedbackRuntime {
@@ -874,6 +821,16 @@ impl InvocationProjectRuntimeIdentityV1 {
     }
 }
 
+pub type ConfigurationRuntimeRefreshFuture =
+    Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+
+pub trait ConfigurationRuntimeRefreshPort: Send + Sync {
+    fn refresh(
+        &self,
+        current: tracedecay_configuration::ConfigurationCurrentStateV1,
+    ) -> ConfigurationRuntimeRefreshFuture;
+}
+
 #[derive(Clone)]
 pub struct RegisteredConfigurationRuntime {
     pub(super) runtime: Arc<ProjectConfigurationRuntime>,
@@ -886,6 +843,7 @@ pub struct RegisteredConfigurationRuntime {
     pub(super) semantic_evaluation_workers: Arc<
         tracedecay_code_index_runtime::semantic_evaluation::DaemonSemanticEvaluationWorkerOwnerV1,
     >,
+    pub(super) feedback_refresh: Arc<RwLock<Option<Arc<dyn ConfigurationRuntimeRefreshPort>>>>,
 }
 
 impl RegisteredConfigurationRuntime {
@@ -903,7 +861,7 @@ pub struct RuntimeLspSession {
     pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub actor: RuntimeLspActor,
     pub(super) delivery_settlements:
-        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+        Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
     /// Captured at the first poll of the current outbound frame. Retries and
     /// terminalization must reuse its exact timestamps and identity.
     pub(super) in_flight_delivery_attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
@@ -916,6 +874,8 @@ struct LspLeaseTask {
     generation: u64,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     handle: tokio::task::JoinHandle<()>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    finished: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl LspLeaseTask {
@@ -991,6 +951,8 @@ impl LspLeaseTaskRegistry {
             let task_registry = Arc::downgrade(self);
             let task_session_id = session_id.clone();
             let (start, started) = tokio::sync::oneshot::channel();
+            #[cfg(any(test, feature = "test-helpers"))]
+            let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
             let handle = tokio::spawn(async move {
                 let admitted = tokio::select! {
                     result = started => result.is_ok(),
@@ -1005,6 +967,10 @@ impl LspLeaseTaskRegistry {
                 if let Some(task_registry) = task_registry.upgrade() {
                     task_registry.finish(&task_session_id, generation);
                 }
+                #[cfg(any(test, feature = "test-helpers"))]
+                {
+                    let _ = finished_tx.send(());
+                }
             });
             let previous = state.tasks.insert(
                 session_id,
@@ -1012,6 +978,8 @@ impl LspLeaseTaskRegistry {
                     generation,
                     cancellation,
                     handle,
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    finished: Some(finished_rx),
                 },
             );
             (previous, start, generation)
@@ -1096,6 +1064,28 @@ impl LspLeaseTaskRegistry {
             Err(poisoned) => poisoned.into_inner().tasks.len(),
         }
     }
+
+    /// Await every registered lease task's completion signal.
+    ///
+    /// The sender fires after `finish` removes the task, so this does not
+    /// hold `lsp_sessions`. A missing receiver means the lease already ended.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn wait_until_idle(&self) {
+        let receivers = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            state
+                .tasks
+                .values_mut()
+                .filter_map(|task| task.finished.take())
+                .collect::<Vec<_>>()
+        };
+        for finished in receivers {
+            let _ = finished.await;
+        }
+    }
 }
 
 impl Drop for LspLeaseTaskRegistry {
@@ -1121,7 +1111,7 @@ pub struct DaemonLspInvocationOwner {
     pub(super) scope_set_storage:
         Option<tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage>,
     pub(super) delivery_settlements:
-        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
+        Option<Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>>,
 }
 
 #[derive(Clone)]
@@ -1163,7 +1153,7 @@ impl DaemonLspInvocationOwner {
     pub fn with_delivery_settlements(
         mut self,
         delivery_settlements: Arc<
-            tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1,
+            tracedecay_application::observability::BoundedDeliverySettlementRecorderV1,
         >,
     ) -> Self {
         self.delivery_settlements = Some(delivery_settlements);
@@ -1181,7 +1171,7 @@ impl DaemonLspInvocationOwner {
         scope_grant: CapabilityGrantSnapshot,
         scope_set_storage: tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
         delivery_settlements: Arc<
-            tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1,
+            tracedecay_application::observability::BoundedDeliverySettlementRecorderV1,
         >,
     ) -> Self {
         Self {

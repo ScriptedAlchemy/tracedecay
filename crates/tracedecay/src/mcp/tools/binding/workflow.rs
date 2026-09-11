@@ -12,15 +12,8 @@ use tracedecay_tool_catalog::ExecutableBindingV1;
 
 use super::{DispatchCatalogBinding, McpToolDispatchGroup};
 
-/// Resolve a Workflow MCP name through the canonical Workflow descriptor.
-pub(crate) fn workflow_operation_for_tool(
-    tool_name: &str,
-) -> Option<tracedecay_api::WorkflowOperation> {
-    let operation_key = tool_name.strip_prefix("tracedecay_workflow_")?;
-    tracedecay_api::WorkflowOperation::ALL
-        .into_iter()
-        .find(|operation| operation.operation_key() == operation_key)
-}
+/// The `tracedecay_workflow_` name map lives once, in the MCP handler crate.
+pub(crate) use tracedecay_mcp::handlers::workflow_family::workflow_operation_for_tool;
 
 /// Resolve the executable Workflow binding that names an MCP tool.
 pub(super) fn workflow_executable_binding_for_tool(
@@ -33,7 +26,7 @@ pub(super) fn workflow_executable_binding_for_tool(
     let operation_id =
         tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned())
             .map_err(|_| invalid_workflow_binding("must name one canonical Workflow operation"))?;
-    let registry = tracedecay_application::workflow_executable_binding_registry()
+    let registry = tracedecay_contracts::workflow_executable_binding_registry()
         .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)?;
     Ok(registry
         .get(&operation_id)
@@ -47,7 +40,7 @@ pub(super) fn workflow_executable_binding_for_tool(
 /// [`workflow_executable_binding_for_tool`].
 pub(super) fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::super::dispatch::McpDispatchMetadataError> {
-    let registry = tracedecay_application::workflow_executable_binding_registry()
+    let registry = tracedecay_contracts::workflow_executable_binding_registry()
         .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)?;
     tracedecay_api::WorkflowOperation::ALL
         .into_iter()
@@ -92,7 +85,7 @@ mod tests {
 
     #[test]
     fn bindings_are_a_projection_of_the_executable_registry() {
-        let registry = tracedecay_application::workflow_executable_binding_registry().unwrap();
+        let registry = tracedecay_contracts::workflow_executable_binding_registry().unwrap();
         let workflow_bindings = dispatch_catalog_bindings()
             .unwrap()
             .into_iter()

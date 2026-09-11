@@ -32,8 +32,8 @@ use std::time::Duration;
 #[cfg(feature = "hotpath")]
 use std::sync::{Mutex, mpsc};
 
-use super::log_daemon_event;
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Wall clock past the graceful drain deadline reserved for receipt logging,
 /// endpoint cleanup, profiling finalization, and bounded CLI runtime teardown.
@@ -60,6 +60,13 @@ pub(crate) fn shutdown_exit_bound() -> Duration {
 }
 
 static ARMED: AtomicBool = AtomicBool::new(false);
+static ARMED_AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Milliseconds since the daemon committed to exiting (0 before arming), so
+/// operator lines without a wall clock still order against the TERM grace.
+pub(super) fn shutdown_elapsed_ms() -> u128 {
+    ARMED_AT.get().map_or(0, |at| at.elapsed().as_millis())
+}
 
 #[cfg(feature = "hotpath")]
 type HotpathShutdownFinalizer = Box<dyn FnOnce() + Send + 'static>;
@@ -108,7 +115,7 @@ fn finalize_hotpath_report_within(bound: Duration) {
 fn watchdog_fire_after() -> Duration {
     #[cfg(feature = "hotpath")]
     {
-        return shutdown_exit_bound().saturating_sub(HOTPATH_FINALIZE_BOUND);
+        shutdown_exit_bound().saturating_sub(HOTPATH_FINALIZE_BOUND)
     }
     #[cfg(not(feature = "hotpath"))]
     shutdown_exit_bound()
@@ -136,6 +143,7 @@ fn drain_bound_exceeded(bound: Duration) -> ! {
     hotpath::measure(label = "daemon.shutdown_watchdog.arm")
 )]
 pub(super) fn arm_shutdown_exit_bound() {
+    let _ = ARMED_AT.set(std::time::Instant::now());
     if ARMED.swap(true, Ordering::AcqRel) {
         return;
     }

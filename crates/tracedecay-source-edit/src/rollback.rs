@@ -1,4 +1,4 @@
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationOperation, CancellationObservation, CancellationStage, EffectTermination,
     ReconciliationState, SourceEditAuthorizationPort, SourceEditRollbackRequestV1, now_micros,
     source_edit_rollback_operation,
@@ -6,7 +6,6 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 
 use tracedecay_domain::errors::Result;
-use tracedecay_usecases::tracedecay::SourceEditRuntime;
 
 use super::JOURNAL_VERSION;
 use super::control::SourceEditEffectControlV1;
@@ -18,14 +17,18 @@ use super::journal::{
     SourceEditJournalV1, same_source_edit_authority,
 };
 use super::outcome::{SourceEditApplicationResult, SourceEditDurableOutcomeV1, SourceEditOutcome};
+use super::plan::{PlannedSourceEditFile, rollback_planned_source_edit_files};
+use super::port::SourceEditRuntime;
 use super::reconcile::recover_source_edit_transaction;
 use super::records::{applied_record, durable_record, interrupted_record, unknown_record};
-use super::verify::{application_contract_error, application_problem, config_error};
+use super::verify::{
+    application_contract_error, application_problem, config_error, idempotency_conflict,
+};
 
 fn durable_request(
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
 ) -> SourceEditDurableRequestV1 {
     SourceEditDurableRequestV1 {
         operation: operation.use_case_id().clone(),
@@ -45,11 +48,11 @@ fn durable_request(
 fn rollback_journal(
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     predicted_state: Option<ManifestDigest>,
     candidate_files: Vec<String>,
-    recovery_files: Vec<tracedecay_usecases::tracedecay::PlannedSourceEditFile>,
+    recovery_files: Vec<PlannedSourceEditFile>,
 ) -> Result<SourceEditJournalV1> {
     let recovery_digest = (!recovery_files.is_empty())
         .then(|| source_edit_recovery_digest(&recovery_files))
@@ -89,7 +92,7 @@ fn persist_pre_effect(
     durability: &SourceEditDurability,
     operation: &ApplicationOperation,
     request: &SourceEditRollbackRequestV1,
-    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     outcome: SourceEditOutcome,
     termination: EffectTermination,
@@ -97,7 +100,7 @@ fn persist_pre_effect(
 ) -> Result<SourceEditApplicationResult> {
     if let Some(stored) = durability.load_receipt(&request.idempotency_key)? {
         if stored.input_digest != *input_digest {
-            return Err(config_error(
+            return Err(idempotency_conflict(
                 "source edit rollback idempotency key conflicts with a prior input",
             ));
         }
@@ -151,7 +154,7 @@ where
     let durability = SourceEditDurability::for_graph(graph);
     let _lock = durability.lock()?;
     let input_digest = request.input_digest().map_err(application_contract_error)?;
-    let requested_authority = tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
+    let requested_authority = tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
         request.authority.clone(),
         request.proof.clone(),
         request.context.scope(),
@@ -224,7 +227,7 @@ where
     recover_source_edit_transaction(&durability, graph, request.context.scope()).await?;
     if let Some(stored) = durability.load_receipt(&request.idempotency_key)? {
         if stored.input_digest != input_digest {
-            return Err(config_error(
+            return Err(idempotency_conflict(
                 "source edit rollback idempotency key conflicts with a prior input",
             ));
         }
@@ -287,13 +290,11 @@ where
     let recovery_files = retained
         .recovery_files
         .iter()
-        .map(
-            |file| tracedecay_usecases::tracedecay::PlannedSourceEditFile {
-                relative_path: file.relative_path.clone(),
-                expected: file.intended.clone(),
-                intended: file.expected.clone(),
-            },
-        )
+        .map(|file| PlannedSourceEditFile {
+            relative_path: file.relative_path.clone(),
+            expected: file.intended.clone(),
+            intended: file.expected.clone(),
+        })
         .collect::<Vec<_>>();
     let mut journal = rollback_journal(
         operation,
@@ -319,11 +320,14 @@ where
         return Ok(record.into_live_application_result(outcome, None));
     }
 
-    let apply_result = hotpath::future!(
-        graph.apply_source_edit_rollback(&retained.recovery_files),
-        label = "usecases.edit.rollback.apply"
-    )
-    .await;
+    // A caller-requested rollback of a completed edit is a live operation, so
+    // the graph is resynchronized wholesale by the daemon-owned scheduler
+    // rather than reindexed file by file: a rollback may delete a file the edit
+    // created, and a deleted path has no bytes left to reindex.
+    let apply_result = hotpath::measure_block!(
+        "usecases.edit.rollback.apply",
+        rollback_planned_source_edit_files(graph.project_root(), &retained.recovery_files)
+    );
     let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if apply_result.is_err() || committed_state != retained.expected_state {
         if committed_state != journal.expected_state {

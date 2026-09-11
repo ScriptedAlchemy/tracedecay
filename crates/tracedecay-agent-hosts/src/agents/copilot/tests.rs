@@ -14,7 +14,7 @@
 //! refuses instead of accepting the loss.
 
 use super::*;
-use crate::errors::TraceDecayError;
+use tracedecay_domain::errors::TraceDecayError;
 
 /// Install a fake `copilot` that appends each invocation's argv to `log` and
 /// then performs `body`.

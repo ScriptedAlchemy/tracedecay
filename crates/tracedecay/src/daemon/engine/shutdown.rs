@@ -23,16 +23,23 @@ use crate::daemon::shutdown_coordination::{ShutdownOwner, ShutdownStatus};
 use crate::daemon::shutdown_orchestration::{
     DaemonShutdownPlan, DaemonShutdownReceipt, coordinate_daemon_shutdown,
 };
-use crate::daemon::store_shutdown::ShutdownTaskReceipt;
-use crate::daemon::{log_daemon_event, project_open_tasks, shutdown_project_servers};
+use crate::daemon::{project_open_tasks, shutdown_project_servers};
 #[cfg(test)]
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_store_runtime::ShutdownTaskReceipt;
 
 impl DaemonEngine {
     #[hotpath::measure(label = "daemon.engine.shutdown_owner_phases", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Shutdown owner-phase list is the ordered drain plan for one daemon stop."
+    )]
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;
 
+        let manual_branch_cancel = self.store_administration.clone();
+        let manual_branch_join = self.store_administration.clone();
         let invocation_join = self.invocation.clone();
 
         let session_refresh = Arc::clone(
@@ -53,24 +60,32 @@ impl DaemonEngine {
         let watcher_cancel = self.git_watcher.clone();
         let watcher_join = self.git_watcher.clone();
 
-        let pr_join = Arc::clone(&self.pr_autotrack_task);
+        let pr_task = self.pr_autotrack_task.lock().await.take();
+        let pr_cancel = pr_task
+            .as_ref()
+            .map(crate::daemon::pr_autotrack::PrAutotrackTask::cancellation);
 
         vec![
+            vec![ShutdownOwner::with_deadline_status(
+                "manual_branch_publication",
+                move || manual_branch_cancel.cancel_manual_branch_publications(),
+                move |_| async move {
+                    match manual_branch_join
+                        .shutdown_manual_branch_publications()
+                        .await
+                    {
+                        Ok(()) => ShutdownStatus::Clean,
+                        Err(reason) => ShutdownStatus::Failed(reason),
+                    }
+                },
+            )],
             vec![ShutdownOwner::with_deadline_status(
                 "invocation",
                 {
                     let invocation_cancel = self.invocation.clone();
                     move || invocation_cancel.cancel_admissions()
                 },
-                move |_| async move {
-                    if invocation_join.shutdown().await {
-                        ShutdownStatus::Clean
-                    } else {
-                        ShutdownStatus::Failed(
-                            "invocation runtime shutdown was incomplete".to_owned(),
-                        )
-                    }
-                },
+                move |_| async move { invocation_join.shutdown().await },
             )],
             vec![
                 ShutdownOwner::with_deadline_status(
@@ -84,15 +99,29 @@ impl DaemonEngine {
                         }
                     },
                 ),
-                ShutdownOwner::new("automation", || {}, async move {
-                    automation_join.shutdown_automation_schedulers().await;
-                }),
+                ShutdownOwner::new(
+                    "automation",
+                    {
+                        let automation_cancel = self.clone();
+                        move || automation_cancel.cancel_automation_schedulers()
+                    },
+                    async move {
+                        automation_join.shutdown_automation_schedulers().await;
+                    },
+                ),
                 ShutdownOwner::new("session_temporal_refresh", || {}, async move {
                     session_refresh.shutdown().await;
                 }),
-                ShutdownOwner::new("host_admission_replay", || {}, async move {
-                    replay_join.shutdown_host_admission_replay().await;
-                }),
+                ShutdownOwner::new(
+                    "host_admission_replay",
+                    {
+                        let replay_cancel = self.store_administration.clone();
+                        move || replay_cancel.cancel_host_admission_replay()
+                    },
+                    async move {
+                        replay_join.shutdown_host_admission_replay().await;
+                    },
+                ),
                 ShutdownOwner::new(
                     "maintenance",
                     {
@@ -122,11 +151,19 @@ impl DaemonEngine {
                         }
                     },
                 ),
-                ShutdownOwner::new("pr_autotrack", || {}, async move {
-                    if let Some(task) = pr_join.lock().await.take() {
-                        task.shutdown().await;
-                    }
-                }),
+                ShutdownOwner::new(
+                    "pr_autotrack",
+                    move || {
+                        if let Some(cancellation) = pr_cancel {
+                            cancellation.cancel();
+                        }
+                    },
+                    async move {
+                        if let Some(task) = pr_task {
+                            task.shutdown().await;
+                        }
+                    },
+                ),
                 ShutdownOwner::new("session_sync", || {}, async move {
                     session_sync_join.shutdown_session_sync().await;
                 }),

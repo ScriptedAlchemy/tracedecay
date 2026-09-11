@@ -2,8 +2,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tree_sitter::{Node as TsNode, Tree};
 
+use crate::common::local_node_id;
 use crate::types::{
-    Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
+    Visibility, generate_node_id,
 };
 
 pub struct ErlangExtractor;
@@ -80,7 +82,7 @@ impl ErlangExtractor {
             file_path: file_path.to_string(),
             start_line: 0,
             attrs_start_line: 0,
-            end_line: source.lines().count().saturating_sub(1) as u32,
+            end_line: crate::common::file_end_line(source, tree),
             start_column: 0,
             end_column: 0,
             signature: None,
@@ -94,6 +96,7 @@ impl ErlangExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -153,11 +156,12 @@ impl ErlangExtractor {
         let arity = Self::count_arity(first_clause);
         let full_name = format!("{name}/{arity}");
         let qualified_name = format!("{}::{}", state.file_path, full_name);
-        let id = generate_node_id(
+        let id = local_node_id(
             &state.file_path,
+            state.source,
             &NodeKind::Function,
             &full_name,
-            start_line,
+            node,
         );
 
         let graph_node = Node {
@@ -182,6 +186,7 @@ impl ErlangExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -217,7 +222,13 @@ impl ErlangExtractor {
         }
         let name = Self::extract_attr_value(state, node).unwrap_or_else(|| "?".to_string());
         let start_line = node.start_position().row as u32;
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Module,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -241,6 +252,7 @@ impl ErlangExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };
@@ -257,7 +269,13 @@ impl ErlangExtractor {
         let name = Self::extract_attr_value(state, node).unwrap_or_else(|| "?".to_string());
         let start_line = node.start_position().row as u32;
         let sig = Self::first_line(state, node);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = local_node_id(
+            &state.file_path,
+            state.source,
+            &NodeKind::Class,
+            &name,
+            node,
+        );
 
         let graph_node = Node {
             id: id.clone(),
@@ -281,6 +299,7 @@ impl ErlangExtractor {
             unsafe_blocks: 0,
             unchecked_calls: 0,
             assertions: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
             updated_at: state.timestamp,
             parent_id: None,
         };

@@ -10,8 +10,8 @@ use crate::{
 
 const BASELINE_REPORT_RESOURCE_CHILD_ENV: &str = "TRACEDECAY_BASELINE_REPORT_RESOURCE_CHILD";
 
-fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_application::ResolvedScope> {
-    tracedecay_application::ResolvedScope::new(
+fn direct_fixture_scope(_repo_root: &Path) -> Option<tracedecay_contracts::ResolvedScope> {
+    tracedecay_contracts::ResolvedScope::new(
         tracedecay_domain::ProjectId::new("project.search-eval-direct-report").ok()?,
         tracedecay_domain::RepositoryId::new("repository.search-eval-direct-report").ok()?,
         tracedecay_domain::WorktreeId::new("worktree.search-eval-direct-report").ok()?,
@@ -48,21 +48,40 @@ fn baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples() {
     // ordinary lane always runs it: production retrieval changes must land with
     // a re-pinned workload or they silently break `semantic activate`.
     for profile in &report.profiles {
+        let observed = generated
+            .outputs
+            .iter()
+            .find(|output| {
+                output.profile_id == profile.profile_id && output.partition == profile.partition
+            })
+            .map(|output| {
+                format!(
+                    "observed {} vs pinned {}",
+                    output.query_fallback_digest, output.expected_query_fallback_digest
+                )
+            })
+            .unwrap_or_else(|| "no generated output for this profile".to_owned());
         assert!(
             profile.fallback_matches_expected,
             "{}:{} query fallback digest drifted from \
              `expected_query_fallback_digests.{}` in \
-             tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json. \
-             Confirm the new query results are intended, then re-pin both workload \
-             copies and packaged::WORKLOAD_SHA256.",
+             tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json \
+             ({observed}). Confirm the new query results are intended, then re-pin \
+             both workload copies, packaged::WORKLOAD_SHA256, the workload digest \
+             pins, and regenerate the packaged native qualification.",
             profile.profile_id, profile.partition, profile.partition
         );
     }
+    // Every recall label above is satisfied, so a non-`Pass` status here is
+    // absent resource evidence, not a measured quality failure. Print the
+    // exact incomplete observation instead of leaving the reader to assume
+    // peak RSS is the only field a host failed to report.
     assert_eq!(
         report.status,
         crate::DirectEvaluationStatusV1::Pass,
         "the checked-in query-fallback baseline must keep passing the labels \
-         activation requires: {}",
+         activation requires: {} profiles={}",
+        report.pending_diagnostic(),
         serde_json::to_string(&report.profiles).expect("serialize profile evaluations")
     );
 
@@ -175,12 +194,26 @@ fn baseline_report_is_self_validating_but_not_activation_evidence() {
     report
         .validate_against(&repo_root, &workload)
         .expect("baseline evidence remains self-validating");
+    // Self-validation and the not-activation-evidence rule are separate
+    // contracts. Incomplete resource evidence refuses at the earlier status
+    // gate and would mask the refusal this test is about, so name it first
+    // with the exact observation the host failed to report.
+    assert_eq!(
+        report.status,
+        crate::DirectEvaluationStatusV1::Pass,
+        "resource evidence is incomplete, so the activation refusal below would \
+         be the status gate rather than the missing native evidence: {}",
+        report.pending_diagnostic()
+    );
     let activation_error = report
         .validate_for_activation(&repo_root, &workload)
         .expect_err("baseline-only report cannot stand in for native activation evidence");
     assert!(
-        activation_error.to_string().contains("native"),
-        "unexpected activation refusal: {activation_error}"
+        activation_error
+            .to_string()
+            .contains("no native current/10x resource evidence"),
+        "a baseline report must be refused for lacking native evidence, not for \
+         any other reason that happens to mention `native`: {activation_error}"
     );
 
     let mut tampered = report.clone();

@@ -12,12 +12,12 @@ use std::sync::Arc;
 use axum::Json;
 use axum::http::StatusCode;
 use serde_json::Value;
-use tracedecay_application::ApplicationProblemEnvelope;
-use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunResultV1};
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillUpdate,
 };
 use tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt;
+use tracedecay_contracts::ApplicationProblemEnvelope;
+use tracedecay_contracts::retained_surfaces::{AutomationRunProblemV1, AutomationRunResultV1};
 
 use super::DashboardHttpRequestControlV1;
 
@@ -69,26 +69,26 @@ impl DashboardAutomationAuthorityErrorV1 {
 
 fn application_problem_status(problem: &ApplicationProblemEnvelope) -> StatusCode {
     match problem.problem.kind() {
-        tracedecay_application::ApplicationProblemKind::PartialEffect
-        | tracedecay_application::ApplicationProblemKind::Conflict
-        | tracedecay_application::ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-        tracedecay_application::ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-        tracedecay_application::ApplicationProblemKind::NotFoundOrNotAuthorized => {
+        tracedecay_contracts::ApplicationProblemKind::PartialEffect
+        | tracedecay_contracts::ApplicationProblemKind::Conflict
+        | tracedecay_contracts::ApplicationProblemKind::Stale => StatusCode::CONFLICT,
+        tracedecay_contracts::ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
+        tracedecay_contracts::ApplicationProblemKind::NotFoundOrNotAuthorized => {
             StatusCode::NOT_FOUND
         }
-        tracedecay_application::ApplicationProblemKind::Unsupported => {
+        tracedecay_contracts::ApplicationProblemKind::Unsupported => {
             StatusCode::UNPROCESSABLE_ENTITY
         }
-        tracedecay_application::ApplicationProblemKind::ResetRequired
-        | tracedecay_application::ApplicationProblemKind::Unavailable => {
+        tracedecay_contracts::ApplicationProblemKind::ResetRequired
+        | tracedecay_contracts::ApplicationProblemKind::Unavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }
-        tracedecay_application::ApplicationProblemKind::ExecutionFailed => {
+        tracedecay_contracts::ApplicationProblemKind::ExecutionFailed => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
-        tracedecay_application::ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-        tracedecay_application::ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
-        tracedecay_application::ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        tracedecay_contracts::ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
+        tracedecay_contracts::ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
+        tracedecay_contracts::ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
     }
 }
 
@@ -276,13 +276,11 @@ mod tests {
     fn request_control() -> DashboardHttpRequestControlV1 {
         let observed_at = tracedecay_domain::UtcMicros(1_000_000);
         DashboardHttpRequestControlV1 {
-            request_id: tracedecay_application::RequestId::new("request.dashboard-automation-test")
+            request_id: tracedecay_contracts::RequestId::new("request.dashboard-automation-test")
                 .expect("request identity"),
-            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                2_000_000,
-            ))
-            .expect("request deadline"),
-            cancellation: tracedecay_application::CancellationSignal::active(
+            deadline: tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(2_000_000))
+                .expect("request deadline"),
+            cancellation: tracedecay_contracts::CancellationSignal::active(
                 "cancel.dashboard-automation-test",
             )
             .expect("request cancellation"),
@@ -539,19 +537,19 @@ mod tests {
     #[test]
     fn admitted_execution_failure_is_an_internal_server_error() {
         let request_id =
-            tracedecay_application::RequestId::new("request.dashboard-automation-execution-failed")
+            tracedecay_contracts::RequestId::new("request.dashboard-automation-execution-failed")
                 .expect("request identity");
-        let problem = tracedecay_application::ApplicationProblem::execution_failed(
-            tracedecay_application::ApplicationExecutionFailureClassV1::Permanent,
-            tracedecay_application::SafeDiagnostic::new(
+        let problem = tracedecay_contracts::ApplicationProblem::execution_failed(
+            tracedecay_contracts::ApplicationExecutionFailureClassV1::Permanent,
+            tracedecay_contracts::SafeDiagnostic::new(
                 "application.dashboard-automation.execution-failed",
                 "The admitted dashboard automation execution failed.",
             )
             .expect("safe execution-failure diagnostic"),
         )
         .expect("execution-failure problem");
-        let envelope = tracedecay_application::ApplicationProblemEnvelope::new(
-            tracedecay_application::ResultContractRef::new(
+        let envelope = tracedecay_contracts::ApplicationProblemEnvelope::new(
+            tracedecay_contracts::ResultContractRef::new(
                 tracedecay_tool_catalog::SchemaId::new(
                     "schema.dashboard-automation.execution-failed-result",
                 )

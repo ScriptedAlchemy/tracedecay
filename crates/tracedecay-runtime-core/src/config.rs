@@ -6,7 +6,6 @@
 //! every item declared here, so `crate::config::<item>` keeps resolving on
 //! both sides of the split.
 
-#[cfg(any(test, feature = "test-helpers"))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +23,21 @@ pub const DB_FILENAME: &str = "tracedecay.db";
 
 /// Filename of the user-level global database inside the profile root.
 pub const GLOBAL_DB_FILENAME: &str = "global.db";
+
+/// Output directories a cargo target dir may hold for this workspace: the
+/// built-in profiles plus the `perf` profile that `cargo test-ci`/`test-all`
+/// and the CI test lanes build with (see `Cargo.toml` `[profile.perf]`).
+/// Heuristics that recognise "inside a cargo target dir" by layout must
+/// accept every entry, or they silently switch off under one profile.
+pub const CARGO_PROFILE_DIRS: &[&str] = &["debug", "release", "perf"];
+
+/// True when `target_dir` holds a build output directory for any workspace
+/// cargo profile.
+pub fn holds_cargo_profile_dir(target_dir: &Path) -> bool {
+    CARGO_PROFILE_DIRS
+        .iter()
+        .any(|profile| target_dir.join(profile).is_dir())
+}
 
 /// New runtime storage lives in the user-level profile shard. The project root
 /// only carries lightweight marker/config files under `.tracedecay/`.
@@ -107,9 +121,7 @@ fn nextest_isolated_user_data_dir(path: PathBuf) -> PathBuf {
 
     let profile_name = profile_dir.file_name().and_then(std::ffi::OsStr::to_str);
     let target_profile = profile_name == Some("test-profile")
-        && profile_dir
-            .parent()
-            .is_some_and(|target| target.join("debug").is_dir());
+        && profile_dir.parent().is_some_and(holds_cargo_profile_dir);
     let ci_profile =
         profile_name == Some("tracedecay-test-profile") && std::env::var_os("CI").is_some();
     if !target_profile && !ci_profile {
@@ -271,6 +283,70 @@ impl Default for PinnedUserDataDir {
     }
 }
 
+/// The search path for host and service program resolution (`kiro-cli`,
+/// `gemini`, `systemctl`, env-shebang interpreters, ...).
+///
+/// Production reads the ambient `PATH` at each call. Tests substitute a
+/// fixture directory through [`HostProgramSearchPathGuard`] instead of
+/// mutating the process environment: a narrowed process-global `PATH` is
+/// visible to every concurrently running test, so unrelated `sh`/`git` spawns
+/// fail with `NotFound` for the guard's lifetime.
+///
+/// [`crate::git::try_git_program`] deliberately does not consult this seam:
+/// the Git authority is process-wide and must never observe a test fixture.
+pub fn host_program_search_path() -> Option<OsString> {
+    #[cfg(any(test, feature = "test-helpers"))]
+    if let Some(path) = HOST_PROGRAM_SEARCH_PATH_OVERRIDE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return Some(path);
+    }
+    std::env::var_os("PATH")
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+static HOST_PROGRAM_SEARCH_PATH_OVERRIDE: std::sync::RwLock<Option<OsString>> =
+    std::sync::RwLock::new(None);
+#[cfg(any(test, feature = "test-helpers"))]
+static HOST_PROGRAM_SEARCH_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Substitutes [`host_program_search_path`] for the guard's lifetime without
+/// touching the process `PATH`.
+///
+/// Guards serialize on their own lock, acquired after
+/// [`lock_user_data_dir_test_env`] whenever a test holds both (never the
+/// reverse), so sibling tests that spawn `sh`, `git`, or the product binary
+/// keep seeing the ambient environment.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct HostProgramSearchPathGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl HostProgramSearchPathGuard {
+    pub fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
+        let lock = HOST_PROGRAM_SEARCH_PATH_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *HOST_PROGRAM_SEARCH_PATH_OVERRIDE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(path.as_ref().to_os_string());
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Drop for HostProgramSearchPathGuard {
+    fn drop(&mut self) {
+        *HOST_PROGRAM_SEARCH_PATH_OVERRIDE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 impl Drop for PinnedUserDataDir {
     fn drop(&mut self) {
@@ -288,5 +364,25 @@ impl Drop for PinnedUserDataDir {
                 None => std::env::remove_var("USERPROFILE"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod host_program_search_path_tests {
+    use super::*;
+
+    #[test]
+    fn fixture_search_path_leaves_process_path_untouched() {
+        let ambient = std::env::var_os("PATH");
+        let fixture = tempfile::tempdir().expect("fixture search directory");
+        {
+            let _guard = HostProgramSearchPathGuard::set(fixture.path());
+            assert_eq!(
+                host_program_search_path().as_deref(),
+                Some(fixture.path().as_os_str())
+            );
+            assert_eq!(std::env::var_os("PATH"), ambient);
+        }
+        assert_eq!(host_program_search_path(), ambient);
     }
 }

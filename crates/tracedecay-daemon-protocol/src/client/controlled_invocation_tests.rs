@@ -15,7 +15,7 @@ use crate::contract::{
 };
 use crate::handshake::DaemonHandshake;
 use crate::lsp_wire::{FrameSend, LspSessionAccess, LspSessionCredential, LspSessionId};
-use tracedecay_application::{
+use tracedecay_contracts::{
     CancellationContext, CancellationSignal, Deadline, WorkGraphReadRequestV1,
     WorkProductSelectionScopeV1,
 };
@@ -66,10 +66,20 @@ fn invocation_client(
     endpoint: crate::transport::DaemonEndpoint,
     instance_id: &str,
 ) -> DaemonInvocationClient {
+    invocation_client_for(
+        DaemonConnection::unauthenticated_for_test(endpoint),
+        instance_id,
+    )
+}
+
+fn invocation_client_for(
+    connection: DaemonConnection,
+    instance_id: &str,
+) -> DaemonInvocationClient {
     let profile = tempfile::tempdir().expect("profile");
     let profile_root = profile.path().to_path_buf();
     DaemonInvocationClient::for_connection_for_test(
-        DaemonConnection::unauthenticated_for_test(endpoint),
+        connection,
         DaemonHandshake {
             project_path: Some(profile_root.clone()),
             scope_prefix: None,
@@ -100,6 +110,50 @@ fn client_activity(client: &DaemonInvocationClient) -> (usize, usize) {
             .in_flight
             .load(std::sync::atomic::Ordering::Acquire),
     )
+}
+
+/// Idle streams currently parked in the client's shared connection pool.
+fn idle_pool_size(client: &DaemonInvocationClient) -> usize {
+    client
+        .pool
+        .idle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
+}
+
+/// A liveness probe standing in for the authority record: current until the
+/// test rotates it, then every check reports the daemon restarted.
+struct RotatingAuthority {
+    rotated: AtomicBool,
+}
+
+impl crate::connection::DaemonLivenessProbe for RotatingAuthority {
+    fn ensure_live(&self, request_label: &str) -> tracedecay_domain::errors::Result<()> {
+        if self.rotated.load(Ordering::SeqCst) {
+            return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "daemon restarted while request '{request_label}' was awaiting a response"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn rotating_authority_client(
+    endpoint: crate::transport::DaemonEndpoint,
+    instance_id: &str,
+) -> (DaemonInvocationClient, Arc<RotatingAuthority>) {
+    let authority = Arc::new(RotatingAuthority {
+        rotated: AtomicBool::new(false),
+    });
+    let probe: Arc<dyn crate::connection::DaemonLivenessProbe> = authority.clone();
+    let client = invocation_client_for(
+        DaemonConnection::unauthenticated_for_test(endpoint).with_liveness(probe),
+        instance_id,
+    );
+    (client, authority)
 }
 
 async fn write_unavailable_response(
@@ -597,8 +651,12 @@ async fn two_hundred_invocations_use_at_most_eight_connections_without_leaks() {
     server.await.expect("bounded pool server task");
 }
 
+/// A daemon restart closes every pooled stream at once and rotates the
+/// authority record. That rotation — not the first transport failure by
+/// itself — is what drains the pool, so the next request handshakes exactly
+/// one fresh connection instead of failing once per dead idle stream.
 #[tokio::test]
-async fn transport_failure_purges_other_idle_connections_before_reconnect() {
+async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_reconnect() {
     const FIRST_WARM_ID: &str = "request.pool.restart.warm-first";
     const SECOND_WARM_ID: &str = "request.pool.restart.warm-second";
     const FAILED_ID: &str = "request.pool.restart.failed";
@@ -686,7 +744,7 @@ async fn transport_failure_purges_other_idle_connections_before_reconnect() {
         assert_eq!(recovered_request.request_id, RECOVERED_ID);
         write_unavailable_response(&mut recovered_writer, RECOVERED_ID).await;
     });
-    let client = invocation_client(endpoint, "client.pool.restart");
+    let (client, authority) = rotating_authority_client(endpoint, "client.pool.restart");
 
     let (first_warm, second_warm) = tokio::join!(
         client.invoke(invocation_request(
@@ -701,12 +759,7 @@ async fn transport_failure_purges_other_idle_connections_before_reconnect() {
     first_warm.expect("first warm invocation");
     second_warm.expect("second warm invocation");
     assert_eq!(
-        client
-            .pool
-            .idle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
+        idle_pool_size(&client),
         2,
         "concurrent warmup must leave two idle pooled connections"
     );
@@ -715,6 +768,7 @@ async fn transport_failure_purges_other_idle_connections_before_reconnect() {
         .send(())
         .expect("request warm connection close");
     warm_closed.await.expect("warm connections closed");
+    authority.rotated.store(true, Ordering::SeqCst);
 
     client
         .invoke(invocation_request(
@@ -723,6 +777,11 @@ async fn transport_failure_purges_other_idle_connections_before_reconnect() {
         ))
         .await
         .expect_err("first invocation after restart must observe transport failure");
+    assert_eq!(
+        idle_pool_size(&client),
+        0,
+        "a rotated daemon authority must drain every idle stream before the next request"
+    );
     client
         .invoke(invocation_request(
             RECOVERED_ID,
@@ -932,11 +991,48 @@ async fn controlled_client(
     )
 }
 
+/// Phase signals from a fixture daemon that never settles a remote effect.
+///
+/// The choreography runs over real loopback connections, so the tests keep
+/// real time until `control_observed` fires and only then pause and advance
+/// the clock past the authoritative-settlement grace. Pausing earlier lets
+/// the paused clock auto-advance past the admission deadline while the
+/// runtime waits for loopback readiness, which drops the invocation
+/// connection before its handshake is written (observed on macOS).
+struct UnsettledDaemon {
+    client: DaemonInvocationClient,
+    /// The daemon read the typed invocation request.
+    admitted: tokio::sync::oneshot::Receiver<()>,
+    /// The daemon finished its cancellation-control phase: it either read the
+    /// typed cancellation request or closed its listener so the control
+    /// connection is refused. In the refused case the client's bounded
+    /// cancel-delivery attempt still runs after this fires; every path it can
+    /// take ends in the same indeterminate settlement.
+    control_observed: tokio::sync::oneshot::Receiver<()>,
+    /// Lets the daemon drop the invocation connection it holds open and exit.
+    release: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+/// Pauses the clock and advances it past the authoritative-settlement grace.
+///
+/// Only call this once every real loopback exchange the test depends on has
+/// completed and the remaining work is timer-bound; the paused clock
+/// auto-advances to the next timer whenever the runtime would otherwise wait
+/// for I/O. Tests that perform more real I/O afterwards must
+/// `tokio::time::resume()` first.
+async fn virtualize_response_grace() {
+    tokio::time::pause();
+    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
+        .await;
+}
+
 async fn reset_then_reconnect_client(
     first_request_id: &'static str,
     second_request_id: &'static str,
 ) -> (
     DaemonInvocationClient,
+    tokio::sync::oneshot::Receiver<()>,
     tokio::sync::oneshot::Receiver<()>,
     tokio::task::JoinHandle<()>,
 ) {
@@ -945,6 +1041,7 @@ async fn reset_then_reconnect_client(
             .await
             .expect("bind invocation listener");
     let (first_admitted, admitted) = tokio::sync::oneshot::channel();
+    let (cancellation_observed, control_observed) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let first_stream = listener.accept().await.expect("accept first invocation");
         let (first_reader, _first_writer) = first_stream.into_split();
@@ -972,11 +1069,15 @@ async fn reset_then_reconnect_client(
             .await
             .expect("read cancellation handshake")
             .expect("cancellation handshake");
-        control_lines
+        let cancellation_line = control_lines
             .next_line()
             .await
             .expect("read cancellation request")
             .expect("cancellation request");
+        let cancellation = parse_daemon_invocation_cancellation_request(&cancellation_line)
+            .expect("typed invocation cancellation");
+        assert_eq!(cancellation.target_request_id(), first_request_id);
+        let _ = cancellation_observed.send(());
 
         // The response-grace read polls liveness with handshake-less probe
         // connections; skip them like the real daemon's accept loop does.
@@ -1038,6 +1139,7 @@ async fn reset_then_reconnect_client(
             handshake,
         ),
         admitted,
+        control_observed,
         server,
     )
 }
@@ -1049,21 +1151,14 @@ enum UnsettledControl {
     ConnectionRejected,
 }
 
-async fn unsettled_client(
-    request_id: &'static str,
-    control: UnsettledControl,
-) -> (
-    DaemonInvocationClient,
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::task::JoinHandle<()>,
-) {
+async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -> UnsettledDaemon {
     let (listener, endpoint) =
         crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
             .await
             .expect("bind invocation listener");
     let (request_admitted, admitted) = tokio::sync::oneshot::channel();
-    let (control_boundary_reached, control_reached) = tokio::sync::oneshot::channel();
+    let (control_phase_done, control_observed) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
         let (invocation_reader, invocation_writer) = invocation_stream.into_split();
@@ -1082,11 +1177,11 @@ async fn unsettled_client(
             serde_json::from_str(&request_line).expect("typed invocation request");
         assert_eq!(request.request_id, request_id);
 
-        match control {
+        let (_control_connection, close_response) = match control {
             UnsettledControl::Delivered | UnsettledControl::DeliveredThenResponseClosed => {
                 let _ = request_admitted.send(());
                 let control_stream = listener.accept().await.expect("accept cancellation");
-                let (control_reader, _control_writer) = control_stream.into_split();
+                let (control_reader, control_writer) = control_stream.into_split();
                 let mut control_lines = BufReader::new(control_reader).lines();
                 control_lines
                     .next_line()
@@ -1101,23 +1196,25 @@ async fn unsettled_client(
                 let cancellation = parse_daemon_invocation_cancellation_request(&cancellation_line)
                     .expect("typed invocation cancellation");
                 assert_eq!(cancellation.target_request_id(), request_id);
-                control_boundary_reached
-                    .send(())
-                    .expect("report cancellation delivery");
-                if matches!(control, UnsettledControl::DeliveredThenResponseClosed) {
-                    drop(invocation_writer);
-                    return;
-                }
+                (
+                    Some((control_lines, control_writer)),
+                    matches!(control, UnsettledControl::DeliveredThenResponseClosed),
+                )
             }
             UnsettledControl::ConnectionRejected => {
                 drop(listener);
                 let _ = request_admitted.send(());
-                control_boundary_reached
-                    .send(())
-                    .expect("report cancellation rejection");
+                (None, false)
             }
+        };
+        let _ = control_phase_done.send(());
+        if close_response {
+            drop(invocation_writer);
+            return;
         }
-        std::future::pending::<()>().await;
+        // Hold the invocation connection open without ever answering; the
+        // test releases it once the client has settled the effect itself.
+        let _ = released.await;
     });
     let profile = tempfile::tempdir().expect("profile");
     let profile_root = profile.path().to_path_buf();
@@ -1137,15 +1234,55 @@ async fn unsettled_client(
         catalog_version: String::new(),
         moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
-    (
-        DaemonInvocationClient::for_connection_for_test(
+    UnsettledDaemon {
+        client: DaemonInvocationClient::for_connection_for_test(
             DaemonConnection::unauthenticated_for_test(endpoint),
             handshake,
         ),
         admitted,
-        control_reached,
+        control_observed,
+        release,
         server,
-    )
+    }
+}
+
+/// Drives one controlled invocation against an [`UnsettledDaemon`] and returns
+/// the settlement the client produced on its own.
+async fn settle_without_daemon_response(
+    daemon: UnsettledDaemon,
+    request_id: &'static str,
+    cancellation: CancellationSignal,
+) -> DaemonInvocationResponse {
+    let UnsettledDaemon {
+        client,
+        admitted,
+        control_observed,
+        release,
+        server,
+    } = daemon;
+    let deadline = deadline_after(Duration::from_secs(10));
+    let call_cancellation = cancellation.clone();
+    let call = tokio::spawn(async move {
+        client
+            .invoke_controlled(
+                invocation_request(request_id, deadline.clone()),
+                deadline,
+                call_cancellation,
+                InvocationCancellationPolicy::AuthoritativeEffect,
+            )
+            .await
+    });
+    admitted.await.expect("request admission");
+    assert!(cancellation.cancel(now_micros()));
+    control_observed.await.expect("cancellation control phase");
+    virtualize_response_grace().await;
+    let response = call
+        .await
+        .expect("authoritative invocation task")
+        .expect("indeterminate settlement is typed");
+    let _ = release.send(());
+    server.await.expect("server task");
+    response
 }
 
 fn assert_authoritative_settlement(response: DaemonInvocationResponse) {
@@ -1216,80 +1353,37 @@ async fn remote_effect_deadline_requests_daemon_cancel_and_awaits_settlement() {
 #[tokio::test]
 async fn remote_effect_without_authoritative_settlement_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-no-settlement";
-    let (client, admitted, control_reached, server) =
-        unsettled_client(REQUEST_ID, UnsettledControl::Delivered).await;
+    let daemon = unsettled_client(REQUEST_ID, UnsettledControl::Delivered).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-no-settlement").expect("cancellation");
-    let deadline = deadline_after(Duration::from_secs(10));
-    let call_cancellation = cancellation.clone();
-    let call = tokio::spawn(async move {
-        client
-            .invoke_controlled(
-                invocation_request(REQUEST_ID, deadline.clone()),
-                deadline,
-                call_cancellation,
-                InvocationCancellationPolicy::AuthoritativeEffect,
-            )
-            .await
-    });
-    admitted.await.expect("request admission");
-    assert!(cancellation.cancel(now_micros()));
-    control_reached
-        .await
-        .expect("cancellation delivery reached the server");
-    tokio::time::pause();
-    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
-        .await;
-    let response = call
-        .await
-        .expect("authoritative invocation task")
-        .expect("indeterminate settlement is typed");
+
+    let response = settle_without_daemon_response(daemon, REQUEST_ID, cancellation).await;
 
     assert_authoritative_settlement(response);
-    server.abort();
 }
 
 #[tokio::test]
 async fn remote_effect_cancel_delivery_failure_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-cancel-delivery-failure";
-    let (client, admitted, control_reached, server) =
-        unsettled_client(REQUEST_ID, UnsettledControl::ConnectionRejected).await;
+    let daemon = unsettled_client(REQUEST_ID, UnsettledControl::ConnectionRejected).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-delivery-failure").expect("cancellation");
-    let deadline = deadline_after(Duration::from_secs(10));
-    let call_cancellation = cancellation.clone();
-    let call = tokio::spawn(async move {
-        client
-            .invoke_controlled(
-                invocation_request(REQUEST_ID, deadline.clone()),
-                deadline,
-                call_cancellation,
-                InvocationCancellationPolicy::AuthoritativeEffect,
-            )
-            .await
-    });
-    admitted.await.expect("request admission");
-    assert!(cancellation.cancel(now_micros()));
-    control_reached
-        .await
-        .expect("cancellation endpoint rejection reached the server");
-    tokio::time::pause();
-    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
-        .await;
-    let response = call
-        .await
-        .expect("authoritative invocation task")
-        .expect("indeterminate settlement is typed");
+
+    let response = settle_without_daemon_response(daemon, REQUEST_ID, cancellation).await;
 
     assert_authoritative_settlement(response);
-    server.abort();
 }
 
 #[tokio::test]
 async fn remote_effect_response_eof_after_cancel_returns_reset_required() {
     const REQUEST_ID: &str = "request.remote-effect-response-eof";
-    let (client, admitted, control_reached, server) =
-        unsettled_client(REQUEST_ID, UnsettledControl::DeliveredThenResponseClosed).await;
+    let UnsettledDaemon {
+        client,
+        admitted,
+        control_observed,
+        release: _release,
+        server,
+    } = unsettled_client(REQUEST_ID, UnsettledControl::DeliveredThenResponseClosed).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-response-eof").expect("cancellation");
     let deadline = deadline_after(Duration::from_secs(10));
@@ -1306,7 +1400,7 @@ async fn remote_effect_response_eof_after_cancel_returns_reset_required() {
     });
     admitted.await.expect("request admission");
     assert!(cancellation.cancel(now_micros()));
-    control_reached
+    control_observed
         .await
         .expect("cancellation delivery reached the server");
     let response = call
@@ -1318,20 +1412,23 @@ async fn remote_effect_response_eof_after_cancel_returns_reset_required() {
     server.await.expect("server task");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn indeterminate_effect_discards_connection_before_next_invocation() {
     const FIRST_ID: &str = "request.remote-effect-reset-state";
     const SECOND_ID: &str = "request.remote-after-effect-reset";
-    // The paused clock virtualizes the response grace the first invocation
-    // must exhaust before it settles as an indeterminate effect; the
-    // choreography itself still runs over real loopback connections.
-    let (client, admitted, server) = reset_then_reconnect_client(FIRST_ID, SECOND_ID).await;
+    let (client, admitted, control_observed, server) =
+        reset_then_reconnect_client(FIRST_ID, SECOND_ID).await;
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-reset-state").expect("cancellation");
     let cancel_after_admission = cancellation.clone();
-    let cancel = tokio::spawn(async move {
+    // Cancel once the daemon has admitted the request, then virtualize the
+    // response grace only after the daemon has read the cancellation: the
+    // choreography itself runs over real loopback connections.
+    let clock = tokio::spawn(async move {
         admitted.await.expect("request admission");
         assert!(cancel_after_admission.cancel(now_micros()));
+        control_observed.await.expect("cancellation delivery");
+        virtualize_response_grace().await;
     });
     let deadline = deadline_after(Duration::from_secs(10));
     let first = client
@@ -1344,6 +1441,9 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
         .await
         .expect("indeterminate effect is typed");
     assert_authoritative_settlement(first);
+    clock.await.expect("clock task");
+    // The reconnect below is real loopback I/O again, so hand real time back.
+    tokio::time::resume();
 
     let second = client
         .invoke(invocation_request(
@@ -1358,7 +1458,6 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
             problem: DaemonInvocationProblem::Unavailable
         }
     ));
-    cancel.await.expect("cancellation task");
     server.await.expect("server task");
 }
 
@@ -1553,5 +1652,155 @@ async fn semantic_qualification_cancellation_controls_the_same_payload_request()
         .expect("typed semantic qualification cancellation");
     assert_eq!(reason, "semantic_qualification_cancelled");
     assert!(!retryable);
+    server.abort();
+}
+
+/// A daemon whose answer is selected by request id: `warm.*` requests wait at
+/// the warm-up barrier before answering (so concurrent warm requests must each
+/// occupy their own connection), `fail.*` requests close their connection
+/// unanswered, `refuse.*` requests answer with a handshake refusal frame, and
+/// anything else answers normally.
+fn spawn_pool_daemon(
+    listener: crate::transport::BrokerListener,
+    warm_up: Arc<tokio::sync::Barrier>,
+) -> (tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let server_accepts = Arc::clone(&accepts);
+    let server = tokio::spawn(async move {
+        loop {
+            let stream = listener.accept().await.expect("accept pooled invocation");
+            server_accepts.fetch_add(1, Ordering::SeqCst);
+            let warm_up = Arc::clone(&warm_up);
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                lines
+                    .next_line()
+                    .await
+                    .expect("read pooled handshake")
+                    .expect("pooled handshake");
+                while let Some(line) = lines.next_line().await.expect("read pooled invocation") {
+                    let request: DaemonInvocationRequest =
+                        serde_json::from_str(&line).expect("typed pooled invocation");
+                    let request_id = request.request_id.clone();
+                    if request_id.starts_with("warm.") {
+                        warm_up.wait().await;
+                    } else if request_id.starts_with("fail.") {
+                        return;
+                    } else if request_id.starts_with("refuse.") {
+                        let refusal =
+                            crate::handshake::DaemonHandshakeRefusal::for_rejected_authentication(
+                                "0.1.0-test+rotated",
+                            )
+                            .to_line()
+                            .expect("refusal line");
+                        writer
+                            .write_all(format!("{refusal}\n").as_bytes())
+                            .await
+                            .expect("write refusal");
+                        writer.flush().await.expect("flush refusal");
+                        return;
+                    }
+                    write_unavailable_response(&mut writer, &request_id).await;
+                }
+            });
+        }
+    });
+    (server, accepts)
+}
+
+/// Settles two concurrent requests so the pool holds two idle streams.
+async fn warm_pool_with_two_streams(client: &DaemonInvocationClient, accepts: &AtomicUsize) {
+    let (first, second) = tokio::join!(
+        client.invoke(invocation_request(
+            "warm.1",
+            deadline_after(Duration::from_secs(5))
+        )),
+        client.invoke(invocation_request(
+            "warm.2",
+            deadline_after(Duration::from_secs(5))
+        )),
+    );
+    first.expect("first warm-up invocation");
+    second.expect("second warm-up invocation");
+    assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        idle_pool_size(client),
+        2,
+        "settled requests must return their streams to idle"
+    );
+}
+
+#[tokio::test]
+async fn request_local_failure_retires_only_its_own_pooled_stream() {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind pooled invocation listener");
+    let (server, accepts) = spawn_pool_daemon(listener, Arc::new(tokio::sync::Barrier::new(2)));
+    let client = invocation_client(endpoint, "client.pool.discard-one");
+    warm_pool_with_two_streams(&client, &accepts).await;
+
+    let error = client
+        .invoke(invocation_request(
+            "fail.1",
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .expect_err("a connection closed before its response must fail the request");
+    assert!(
+        error
+            .to_string()
+            .contains("closed the invocation connection"),
+        "the failure must name the closed stream: {error}"
+    );
+    assert_eq!(
+        idle_pool_size(&client),
+        1,
+        "a request-local failure retires only the stream that failed"
+    );
+
+    client
+        .invoke(invocation_request(
+            "reuse.1",
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .expect("invocation over the surviving idle stream");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        2,
+        "the surviving idle stream must be reused instead of reconnecting"
+    );
+    assert_eq!(idle_pool_size(&client), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn handshake_refusal_drains_the_whole_pool() {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .expect("bind pooled invocation listener");
+    let (server, accepts) = spawn_pool_daemon(listener, Arc::new(tokio::sync::Barrier::new(2)));
+    let client = invocation_client(endpoint, "client.pool.handshake-refusal");
+    warm_pool_with_two_streams(&client, &accepts).await;
+
+    let error = client
+        .invoke(invocation_request(
+            "refuse.1",
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .expect_err("a refused handshake must fail the request");
+    let (code, _, _) = error
+        .project_route_context()
+        .expect("the refusal must stay typed");
+    assert_eq!(code, super::DAEMON_AUTHENTICATION_REJECTED);
+    assert_eq!(
+        idle_pool_size(&client),
+        0,
+        "a credential rotation must drain every idle stream"
+    );
     server.abort();
 }

@@ -1,6 +1,6 @@
 //! Registered-store adapter for canonical observability envelopes.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     ApplicationContractError, ExecutionTopologyRollupFragmentPageV1,
     ExecutionTopologyRollupFragmentQueryV1, ExecutionTopologyRollupQueryPort, ObservabilityFuture,
     ObservabilityPageV1, ObservabilityQueryPort, ObservabilityQueryV1, ObservabilityRecordPort,
@@ -31,6 +31,35 @@ impl<'a> RegisteredObservabilityPortV1<'a> {
     #[hotpath::skip]
     pub const fn new(db: &'a RegisteredGlobalDb) -> Self {
         Self { db }
+    }
+
+    pub async fn read_exact(
+        &self,
+        authorized_scope_ref: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<ObservabilityEnvelopeV1>, ApplicationContractError> {
+        let Some(row) = self
+            .db
+            .read_observability_event(authorized_scope_ref, idempotency_key)
+            .await
+            .map_err(ApplicationContractError::Domain)?
+        else {
+            return Ok(None);
+        };
+        let envelope = row
+            .metadata_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<ObservabilityEnvelopeV1>(value).ok())
+            .filter(|envelope| envelope.validate().is_ok())
+            .filter(|envelope| {
+                envelope.scope_ref == authorized_scope_ref
+                    && envelope.idempotency_key == idempotency_key
+                    && envelope.event_kind == row.event_kind
+            })
+            .ok_or(ApplicationContractError::Inconsistent {
+                field: "observability_exact_read",
+            })?;
+        Ok(Some(envelope))
     }
 }
 

@@ -19,7 +19,7 @@ use tracedecay_graph_db::{
 };
 use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection};
 use tracedecay_runtime_core::db::{DatabaseAccessMode, DatabaseAuthority};
-use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeRegistryFailure;
+use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
 };
@@ -389,7 +389,7 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     assert!(current.incarnation > stale.incarnation);
     assert!(matches!(
         second_registry.lookup_store_runtime(&stale),
-        tracedecay_runtime_core::store_runtime::registry::StoreRuntimeLookup::WrongIncarnation {
+        tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeLookup::WrongIncarnation {
             expected,
             actual,
         } if *expected == stale && actual.as_ref() == &current
@@ -409,7 +409,7 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     )
     .expect("daemon database scope");
     let memory_path =
-        tracedecay_runtime_core::memory::user::user_memory_db_path(identity.profile_root());
+        tracedecay_session_memory::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
     tracedecay_runtime_core::db::migrations::create_schema_connection(&seed)
         .await

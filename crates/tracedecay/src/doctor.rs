@@ -5,25 +5,21 @@
 
 use std::path::{Path, PathBuf};
 
-use tracedecay_application::{ApplicationOutcome, ResolvedSetting};
+use tracedecay_contracts::{ApplicationOutcome, ResolvedSetting};
 use tracedecay_domain::configuration::{
     ConfigurationValueV1, SettingKey, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
-use crate::agents::{self, DoctorCounters, HealthcheckContext};
-use crate::application_surface::{
-    ApplicationSurfaceRequest, execute_application_surface, resolve_application_surface_dispatch,
-};
-use tracedecay_application::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
+use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
+use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 use tracedecay_daemon_protocol::RequestedOutputFormat;
+use tracedecay_daemon_service::application_surface::{
+    execute_application_surface, resolve_application_surface_dispatch,
+};
 use tracedecay_runtime_core::text::format_token_count;
-
-// Consumed by the unix-only daemon git-watch maintenance path; on other
-// targets only the module's tests reference it.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) mod registry_drift;
 
 /// Opens an isolated daemon-registered profile database so Doctor tests can
 /// exercise the read-only session-temporal health adapter against the real
@@ -80,9 +76,19 @@ impl DoctorTestRuntime {
     }
 }
 
+/// Sync cloud probes admitted by the CLI binary. Doctor never opens ureq
+/// itself — the composition root cannot depend on the CLI crate.
+#[derive(Clone, Copy)]
+pub struct AdmittedDoctorNetworkProbes {
+    pub fetch_worldwide_total: fn() -> Option<u64>,
+    pub fetch_latest_version: fn() -> Option<String>,
+}
+
 /// Runs a comprehensive health check of the tracedecay installation.
 #[hotpath::measure(label = "doctor.run", future = true)]
-pub async fn run_doctor() -> tracedecay_domain::errors::Result<()> {
+pub async fn run_doctor(
+    network: AdmittedDoctorNetworkProbes,
+) -> tracedecay_domain::errors::Result<()> {
     let _lifecycle_lease =
         match tracedecay_runtime_core::lifecycle_lease::acquire_shared_or_inherited("doctor") {
             Ok(lease) => lease,
@@ -169,7 +175,7 @@ pub async fn run_doctor() -> tracedecay_domain::errors::Result<()> {
         dc.fail("Could not determine home directory");
     }
 
-    check_network(&mut dc, upload_enabled.as_ref());
+    check_network(&mut dc, upload_enabled.as_ref(), network);
     print_summary(&dc);
 
     doctor_result(&dc, &storage_health)
@@ -181,7 +187,7 @@ fn should_run_host_healthcheck(agent: &dyn agents::AgentIntegration, home: &Path
 
 fn render_canonical_doctor_report(
     dc: &mut DoctorCounters,
-    report: &tracedecay_application::doctor::DoctorReportV1,
+    report: &tracedecay_contracts::doctor::DoctorReportV1,
 ) {
     eprintln!("\n\x1b[1mCanonical Doctor findings\x1b[0m");
     for finding in report.findings() {
@@ -192,9 +198,9 @@ fn render_canonical_doctor_report(
 
 fn render_doctor_finding(
     dc: &mut DoctorCounters,
-    finding: &tracedecay_application::doctor::DoctorFindingV1,
+    finding: &tracedecay_contracts::doctor::DoctorFindingV1,
 ) {
-    use tracedecay_application::doctor::DoctorEvidenceStateV1 as State;
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1 as State;
 
     let evidence = finding
         .evidence()
@@ -221,7 +227,7 @@ fn render_doctor_finding(
 
 fn canonical_daemon_doctor_report(
     status: &serde_json::Value,
-) -> tracedecay_domain::errors::Result<Option<tracedecay_application::doctor::DoctorReportV1>> {
+) -> tracedecay_domain::errors::Result<Option<tracedecay_contracts::doctor::DoctorReportV1>> {
     let Some(doctor_report) = status.get("doctor_report") else {
         return Ok(None);
     };
@@ -261,9 +267,9 @@ fn canonical_daemon_doctor_report(
 /// unknown. Multiple findings retain the strongest state:
 /// `Failed` > `Unknown` > `Healthy`.
 fn database_health_from_canonical_report(
-    report: &tracedecay_application::doctor::DoctorReportV1,
+    report: &tracedecay_contracts::doctor::DoctorReportV1,
 ) -> DatabaseHealth {
-    use tracedecay_application::doctor::DoctorFindingFamilyV1 as Family;
+    use tracedecay_contracts::doctor::DoctorFindingFamilyV1 as Family;
 
     database_health_from_storage_runtime_findings(
         report
@@ -273,15 +279,15 @@ fn database_health_from_canonical_report(
 }
 
 fn database_health_from_storage_runtime_findings<'a>(
-    findings: impl IntoIterator<Item = &'a tracedecay_application::doctor::DoctorFindingV1>,
+    findings: impl IntoIterator<Item = &'a tracedecay_contracts::doctor::DoctorFindingV1>,
 ) -> DatabaseHealth {
-    use tracedecay_application::doctor::DoctorEvidenceStateV1 as State;
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1 as State;
 
     let mut findings = findings.into_iter();
     let Some(first) = findings.next() else {
         return DatabaseHealth::unknown("canonical_storage_runtime_missing");
     };
-    let health = |finding: &tracedecay_application::doctor::DoctorFindingV1| {
+    let health = |finding: &tracedecay_contracts::doctor::DoctorFindingV1| {
         let evidence = finding
             .evidence()
             .first()
@@ -796,11 +802,12 @@ fn json_bool(value: &serde_json::Value, key: &str) -> bool {
 fn check_network(
     dc: &mut DoctorCounters,
     upload_enabled: Result<&bool, &tracedecay_domain::errors::TraceDecayError>,
+    network: AdmittedDoctorNetworkProbes,
 ) {
     eprintln!("\n\x1b[1mNetwork\x1b[0m");
     match upload_enabled {
         Ok(true) => {
-            if let Some(total) = crate::cloud::fetch_worldwide_total() {
+            if let Some(total) = (network.fetch_worldwide_total)() {
                 dc.pass(&format!(
                     "Worldwide counter reachable (total: {})",
                     format_token_count(total)
@@ -814,7 +821,7 @@ fn check_network(
             "Worldwide counter check skipped because canonical configuration is unavailable: {error}"
         )),
     }
-    if crate::cloud::fetch_latest_version().is_some() {
+    if (network.fetch_latest_version)().is_some() {
         dc.pass("GitHub releases API reachable");
     } else {
         dc.warn("GitHub releases API unreachable (offline or timeout)");

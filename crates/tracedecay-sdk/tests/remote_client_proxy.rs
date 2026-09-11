@@ -9,8 +9,8 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 
-use tracedecay_application::RequestId;
-use tracedecay_application::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+use tracedecay_contracts::RequestId;
+use tracedecay_contracts::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
 use tracedecay_domain::{
     BrainId, BrainNodeId, EntityId, ProjectId, RefId, RemoteCapabilityV1, RemoteRepositoryScopeV1,
     RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId,

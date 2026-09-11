@@ -18,14 +18,14 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 const HALF_CLOSE_ROUND_TRIP_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[cfg(unix)]
-fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::Deadline {
+fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_contracts::Deadline {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_micros();
     let now = i64::try_from(now).unwrap_or(i64::MAX);
     let delta = i64::try_from(after.as_micros()).unwrap_or(i64::MAX);
-    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(now.saturating_add(delta)))
+    tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(now.saturating_add(delta)))
         .expect("LSP deadline")
 }
 
@@ -33,12 +33,12 @@ fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::De
 fn active_lsp_control(
     token: &str,
 ) -> (
-    tracedecay_application::Deadline,
-    tracedecay_application::CancellationSignal,
+    tracedecay_contracts::Deadline,
+    tracedecay_contracts::CancellationSignal,
 ) {
     (
         future_lsp_deadline(std::time::Duration::from_secs(2)),
-        tracedecay_application::CancellationSignal::active(token).expect("LSP cancellation"),
+        tracedecay_contracts::CancellationSignal::active(token).expect("LSP cancellation"),
     )
 }
 
@@ -136,11 +136,11 @@ fn closed_feedback_list_request(
         ApplicationSurfaceOperation::FeedbackList,
         request_handle.to_owned(),
         observed_at,
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
             observed_at.0.saturating_add(60_000_000),
         ))
         .expect("future deadline"),
-        tracedecay_application::CancellationContext::active(format!("cancel.{request_id}"))
+        tracedecay_contracts::CancellationContext::active(format!("cancel.{request_id}"))
             .expect("cancellation"),
     )
 }
@@ -250,9 +250,8 @@ async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
     });
     let profile = TempDir::new().expect("profile");
     let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-deadline-test");
-    let cancellation =
-        tracedecay_application::CancellationSignal::active("cancel.lsp.deadline-test")
-            .expect("cancellation");
+    let cancellation = tracedecay_contracts::CancellationSignal::active("cancel.lsp.deadline-test")
+        .expect("cancellation");
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -270,7 +269,7 @@ async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
 
     assert!(matches!(
         result,
-        Err(tracedecay_application::InvocationError::DeadlineExceeded)
+        Err(tracedecay_contracts::InvocationError::DeadlineExceeded)
     ));
     server.await.expect("server task");
 }
@@ -301,12 +300,12 @@ async fn lsp_gateway_open_returns_typed_cancellation() {
     });
     let profile = TempDir::new().expect("profile");
     let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-cancel-test");
-    let cancellation = tracedecay_application::CancellationSignal::active("cancel.lsp.cancel-test")
+    let cancellation = tracedecay_contracts::CancellationSignal::active("cancel.lsp.cancel-test")
         .expect("cancellation");
     let cancellation_request = cancellation.clone();
     let cancel = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        cancellation_request.cancel(tracedecay_application::clock::now_micros());
+        cancellation_request.cancel(tracedecay_contracts::clock::now_micros());
     });
 
     let result = tokio::time::timeout(
@@ -325,7 +324,7 @@ async fn lsp_gateway_open_returns_typed_cancellation() {
 
     assert!(matches!(
         result,
-        Err(tracedecay_application::InvocationError::Cancelled)
+        Err(tracedecay_contracts::InvocationError::Cancelled)
     ));
     cancel.await.expect("cancellation task");
     server.await.expect("server task");
@@ -374,7 +373,7 @@ async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
 
     assert!(matches!(
         result,
-        Err(tracedecay_application::InvocationError::Unavailable)
+        Err(tracedecay_contracts::InvocationError::Unavailable)
     ));
     server.await.expect("server task");
 }
@@ -668,6 +667,7 @@ async fn socket_client_requires_user_storage_scope_without_project() {
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "projectless-socket-test");
+    prewarm_test_profile_runtime(&engine.store_administration).await;
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
@@ -749,6 +749,7 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     )
     .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let unregistered_project = home.join("unregistered-project");
     std::fs::create_dir_all(&unregistered_project).expect("unregistered project directory");
 
@@ -826,6 +827,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
         &client_identity.profile_root,
         "closed-invocation-socket-test",
     );
+    prewarm_test_profile_runtime(&engine.store_administration).await;
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(Box::pin(super::super::serve_socket_client(server, engine)));
 
@@ -877,7 +879,7 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
 async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonical() {
     use std::process::Command;
 
-    use tracedecay_application::{CancellationContext, Deadline, IdempotencyKey};
+    use tracedecay_contracts::{CancellationContext, Deadline, IdempotencyKey};
     use tracedecay_domain::{
         GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexSigningPolicyV1,
         GitIndexTransactionOperationV1, UtcMicros,
@@ -941,7 +943,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         email: "tracedecay@example.com".to_owned(),
         at: observed_at,
     };
-    let request = crate::application_surface::GitPreviewSurfaceRequest {
+    let request = tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::CommitIndex,
         preview_input_id: None,
         selected_hunk_digests: Vec::new(),
@@ -1002,7 +1004,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         "{preview_response:#}"
     );
 
-    let apply = crate::application_surface::GitApplySurfaceRequest {
+    let apply = tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
         preview_id: preview.preview_id.clone(),
         preview_digest: preview.preview_digest.clone(),
         idempotency_key: IdempotencyKey::new("idempotency.socket-git").expect("idempotency"),
@@ -1050,7 +1052,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
 
     let stale = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.stale",
-        crate::application_surface::GitApplySurfaceRequest {
+        tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
             preview_id: apply.preview_id.clone(),
             preview_digest: apply.preview_digest.clone(),
             idempotency_key: IdempotencyKey::new("idempotency.socket-stale").unwrap(),
@@ -1080,7 +1082,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     git(repository.path(), &["add", "packet.txt"]);
     let recovery_preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.recovery-preview",
-        crate::application_surface::GitPreviewSurfaceRequest {
+        tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
             operation: GitIndexTransactionOperationV1::CommitIndex,
             preview_input_id: None,
             selected_hunk_digests: Vec::new(),
@@ -1135,7 +1137,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .unwrap();
     let recovery_blocked = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.recovery-blocked",
-        crate::application_surface::GitApplySurfaceRequest {
+        tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
             preview_id: recovery_preview.preview_id,
             preview_digest: recovery_preview.preview_digest,
             idempotency_key: IdempotencyKey::new("idempotency.socket-recovery").unwrap(),
@@ -1220,6 +1222,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         &client_identity.profile_root,
         "portable-closed-invocation-test",
     );
+    prewarm_test_profile_runtime(&store_administration).await;
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
         &tracedecay_daemon_protocol::default_loopback_endpoint(),
     )
@@ -1392,11 +1395,13 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .expect("linked project registry context present");
     assert_eq!(
         context.project.canonical_root,
-        crate::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&primary)
+        crate::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(
+            &primary
+        )
     );
     assert!(context.aliases.iter().any(|alias| {
         alias.alias_path
-            == crate::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
+            == crate::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
     }));
 }
 

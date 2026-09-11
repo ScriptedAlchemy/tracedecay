@@ -27,7 +27,7 @@
 //!    graph version commit in one transaction, so a caller can never observe an
 //!    event without the graph authority that verified and digested it.
 
-use tracedecay_application::{
+use tracedecay_contracts::{
     AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkGraphSelectionCoverageV1,
     WorkProductSelectionScopeV1,
 };

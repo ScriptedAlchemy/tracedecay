@@ -1,6 +1,7 @@
 use rusqlite::OptionalExtension;
 use tempfile::TempDir;
 
+use crate::schema_contract::invariants::test_fixture::authority_fixture;
 use crate::tests::harness::open_registered_test_database_fixture;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
@@ -187,6 +188,236 @@ fn count(conn: &rusqlite::Connection, table: &str) -> i64 {
     .unwrap()
 }
 
+/// Seeds one canonical-shape observation and cursor whose source names
+/// `provider`, then removes the native-source scheme marker so the store looks
+/// exactly like one written before the Cline/Roo/Kilo `ui_messages` source
+/// existed. `source_key` is the observation's source key (`None` omits it).
+fn seed_unmarked_native_source_rows(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    source_key: Option<&str>,
+) {
+    let source = match source_key {
+        Some(key) => format!(
+            r#"{{"provider":"{provider}","session_id":"session.fixture","source_key":"{key}"}}"#
+        ),
+        None => format!(r#"{{"provider":"{provider}","session_id":"session.fixture"}}"#),
+    };
+    let observation =
+        format!(r#"{{"identity":{{"source":{source},"scope":{{"kind":"profile"}}}}}}"#);
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("disable foreign keys for fixture seeding");
+    conn.execute_batch(
+        "INSERT INTO sanitization_receipts
+            (receipt_id, sanitizer_version, payload_digest, receipt_json)
+         VALUES ('receipt.fixture', 'v1', 'digest.fixture', '{}');",
+    )
+    .expect("seed a receipt");
+    conn.execute(
+        "INSERT INTO observations
+            (observation_id, payload_digest, receipt_id, observation_json,
+             committed_cursor_json)
+         VALUES ('observation.fixture', 'digest.fixture', 'receipt.fixture', ?1, '{}')",
+        [&observation],
+    )
+    .expect("seed an observation");
+    conn.execute(
+        "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+         VALUES (?1, '{\"kind\":\"profile\"}', '{}')",
+        [&source],
+    )
+    .expect("seed a cursor");
+    conn.execute(
+        "DELETE FROM global_schema_migrations WHERE migration = ?1",
+        [super::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+    )
+    .expect("make the fixture an old-scheme store");
+}
+
+async fn reopen_registered_store(path: &std::path::Path) -> tracedecay_domain::errors::Result<()> {
+    open_registered_test_database_fixture(path, TestDatabaseRuntimeScope::ProfileSessions)
+        .await
+        .map(drop)
+}
+
+/// The native-source scheme change only ever applied to Cline, Roo Code and
+/// Kilo tasks. A populated store whose observations and cursors name none of
+/// those hosts cannot double-count anything under the new scheme, so attach
+/// enrolls it instead of demanding a reset that would discard derived history
+/// for no reason. Rows are untouched. The rows are real committed Codex
+/// observations (the same fixture the authority audit uses), because attach
+/// audits every retained row after the shape check admits the store.
+#[tokio::test]
+async fn populated_store_without_cline_like_sources_enrolls_on_attach() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        for index in 0..=super::super::schema::SOURCE_CURSOR_CENSUS_PAGE_ROWS {
+            let (observation, cursor) =
+                authority_fixture(u64::try_from(index).unwrap(), &format!("enroll-{index}"));
+            let receipt = observation.receipt();
+            let payload_digest = observation.payload_reference().digest().as_str().to_owned();
+            raw.execute(
+                "INSERT INTO sanitization_receipts
+                    (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    receipt.receipt().receipt_id().as_str(),
+                    receipt.receipt().sanitizer_version().as_str(),
+                    payload_digest.as_str(),
+                    serde_json::to_string(receipt).unwrap()
+                ],
+            )
+            .expect("seed a committed receipt");
+            raw.execute(
+                "INSERT INTO observations
+                    (observation_id, payload_digest, receipt_id, observation_json,
+                     committed_cursor_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    observation.observation_id().as_str(),
+                    payload_digest.as_str(),
+                    receipt.receipt().receipt_id().as_str(),
+                    serde_json::to_string(&observation).unwrap(),
+                    serde_json::to_string(&cursor).unwrap()
+                ],
+            )
+            .expect("seed a committed Codex observation");
+            raw.execute(
+                "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    serde_json::to_string(cursor.source()).unwrap(),
+                    serde_json::to_string(cursor.scope()).unwrap(),
+                    serde_json::to_string(&cursor).unwrap()
+                ],
+            )
+            .expect("seed the committed cursor");
+        }
+        raw.execute(
+            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            [super::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+        )
+        .expect("make the fixture an old-scheme store");
+        assert!(!scheme_migration_recorded(&raw));
+    }
+
+    reopen_registered_store(&database_path)
+        .await
+        .expect("a Codex-only old-scheme store must attach");
+
+    let raw = rusqlite::Connection::open(&database_path).unwrap();
+    assert!(
+        scheme_migration_recorded(&raw),
+        "attach must enroll the scheme for a store the change never applied to"
+    );
+    let expected_rows = super::super::schema::SOURCE_CURSOR_CENSUS_PAGE_ROWS + 1;
+    assert_eq!(count(&raw, "observations"), expected_rows);
+    assert_eq!(count(&raw, "source_cursors"), expected_rows);
+    assert!(
+        super::reset_refused_observation_authority(
+            &mut rusqlite::Connection::open(&database_path).unwrap()
+        )
+        .is_err(),
+        "an enrolled store is healthy and the scoped reset must refuse it"
+    );
+}
+
+/// The observations scan is independently authoritative: a cursor can be
+/// absent after a committed observation, and a Cline-like row beyond the
+/// first bounded page must still refuse enrollment.
+#[tokio::test]
+async fn paged_census_finds_cline_observation_without_source_cursor() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        raw.pragma_update(None, "foreign_keys", false)
+            .expect("disable foreign keys for fixture seeding");
+        raw.execute_batch(
+            "INSERT INTO sanitization_receipts
+                (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             VALUES ('receipt.census', 'v1', 'digest.census', '{}');",
+        )
+        .expect("seed census receipt");
+        let rows = super::super::schema::OBSERVATION_SOURCE_CENSUS_PAGE_ROWS + 1;
+        for index in 0..rows {
+            let provider = if index + 1 == rows { "cline" } else { "codex" };
+            let observation = format!(
+                r#"{{"identity":{{"source":{{"provider":"{provider}","session_id":"session.{index}"}},"scope":{{"kind":"profile"}}}}}}"#
+            );
+            raw.execute(
+                "INSERT INTO observations
+                    (observation_id, payload_digest, receipt_id, observation_json,
+                     committed_cursor_json)
+                 VALUES (?1, 'digest.census', 'receipt.census', ?2, '{}')",
+                rusqlite::params![format!("observation.census-{index}"), observation],
+            )
+            .expect("seed census observation");
+        }
+        raw.execute(
+            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            [super::OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION],
+        )
+        .expect("make the fixture an old-scheme store");
+        assert_eq!(count(&raw, "source_cursors"), 0);
+    }
+
+    let error = reopen_registered_store(&database_path)
+        .await
+        .expect_err("a paged Cline observation census must refuse admission");
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("expected typed ResetRequired, got: {error}"));
+    assert_eq!(authority, super::OBSERVATION_AUTHORITY);
+    assert!(reason.contains("ui_messages.json"));
+
+    let raw = rusqlite::Connection::open(&database_path).unwrap();
+    assert!(!scheme_migration_recorded(&raw));
+    assert_eq!(count(&raw, "source_cursors"), 0);
+}
+
+/// A store that did admit a Cline-like task under the combined `<task>` source
+/// carries no record of which scheme wrote those rows, so it must still refuse
+/// with the typed `ResetRequired` state naming the observation authority —
+/// whether the host shows up as an observation provider or only as a cursor.
+#[tokio::test]
+async fn populated_store_with_cline_like_sources_still_refuses_without_the_marker() {
+    for (provider, source_key) in [
+        ("cline", None),
+        ("roo-code", None),
+        ("kilo", Some("task.fixture:ui_messages")),
+    ] {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        install_registered_store(&database_path).await;
+        {
+            let raw = rusqlite::Connection::open(&database_path).unwrap();
+            seed_unmarked_native_source_rows(&raw, provider, source_key);
+        }
+
+        let error = reopen_registered_store(&database_path)
+            .await
+            .expect_err("an old-scheme Cline-like store must refuse admission");
+        let (authority, reason) = error.reset_required_context().unwrap_or_else(|| {
+            panic!("expected the typed ResetRequired state for {provider}, got: {error}")
+        });
+        assert_eq!(authority, super::OBSERVATION_AUTHORITY);
+        assert!(
+            reason.contains("ui_messages.json"),
+            "the refusal must name the scheme change for {provider}: {reason}"
+        );
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        assert!(
+            !scheme_migration_recorded(&raw),
+            "a refused {provider} store must not be enrolled behind the operator's back"
+        );
+    }
+}
+
 #[tokio::test]
 async fn refused_observation_shape_resets_scoped_and_readmits() {
     let directory = TempDir::new().unwrap();
@@ -331,6 +562,13 @@ async fn healthy_observation_authority_refuses_the_scoped_reset() {
     install_registered_store(&database_path).await;
 
     let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    raw.execute(
+        "INSERT INTO session_query_cursor_keys
+            (key_id, key_version, key_material, created_at, retired_at)
+         VALUES ('cursor-key-healthy', 1, ?1, 1, NULL)",
+        rusqlite::params![vec![9_u8; 32]],
+    )
+    .unwrap();
     let error = reset_refused_observation_authority(&mut raw)
         .expect_err("a healthy authority must never be reset");
     assert!(
@@ -339,6 +577,18 @@ async fn healthy_observation_authority_refuses_the_scoped_reset() {
             TraceDecayError::Config { message } if message.contains("not in a refused state")
         ),
         "unexpected error resetting a healthy authority: {error}"
+    );
+    assert_eq!(count(&raw, "session_query_cursor_keys"), 1);
+    let unchanged_key: (String, Vec<u8>, Option<i64>) = raw
+        .query_row(
+            "SELECT key_id, key_material, retired_at FROM session_query_cursor_keys",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        unchanged_key,
+        ("cursor-key-healthy".to_owned(), vec![9_u8; 32], None)
     );
     assert!(
         table_exists(&raw, "observations"),
@@ -436,6 +686,219 @@ async fn populated_temporal_generation_is_invalidated_and_replay_rediscovered() 
         Some(0),
         "the rebuilt stream must be rediscovered from zero, not excluded by the \
          frontier of the generation the reset invalidated"
+    );
+}
+
+/// Seeds the anchor state one admitted observation leaves behind: its
+/// exact-observation anchor bound through `observation_retrieval_anchors` and
+/// `observation_projection_provenance`, the native-record alias resolving to
+/// it, and a repository-capture anchor bound through
+/// `observation_repository_provenance`.
+fn seed_observation_bound_anchors(conn: &rusqlite::Connection) {
+    conn.pragma_update(None, "foreign_keys", false)
+        .expect("disable foreign keys for fixture seeding");
+    conn.execute_batch(
+        "INSERT INTO retrieval_anchors
+            (anchor_id, anchor_json, owner_json, projection_generation)
+         VALUES ('anchor.observation', '{}', '{\"kind\":\"profile\"}', 'generation.fixture'),
+                ('anchor.capture', '{}', '{\"kind\":\"profile\"}', 'generation.fixture');
+         INSERT INTO retrieval_anchor_aliases
+            (owner_json, alias_kind, locator_digest, anchor_id)
+         VALUES ('{\"kind\":\"profile\"}', '\"provider_record\"', '\"sha256:record\"',
+                 'anchor.observation');
+         INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
+         VALUES ('observation.legacy', 'anchor.observation');
+         INSERT INTO observation_repository_provenance
+            (observation_id, availability_json, capture_json, retrieval_anchor_id, owner_json)
+         VALUES ('observation.legacy', '{}', '{}', 'anchor.capture', '{\"kind\":\"profile\"}');
+         INSERT INTO observation_projection_provenance
+            (projector_version, observation_id, output_ordinal, retrieval_anchor_id,
+             receipt_id, output_provider, output_message_id, output_digest, message_created)
+         VALUES ('projector.v1', 'observation.legacy', 0, 'anchor.observation',
+                 'receipt.legacy', 'claude', 'message.fixture', 'digest.output', 1);",
+    )
+    .expect("seed the anchors one admitted observation binds");
+}
+
+/// The anchors an admitted observation binds, and the native-record aliases
+/// resolving to them, are re-derived by the next admission of the same
+/// records — and verified field-for-field against whatever row already holds
+/// the anchor id. A retained anchor whose transcript file was since replaced
+/// (a new source generation) fails that verification as a storage collision
+/// on every retry; a retained alias whose record was revised refuses it
+/// deterministically. Either leaves the rebuild the reset promises undone, so
+/// they go with the observation stream, while anchors preserved rows own
+/// (here a summary anchor) stay, the immutability guards return, and the
+/// committed store is referentially coherent.
+#[tokio::test]
+async fn observation_bound_anchors_and_aliases_reset_with_the_stream() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        seed_preserved_transcript_rows(&raw);
+        install_legacy_observation_shape(&raw);
+        seed_active_temporal_generation(&raw);
+        seed_observation_bound_anchors(&raw);
+        raw.execute_batch(
+            "INSERT INTO session_summary_nodes
+                (summary_id, session_id, summary_anchor_id, summary_text,
+                 index_text, source_horizon_json, created_at)
+             VALUES ('summary.fixture', 'session.fixture', 'anchor.fixture',
+                     'summary', 'index', '{}', 1);",
+        )
+        .expect("seed a preserved summary naming its own anchor");
+        assert_eq!(count(&raw, "retrieval_anchors"), 3);
+        assert_eq!(count(&raw, "retrieval_anchor_aliases"), 1);
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report =
+        reset_refused_observation_authority(&mut raw).expect("scoped reset of an anchored store");
+    assert_eq!(
+        report.cleared_retrieval_anchor_rows, 3,
+        "two observation-bound anchors and one alias must be accounted for: {report:?}"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT group_concat(anchor_id, ',') FROM retrieval_anchors",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "anchor.fixture",
+        "only the anchor a preserved summary names may survive"
+    );
+    assert_eq!(
+        count(&raw, "retrieval_anchor_aliases"),
+        0,
+        "no alias may keep resolving a native record to an anchor that is gone"
+    );
+    for trigger in [
+        "retrieval_anchors_immutable_delete",
+        "retrieval_anchor_aliases_immutable_delete",
+        "retrieval_anchors_immutable_update",
+    ] {
+        assert!(
+            trigger_exists(&raw, trigger),
+            "{trigger} must be reinstalled before the reset commits"
+        );
+    }
+    assert!(
+        raw.execute("DELETE FROM retrieval_anchors", []).is_err(),
+        "runtime immutability must be back in force"
+    );
+    assert!(
+        foreign_key_violations(&raw).is_empty(),
+        "the committed reset must be referentially coherent"
+    );
+    assert_eq!(count(&raw, "session_summary_nodes"), 1);
+
+    // Re-admitting the same native record under a moved source generation
+    // must now be able to write its anchor and alias afresh.
+    raw.execute_batch(
+        "INSERT INTO retrieval_anchors
+            (anchor_id, anchor_json, owner_json, projection_generation)
+         VALUES ('anchor.observation', '{\"generation\":2}', '{\"kind\":\"profile\"}',
+                 'generation.fixture');
+         INSERT INTO retrieval_anchor_aliases
+            (owner_json, alias_kind, locator_digest, anchor_id)
+         VALUES ('{\"kind\":\"profile\"}', '\"provider_record\"', '\"sha256:record\"',
+                 'anchor.observation');",
+    )
+    .expect("the rebuilt authority must own the anchor identity again");
+}
+
+/// The rebuilt authority re-reads every native transcript only if nothing
+/// tells it the corpus was already swept. The Codex history frontier and
+/// corpus epoch, per-provider coverage verdicts, host discovery frontiers, and
+/// queued discovery paths all live in `parse_offsets`; a surviving `complete`
+/// verdict would leave the reset store empty forever while every read reports
+/// a healthy, current, empty projection. The hook-analytics import cursor
+/// shares the table but feeds `analytics_events`, so it stays.
+#[tokio::test]
+async fn native_source_scheduling_cursors_reset_with_the_stream() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        install_legacy_observation_shape(&raw);
+        raw.execute_batch(
+            "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id) VALUES
+                ('host-coverage://codex/v1', 0, 2, 1),
+                ('tracedecay-internal:codex-history-frontier:v2', 0, 0, 3),
+                ('tracedecay-internal:codex-history-epoch:v2', -5565623358034642743,
+                 -2743919526740859943, 1),
+                ('tracedecay-internal:project-ingest-provider-frontier:v1', 11, 0, 1),
+                ('host-frontier://kimi/discovery/v1', 0, 4, 0),
+                ('host-discovery-queue://codex/v1/L2hvbWUvcm9sbG91dA', 1, 0, 1),
+                ('hook_analytics:/project/.tracedecay/hook_analytics.jsonl', 4096, 7, 1);",
+        )
+        .expect("seed every parse-offset tenant");
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report = reset_refused_observation_authority(&mut raw)
+        .expect("scoped reset of a store with scheduling cursors");
+    assert_eq!(
+        report.cleared_native_source_cursor_rows, 6,
+        "every native-source scheduling cursor must be accounted for: {report:?}"
+    );
+    assert_eq!(
+        raw.query_row(
+            "SELECT group_concat(file_path, ',') FROM parse_offsets",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "hook_analytics:/project/.tracedecay/hook_analytics.jsonl",
+        "only the analytics import cursor may survive the reset"
+    );
+}
+
+/// A disposition (for example a redaction) recorded against an observation
+/// anchor is preserved evidence the reset cannot rebind, so a store carrying
+/// one refuses atomically instead of orphaning it.
+#[tokio::test]
+async fn anchor_dispositions_on_observation_anchors_refuse_atomically() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        seed_preserved_transcript_rows(&raw);
+        install_legacy_observation_shape(&raw);
+        seed_observation_bound_anchors(&raw);
+        raw.execute_batch(
+            "INSERT INTO retrieval_anchor_dispositions
+                (disposition_id, anchor_id, owner_json, state, superseded_by,
+                 reason_class, effective_at, record_json)
+             VALUES ('disposition.redacted', 'anchor.observation', '{\"kind\":\"profile\"}',
+                     'redacted', NULL, 'redaction', 1, '{}');",
+        )
+        .expect("seed a redaction against the observation anchor");
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let error = reset_refused_observation_authority(&mut raw)
+        .expect_err("an anchor disposition the reset cannot rebind must refuse");
+    assert!(
+        matches!(
+            &error,
+            TraceDecayError::Config { message }
+                if message.contains("retrieval_anchor_dispositions")
+                    && message.contains("nothing was reset")
+        ),
+        "unexpected error for a preserved anchor disposition: {error}"
+    );
+    assert_eq!(count(&raw, "retrieval_anchors"), 2);
+    assert_eq!(count(&raw, "retrieval_anchor_aliases"), 1);
+    assert_eq!(count(&raw, "retrieval_anchor_dispositions"), 1);
+    assert!(
+        trigger_exists(&raw, "retrieval_anchors_immutable_delete"),
+        "a rolled-back reset must leave the anchor guards in place"
     );
 }
 
@@ -552,6 +1015,13 @@ async fn a_failure_after_deletion_leaves_the_refused_store_unchanged() {
         seed_preserved_transcript_rows(&raw);
         install_legacy_observation_shape(&raw);
         seed_active_temporal_generation(&raw);
+        raw.execute(
+            "INSERT INTO session_query_cursor_keys
+                (key_id, key_version, key_material, created_at, retired_at)
+             VALUES ('cursor-key-reset-rollback', 1, ?1, 1, NULL)",
+            rusqlite::params![vec![7_u8; 32]],
+        )
+        .unwrap();
         // Old-scheme rows: the enrollment marker this reset would add is
         // absent, so its premature appearance would be visible.
         raw.execute(
@@ -597,6 +1067,18 @@ async fn a_failure_after_deletion_leaves_the_refused_store_unchanged() {
             "{trigger} must be back before the transaction that dropped it ends"
         );
     }
+    assert_eq!(count(&reopened, "session_query_cursor_keys"), 1);
+    let retained_key: (String, Vec<u8>, Option<i64>) = reopened
+        .query_row(
+            "SELECT key_id, key_material, retired_at FROM session_query_cursor_keys",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        retained_key,
+        ("cursor-key-reset-rollback".to_owned(), vec![7_u8; 32], None)
+    );
     assert_eq!(count(&reopened, "session_temporal_generations"), 1);
     assert_eq!(count(&reopened, "session_occurrences"), 1);
     assert_eq!(count(&reopened, "session_refresh_operations"), 1);
@@ -608,4 +1090,164 @@ async fn a_failure_after_deletion_leaves_the_refused_store_unchanged() {
         reset_refused_observation_authority(&mut reopened).is_err(),
         "the store must still be refused after a rolled-back reset"
     );
+}
+
+/// The reset's promise is that the rebuilt authority re-reads what it lost.
+/// Row counts alone do not prove it: an ingestion cursor, an advance ledger
+/// entry, or a projector checkpoint that outlived the reset would each silently
+/// skip exactly the native events the rebuild depends on re-offering. Every
+/// pre-reset cursor must therefore be refused after the reset — the tables come
+/// back at the canonical shape and empty, the identical advance re-presents as
+/// new rather than deduping against a survivor, and the temporal refresh query
+/// discovers the re-ingested stream from zero instead of the frozen frontier.
+#[tokio::test]
+async fn pre_reset_cursors_are_refused_and_the_rebuilt_stream_is_rediscovered() {
+    const ADVANCE: (&str, &str, &str) = (
+        r#"{"provider":"claude"}"#,
+        r#"{"project":"project.fixture"}"#,
+        r#"{"through":100}"#,
+    );
+
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        seed_preserved_transcript_rows(&raw);
+        install_legacy_observation_shape(&raw);
+        seed_active_temporal_generation(&raw);
+        raw.execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![ADVANCE.0, ADVANCE.1, ADVANCE.2],
+        )
+        .expect("seed the pre-reset ingestion cursor");
+        raw.execute(
+            "INSERT INTO source_cursor_advances
+                (source_json, scope_json, coverage_json, reason, receipt_id)
+             VALUES (?1, ?2, ?3, 'admitted', 'receipt.legacy')",
+            rusqlite::params![ADVANCE.0, ADVANCE.1, ADVANCE.2],
+        )
+        .expect("seed the pre-reset advance ledger entry");
+        raw.execute_batch(
+            "INSERT INTO observation_projection_checkpoints(projector_version, last_sequence)
+             VALUES ('projector.v1', 100);",
+        )
+        .expect("seed the pre-reset projector checkpoint");
+        assert_eq!(
+            refresh_discovery_frontier(&raw, "session.fixture"),
+            None,
+            "the seeded store must start with the rebuild suppressed, or this \
+             test proves nothing"
+        );
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report =
+        reset_refused_observation_authority(&mut raw).expect("scoped reset of a cursored store");
+    for table in [
+        "source_cursors",
+        "source_cursor_advances",
+        "observation_projection_checkpoints",
+    ] {
+        assert!(
+            report.reset_tables.iter().any(|reset| reset == table),
+            "{table} decides what gets re-offered and must be part of the reset: {report:?}"
+        );
+        assert!(
+            table_exists(&raw, table),
+            "{table} must be recreated at the canonical shape"
+        );
+        assert_eq!(
+            count(&raw, table),
+            0,
+            "no pre-reset cursor may survive to skip the events the rebuild re-reads"
+        );
+    }
+
+    // Re-ingest the native event the pre-reset advance already claimed to
+    // cover, re-presenting that exact advance identity. A surviving row would
+    // collide on the advance primary key; a refused one lets the rebuilt
+    // authority record its own coverage.
+    raw.execute_batch(
+        "INSERT INTO sanitization_receipts
+            (receipt_id, sanitizer_version, payload_digest, receipt_json)
+         VALUES ('receipt.rebuilt', 'v1', 'digest.payload', '{}');
+         INSERT INTO observations
+            (observation_id, payload_digest, receipt_id, observation_json,
+             committed_cursor_json)
+         VALUES ('observation.rebuilt', 'digest.payload', 'receipt.rebuilt', '{}', '{}');
+         INSERT INTO session_temporal_observation_effects
+            (observation_id, observation_sequence, session_id, receipt_id,
+             effect_digest, output_count, recorded_at)
+         VALUES ('observation.rebuilt', 1, 'session.fixture', 'receipt.rebuilt',
+                 'digest.effect', 1, 9);",
+    )
+    .expect("re-ingest one native event under the rebuilt authority");
+    raw.execute(
+        "INSERT INTO source_cursor_advances
+            (source_json, scope_json, coverage_json, reason, receipt_id)
+         VALUES (?1, ?2, ?3, 'admitted', 'receipt.rebuilt')",
+        rusqlite::params![ADVANCE.0, ADVANCE.1, ADVANCE.2],
+    )
+    .expect("the rebuilt authority must be able to record the same coverage again");
+
+    assert_eq!(
+        refresh_discovery_frontier(&raw, "session.fixture"),
+        Some(0),
+        "the rebuilt stream must be rediscovered from zero, not excluded by the \
+         frontier of the generation the reset invalidated"
+    );
+    assert!(
+        foreign_key_violations(&raw).is_empty(),
+        "the re-ingested stream must be referentially coherent"
+    );
+}
+
+/// The host-observation journal attests the stream the reset destroys.
+/// Leaving those receipts makes the next admission of the same observation
+/// id a conflicting reuse. The writer ledger is installed only when the
+/// runtime mounts a store; this offline fixture covers the receipt tables
+/// the registered schema always carries.
+#[tokio::test]
+async fn host_observation_journal_resets_with_the_stream() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("sessions.db");
+    install_registered_store(&database_path).await;
+    {
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        install_legacy_observation_shape(&raw);
+        raw.execute_batch(
+            "INSERT INTO external_source_states_v1 (
+                binding_id, source_id, owner_kind, owner_id, definition_revision,
+                definition_digest, binding_revision, binding_digest,
+                source_frontier_digest, source_frontier_json,
+                latest_source_receipt_digest
+             ) VALUES (
+                'binding.host', 'source.host-observation.codex', 'project',
+                'project.fixture', 1, 'digest.definition', 1, 'digest.binding',
+                'digest.frontier', '{}', 'digest.receipt'
+             );
+             INSERT INTO external_source_commit_receipts_v1 (
+                binding_id, idempotency_key, request_digest, definition_revision,
+                binding_revision, predecessor_frontier_digest,
+                successor_frontier_digest, receipt_digest, receipt_json
+             ) VALUES (
+                'binding.host', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                1, 1, 'digest.pred', 'digest.succ', 'digest.receipt', '{}'
+             );",
+        )
+        .expect("seed a host-observation journal");
+    }
+
+    let mut raw = rusqlite::Connection::open(&database_path).unwrap();
+    let report = reset_refused_observation_authority(&mut raw)
+        .expect("scoped reset of a store with a host-observation journal");
+    assert_eq!(
+        report.cleared_external_source_rows, 2,
+        "state and receipt must be accounted for: {report:?}"
+    );
+    assert_eq!(count(&raw, "external_source_states_v1"), 0);
+    assert_eq!(count(&raw, "external_source_commit_receipts_v1"), 0);
 }

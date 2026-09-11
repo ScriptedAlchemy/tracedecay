@@ -6,6 +6,7 @@
 //! names gain a module prefix (e.g. `agent_test::test_get_all_integrations`)
 //! but coverage is unchanged.
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -13,7 +14,7 @@ mod agent_registry_test;
 mod agent_targets_test;
 mod claude_plugin_bundle_test;
 mod claude_plugin_schema_test;
-mod cli_args_contract_test;
+mod host_io_bundle_test;
 mod managed_skill_archive_test;
 mod managed_skills_test;
 mod plugin_config_schema_test;

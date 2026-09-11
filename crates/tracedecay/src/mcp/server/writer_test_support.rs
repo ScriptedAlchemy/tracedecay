@@ -2,10 +2,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use crate::config::PinnedUserDataDir;
-use crate::host_admission::HostAdmissionTestRuntimeV1;
 use crate::mcp::server::McpServerConstructionContext;
+use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use crate::tracedecay::TraceDecay;
 
 pub(super) fn git(root: &Path, args: &[&str]) {
@@ -13,8 +14,8 @@ pub(super) fn git(root: &Path, args: &[&str]) {
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
     )
-    .current_dir(root)
-    .args(args)
+    .current_dir(plain_host_path(root))
+    .args(plain_git_args(args))
     .output()
     .expect("git runs");
     assert!(
@@ -83,22 +84,12 @@ pub(super) fn registered_context(
     context
 }
 
-/// Base directory for fixture temporary roots, resolved through every symlink.
-///
-/// macOS puts `TempDir` under `/var/folders/...`, and `/var` is a symlink to
-/// `/private/var`. The registered runtime canonicalizes a project root before
-/// it keys the retained graph and the code-index scope, so a fixture that
-/// hands out the symlinked path names a different project than the one the
-/// server mounted. Create the repository inside the canonical temporary
-/// directory so `dir.path()` is already canonical.
-fn canonical_temp_root() -> std::path::PathBuf {
-    let base = std::env::temp_dir();
-    base.canonicalize().unwrap_or(base)
-}
-
 pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
     let pin = PinnedUserDataDir::new();
-    let dir = TempDir::new_in(canonical_temp_root()).expect("temp repo");
+    let temporary_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temporary root");
+    let dir = TempDir::new_in(temporary_root).expect("canonical temp repo");
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
     git(root, &["config", "user.email", "t@t.com"]);

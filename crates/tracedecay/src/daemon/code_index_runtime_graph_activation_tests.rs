@@ -10,25 +10,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_application::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope, now_micros,
-};
 use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexReconcileOutcomeV1,
     CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
     scoped_code_index_store_root,
 };
+use tracedecay_contracts::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId, ResolvedScope, now_micros,
+};
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
-use tracedecay_graph_query::{CodeGraphReadFreshnessV1, CodeGraphReadRequest};
+use tracedecay_graph_query::{
+    CodeGraphReadFreshnessV1, CodeGraphReadRequest, request_graph_cancellation,
+};
 use tracedecay_session_memory::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::daemon::project_open_owners::{
+use tracedecay_code_index_runtime::project_reads::{
     project_code_graph_projection_read_port, project_code_index_generation_census_reader,
 };
 
@@ -185,6 +187,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
             graph_runtime.code_graph_seat_port(),
             read_only_project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount retained generation");
@@ -296,7 +299,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     // Activation issues verified graph reads; the project graph runtime binds
     // asynchronously after `project_memory` returns, so an unawaited bind
     // races activation into "not ready for verified reads".
-    crate::host_admission::await_bound_graph_runtime(
+    crate::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind small persistent activation graph runtime",
     )
@@ -385,7 +388,15 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         store.path(),
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
-    let (scope, seeded_generation_id, latest, replay_binding, repository_id, worktree_id) = {
+    let (
+        scope,
+        seeded_generation_id,
+        seeded_statistics,
+        latest,
+        replay_binding,
+        repository_id,
+        worktree_id,
+    ) = {
         let mut scheduler = scheduler(
             &fixture,
             scoped_store.clone(),
@@ -400,6 +411,10 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             .code_graph_replay_binding(&latest.generation().manifest().generation_id)
             .expect("seed graph replay binding");
         let snapshot = latest.generation().snapshot();
+        let statistics = latest
+            .generation()
+            .generation_statistics()
+            .expect("seed generation statistics");
         let repository_id = snapshot.repository.clone();
         let worktree_id = snapshot.worktree.clone().expect("worktree identity");
         (
@@ -411,6 +426,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             )
             .expect("resolved scope"),
             latest.generation().manifest().generation_id.clone(),
+            statistics,
             latest,
             replay_binding,
             repository_id,
@@ -443,7 +459,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("writable project database");
-    crate::host_admission::await_bound_graph_runtime(
+    crate::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind stale graph status projection",
     )
@@ -520,7 +536,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("restarted writable project database");
-    crate::host_admission::await_bound_graph_runtime(
+    crate::test_support::host_admission::await_bound_graph_runtime(
         &project_database,
         "bind restarted graph status projection",
     )
@@ -557,6 +573,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             graph_runtime.code_graph_seat_port(),
             project_database,
             CodeGraphActivationPolicyV1::Enabled,
+            None,
         )
         .await
         .expect("mount persistent graph generation");
@@ -701,7 +718,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .await
         .expect("settled restart graph read");
     assert_eq!(settled_read.freshness(), CodeGraphReadFreshnessV1::Current);
-    if corrupt_graph || dirty_before_restart {
+    let seated_census = if corrupt_graph || dirty_before_restart {
         // A decoded census is a strictly later state than the text-serving
         // head this case already settled on: `latest_complete_ready_decoded_*`
         // abstains — returning no decoded owner at all — while a reconcile
@@ -712,31 +729,53 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         let census_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let settled_census = census().await;
-            if matches!(
-                settled_census,
+            // Freshness alone would anchor the later lock-held comparison to
+            // whatever generation happened to decode first. The seated head is
+            // already pinned above: repairing a corrupt retained graph keeps
+            // the seeded identity, while a dirty checkout rebuilds into a
+            // successor, so the census must carry that same identity.
+            let seats_the_settled_generation = match &settled_census {
                 GenerationCensusSnapshot::Observed {
+                    generation_id,
                     freshness: GenerationCensusServingFreshness::Current,
                     ..
-                }
-            ) {
-                break;
+                } if corrupt_graph => generation_id.as_str() == seeded_generation_id.as_str(),
+                GenerationCensusSnapshot::Observed {
+                    generation_id,
+                    freshness: GenerationCensusServingFreshness::Current,
+                    ..
+                } => generation_id.as_str() != seeded_generation_id.as_str(),
+                _ => false,
+            };
+            if seats_the_settled_generation {
+                break settled_census;
             }
             assert!(
                 std::time::Instant::now() <= census_deadline,
-                "the rebuilt successor never published a current decoded census: \
-                 {settled_census:?}"
+                "no current decoded census for the settled generation \
+                 (corrupt_graph={corrupt_graph}, dirty_before_restart={dirty_before_restart}, \
+                 seeded={seeded_generation_id:?}): {settled_census:?}"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     } else {
         let settled_census = census().await;
-        assert!(matches!(
+        assert_eq!(
             settled_census,
-            GenerationCensusSnapshot::Unavailable {
-                reason: GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
-            }
-        ));
-    }
+            GenerationCensusSnapshot::Observed {
+                generation_id: seeded_generation_id.as_str().to_owned(),
+                freshness: GenerationCensusServingFreshness::Current,
+                statistics:
+                    tracedecay_session_memory::runtime_telemetry::GenerationCensusStatistics {
+                        source_total_bytes: seeded_statistics.source_total_bytes,
+                        symbol_count: seeded_statistics.symbol_count,
+                        edge_count: seeded_statistics.edge_count,
+                    },
+            },
+            "clean restart must retain the exact authenticated generation census"
+        );
+        settled_census
+    };
 
     let scheduler = registry
         .scheduler_handle(fixture.path())
@@ -756,6 +795,41 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         assert_eq!(
             sealed_decode_count, 0,
             "clean restart must seat the verified graph head without replaying partition segments"
+        );
+        assert_eq!(
+            settled_read.generation(),
+            &seeded_generation_id,
+            "graph requests must preserve the restored publication identity"
+        );
+        assert!(
+            Arc::ptr_eq(
+                settled_read.store(),
+                &settled.interactive_graph_store().expect("restored graph"),
+            ),
+            "graph requests must reuse the recovered graph authority"
+        );
+        let reader = settled_read
+            .reader(&settled_context, now_micros())
+            .expect("admitted reader for the recovered graph");
+        let page = reader
+            .symbols_page(None, 16, request_graph_cancellation(&settled_context))
+            .expect("bounded symbol query on the recovered graph");
+        assert!(!page.has_more, "the single-function fixture fits one page");
+        assert!(
+            page.symbols.iter().any(|symbol| symbol
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.simple_name == "alpha")),
+            "the recovered graph must return the fixture function: {:?}",
+            page.symbols
+        );
+        assert_eq!(
+            scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sealed_decode_count(),
+            0,
+            "a graph query after clean restart must not replay partition segments"
         );
     }
     let (held_tx, held_rx) = std::sync::mpsc::channel();
@@ -798,12 +872,26 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         graph_read.freshness(),
         CodeGraphReadFreshnessV1::LastCompleteStale { .. }
     ));
-    assert!(matches!(
-        census_snapshot,
-        GenerationCensusSnapshot::Unavailable {
-            reason: GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
-        }
-    ));
+    // After a dirty restart the seated head is the rebuilt successor, not
+    // the recovered seed. A lock-held tip move must keep serving that seated
+    // generation as LastCompleteStale with the same decoded statistics.
+    match (&census_snapshot, &seated_census) {
+        (
+            GenerationCensusSnapshot::Observed {
+                generation_id,
+                freshness: GenerationCensusServingFreshness::LastCompleteStale { .. },
+                statistics,
+            },
+            GenerationCensusSnapshot::Observed {
+                generation_id: seated_id,
+                statistics: seated_statistics,
+                ..
+            },
+        ) if generation_id == seated_id && statistics == seated_statistics => {}
+        (other, seated) => panic!(
+            "seated-graph census while the scheduler lock is held: {other:?}; seated={seated:?}"
+        ),
+    }
 }
 
 fn graph_request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {

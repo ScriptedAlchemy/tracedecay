@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, ProjectId, ProviderUsageCounterSemanticsV1,
     ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1,
@@ -31,6 +31,7 @@ use crate::restart_atomicity::{
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo,
+    normalize_path_text,
 };
 
 const SESSION_ID: &str = "20260101_000000_abc123";
@@ -313,13 +314,9 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
         .get_session("hermes", SESSION_ID)
         .await
         .expect("hermes session should be stored");
+    let project_path = normalize_path_text(&project.to_string_lossy());
     let results = db
-        .search_session_messages(
-            "hermes",
-            Some(project.to_string_lossy().as_ref()),
-            "billing pipeline",
-            10,
-        )
+        .search_session_messages("hermes", Some(&project_path), "billing pipeline", 10)
         .await;
     assert!(
         results.iter().any(|hit| hit.message.role == "user"),
@@ -482,6 +479,12 @@ async fn hermes_parent_session_id_marks_subagent_session() {
 async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
+    #[cfg(unix)]
+    let project = {
+        let alias = tmp.path().join("project-alias");
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        alias
+    };
     write_hermes_profile(&hermes_home, "test", Some(&project)).await;
 
     let db = open_project_session_db(&project).await.unwrap();
@@ -492,7 +495,7 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
                 &SessionRecord {
                     provider: "hermes".to_string(),
                     session_id: SESSION_ID.to_string(),
-                    project_key: project.to_string_lossy().to_string(),
+                    project_key: db.project_id().as_str().to_owned(),
                     project_path: project.to_string_lossy().to_string(),
                     title: Some("Runtime-owned raw session".to_string()),
                     started_at: Some(1_780_629_300),

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use tracedecay_application::retrieval::{
+use tracedecay_contracts::retrieval::{
     GitTopologyAnchorAuthorityErrorV2, GitTopologyAnchorAuthorityV2, GitTopologyAnchorFutureV2,
     GitTopologyAnchorPublicationOutcomeV2, GitTopologyAnchorPublicationV2,
     GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorResolutionV2,

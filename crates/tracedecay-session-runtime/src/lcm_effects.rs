@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -105,7 +105,7 @@ impl DaemonLcmEffectService {
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         let result = self.compress_phases(request).await;
-        observe_compression_outcome(&result);
+        observe_compression_outcome(result.as_ref());
         result
     }
 
@@ -118,12 +118,7 @@ impl DaemonLcmEffectService {
         let result = self
             .compress_retained_phases(request, convergence_candidate)
             .await;
-        observe_compression_outcome(
-            &result
-                .as_ref()
-                .map(|bounded| bounded.response.clone())
-                .map_err(|error| (*error).clone()),
-        );
+        observe_compression_outcome(result.as_ref().map(|bounded| &bounded.response));
         result
     }
 
@@ -152,15 +147,17 @@ impl DaemonLcmEffectService {
             LcmSummarizerMode::Provided { summary_text, .. } if !summary_text.trim().is_empty()
         ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
         {
-            return self.commit_compression(request).await;
+            return self.commit_compression(&request).await;
         }
 
+        // The message corpus is owned once by `request`; only `summarizer`
+        // changes between the planning pass and the final commit.
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
-        let pending = self.commit_compression(request.clone()).await?;
+        let pending = self.commit_compression(&request).await?;
         if pending.status != "needs_summary" {
             return Ok(pending);
         }
-        let Some(summary_request) = pending.summary_request.clone() else {
+        let Some(summary_request) = pending.summary_request.as_ref() else {
             return Ok(pending);
         };
         let summary = match super::lcm_summarization::resolve_authoritative_summary(
@@ -187,7 +184,7 @@ impl DaemonLcmEffectService {
             summary_text: summary.text,
             route: Some(summary.route),
         };
-        self.commit_compression(request).await
+        self.commit_compression(&request).await
     }
 
     async fn compress_retained_phases(
@@ -201,18 +198,18 @@ impl DaemonLcmEffectService {
         ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
         {
             return self
-                .commit_retained_compression(request, Some(convergence_candidate), None)
+                .commit_retained_compression(&request, Some(convergence_candidate), None)
                 .await;
         }
 
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
         let pending = self
-            .commit_retained_compression(request.clone(), Some(convergence_candidate), None)
+            .commit_retained_compression(&request, Some(convergence_candidate), None)
             .await?;
         if pending.response.status != "needs_summary" {
             return Ok(pending);
         }
-        let Some(summary_request) = pending.response.summary_request.clone() else {
+        let Some(summary_request) = pending.response.summary_request.as_ref() else {
             return Ok(pending);
         };
         // Host-native compaction text is usable for retained convergence only
@@ -229,14 +226,23 @@ impl DaemonLcmEffectService {
         )
         .await
         {
-            Ok(summary) if summary.source_range.as_ref() == Some(&required_native_source_range) => {
+            Ok(summary)
+                if summary.source_range.interval() == Some(&required_native_source_range) =>
+            {
                 summary
             }
-            Ok(_) => {
+            Ok(summary) => {
                 self.control.checkpoint()?;
                 let mut pending = pending;
-                pending.response =
-                    summary_unavailable(pending.response, "authoritative_summary_source_mismatch");
+                // An absent interval is its own typed state; only a present
+                // interval that binds a different range is a mismatch.
+                pending.response = summary_unavailable(
+                    pending.response,
+                    summary
+                        .source_range
+                        .absent_reason()
+                        .unwrap_or("authoritative_summary_source_mismatch"),
+                );
                 return Ok(pending);
             }
             Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {
@@ -256,7 +262,7 @@ impl DaemonLcmEffectService {
         };
         let mut committed = self
             .commit_retained_compression(
-                request,
+                &request,
                 Some(convergence_candidate),
                 Some(&required_native_source_range),
             )
@@ -272,7 +278,7 @@ impl DaemonLcmEffectService {
     #[hotpath::skip]
     async fn commit_compression(
         &self,
-        request: LcmCompressionRequest,
+        request: &LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         let execution = self.control.execution_control();
         let before_commit = self.control.clone();
@@ -291,7 +297,7 @@ impl DaemonLcmEffectService {
 
     async fn commit_retained_compression(
         &self,
-        request: LcmCompressionRequest,
+        request: &LcmCompressionRequest,
         convergence_candidate: Option<
             &tracedecay_lcm::summary_convergence::LcmSummaryConvergenceCandidate,
         >,
@@ -402,8 +408,9 @@ pub async fn lcm_session_boundary_for_test(
 
 /// Terminal compression outcomes for profiling, including deferrals and
 /// failures: a lane that only counts commits hides exactly the retried and
-/// cancelled work a compaction investigation needs to see.
-fn observe_compression_outcome(result: &Result<LcmCompressionResponse, LcmError>) {
+/// cancelled work a compaction investigation needs to see. Borrows the
+/// outcome so classifying a retained page never copies its response payload.
+fn observe_compression_outcome(result: Result<&LcmCompressionResponse, &LcmError>) {
     match result {
         Ok(response) if response.retry_status.is_some() => {
             hotpath::gauge!("daemon.lcm.compress.deferred").inc(1.0);
@@ -449,6 +456,8 @@ mod tests {
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
     use tracedecay_store::ParseOffset;
+
+    mod compression_ownership;
 
     fn session(provider: &str, session_id: &str) -> SessionRecord {
         SessionRecord {
@@ -616,7 +625,7 @@ mod tests {
         let cancellation_control = execution_control();
         let cancelled = db
             .lcm_compress_guarded(
-                compression_request("compress-session"),
+                &compression_request("compress-session"),
                 &cancellation_control,
                 || Err(LcmError::Cancelled),
             )
@@ -960,6 +969,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_native_compaction_recognizes_production_boundary_id() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-claude-prod-boundary").await;
+        let db = harness.registered.clone();
+        assert!(
+            db.upsert_session(&session("claude", "claude-native-session"))
+                .await
+        );
+        let claude_text = "production Claude compact pair body";
+        let summary_metadata = canonical_envelope(
+            "claude",
+            "claude-native-session",
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            Some("ffffffff-0000-4000-8000-000000000001"),
+            vec![
+                serde_json::json!({
+                    "kind": "message",
+                    "role": "user",
+                    "content": claude_text
+                }),
+                serde_json::json!({
+                    "kind": "compaction",
+                    "summary": {
+                        "isCompactSummary": true,
+                        "isVisibleInTranscriptOnly": true
+                    }
+                }),
+            ],
+        );
+        insert_summary_evidence(
+            (&db, "claude"),
+            "claude-native-session",
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            11,
+            claude_text,
+            "message",
+            &summary_metadata,
+        )
+        .await;
+        let boundary_envelope = canonical_envelope(
+            "claude",
+            "claude-native-session",
+            "ffffffff-0000-4000-8000-000000000001",
+            Some("pre-compact-parent"),
+            vec![serde_json::json!({
+                "kind": "compaction",
+                "summary": {
+                    "preservedSegment": {
+                        "anchorUuid": "aaaaaaaa-0000-4000-8000-000000000001"
+                    }
+                }
+            })],
+        );
+        insert_summary_evidence(
+            (&db, "claude"),
+            "claude-native-session",
+            "compact_boundary:ffffffff-0000-4000-8000-000000000001",
+            10,
+            "Claude compaction boundary",
+            "compact_boundary",
+            &serde_json::json!({
+                "source": "claude_compact_boundary",
+                "trigger": "manual",
+                "canonical_envelope": boundary_envelope
+            }),
+        )
+        .await;
+        let claude = super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            "claude-native-session",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(claude.text, claude_text);
+        assert_eq!(claude.route, "claude_native_compaction");
+    }
+
+    /// Ingests one recognizable Claude compact pair and returns the store's
+    /// session id. `leading_role` is the role of the rows before the pair:
+    /// `system` rows are policy anchors compression pins separately, so a
+    /// summary behind only those rows is owed no conversational interval.
+    async fn ingest_claude_compact_pair(
+        db: &RegisteredGlobalDb,
+        session_id: &str,
+        leading_role: &str,
+    ) {
+        let boundary_id = format!("{session_id}-boundary");
+        let summary_id = format!("{session_id}-summary");
+        let mut messages = Vec::new();
+        for ordinal in 1..=2 {
+            let mut record = message(session_id, ordinal);
+            record.provider = "claude".to_string();
+            record.message_id = format!("{session_id}-leading-{ordinal}");
+            record.role = leading_role.to_string();
+            messages.push(record);
+        }
+        let mut boundary = message(session_id, 3);
+        boundary.provider = "claude".to_string();
+        boundary.message_id = boundary_id.clone();
+        boundary.role = "system".to_string();
+        boundary.kind = Some("compaction".to_string());
+        boundary.metadata_json = Some(
+            canonical_envelope(
+                "claude",
+                session_id,
+                &boundary_id,
+                None,
+                vec![
+                    serde_json::json!({
+                        "kind": "boundary",
+                        "boundary_kind": "compaction_boundary"
+                    }),
+                    serde_json::json!({
+                        "kind": "compaction",
+                        "summary": {"preservedSegment": {"anchorUuid": summary_id}}
+                    }),
+                ],
+            )
+            .to_string(),
+        );
+        messages.push(boundary);
+        let mut summary = message(session_id, 4);
+        summary.provider = "claude".to_string();
+        summary.message_id = summary_id.clone();
+        summary.role = "user".to_string();
+        summary.text = "authoritative Claude compaction".to_string();
+        summary.metadata_json = Some(
+            canonical_envelope(
+                "claude",
+                session_id,
+                &summary_id,
+                Some(&boundary_id),
+                vec![serde_json::json!({
+                    "kind": "compaction",
+                    "summary": {
+                        "isCompactSummary": true,
+                        "isVisibleInTranscriptOnly": true
+                    }
+                })],
+            )
+            .to_string(),
+        );
+        messages.push(summary);
+        assert!(
+            db.upsert_transcript_batch(
+                &session("claude", session_id),
+                &messages,
+                &format!("/tmp/{session_id}.jsonl"),
+                ParseOffset::default(),
+            )
+            .await
+        );
+    }
+
+    /// An absent predecessor interval must never reach a published summary as
+    /// an unannotated empty range: a session's genuinely-first conversational
+    /// message has no predecessor, while an interval that is owed and missing
+    /// is unavailable and the caller refuses.
+    #[tokio::test]
+    async fn claude_native_summary_without_a_persisted_range_is_typed_absent() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-claude-absent-range").await;
+        let db = harness.registered.clone();
+        let owed_session = "claude-owed-range-session";
+        ingest_claude_compact_pair(&db, owed_session, "assistant").await;
+
+        let ingested = super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            owed_session,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            ingested.source_range.interval().is_some(),
+            "ordinary ingest must persist the conversational interval: {:?}",
+            ingested.source_range
+        );
+
+        // Model the #843 window: a preserved row whose interval the
+        // background rewrite has not produced yet.
+        let transaction = db.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "DELETE FROM lcm_raw_predecessor_ranges
+                 WHERE provider = 'claude' AND session_id = ?1",
+                params![owed_session],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let unavailable = super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            owed_session,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            unavailable.source_range,
+            tracedecay_lcm::raw::LcmPredecessorRangeState::Unavailable
+        );
+        assert_eq!(
+            unavailable.source_range.absent_reason(),
+            Some("predecessor_interval_unavailable")
+        );
+
+        // A summary whose only earlier rows are policy anchors genuinely has
+        // no conversational predecessor, which is a different typed state.
+        let first_session = "claude-first-conversational-session";
+        ingest_claude_compact_pair(&db, first_session, "system").await;
+        let first = super::super::lcm_summarization::native_summary_evidence(
+            &db,
+            "claude",
+            first_session,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            first.source_range,
+            tracedecay_lcm::raw::LcmPredecessorRangeState::NoPredecessor
+        );
+        assert_eq!(
+            first.source_range.absent_reason(),
+            Some("no_predecessor_interval")
+        );
+    }
+
+    #[tokio::test]
     async fn transcript_ingest_persists_native_compaction_raw_range() {
         let harness = RegisteredGlobalDbHarness::open("lcm-native-summary-range").await;
         let db = harness.registered.clone();
@@ -1023,10 +1268,12 @@ mod tests {
         assert_eq!(evidence.text, "production Codex compaction text");
         assert_eq!(
             evidence.source_range,
-            Some(tracedecay_lcm::LcmSummarySourceRange {
-                from_store_id: first,
-                to_store_id: last,
-            })
+            tracedecay_lcm::raw::LcmPredecessorRangeState::Interval(
+                tracedecay_lcm::LcmSummarySourceRange {
+                    from_store_id: first,
+                    to_store_id: last,
+                }
+            )
         );
         let converged =
             super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
@@ -1289,7 +1536,7 @@ mod tests {
         .unwrap();
         assert_eq!(second.text, "second authoritative Claude compaction");
         assert_eq!(
-            second.source_range.as_ref().unwrap().from_store_id,
+            second.source_range.interval().unwrap().from_store_id,
             first_summary_store_id
         );
     }
@@ -1558,7 +1805,7 @@ done
         };
         let interrupted = db
             .lcm_compress_retained_page_guarded(
-                interrupted_request,
+                &interrupted_request,
                 &execution_control(),
                 || Err(LcmError::Cancelled),
                 retained_guard(None),
@@ -1633,7 +1880,7 @@ done
         };
         let bounded = db
             .lcm_compress_retained_page_guarded(
-                retained,
+                &retained,
                 &execution_control(),
                 || Ok(()),
                 retained_guard(None),
@@ -1970,7 +2217,7 @@ done
             route: Some("test_partial_invalidation_fairness".to_string()),
         };
         db.lcm_compress_retained_page_guarded(
-            request,
+            &request,
             &execution_control(),
             || Ok(()),
             retained_guard(None),
@@ -2096,7 +2343,7 @@ done
         };
         let poison = db
             .lcm_compress_retained_page_guarded(
-                poison_request,
+                &poison_request,
                 &execution_control(),
                 || Ok(()),
                 retained_guard(None),
@@ -2455,7 +2702,7 @@ done
             };
             let initial = db
                 .lcm_compress_retained_page_guarded(
-                    initial_request,
+                    &initial_request,
                     &execution_control(),
                     || Ok(()),
                     retained_guard(None),
@@ -2624,7 +2871,7 @@ done
                 };
                 let compressed = db
                     .lcm_compress_retained_page_guarded(
-                        request,
+                        &request,
                         &execution_control(),
                         || Ok(()),
                         retained_guard(None),
@@ -2923,7 +3170,7 @@ done
         };
         let initial = db
             .lcm_compress_retained_page_guarded(
-                request,
+                &request,
                 &execution_control(),
                 || Ok(()),
                 retained_guard(None),
@@ -3007,7 +3254,7 @@ done
         };
         let error = db
             .lcm_compress_retained_page_guarded(
-                request,
+                &request,
                 &execution_control(),
                 || Ok(()),
                 retained_guard(Some(tracedecay_lcm::LcmSummarySourceRange {

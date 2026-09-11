@@ -9,7 +9,7 @@ use super::{
     artifact_path_from_relative, artifact_relative_path, read_run_artifact_payload,
     validate_run_id_component,
 };
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const RUN_ARTIFACT_PUBLICATION_FILE: &str = ".tracedecay-publication.json";
 const PRODUCT_ARTIFACT_KINDS: [AutomationRunArtifactKind; 6] = [
@@ -110,8 +110,11 @@ pub async fn read_published_artifact_chain(
     expected_identity: Option<&Value>,
 ) -> Result<Option<Vec<AutomationRunArtifact>>> {
     let publication_path = run_artifact_publication_path(dashboard_root, run_id)?;
-    crate::storage::reject_symlink_components(&publication_path, "automation artifact publication")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &publication_path,
+        "automation artifact publication",
+    )
+    .map_err(TraceDecayError::from)?;
     let bytes = match tokio::fs::read(&publication_path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -234,8 +237,11 @@ fn publish_run_artifact_chain_blocking_with_fault(
             dashboard_root.display()
         ))
     })?;
-    crate::storage::reject_symlink_components(&artifacts_root, "automation artifact")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &artifacts_root,
+        "automation artifact",
+    )
+    .map_err(TraceDecayError::from)?;
     std::fs::create_dir_all(&artifacts_root).map_err(|error| {
         config_error(format!(
             "failed to create artifact root '{}': {error}",
@@ -244,8 +250,11 @@ fn publish_run_artifact_chain_blocking_with_fault(
     })?;
     sync_directory(dashboard_root)?;
     let final_directory = artifacts_root.join(run_id);
-    crate::storage::reject_symlink_components(&final_directory, "automation artifact run")
-        .map_err(TraceDecayError::from)?;
+    tracedecay_runtime_core::storage::reject_symlink_components(
+        &final_directory,
+        "automation artifact run",
+    )
+    .map_err(TraceDecayError::from)?;
     let chain_matches = |directory: &Path| -> Result<bool> {
         for (artifact, expected) in artifacts {
             let path = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;

@@ -2,7 +2,7 @@
 //!
 //! The concrete mutation/query ports remain beside their sole durable
 //! implementation. Public request/result DTOs are owned by
-//! `tracedecay-application::configuration` and re-exported from `types` only
+//! `tracedecay-contracts::configuration` and re-exported from `types` only
 //! so the store implementation consumes that same wire authority.
 
 pub mod ports;
@@ -10,7 +10,7 @@ pub mod types;
 
 pub use ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationCurrentStateV1,
-    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture, CredentialWritePort,
+    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
     CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 pub use types::{
@@ -18,6 +18,5 @@ pub use types::{
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
     ConfigurationPlanContext, ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1,
-    CredentialWriteHandleV1, DirectConfigurationMutation, ResolvedSetting, SettingSummary,
-    WriteOnlyCredentialMutation, configuration_layer_scope_digest,
+    DirectConfigurationMutation, ResolvedSetting, SettingSummary, configuration_layer_scope_digest,
 };

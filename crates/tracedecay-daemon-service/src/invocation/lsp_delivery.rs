@@ -108,11 +108,11 @@ impl RuntimeLspSession {
             drop_reason,
         };
         match recorder.try_record(settlement) {
-            Ok(tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {
+            Ok(tracedecay_application::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {
                 LspDeliverySettlementAdmissionV1::Enqueued
             }
             Ok(
-                tracedecay_usecases::observability::DeliverySettlementRecordOutcomeV1::DroppedAtCapacity,
+                tracedecay_application::observability::DeliverySettlementRecordOutcomeV1::DroppedAtCapacity,
             ) => {
                 tracing::warn!("LSP delivery receipt was dropped at recorder capacity");
                 LspDeliverySettlementAdmissionV1::DroppedAtCapacity

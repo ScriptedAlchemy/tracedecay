@@ -76,6 +76,10 @@ impl ProductionProjectCompositionRuntime {
         }
     }
 
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Portable runtimes return None; Unix production builds compile only the available reconciler arm"
+    )]
     pub(super) fn automation_scheduler_reconciler(
         &self,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
@@ -118,6 +122,26 @@ impl ProductionProjectCompositionRuntime {
             } => *startup_catch_up,
         }
     }
+
+    pub(super) fn resident_memory_admission_limit_bytes(&self) -> u64 {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(engine) => {
+                engine
+                    .invocation
+                    .code_index_schedulers
+                    .process_resident_memory()
+                    .snapshot()
+                    .limit_bytes
+            }
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
+            Self::Portable { .. } => {
+                tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(
+                )
+                .get()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +149,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    use tracedecay_application::work::{
+        RegisteredWorkApplicationServicesV1, RegisteredWorkflowApplicationServicesV1,
+    };
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_graph_db::{
@@ -135,11 +162,8 @@ mod tests {
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
         TestRuntimeProfileIdentityV1,
     };
-    use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
+    use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
-    use tracedecay_usecases::work::{
-        RegisteredWorkApplicationServicesV1, RegisteredWorkflowApplicationServicesV1,
-    };
 
     use super::bind_verified_project_graph_runtime;
 

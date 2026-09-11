@@ -29,8 +29,8 @@ impl Drop for CancelSearchOnDrop {
 pub async fn run_bounded_search<T, E, F>(
     tool_name: &'static str,
     query: String,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    deadline: Option<tracedecay_contracts::Deadline>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
     worker: F,
 ) -> Result<T>
 where
@@ -38,7 +38,7 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce(
             Arc<AtomicBool>,
-            Option<tracedecay_application::CancellationSignal>,
+            Option<tracedecay_contracts::CancellationSignal>,
         ) -> std::result::Result<T, E>
         + Send
         + 'static,
@@ -61,7 +61,7 @@ async fn run_bounded_search_with_capacity<T, E, F>(
     budget: Duration,
     tool_name: &'static str,
     query: String,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
+    cancellation: Option<tracedecay_contracts::CancellationSignal>,
     worker: F,
 ) -> Result<T>
 where
@@ -69,14 +69,14 @@ where
     E: std::fmt::Display + Send + 'static,
     F: FnOnce(
             Arc<AtomicBool>,
-            Option<tracedecay_application::CancellationSignal>,
+            Option<tracedecay_contracts::CancellationSignal>,
         ) -> std::result::Result<T, E>
         + Send
         + 'static,
 {
     if cancellation
         .as_ref()
-        .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+        .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
     {
         return Err(search_cancelled_error(tool_name));
     }
@@ -111,7 +111,7 @@ where
         Ok(result) => {
             if cancellation
                 .as_ref()
-                .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                .is_some_and(tracedecay_contracts::CancellationSignal::is_cancelled)
             {
                 Err(search_cancelled_error(tool_name))
             } else {
@@ -131,7 +131,7 @@ where
 
 fn search_budget(
     tool_name: &str,
-    deadline: Option<&tracedecay_application::Deadline>,
+    deadline: Option<&tracedecay_contracts::Deadline>,
 ) -> Result<Duration> {
     match deadline {
         Some(deadline) => tracedecay_daemon_protocol::deadline_remaining(deadline)
