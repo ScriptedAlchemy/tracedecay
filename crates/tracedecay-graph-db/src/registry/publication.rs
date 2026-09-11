@@ -18,9 +18,10 @@ use super::code_graph_namespace::is_legacy_per_generation_code_graph_namespace_s
 use super::path::canonical_graph_database_file;
 use super::publication_support::{
     RegisteredGraphDbOperationV1, check_all, clear_retiring_fence, collect_closure,
-    dependency_key_for_binding, locator_from_dependency, locator_from_key,
-    require_active_replay_evidence, require_head_replay, require_projection_binding,
-    retain_lease_closure, validate_exact_dependency_closure, validate_replay_cursor,
+    dependency_key_for_binding, locator_from_dependency, locator_from_dependency_in_binding,
+    locator_from_key, require_active_replay_evidence, require_head_replay,
+    require_projection_binding, retain_lease_closure, validate_exact_dependency_closure,
+    validate_replay_cursor,
 };
 use super::{GraphDbRegistration, GraphDbRegistry, check_registration_request};
 use crate::generation::{metadata_manifest_from_source, validate_supplied_manifest_binding};
@@ -32,7 +33,7 @@ use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationReplaySource, GraphProjectionIdentity,
     GraphReplayCollectionOutcome, SealedStagingRelease, SealedStagingRetentionReason,
-    VerifiedGraphCommit,
+    SupersededReplayRetirement, VerifiedGraphCommit,
 };
 
 /// The publication mode choices `publish_verified_inner` varies on.
@@ -966,6 +967,366 @@ impl GraphDbRegistry {
             }
             projection_after = Some(continuation);
         }
+    }
+
+    /// Retires every superseded replay of one projection now that a newer
+    /// verified head is installed.
+    ///
+    /// Publishing generation N+1 supersedes N through the verified-head
+    /// compare-and-swap, but N's journal row, native staging rows, and sealed
+    /// artifact stayed on disk until code-index retention happened to delete
+    /// the code generation naming them — and projections with no code-index
+    /// owner (session git evidence, memory relations) never retired at all.
+    /// This is the ordinary reclaim: every active replay of `projection`
+    /// other than the head that is not pending, not a dependency of any
+    /// active replay, and not retained by a live reader is tombstoned, its
+    /// generation contents deleted, and its cleanup finalized. Retained
+    /// replays are counted and revisited by the next pass; a tombstone left
+    /// by an earlier interrupted retirement finishes here too.
+    ///
+    /// A sealed code generation retired here is still on disk in the code
+    /// index; its later retention pass finds the replay absent and unlinks the
+    /// replay-pool copy, the same order it already handles.
+    #[hotpath::measure(
+        label = "graph_db.replay_pool.retire_superseded",
+        impl_type = "GraphDbRegistry"
+    )]
+    pub fn retire_superseded_projection_replays(
+        &self,
+        registration: GraphDbRegistration,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<SupersededReplayRetirement, GraphDbError> {
+        let operation = self.registered_operation(registration)?;
+        self.retire_superseded_projection_replays_inner(&operation, authority, context, projection)
+    }
+
+    /// [`Self::retire_superseded_projection_replays`] through an
+    /// already-issued, registry-validated graph lease.
+    pub fn retire_superseded_projection_replays_with_lease(
+        &self,
+        database: &GraphDbLeaseV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<SupersededReplayRetirement, GraphDbError> {
+        let operation = self.registered_operation_with_lease(database)?;
+        self.retire_superseded_projection_replays_inner(&operation, authority, context, projection)
+    }
+
+    fn retire_superseded_projection_replays_inner(
+        &self,
+        operation: &RegisteredGraphDbOperationV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        projection: &GraphProjectionIdentityV1,
+    ) -> Result<SupersededReplayRetirement, GraphDbError> {
+        operation.check(self, context)?;
+        operation.require_projection_binding(projection)?;
+        let database = operation.database().clone();
+        let Some(head) = authority
+            .verified_head(projection, context)
+            .map_err(GraphDbError::from)?
+        else {
+            return Ok(SupersededReplayRetirement::default());
+        };
+        let head_locator = locator_from_key(&head.key)?;
+
+        // Census the whole shard: a superseded generation of this projection
+        // may still be a dependency of another projection's active replay.
+        let mut retained = BTreeSet::new();
+        let mut candidates = Vec::new();
+        let mut stale_tombstones = Vec::new();
+        let mut projection_after = None;
+        loop {
+            let request = GraphPublicationProjectionPageRequestV1::new(
+                operation.binding().shard_id.clone(),
+                projection_after.clone(),
+                MAX_GRAPH_PUBLICATION_PROJECTION_PAGE_RECORDS_V1,
+            )
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            let page = authority
+                .projection_page(&request, context)
+                .map_err(GraphDbError::from)?;
+            for census_projection in page.projections {
+                operation.require_projection_binding(&census_projection)?;
+                if let Some(installed) = authority
+                    .verified_head(&census_projection, context)
+                    .map_err(GraphDbError::from)?
+                {
+                    retained.insert(locator_from_key(&installed.key)?);
+                }
+                if let Some(pending) = authority
+                    .pending_replay(&census_projection, context)
+                    .map_err(GraphDbError::from)?
+                {
+                    retained.insert(locator_from_key(&pending.publication.key)?);
+                }
+                let is_target = census_projection == *projection;
+                let mut replay_after = None;
+                loop {
+                    let request = GraphPublicationReplayPageRequestV1::new(
+                        census_projection.clone(),
+                        replay_after.clone(),
+                        MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
+                    )
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                    let page = authority
+                        .replay_page(&request, context)
+                        .map_err(GraphDbError::from)?;
+                    for replay in page.records {
+                        if replay.publication.key.projection != census_projection {
+                            return Err(GraphDbError::Corrupt {
+                                message: "relational graph replay page escaped its projection"
+                                    .to_owned(),
+                            });
+                        }
+                        for dependency in &replay.publication.direct_dependency_generations {
+                            retained.insert(locator_from_dependency_in_binding(
+                                operation.binding(),
+                                dependency,
+                            )?);
+                        }
+                        if is_target {
+                            let owner = locator_from_key(&replay.publication.key)?;
+                            if owner != head_locator {
+                                candidates.push((owner, replay));
+                            }
+                        }
+                    }
+                    let Some(continuation) = page.continuation else {
+                        break;
+                    };
+                    validate_replay_cursor(
+                        &census_projection,
+                        replay_after.as_ref(),
+                        &continuation,
+                        "relational graph replay",
+                    )?;
+                    replay_after = Some(continuation);
+                }
+                if !is_target {
+                    continue;
+                }
+                let mut cleanup_after = None;
+                loop {
+                    let request = GraphPublicationRetiredCleanupPageRequestV1::new(
+                        census_projection.clone(),
+                        cleanup_after.clone(),
+                        MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
+                    )
+                    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+                    let page = authority
+                        .retired_cleanup_page(&request, context)
+                        .map_err(GraphDbError::from)?;
+                    for tombstone in page.records {
+                        if tombstone.key.projection != census_projection {
+                            return Err(GraphDbError::Corrupt {
+                                message: "retired graph cleanup page escaped its projection"
+                                    .to_owned(),
+                            });
+                        }
+                        stale_tombstones.push((locator_from_key(&tombstone.key)?, tombstone));
+                    }
+                    let Some(continuation) = page.continuation else {
+                        break;
+                    };
+                    validate_replay_cursor(
+                        &census_projection,
+                        cleanup_after.as_ref(),
+                        &continuation,
+                        "retired graph cleanup",
+                    )?;
+                    cleanup_after = Some(continuation);
+                }
+            }
+            let Some(continuation) = page.continuation else {
+                break;
+            };
+            operation.require_projection_binding(&continuation)?;
+            if projection_after
+                .as_ref()
+                .is_some_and(|previous| continuation <= *previous)
+            {
+                return Err(GraphDbError::Corrupt {
+                    message: "relational graph projection cursor did not advance".to_owned(),
+                });
+            }
+            projection_after = Some(continuation);
+        }
+
+        let mut receipt = SupersededReplayRetirement::default();
+        // Liveness is decided under the generation-state lock, and every
+        // selected candidate is fenced there so a concurrent recover or open
+        // cannot seat it while its rows disappear.
+        let selected = {
+            let mut state = database.wait_verified_generations_write()?;
+            for lease in state.heads.values() {
+                retain_lease_closure(lease, &mut retained);
+            }
+            for (locator, weak) in &state.known {
+                if weak.upgrade().is_some() {
+                    retained.insert(locator.clone());
+                }
+            }
+            retained.extend(self.live_direct_sealed_locators()?);
+            candidates.sort_by_key(|(_, replay)| replay.sequence);
+            let mut selected = Vec::with_capacity(candidates.len());
+            for (locator, replay) in candidates {
+                if retained.contains(&locator) || state.retiring.contains(&locator) {
+                    receipt.retained += 1;
+                    continue;
+                }
+                state.retiring.insert(locator.clone());
+                selected.push((locator, replay));
+            }
+            selected
+        };
+        for (locator, replay) in selected {
+            let retirement = match GraphPublicationReplayRetirementV1::new(
+                replay.publication.key.clone(),
+                replay.publication.input_digest.clone(),
+                replay
+                    .publication
+                    .dependency_generation_closure_digest
+                    .clone(),
+                replay.publication.direct_dependency_generations.clone(),
+                replay.publication.expected_prior_head.clone(),
+                replay.publication.expected_recovered_digest.clone(),
+                replay.publication.canonical_replay_source_digest.clone(),
+            ) {
+                Ok(retirement) => retirement,
+                Err(error) => {
+                    clear_retiring_fence(&database, &locator)?;
+                    return Err(GraphDbError::invalid(error.to_string()));
+                }
+            };
+            let outcome = match authority.retire_replay(&retirement, context) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    clear_retiring_fence(&database, &locator)?;
+                    return Err(GraphDbError::from(error));
+                }
+            };
+            match outcome {
+                GraphReplayRetirementOutcomeV1::Retired(_)
+                | GraphReplayRetirementOutcomeV1::ExactReplay(_) => {
+                    tracing::info!(
+                        event = "graph_superseded_replay_retired",
+                        namespace = projection.namespace.as_str(),
+                        projection = projection.projection.as_str(),
+                        graph_generation = %locator.generation,
+                        replay_sequence = replay.sequence.get(),
+                        head_generation = head.key.generation.as_str(),
+                        "superseded graph replay retired behind the installed head"
+                    );
+                    self.finish_retired_replay(
+                        &database,
+                        operation,
+                        authority,
+                        context,
+                        &locator,
+                        &retirement,
+                        &mut receipt,
+                    )?;
+                }
+                GraphReplayRetirementOutcomeV1::CurrentVerifiedHead { .. }
+                | GraphReplayRetirementOutcomeV1::PendingReplay { .. } => {
+                    clear_retiring_fence(&database, &locator)?;
+                    receipt.retained += 1;
+                }
+                GraphReplayRetirementOutcomeV1::Conflict => {
+                    clear_retiring_fence(&database, &locator)?;
+                    tracing::warn!(
+                        event = "graph_superseded_replay_retirement_conflict",
+                        namespace = projection.namespace.as_str(),
+                        projection = projection.projection.as_str(),
+                        graph_generation = %locator.generation,
+                        "superseded replay retirement conflicted with a concurrent authority \
+                         change; the next pass revisits it"
+                    );
+                    receipt.retained += 1;
+                }
+                GraphReplayRetirementOutcomeV1::Missing => {
+                    clear_retiring_fence(&database, &locator)?;
+                    return Err(GraphDbError::Corrupt {
+                        message: "graph replay disappeared during superseded retirement"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        for (locator, tombstone) in stale_tombstones {
+            if locator == head_locator {
+                continue;
+            }
+            self.finish_retired_replay(
+                &database,
+                operation,
+                authority,
+                context,
+                &locator,
+                &tombstone.retirement(),
+                &mut receipt,
+            )?;
+        }
+        Ok(receipt)
+    }
+
+    /// Completes one relational retirement: delete the generation's native
+    /// rows and sealed artifact, then finalize the tombstone so the journal
+    /// row and its replay payload go too. Retirement was the linearization
+    /// point; a failure here leaks derived bytes the next pass reclaims but
+    /// never the source of an active replay.
+    fn finish_retired_replay(
+        &self,
+        database: &GraphDb,
+        operation: &RegisteredGraphDbOperationV1,
+        authority: &mut dyn GraphPublicationStoreV1,
+        context: &GraphPublicationOperationContextV1<'_>,
+        locator: &GenerationLocator,
+        retirement: &GraphPublicationReplayRetirementV1,
+        receipt: &mut SupersededReplayRetirement,
+    ) -> Result<(), GraphDbError> {
+        let deletion = match database
+            .delete_generation_contents(locator, &|| operation.check(self, context))
+        {
+            Ok(deletion) => deletion,
+            Err(error) => {
+                clear_retiring_fence(database, locator)?;
+                return Err(error);
+            }
+        };
+        if matches!(deletion, GenerationContentsDeletion::RetentionPending) {
+            clear_retiring_fence(database, locator)?;
+            receipt.pending += 1;
+            return Ok(());
+        }
+        match authority
+            .finalize_retired_replay_cleanup(retirement, context)
+            .map_err(GraphDbError::from)?
+        {
+            GraphRetiredReplayCleanupFinalizeOutcomeV1::Finalized(_)
+            | GraphRetiredReplayCleanupFinalizeOutcomeV1::ExactReplay(_) => {
+                receipt.retired += 1;
+            }
+            GraphRetiredReplayCleanupFinalizeOutcomeV1::Conflict => {
+                tracing::warn!(
+                    event = "graph_superseded_replay_cleanup_conflict",
+                    graph_generation = %locator.generation,
+                    "superseded replay cleanup finalization conflicted; the tombstone stays \
+                     for the next pass"
+                );
+                receipt.pending += 1;
+            }
+            GraphRetiredReplayCleanupFinalizeOutcomeV1::Missing => {
+                // A concurrent code-generation reconcile finalized the same
+                // tombstone between our retirement and this finalize.
+                receipt.retired += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Publishes the journaled replay behind `publication_key` through the

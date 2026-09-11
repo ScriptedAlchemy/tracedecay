@@ -14,8 +14,9 @@
 
 use rusqlite::Savepoint;
 use tracedecay_graph_db::{
-    LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX, code_graph_shard_namespace,
-    is_code_graph_shard_namespace, is_legacy_per_generation_code_graph_namespace,
+    LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX, SupersededReplayRetirement,
+    VerifiedGraphCommit, code_graph_shard_namespace, is_code_graph_shard_namespace,
+    is_legacy_per_generation_code_graph_namespace,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -620,4 +621,177 @@ fn retired_legacy_replay_without_a_head_releases_its_verified_sealed_staging_row
         (0, 0),
         "the replay-verified sealed artifact makes the staging copy redundant"
     );
+}
+
+/// Number of sealed generation artifacts currently on disk under the store.
+fn sealed_generation_count(root: &std::path::Path) -> usize {
+    std::fs::read_dir(support::graph_path(root).with_extension("sealed"))
+        .map(|entries| {
+            entries
+                .map(Result::unwrap)
+                .filter(|entry| entry.path().join("sealed.json").is_file())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn publish_generation(
+    registered: &RegisteredGraph,
+    root: &std::path::Path,
+    authority: &mut RelationalAuthority,
+    identity: &GraphProjectionIdentity,
+    generation: &str,
+    expected: Option<GraphVerifiedHeadV1>,
+    input: char,
+) -> (GraphPublicationReplayRecordV1, VerifiedGraphCommit) {
+    let manifest = manifest(identity.clone(), generation, generation, vec![], vec![]);
+    let record = stage_manifest(
+        authority,
+        &registered.binding,
+        &manifest,
+        &format!("publish:{generation}"),
+        expected,
+        input,
+    );
+    let (control, probe) = control_and_probe();
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), root),
+            authority,
+            &fresh_context(&control, &probe),
+            &record.publication.key,
+            None,
+        )
+        .unwrap();
+    (record, commit)
+}
+
+/// Installing a new head is the ordinary reclaim of every generation it
+/// superseded: their journal rows are tombstoned and finalized, and their
+/// sealed artifacts leave the disk, while the head — and any generation a
+/// live reader still holds — stays.
+#[test]
+fn installing_a_head_retires_every_superseded_generation_it_no_longer_needs() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = canonical_projection("worktree.superseded");
+    let root = temp.path();
+
+    let (g1_record, g1_commit) =
+        publish_generation(&registered, root, &mut authority, &identity, "sup-g1", None, '1');
+    let g1_head = g1_commit.head.clone();
+    let (g2_record, g2_commit) = publish_generation(
+        &registered,
+        root,
+        &mut authority,
+        &identity,
+        "sup-g2",
+        Some(g1_head.clone()),
+        '2',
+    );
+    let g2_head = g2_commit.head.clone();
+    drop(g2_commit);
+    let (g3_record, g3_commit) = publish_generation(
+        &registered,
+        root,
+        &mut authority,
+        &identity,
+        "sup-g3",
+        Some(g2_head),
+        '3',
+    );
+    let g3_head = g3_commit.head.clone();
+    drop(g3_commit);
+    assert_eq!(sealed_generation_count(root), 3, "every publish sealed its generation");
+
+    // g1's publication snapshot is still alive: it is a live reader, so the
+    // first pass retires only g2.
+    let (control, probe) = control_and_probe();
+    let receipt = registered
+        .registry
+        .retire_superseded_projection_replays(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &g3_record.publication.key.projection,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt,
+        SupersededReplayRetirement {
+            retired: 1,
+            retained: 1,
+            pending: 0,
+        },
+        "the superseded generation a live reader holds is retained"
+    );
+    assert!(authority.records.contains_key(&g1_record.publication.key));
+    assert!(!authority.records.contains_key(&g2_record.publication.key));
+    assert_eq!(
+        authority
+            .retired
+            .get(&g2_record.publication.key)
+            .map(|tombstone| tombstone.canonical_replay_source.is_none()),
+        Some(true),
+        "the retired replay is tombstoned and its cleanup finalized"
+    );
+    assert_eq!(sealed_generation_count(root), 2);
+    assert_eq!(authority.head_retirement_calls, 0);
+
+    // Once the reader is gone the remaining superseded generation goes too.
+    drop(g1_commit);
+    let (control, probe) = control_and_probe();
+    let receipt = registered
+        .registry
+        .retire_superseded_projection_replays(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &g3_record.publication.key.projection,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt,
+        SupersededReplayRetirement {
+            retired: 1,
+            retained: 0,
+            pending: 0,
+        }
+    );
+    assert!(!authority.records.contains_key(&g1_record.publication.key));
+    assert!(authority.records.contains_key(&g3_record.publication.key));
+    assert_eq!(
+        authority.heads.get(&g3_record.publication.key.projection),
+        Some(&g3_head),
+        "the installed head is never a retirement candidate"
+    );
+    assert_eq!(sealed_generation_count(root), 1, "only the head's sealed artifact remains");
+
+    // A clean projection is a no-op, and the head still serves.
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered
+            .registry
+            .retire_superseded_projection_replays(
+                registration(registered.binding.clone(), root),
+                &mut authority,
+                &fresh_context(&control, &probe),
+                &g3_record.publication.key.projection,
+            )
+            .unwrap(),
+        SupersededReplayRetirement::default()
+    );
+    let (control, probe) = control_and_probe();
+    let recovered = registered
+        .registry
+        .recover_verified_snapshot(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &g3_record.publication.key.projection,
+        )
+        .unwrap();
+    assert_eq!(recovered.generation().as_str(), "sup-g3");
 }
