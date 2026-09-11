@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    CanonicalWorkflowSemanticKindV1, ObservationId, ObservationOrderingDomainV1,
+    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowSemanticKindV1,
+    ObservationId, ObservationOrderingDomainV1,
     ObservationSourceIdentityV1, ProviderId, ProviderUsageCounterSemanticsV1,
     ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, SessionId,
 };
@@ -13,6 +13,7 @@ use tracedecay_store::cursor_dispatch::cursor_model_string;
 use crate::{
     ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse::sha256_hex,
 };
+use crate::git_facts::append_diff_and_pull_request_facts;
 
 const PROVIDER: &str = "cursor";
 
@@ -283,35 +284,22 @@ fn append_composer_git_facts(native: &Value, facts: &mut Vec<CanonicalObservatio
             });
         }
     }
-    if native
+    let has_diffs = native
         .get("gitDiffs")
         .and_then(Value::as_array)
-        .is_some_and(|diffs| !diffs.is_empty())
-    {
-        facts.push(CanonicalObservationFactV1::Git {
-            evidence_kind: CanonicalGitEvidenceKindV1::Diff,
-            reference: None,
-            content: None,
-        });
-    }
-    if let Some(pull_requests) = native.get("pullRequests").and_then(Value::as_array) {
-        for pull_request in pull_requests {
-            let reference = ["url", "htmlUrl", "html_url", "id"]
+        .is_some_and(|diffs| !diffs.is_empty());
+    let pull_request_references = native
+        .get("pullRequests")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|pull_request| {
+            ["url", "htmlUrl", "html_url", "id"]
                 .into_iter()
                 .find_map(|key| pull_request.get(key).and_then(Value::as_str))
-                .map(str::to_string);
-            facts.push(CanonicalObservationFactV1::Git {
-                evidence_kind: CanonicalGitEvidenceKindV1::PullRequest,
-                reference: reference.clone(),
-                content: None,
-            });
-            facts.push(CanonicalObservationFactV1::Workflow {
-                evidence_kind: CanonicalWorkflowEvidenceKindV1::PullRequest,
-                reference,
-                content: None,
-            });
-        }
-    }
+                .map(str::to_string)
+        });
+    append_diff_and_pull_request_facts(facts, has_diffs, pull_request_references);
 }
 
 /// Map native Composer `todos[{id,content,status}]` into `WorkflowLifecycle`
