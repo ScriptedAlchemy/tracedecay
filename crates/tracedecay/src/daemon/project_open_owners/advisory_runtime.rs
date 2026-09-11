@@ -1352,7 +1352,7 @@ fn production_ci_observation_stores(
 
 #[expect(
     clippy::too_many_lines,
-    reason = "Advisory owner registration is one hook-and-feedback wiring for the opened project."
+    reason = "The Context Scout owner, configuration, feedback cycle, and LSP session factory are bound in one pass so an advisory owner is never registered with a partially wired dependency set."
 )]
 async fn register_production_advisory_owner(
     invocation: &DaemonInvocationState,

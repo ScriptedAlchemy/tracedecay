@@ -85,7 +85,8 @@ where
 }
 
 /// A terminal host receipt is never reviewed until its exact completed-turn
-/// watermark is durable in LCM; an unreadable snapshot defers, it never passes.
+/// watermark is durable in LCM: an absent watermark defers the review, and an
+/// unreadable snapshot is a typed error, never a pass.
 async fn transcript_watermark_is_durable(
     session_database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     watermark: &str,

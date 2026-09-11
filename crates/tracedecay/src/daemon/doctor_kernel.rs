@@ -422,8 +422,9 @@ async fn collect_over_budget_store_findings(
     }
 }
 
-/// Published vectors are proven from the mounted code graph; an unreadable
-/// graph reads Unknown, never "nothing is pinned".
+/// Published vectors are proven from the mounted code graph; an unproven
+/// protection set reads as its named degradation (unavailable, reset required,
+/// corrupt, denied) or Unknown, never "nothing is pinned".
 async fn collect_semantic_vector_retention_finding(
     schedulers: &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
