@@ -376,6 +376,10 @@ fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
 }
 
 #[hotpath::measure(label = "mcp.analytics.report.total")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Analytics handling is one section-assemble of the live usage snapshot."
+)]
 pub(super) async fn handle_analytics(
     cg: &TraceDecay,
     args: Value,
@@ -513,6 +517,10 @@ pub(super) async fn handle_analytics(
     }))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "The tools analytics section ranks every cataloged tool from one usage read."
+)]
 fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
     let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
     for row in rows {

@@ -437,6 +437,10 @@ impl<'a> ToolCallRegistryOptions<'a> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Tool-call handling is one registry dispatch match onto the owning handler."
+)]
 pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,

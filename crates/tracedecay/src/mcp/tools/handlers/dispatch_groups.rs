@@ -354,6 +354,10 @@ pub(super) async fn dispatch_graph_tools(
     dispatch_graph_tools_inner(tool_name, cg, args, selected_scope_prefix, options).await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Graph-tool dispatch is one name match onto the verified graph ports."
+)]
 fn dispatch_graph_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
@@ -1226,6 +1230,10 @@ pub(super) async fn dispatch_retained_application_tools(
     .await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Retained-application dispatch is one name match onto the application surface."
+)]
 fn dispatch_retained_application_tools_inner<'a>(
     tool_name: &'a str,
     cg: &'a TraceDecay,
