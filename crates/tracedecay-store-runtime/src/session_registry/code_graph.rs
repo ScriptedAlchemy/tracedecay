@@ -561,6 +561,55 @@ fn observe_sealed_staging_release(
     }
 }
 
+/// Retires the replays a freshly installed head superseded and reports what
+/// the pass decided. Runs beside the staging release on the same lease: the
+/// release trims the head's duplicate rows, this reclaims every predecessor's
+/// journal row, native rows, and sealed artifact. Failure is logged, never
+/// propagated — the next publish or maintenance pass revisits the projection.
+fn retire_superseded_replays(
+    stage: &'static str,
+    graph_registry: &tracedecay_graph_db::GraphDbRegistry,
+    registration: GraphDbRegistration,
+    storage: &mut dyn GraphPublicationStoreV1,
+    context: &GraphPublicationOperationContextV1<'_>,
+    projection: &GraphProjectionIdentityV1,
+) {
+    match graph_registry.retire_superseded_projection_replays(
+        registration,
+        storage,
+        context,
+        projection,
+    ) {
+        Ok(receipt) if receipt == tracedecay_graph_db::SupersededReplayRetirement::default() => {
+            tracing::debug!(
+                event = "graph_superseded_replays_clean",
+                stage,
+                namespace = projection.namespace.as_str(),
+                projection = projection.projection.as_str(),
+                "no superseded graph replays behind the installed head"
+            );
+        }
+        Ok(receipt) => tracing::info!(
+            event = "graph_superseded_replays_retired",
+            stage,
+            namespace = projection.namespace.as_str(),
+            projection = projection.projection.as_str(),
+            retired = receipt.retired,
+            retained = receipt.retained,
+            pending = receipt.pending,
+            "retired the graph replays superseded by the installed head"
+        ),
+        Err(error) => tracing::warn!(
+            event = "graph_superseded_replay_retirement_failed",
+            stage,
+            namespace = projection.namespace.as_str(),
+            projection = projection.projection.as_str(),
+            error = ?error,
+            "superseded graph replay retirement will be retried by the next pass"
+        ),
+    }
+}
+
 fn release_publish_transient_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -1005,6 +1054,38 @@ impl RetainedVerifiedGraphRuntimeV1 {
             }
         }
         let publication = publish_journaled(&mut storage, &replay.key)?;
+        // The head just advanced past every earlier generation of this
+        // projection. Inline manifests have no code-index owner whose
+        // retention would ever reclaim them, so this publish is their only
+        // retirement path.
+        match self.graph_registry.retire_superseded_projection_replays_with_lease(
+            &graph,
+            &mut storage,
+            &context,
+            &relational_projection,
+        ) {
+            Ok(receipt) if receipt != tracedecay_graph_db::SupersededReplayRetirement::default() => {
+                tracing::info!(
+                    event = "graph_superseded_replays_retired",
+                    stage = "publish_manifest",
+                    namespace = relational_projection.namespace.as_str(),
+                    projection = relational_projection.projection.as_str(),
+                    retired = receipt.retired,
+                    retained = receipt.retained,
+                    pending = receipt.pending,
+                    "retired the graph replays superseded by the installed head"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                event = "graph_superseded_replay_retirement_failed",
+                stage = "publish_manifest",
+                namespace = relational_projection.namespace.as_str(),
+                projection = relational_projection.projection.as_str(),
+                error = ?error,
+                "superseded graph replay retirement will be retried by the next publish"
+            ),
+        }
         Ok(publication.snapshot)
     }
 
@@ -1676,12 +1757,20 @@ impl RetainedCodeGraphRuntimeV1 {
                     .graph_publication_storage()
                     .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
                 let outcome = graph_registry.release_sealed_generation_staging_rows(
-                    registration,
+                    registration.clone(),
                     &mut storage,
                     &context,
                     &projection,
                 )?;
                 observe_sealed_staging_release("publish", &projection, outcome);
+                retire_superseded_replays(
+                    "publish",
+                    &graph_registry,
+                    registration,
+                    &mut storage,
+                    &context,
+                    &projection,
+                );
                 Ok(outcome)
             })();
             if let Err(error) = release {
@@ -2882,12 +2971,20 @@ impl DaemonSessionRuntimeRegistryV1 {
                 deadline: deadline_at,
             };
             let outcome = graph_registry.release_sealed_generation_staging_rows(
-                registration,
+                registration.clone(),
                 &mut storage,
                 &context,
                 &projection,
             )?;
             observe_sealed_staging_release("sweep", &projection, outcome);
+            retire_superseded_replays(
+                "sweep",
+                &graph_registry,
+                registration,
+                &mut storage,
+                &context,
+                &projection,
+            );
             Ok(Some(projection))
         })
         .await
