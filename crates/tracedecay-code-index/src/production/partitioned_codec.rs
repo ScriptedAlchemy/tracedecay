@@ -54,10 +54,11 @@ use super::canonical_json::{
 };
 use super::lexical_page_source::{LEXICAL_FILE_PREFETCH_BYTES_V1, checkpoint};
 use super::sealed_codec::{
-    PersistedFileGenerationArtifactsRefV2, PersistedFileGenerationArtifactsV1,
-    PersistedFileGenerationArtifactsV2, SEALED_GENERATION_FORMAT_REVISION_V1,
-    StreamingPersistedPublishedGenerationV1, StreamingRestoredFilesV1,
-    assemble_published_generation, restore_file_pages,
+    MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION, PersistedFileGenerationArtifactsRefV2,
+    PersistedFileGenerationArtifactsV1, PersistedFileGenerationArtifactsV2,
+    SEALED_GENERATION_FORMAT_REVISION_V1, StreamingPersistedPublishedGenerationV1,
+    StreamingRestoredFilesV1, assemble_published_generation, restore_file_pages,
+    superseded_sealed_generation_revision,
 };
 use super::*;
 
@@ -215,15 +216,7 @@ struct PartitionedPublishedGenerationV1 {
     format_revision: u32,
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
-    /// The sealed census, absent in manifests written before this revision
-    /// carried one. Readers surface that gap as an unavailable census rather
-    /// than a zeroed one: a census is an aggregate *of* the generation, so
-    /// reporting absence costs nothing a caller could mistake for evidence,
-    /// while a default would claim a repository of no bytes and no symbols.
-    /// Row evidence takes the opposite route — see the segment decoder, which
-    /// refuses historical rows instead of defaulting their fields.
-    #[serde(default)]
-    statistics: Option<CodeIndexGenerationStatisticsV1>,
+    statistics: CodeIndexGenerationStatisticsV1,
     repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     ignored_source_admissions_digest: ManifestDigest,
@@ -2376,8 +2369,23 @@ fn parse_partitioned_manifest(
                 "sealed generation manifest format probe failed: {error}"
             ))
         })?;
-    if probe.format_revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
-        return Ok(None);
+    match probe.format_revision {
+        SEALED_GENERATION_FORMAT_REVISION_V1 => {}
+        // The monolithic envelope, which its own decoder owns.
+        MONOLITHIC_SEALED_GENERATION_FORMAT_REVISION => return Ok(None),
+        // Every other revision is a manifest this build refuses to read. A
+        // retired one names a shape the writer no longer emits, so the caller
+        // rebuilds the generation from its source tree instead of decoding
+        // it; a revision at or above the current one was written by a newer
+        // build, which this one cannot reason about.
+        revision if revision < SEALED_GENERATION_FORMAT_REVISION_V1 => {
+            return Err(superseded_sealed_generation_revision(revision));
+        }
+        _ => {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation manifest format revision is incompatible".to_owned(),
+            ));
+        }
     }
     let generation: PartitionedPublishedGenerationV1 = serde_json::from_str(raw.generation.get())
         .map_err(|error| {
@@ -2629,7 +2637,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             reader,
             generation.manifest,
             generation.snapshot,
-            generation.statistics,
+            Some(generation.statistics),
             source,
             source_state_digest,
             maximum_page_chunks,
@@ -2657,10 +2665,19 @@ impl CodeIndexPublishedGenerationV1 {
         ) -> Result<(), CodeIndexProductionErrorV1>,
     ) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
         self.validate()?;
-        let parent = parent_manifest_bytes
+        // Segment reuse is an optimization over a readable parent, never a
+        // precondition for publishing. A parent sealed in a shape this build
+        // has retired therefore offers no reuse and the child re-encodes its
+        // own segments — refusing the publication instead would leave a store
+        // that holds a retired generation unable to replace it.
+        let parent = match parent_manifest_bytes
             .map(parse_partitioned_manifest)
-            .transpose()?
-            .flatten();
+            .transpose()
+        {
+            Ok(parent) => parent.flatten(),
+            Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_)) => None,
+            Err(error) => return Err(error),
+        };
         if let Some(parent) = parent.as_ref()
             && self.manifest.parent_generation.as_ref() != Some(&parent.manifest.generation_id)
         {
@@ -2917,7 +2934,7 @@ impl CodeIndexPublishedGenerationV1 {
         .map(Some)
     }
 
-    /// Authenticate only the tiny revision-7 manifest and return the metadata
+    /// Authenticate only the tiny partitioned manifest and return the metadata
     /// needed to bind already-published text and graph owners. Segment bytes
     /// remain untouched; callers may use this only when those owners already
     /// have their own verified durable artifacts.
@@ -2930,7 +2947,7 @@ impl CodeIndexPublishedGenerationV1 {
         VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
             generation.manifest,
             generation.snapshot,
-            generation.statistics,
+            Some(generation.statistics),
         )
         .map(Some)
     }
@@ -2956,12 +2973,18 @@ impl CodeIndexPublishedGenerationV1 {
         Ok(Some(identities))
     }
 
-    /// Stream only revision-7 segment descriptors from a generation manifest.
+    /// Stream only current-revision segment descriptors from a generation
+    /// manifest.
     ///
     /// This projection intentionally does not re-materialize the enclosing
     /// manifest. Retention must first authenticate the complete outer file
     /// against its content-addressed name. It must never replace
     /// [`Self::verify_partitioned_sealed`] at a serving boundary.
+    ///
+    /// Unlike the decoding readers, a revision this build does not write is
+    /// abstained rather than refused: retention marks the segments it can
+    /// prove live and must stay able to plan a store that still holds a
+    /// retired generation, whose own segments are then unreferenced.
     pub fn partitioned_segment_identities_from_reader(
         reader: impl Read,
     ) -> Result<Option<Vec<SealedGenerationSegmentIdentityV1>>, CodeIndexProductionErrorV1> {
@@ -3990,6 +4013,65 @@ mod tests {
         );
     }
 
+    fn historical_fixture_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/partitioned_pre_paging")
+    }
+
+    /// The descriptors that address the archival carrier's file segments.
+    ///
+    /// The carrier's own envelope names a retired manifest revision, so the
+    /// decoding readers refuse it (see
+    /// [`tests::archival_carrier_revision_is_refused_for_rebuild`]). What the
+    /// fixture exists to prove lives one level below that envelope — the
+    /// revision-1 and revision-2 *segment* bytes, which no manifest revision
+    /// rewrites — so the tests below read the descriptors addressing them
+    /// straight from the archival bytes instead of asking a current decoder
+    /// to admit a shape this build no longer writes.
+    #[derive(Deserialize)]
+    struct ArchivalSegmentCarrierV1 {
+        generation: ArchivalSegmentCarrierGenerationV1,
+    }
+
+    #[derive(Deserialize)]
+    struct ArchivalSegmentCarrierGenerationV1 {
+        manifest: CodeGenerationManifestV1,
+        file_segments: Vec<PartitionedFileSegmentDescriptorV1>,
+    }
+
+    fn archival_segment_carrier() -> ArchivalSegmentCarrierGenerationV1 {
+        let manifest = std::fs::read(historical_fixture_root().join("manifest.json"))
+            .expect("historical manifest");
+        serde_json::from_slice::<ArchivalSegmentCarrierV1>(&manifest)
+            .expect("archival carrier segment descriptors")
+            .generation
+    }
+
+    /// The archival carrier was sealed at revision seven, which named a
+    /// manifest both with and without its census and is therefore retired.
+    /// Every decoding reader refuses it with the typed rebuild error rather
+    /// than admitting either shape.
+    #[test]
+    fn archival_carrier_revision_is_refused_for_rebuild() {
+        let manifest = std::fs::read(historical_fixture_root().join("manifest.json"))
+            .expect("historical manifest");
+        let Err(error) = parse_partitioned_manifest(&manifest) else {
+            panic!("a retired manifest revision must be refused, never migrated")
+        };
+
+        assert!(
+            matches!(
+                error,
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(7)
+            ),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("will be rebuilt from source"),
+            "a retired revision must tell the operator it rebuilds: {error}"
+        );
+    }
+
     /// The historical writer's revision-1 file segments predate the required
     /// symbol evidence (`docstring`, then `is_async` and `derives`). Older
     /// sealed rows are never defaulted: the decoder refuses them with the
@@ -3997,12 +4079,8 @@ mod tests {
     /// generation is rebuilt instead of being served as negative evidence.
     #[test]
     fn revision_one_historical_segments_are_refused_without_docstring_evidence() {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/partitioned_pre_paging");
-        let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
-        let generation = parse_partitioned_manifest(&manifest)
-            .expect("historical manifest parses")
-            .expect("revision seven manifest");
+        let fixture = historical_fixture_root();
+        let generation = archival_segment_carrier();
         let mut refused_segments = 0;
         for descriptor in &generation.file_segments {
             let name = descriptor
@@ -4044,12 +4122,8 @@ mod tests {
     /// supplies the symbol evidence those rows lack to obtain a typed record.
     #[test]
     fn revision_two_rows_without_defaults_are_refused() {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/partitioned_pre_paging");
-        let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
-        let generation = parse_partitioned_manifest(&manifest)
-            .expect("historical manifest parses")
-            .expect("revision seven manifest");
+        let fixture = historical_fixture_root();
+        let generation = archival_segment_carrier();
         let descriptor = &generation.file_segments[0];
         let name = descriptor
             .segment_digest

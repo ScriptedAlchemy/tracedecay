@@ -1058,7 +1058,7 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     let first_manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&first_manifest_path).expect("read first manifest"))
             .expect("decode first manifest");
-    assert_eq!(first_manifest["generation"]["format_revision"], 7);
+    assert_eq!(first_manifest["generation"]["format_revision"], 8);
     let first_segments = first_manifest["generation"]["file_segments"]
         .as_array()
         .expect("first generation file segments");
@@ -11059,7 +11059,7 @@ fn durable_publication_writes_partitioned_manifest_and_reuses_immutable_targets(
     let manifest: serde_json::Value =
         serde_json::from_slice(&canonical).expect("decode generation manifest");
     assert_eq!(
-        manifest["generation"]["format_revision"], 7,
+        manifest["generation"]["format_revision"], 8,
         "durable publication must emit the partitioned format"
     );
     assert_eq!(
@@ -11160,6 +11160,202 @@ fn restart_rejects_pointer_generation_mismatch() {
         reopened.latest_complete_already_decoded().is_none(),
         "a mismatched pointer never becomes serving state"
     );
+}
+
+#[derive(Clone)]
+struct CapturedLogWriter {
+    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for CapturedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLogWriter {
+    type Writer = Self;
+
+    fn make_writer(&self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Runs `scope` under a capturing `tracing` subscriber and returns the
+/// operator log it emitted.
+fn captured_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
+    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(CapturedLogWriter {
+            bytes: Arc::clone(&bytes),
+        })
+        .finish();
+    let value = tracing::subscriber::with_default(subscriber, scope);
+    let bytes = bytes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    (
+        value,
+        String::from_utf8(bytes).expect("captured tracing is UTF-8"),
+    )
+}
+
+/// Rewrites the store's active generation to the retired manifest revision
+/// seven, in the census shape the caller names, and republishes the durable
+/// identities that address it: the content-addressed file name, the active
+/// pointer, and the generation-index entry with its digest. This is the shape
+/// an operator's store is left in by a build that wrote revision seven.
+fn retire_active_generation_to_revision_seven(store: &Path, keeps_census: bool) {
+    let pointer_path = store.join("active-code-generation-v1.json");
+    let mut pointer: super::DurablePublicationPointerV1 =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
+            .expect("decode active pointer");
+    let generations = store.join("code-generations-v1");
+    let superseded = generations.join(&pointer.generation_file);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&superseded).expect("read generation manifest"))
+            .expect("decode generation manifest");
+    let payload = manifest["generation"]
+        .as_object_mut()
+        .expect("generation payload");
+    payload.insert("format_revision".to_owned(), serde_json::json!(7));
+    if !keeps_census {
+        payload
+            .remove("statistics")
+            .expect("a published manifest carries a census to remove");
+    }
+    manifest["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&manifest["generation"]).expect("retired payload bytes")
+        ))
+    ));
+
+    let bytes = serde_json::to_vec(&manifest).expect("retired manifest bytes");
+    let file_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+    let generation_file = format!(
+        "generation-{}.json",
+        file_digest
+            .strip_prefix("sha256:")
+            .expect("prefixed file digest")
+    );
+    std::fs::write(generations.join(&generation_file), &bytes).expect("write retired manifest");
+    std::fs::remove_file(&superseded).expect("remove the manifest the retired one replaces");
+
+    for entry in &mut pointer.generation_index {
+        if entry.generation_id == pointer.generation_id {
+            entry.generation_file = generation_file.clone();
+            entry.state_digest = file_digest.clone();
+            entry.size_bytes = bytes.len() as u64;
+        }
+    }
+    pointer.generation_file = generation_file;
+    pointer.state_digest = file_digest;
+    pointer.generation_index_digest = Some(
+        super::durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("generation index digest"),
+    );
+    std::fs::write(
+        &pointer_path,
+        serde_json::to_vec(&pointer).expect("encode retired pointer"),
+    )
+    .expect("write retired pointer");
+}
+
+/// A generation sealed at the retired manifest revision seven is rebuilt, not
+/// served and not treated as corruption. Revision seven named two payload
+/// shapes — with and without the sealed census — and both reach the same
+/// typed refusal, which the operator log records by revision so the rebuild
+/// is attributable. The rebuilt generation is published at the current
+/// revision, which is what makes the retirement converge.
+#[test]
+fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
+    for keeps_census in [true, false] {
+        let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+        let store = TempDir::new().expect("store root");
+        let retired_generation_id = {
+            let mut scheduler = scheduler(
+                &fixture,
+                store.path().to_path_buf(),
+                Arc::new(SharedCodeIndexBytePoolV1::default()),
+            );
+            published(scheduler.reconcile_now().expect("initial publish"));
+            scheduler
+                .latest_complete_already_decoded()
+                .expect("published generation remains decoded")
+                .generation
+                .manifest()
+                .generation_id
+                .clone()
+        };
+        retire_active_generation_to_revision_seven(store.path(), keeps_census);
+
+        let mut reopened = CodeIndexWorktreeSchedulerV1::open(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("foreground open defers sealed validation");
+        let (outcome, log) = captured_tracing(|| reopened.activate_or_reconcile());
+        published(outcome.expect("a retired revision must rebuild, not fail activation"));
+        assert!(
+            log.contains("sealed_format_revision=7"),
+            "the rebuild must name the retired revision it refused (census={keeps_census}): {log}"
+        );
+
+        let rebuilt = reopened
+            .latest_complete_already_decoded()
+            .expect("the rebuilt generation serves");
+        assert_ne!(
+            rebuilt.generation.manifest().generation_id,
+            retired_generation_id,
+            "a retired generation is replaced, never re-served"
+        );
+        drop(rebuilt);
+
+        let pointer: super::DurablePublicationPointerV1 = serde_json::from_slice(
+            &std::fs::read(store.path().join("active-code-generation-v1.json"))
+                .expect("read active pointer"),
+        )
+        .expect("decode active pointer");
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                store
+                    .path()
+                    .join("code-generations-v1")
+                    .join(&pointer.generation_file),
+            )
+            .expect("read rebuilt manifest"),
+        )
+        .expect("decode rebuilt manifest");
+        assert_eq!(
+            manifest["generation"]["format_revision"],
+            serde_json::json!(
+                tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1
+            ),
+            "the rebuild must converge on the revision this build writes"
+        );
+        assert!(
+            manifest["generation"]["statistics"].is_object(),
+            "the current revision carries its census as a required field"
+        );
+    }
 }
 
 #[tokio::test]

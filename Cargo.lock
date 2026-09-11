@@ -6304,6 +6304,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
+ "tracing-subscriber",
  "url",
  "walkdir",
 ]

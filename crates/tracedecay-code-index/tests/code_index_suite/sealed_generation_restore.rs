@@ -12,7 +12,8 @@ use tracedecay_code_index::parallelism::{
 use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
     CodeIndexPublishedGenerationV1, MINIMUM_SEALED_GENERATION_FORMAT_REVISION,
-    UninterruptibleCodeIndexControlV1, sealed_generation_payload_digest,
+    SEALED_GENERATION_FORMAT_REVISION_V1, UninterruptibleCodeIndexControlV1,
+    sealed_generation_payload_digest,
 };
 use tracedecay_domain::{
     FileOccurrenceId, LanguageId, SanitizedCodeFileV1, SensitivityLevelV1,
@@ -254,7 +255,8 @@ fn sealed_restore_refuses_superseded_and_adjacent_revisions() {
 
     // Above every revision this build knows: abstain, then refuse.
     let mut incompatible = envelope;
-    incompatible["generation"]["format_revision"] = Value::from(8);
+    incompatible["generation"]["format_revision"] =
+        Value::from(SEALED_GENERATION_FORMAT_REVISION_V1 + 1);
     let incompatible =
         serde_json::to_vec(&incompatible).expect("incompatible sealed-generation JSON");
     assert!(matches!(
