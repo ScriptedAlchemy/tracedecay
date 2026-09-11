@@ -433,7 +433,6 @@
     "source_body",
     "source_outline",
     "module_api",
-    "file_metadata",
     "health_read",
     "health_delta",
     "storage_status",
