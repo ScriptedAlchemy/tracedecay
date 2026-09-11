@@ -2497,7 +2497,7 @@ fn disk_artifact_defers_statistics_and_serving_indexes_until_freeze() {
         .expect("compare fuzzy vocabulary flags");
     let staging_tables: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('field_length_totals', 'row_dictionary_pages')",
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('field_stats_staging', 'row_dictionary_pages')",
             [],
             |row| row.get(0),
         )
