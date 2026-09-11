@@ -246,7 +246,7 @@ impl AdvisoryCycleOutcome {
     /// Returns the exact shared-store publication only after its atomic insert
     /// completed. Delivery callers receive no value for duplicate, failed,
     /// cancelled, timed-out, or otherwise unpublished cycles.
-    pub fn publication(&self) -> Option<&FeedbackCompletedPublicationV1> {
+    pub fn publication(&self) -> Option<&FeedbackPublicationV1> {
         match self {
             Self::Completed { cycle, .. } => cycle.publication.as_ref(),
             Self::Cancelled { .. } | Self::TimedOut { .. } => None,
