@@ -103,7 +103,10 @@ pub use sealed_codec::{
 /// Current daemon chunker identity shared by production indexing and native
 /// semantic evaluation fixtures. Historical revisions remain decodable but
 /// must never be emitted as current activation evidence.
-pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v3";
+///
+/// `v4` attributes whitespace-only FileWindow ranges to a neighboring
+/// retrievable grain instead of minting unreachable rows.
+pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v4";
 
 /// Immutable configuration retained by one production index owner.
 #[derive(Clone, Debug)]

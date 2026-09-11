@@ -1419,7 +1419,8 @@ fn augment_callee_dispatch_page(
     scope: &tracedecay_contracts::CodeQueryScope,
     budget: RetrievalBudget,
     control: &dyn GraphExecutionControl,
-) -> Result<NativeLanePageV1<SymbolRelationRecord>, NativeLaneOutcomeV1<SymbolRelationRecord>> {
+) -> Result<NativeLanePageV1<SymbolRelationRecord>, Box<NativeLaneOutcomeV1<SymbolRelationRecord>>>
+{
     let candidate_cap = usize::try_from(budget.max_candidates_per_lane).unwrap_or(usize::MAX);
     let mut page = NativeLanePageV1 {
         generation: page.generation,
@@ -1443,11 +1444,11 @@ fn augment_callee_dispatch_page(
         match check_dispatch_control(control, budget) {
             Ok(()) => {}
             Err(DispatchExpansionStop::Cancelled) => {
-                return Err(NativeLaneOutcomeV1::Cancelled);
+                return Err(Box::new(NativeLaneOutcomeV1::Cancelled));
             }
             Err(DispatchExpansionStop::TimedOut) => {
-                return Err(NativeLaneOutcomeV1::TimedOut(callee_dispatch_usage(
-                    &page, examined, control,
+                return Err(Box::new(NativeLaneOutcomeV1::TimedOut(
+                    callee_dispatch_usage(&page, examined, control),
                 )));
             }
         }
@@ -1490,11 +1491,11 @@ fn augment_callee_dispatch_page(
                 break 'callees;
             }
             Err(DispatchExpansionStop::Cancelled) => {
-                return Err(NativeLaneOutcomeV1::Cancelled);
+                return Err(Box::new(NativeLaneOutcomeV1::Cancelled));
             }
             Err(DispatchExpansionStop::TimedOut) => {
-                return Err(NativeLaneOutcomeV1::TimedOut(callee_dispatch_usage(
-                    &page, examined, control,
+                return Err(Box::new(NativeLaneOutcomeV1::TimedOut(
+                    callee_dispatch_usage(&page, examined, control),
                 )));
             }
         }
@@ -1516,13 +1517,13 @@ fn augment_callee_dispatch(
         NativeLaneOutcomeV1::Complete(page) => {
             match augment_callee_dispatch_page(latest, page, scope, budget, control) {
                 Ok(page) => NativeLaneOutcomeV1::Complete(page),
-                Err(terminal) => terminal,
+                Err(terminal) => *terminal,
             }
         }
         NativeLaneOutcomeV1::Partial { page, reason } => {
             match augment_callee_dispatch_page(latest, page, scope, budget, control) {
                 Ok(page) => NativeLaneOutcomeV1::Partial { page, reason },
-                Err(terminal) => terminal,
+                Err(terminal) => *terminal,
             }
         }
         NativeLaneOutcomeV1::Unavailable(reason) => NativeLaneOutcomeV1::Unavailable(reason),

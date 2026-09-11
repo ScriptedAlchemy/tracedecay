@@ -9,6 +9,10 @@ use super::*;
 
 impl DaemonInvocationState {
     #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Per-project invocation is one payload match including direct multi-root routes."
+    )]
     pub(in crate::daemon) async fn invoke_for_project(
         &self,
         store_administration: &StoreAdministration,

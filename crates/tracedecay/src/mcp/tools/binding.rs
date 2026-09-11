@@ -863,6 +863,10 @@ fn cancellation_for_tool(
     CancellationContract::cooperative(points)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Dispatch catalog construction lists every retained tool as one discovery payload."
+)]
 fn build_mcp_dispatch_catalog()
 -> Result<McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     let mut contracts = Vec::new();

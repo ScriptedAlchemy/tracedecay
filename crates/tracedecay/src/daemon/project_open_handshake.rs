@@ -7,6 +7,10 @@
 use super::*;
 
 #[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Handshake open is one identity-bind and route-publish sequence."
+)]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,

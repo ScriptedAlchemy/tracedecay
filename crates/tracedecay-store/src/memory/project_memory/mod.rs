@@ -112,6 +112,7 @@ pub struct ProjectMemoryFactV1 {
     projected_as_of: UtcMicros,
     source: FactIdentitySourceV1,
     telemetry: ProjectMemoryFactTelemetryV1,
+    superseded_by: Option<FactId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,7 +177,17 @@ impl ProjectMemoryFactV1 {
             projected_as_of,
             source,
             telemetry,
+            superseded_by: None,
         })
+    }
+
+    pub fn with_superseded_by(mut self, superseded_by: FactId) -> FactStoreResult<Self> {
+        validate_owned_fact_id(&superseded_by, &self.owner)?;
+        if superseded_by == self.fact_id {
+            return Err(FactStoreError::FactMismatch);
+        }
+        self.superseded_by = Some(superseded_by);
+        Ok(self)
     }
 
     pub fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
@@ -212,6 +223,9 @@ impl ProjectMemoryFactV1 {
     }
     pub fn telemetry(&self) -> &ProjectMemoryFactTelemetryV1 {
         &self.telemetry
+    }
+    pub fn superseded_by(&self) -> Option<&FactId> {
+        self.superseded_by.as_ref()
     }
     pub fn payload(&self) -> &FactPayloadV1 {
         &self.payload

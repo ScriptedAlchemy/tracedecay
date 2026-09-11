@@ -293,7 +293,7 @@ pub struct ContextScoutMutationBindingV1 {
 #[serde(rename_all = "snake_case", tag = "operation", content = "result")]
 pub enum ContextScoutMutationResultV1 {
     Cancel(ContextScoutDurableStoreOutcomeV1),
-    Claim(ContextScoutDurableClaimOutcomeV1),
+    Claim(Box<ContextScoutDurableClaimOutcomeV1>),
     Delivery {
         outcome: ContextScoutDurableStoreOutcomeV1,
         receipt: ContextScoutDeliveryReceiptV1,
@@ -311,7 +311,7 @@ pub struct ContextScoutMutationSettlementV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContextScoutMutationSettlementOutcomeV1 {
-    Reconciled(ContextScoutMutationSettlementV1),
+    Reconciled(Box<ContextScoutMutationSettlementV1>),
     IdempotencyConflict,
     Unavailable,
 }

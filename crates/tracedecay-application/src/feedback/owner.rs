@@ -91,7 +91,7 @@ pub trait FeedbackReadRequestAuthority: Send + Sync {
 }
 
 /// Physical durable-read boundary implemented by the daemon's canonical
-/// completed-publication ledger and anchor owner.
+/// publication ledger and anchor owner.
 ///
 /// `list` owns stable finding-id ordering and authenticated cursor validation.
 /// `expand` accepts only the exact `RetrievalAnchorId` resolved by the

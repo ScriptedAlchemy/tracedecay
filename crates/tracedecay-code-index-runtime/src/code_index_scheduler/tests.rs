@@ -25,11 +25,12 @@ use tracedecay_domain::{
     CommitId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
     ExactAdmissionRuleRevision, ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile,
     LogicalEvidenceId, ManifestDigest, OptionalStagePublicStatus, PolicyRevisionId, PrincipalId,
-    PrivacyDomainId, ProjectId, PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate,
-    RefId, RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
-    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
-    SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
+    PrivacyDomainId, ProjectId, ProviderEvaluationStateV1, PublicRetrieverStatus,
+    QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId,
+    RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1,
+    UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
@@ -64,8 +65,10 @@ use super::{
 use crate::code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
+    DAEMON_CODE_INDEX_CHUNKER_REVISION, UninterruptibleCodeIndexControlV1,
+    VerifiedSealedLexicalPageReadV1,
 };
+use crate::code_index::provider::GenerationTestAttributionJoinReadPort;
 use crate::semantic_code::rerank_adapter::{
     GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
 };
@@ -3850,7 +3853,8 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
     drop(config_a);
 
     let mut config_b = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    replace_scheduler_chunker_revision(&mut config_b, "chunker.daemon.v4");
+    let foreign_revision = format!("{DAEMON_CODE_INDEX_CHUNKER_REVISION}-foreign");
+    replace_scheduler_chunker_revision(&mut config_b, &foreign_revision);
     assert_eq!(
         config_b
             .latest_complete()
@@ -3886,7 +3890,7 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
             .manifest()
             .chunker_revision
             .as_str(),
-        "chunker.daemon.v4"
+        foreign_revision.as_str()
     );
 }
 
@@ -5729,6 +5733,65 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
     assert!(
         previous_path.is_file(),
         "retention owns the superseded artifact"
+    );
+}
+
+/// A projection whose final source page fills exactly on its last file's last
+/// record is convergeable, and the durable text lane must converge it.
+///
+/// A completed source mints one terminal read that emits no record and only
+/// normalizes the exhausted file position, so its live cursor sits one file
+/// rollover past the last durably accepted page exactly when that page filled
+/// on a file boundary. Holding the builder's durable progress against that
+/// normalized cursor — instead of against the completion receipt — reports a
+/// deterministic contract violation, which parks the text projection as
+/// unconvergeable and leaves the complete serving seat permanently empty.
+#[test]
+fn page_aligned_final_source_page_converges_the_text_projection() {
+    // A whole-page multiple of symbols in one file keeps the last page filling
+    // on the file's last record for any per-symbol chunk count.
+    let source =
+        (0..super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 * 2).fold(String::new(), |mut source, index| {
+            writeln!(
+                &mut source,
+                "pub fn aligned_{index}() -> usize {{ {index} }}"
+            )
+            .expect("write page-aligned source fixture");
+            source
+        });
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let mut passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("a page-aligned projection converges")
+    {
+        passes += 1;
+        assert!(
+            passes < 10_000,
+            "page-aligned text projection did not converge"
+        );
+    }
+    assert!(latest.query_owners_are_warm());
+    let progress = build_progress_snapshot(&scheduler);
+    // Every committed page must be chunk-full: an early commit from the page
+    // byte bound or an import record would leave the final page partial, which
+    // is exactly the shape that does not trip this invariant.
+    assert_eq!(
+        progress.committed_chunks,
+        progress.committed_pages * super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64,
+        "the fixture must keep every page chunk-full so the final page ends on the last record"
+    );
+    assert_eq!(
+        progress.committed_imports, 0,
+        "an import record would commit a partial page and break the alignment"
     );
 }
 
@@ -16121,6 +16184,104 @@ async fn witness_verified_mount_activates_without_rebuild() {
         Some(seeded),
         "the witness-verified mount serves the sealed generation without rebuilding"
     );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generation_read_callers_install_exact_affected_test_attribution() {
+    let fixture = GitFixture::new(&[(
+        "tests/production.rs",
+        "fn helper() {}\n#[test]\nfn verifies_helper() { helper(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount fixture");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let snapshot = latest.generation().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let occurrence = |name: &str| {
+        latest
+            .generation()
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.simple_name == name)
+            .unwrap_or_else(|| panic!("fixture symbol {name}"))
+            .occurrence
+            .clone()
+    };
+    let helper = occurrence("helper");
+    let test = occurrence("verifies_helper");
+
+    let assert_attribution = || {
+        let read = registry.read_test_attribution(&generation_id);
+        assert_eq!(
+            read.provider_state,
+            ProviderEvaluationStateV1::Partial,
+            "the real graph reports its honest partial attribution coverage"
+        );
+        let join = read.evidence.expect("generation attribution evidence");
+        let record = join
+            .records
+            .iter()
+            .find(|record| record.attribution.test_occurrence == test)
+            .expect("exact test attribution");
+        assert!(record.attribution.covered_occurrences.contains(&helper));
+        assert_eq!(
+            record
+                .test_occurrence
+                .as_ref()
+                .map(|occurrence| &occurrence.occurrence_id),
+            Some(&test)
+        );
+    };
+
+    registry.remove_test_attribution_authority(fixture.path());
+    assert_eq!(
+        registry
+            .read_test_attribution(&generation_id)
+            .provider_state,
+        ProviderEvaluationStateV1::Unavailable,
+        "an uninstalled generation stays typed unavailable"
+    );
+    let fresh = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("fresh caller resolves generation");
+    assert_eq!(fresh.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
+    registry.remove_test_attribution_authority(fixture.path());
+    let ready = registry
+        .latest_complete_ready_for_scope(&scope)
+        .await
+        .expect("ready caller resolves generation");
+    assert_eq!(ready.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
+    registry.remove_test_attribution_authority(fixture.path());
+    let decoded = registry
+        .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        .await
+        .expect("ready-decoded caller resolves generation");
+    assert_eq!(decoded.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
     registry.shutdown().await;
 }
 

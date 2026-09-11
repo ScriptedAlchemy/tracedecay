@@ -1240,6 +1240,54 @@ pub struct CodeIndexSchedulerRegistryV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    async fn install_test_attribution_authority(
+        &self,
+        project_root: &Path,
+        latest: &LatestCompleteCodeIndexV1,
+    ) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let Ok(authority) = latest.test_attribution_authority() else {
+            return false;
+        };
+        let serving_generation = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            Arc::clone(&worktree.serving_generation)
+        };
+        let serving = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation_id = latest.generation.manifest().generation_id.clone();
+        if serving
+            .as_ref()
+            .map(LatestCompleteCodeIndexV1::generation)
+            .map(|generation| &generation.manifest().generation_id)
+            != Some(&generation_id)
+        {
+            return false;
+        }
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(project_root, (generation_id, authority));
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn remove_test_attribution_authority(&self, project_root: &Path) {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return;
+        };
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&project_root);
+    }
+
     fn incomplete_text_slice_may_continue(pending_wake: &PendingWakeV1) -> bool {
         !pending_wake.has_pending_arrival()
     }
@@ -6091,19 +6139,8 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
         .ok()
         .flatten()?;
-        if let Ok(authority) = latest.test_attribution_authority() {
-            let mut authorities = self
-                .test_attribution_authorities
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authorities.insert(
-                authority_root,
-                (
-                    latest.generation.manifest().generation_id.clone(),
-                    authority,
-                ),
-            );
-        }
+        self.install_test_attribution_authority(&authority_root, &latest)
+            .await;
         Some(latest)
     }
 
@@ -6203,19 +6240,8 @@ impl CodeIndexSchedulerRegistryV1 {
             );
         }
         let latest = latest?;
-        if let Ok(authority) = latest.test_attribution_authority() {
-            let mut authorities = self
-                .test_attribution_authorities
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            authorities.insert(
-                project_root,
-                (
-                    latest.generation.manifest().generation_id.clone(),
-                    authority,
-                ),
-            );
-        }
+        self.install_test_attribution_authority(&project_root, &latest)
+            .await;
         Some(latest)
     }
 
@@ -6437,18 +6463,22 @@ impl CodeIndexSchedulerRegistryV1 {
             }
         );
         let scope = scope.clone();
+        let probe_root = project_root.clone();
         let probe = tokio::task::spawn_blocking(move || {
             hotpath::measure_block!(
                 "daemon.code_index.query.latest_ready_decoded.execution",
-                Self::ready_decoded_from_serving_parts(parts, &project_root, &scope)
+                Self::ready_decoded_from_serving_parts(parts, &probe_root, &scope)
             )
         });
-        hotpath::measure_block!(
+        let latest = hotpath::measure_block!(
             "daemon.code_index.query.latest_ready_decoded.offload_join",
             probe.await
         )
         .ok()
-        .flatten()
+        .flatten()?;
+        self.install_test_attribution_authority(&project_root, &latest)
+            .await;
+        Some(latest)
     }
 
     async fn latest_complete_ready_for_scope_with(
@@ -6881,13 +6911,89 @@ impl CodeIndexSchedulerRegistryV1 {
         true
     }
 
+    /// Resolve the current canonical generation for semantic evaluation.
+    ///
+    /// A partitioned restart deliberately restores text and graph through
+    /// lightweight owners without installing the decoded serving seat. Native
+    /// evaluation still needs the immutable full generation, so it opens the
+    /// active publication through the scheduler's shared decode cache after
+    /// proving the exact mounted scope and source-freshness witness. This never
+    /// seats graph serving or promotes a retained generation on its own.
+    pub async fn semantic_evaluation_generation_for_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_contracts::ResolvedScope,
+    ) -> Option<(
+        super::SemanticEvaluationCodeSnapshotV1,
+        Arc<CodeIndexPublishedGenerationV1>,
+    )> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (scheduler, source_freshness, shutting_down, wake, pending_wake) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = mounted.get(&project_root)?;
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                return None;
+            }
+            (
+                Arc::clone(&worktree.scheduler),
+                worktree.source_freshness.clone(),
+                Arc::clone(&worktree.shutting_down),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.pending_wake),
+            )
+        };
+        let freshness_root = project_root.clone();
+        let scope = scope.clone();
+        let task_shutting_down = Arc::clone(&shutting_down);
+        let result = tokio::task::spawn_blocking(move || {
+            if !source_freshness.ready_without_stat(&freshness_root, &task_shutting_down) {
+                return None;
+            }
+            let scheduler =
+                Self::lock_scheduler_unless_shutting_down(&scheduler, &task_shutting_down).ok()?;
+            if !scheduler.git_authority_available() {
+                return None;
+            }
+            let latest = scheduler.latest_complete()?;
+            if !source_freshness.ready_without_stat(&freshness_root, &task_shutting_down)
+                || !latest_matches_scope_identity(&latest, &scope)
+            {
+                return None;
+            }
+            Some((
+                latest.semantic_evaluation_snapshot(),
+                latest.generation_handle(),
+            ))
+        })
+        .await
+        .ok()
+        .flatten();
+        if result.is_none() && !shutting_down.load(Ordering::Acquire) {
+            Self::note_wake_if_idle(
+                &pending_wake,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+        }
+        result
+    }
+
     pub async fn semantic_evaluation_snapshot_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<super::SemanticEvaluationCodeSnapshotV1> {
-        self.latest_complete_fresh_for_scope(scope)
+        let root = {
+            let mounted = self.mounted.lock().await;
+            unique_mounted_for_scope(&mounted, scope)
+                .unique()?
+                .0
+                .clone()
+        };
+        self.semantic_evaluation_generation_for_scope(&root, scope)
             .await
-            .map(|latest| latest.semantic_evaluation_snapshot())
+            .map(|(snapshot, _)| snapshot)
     }
 
     pub async fn acquire_semantic_evaluation_publication_lease(

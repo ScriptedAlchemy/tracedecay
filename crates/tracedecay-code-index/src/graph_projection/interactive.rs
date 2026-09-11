@@ -31,11 +31,12 @@ use tracedecay_graph_db::{
 };
 
 use super::{
-    CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation, EDGE_LABEL,
-    EDGE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND, compare_edges,
-    deserialize_property, edge_entity_id, has_label, load_symbol_record, symbol_entity_id,
-    validate_edge,
+    CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation,
+    CodeGraphSymbolBindingV1, EDGE_LABEL, EDGE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SymbolRecordV1,
+    TARGET_EDGE_KIND, compare_edges, deserialize_property, edge_entity_id, has_label,
+    load_symbol_record, symbol_entity_id, validate_edge,
 };
+use crate::lineage::LineageSymbolRecordV1;
 
 mod artifact;
 mod catalog;
@@ -54,6 +55,13 @@ pub use self::models::{
 /// Symbols measured per bulk degree read while ranking a generation. Bounds
 /// the batch-wide relation budget each measurement charges.
 const DEGREE_RANKING_BATCH_SYMBOLS: usize = 256;
+
+pub type CodeGraphSymbolPredicate<'a> = dyn Fn(
+        &SymbolOccurrenceId,
+        Option<&CodeGraphSymbolBindingV1>,
+        Option<&LineageSymbolRecordV1>,
+    ) -> bool
+    + 'a;
 
 enum InteractiveCatalogState {
     Cold,
@@ -418,6 +426,42 @@ impl CodeGraphInteractiveReader {
             });
         }
         Ok(CodeGraphSymbolPageV1 { symbols, has_more })
+    }
+
+    /// Finds symbols in canonical occurrence order without hydrating
+    /// non-matching catalog records.
+    pub fn find_symbols(
+        &self,
+        predicate: &CodeGraphSymbolPredicate<'_>,
+        limit: usize,
+        request_cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>, CodeGraphProjectionError> {
+        const CANCELLATION_INTERVAL: usize = 4_096;
+
+        let cancellation = self.read_cancellation(request_cancellation)?;
+        require_positive(limit, "code graph symbol find limit")?;
+        let catalog = self.catalog(Arc::clone(&cancellation))?;
+        let mut symbols = Vec::new();
+        for (index, (occurrence, record)) in catalog.symbols.iter().enumerate() {
+            if index.is_multiple_of(CANCELLATION_INTERVAL) && cancellation.is_cancelled() {
+                return Err(CodeGraphProjectionError::Cancelled);
+            }
+            if predicate(
+                occurrence,
+                record.binding.as_ref(),
+                record.metadata.as_ref(),
+            ) {
+                symbols.push(CodeGraphSymbolSummaryV1 {
+                    occurrence: occurrence.clone(),
+                    binding: record.binding.clone(),
+                    metadata: record.metadata.clone(),
+                });
+                if symbols.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(symbols)
     }
 
     /// Per-seed outgoing semantic edges (callees when filtered to call
