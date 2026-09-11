@@ -3,6 +3,7 @@
 use super::*;
 use tracedecay_application::feedback::ProductionFeedbackCyclePartsV1;
 use tracedecay_contracts::AnalyzerAdmittedDiagnosticProviderV1;
+use tracedecay_contracts::diagnostics::FeedbackDiagnosticProviderAdmissionV1;
 
 mod lsp;
 pub use lsp::DaemonLspOwnerRegistrar;
@@ -444,17 +445,23 @@ impl FeedbackCycleRuntimeBuilderV1 {
         )?;
         let provider_admissions = provider_candidates
             .into_iter()
-            .map(|(identity, input)| {
-                AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
+            .map(|candidate| match candidate {
+                tracedecay_application::feedback::cycle_production::ProductionDiagnosticProviderCandidateV1::Analyzer {
+                    identity,
+                    admission,
+                } => AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
                     &policy,
                     &policy_context,
                     identity,
-                    input,
+                    admission,
                 )
+                .map(FeedbackDiagnosticProviderAdmissionV1::from),
+                tracedecay_application::feedback::cycle_production::ProductionDiagnosticProviderCandidateV1::StoredPublication(identity) => {
+                    FeedbackDiagnosticProviderAdmissionV1::from_stored_publication(identity)
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         let observations = self.feedback.observation_port();
-        let production_lsp_input = Arc::clone(&lsp_input);
         let runtime = open_feedback_cycle_runtime(
             database,
             Arc::clone(&self.feedback),
@@ -473,7 +480,7 @@ impl FeedbackCycleRuntimeBuilderV1 {
         )?;
         let production_input = production_proximity_feedback_cycle_input(
             Arc::clone(&runtime),
-            production_lsp_input,
+            runtime.lsp_input(),
             proximity,
         );
         Ok((runtime, production_input))

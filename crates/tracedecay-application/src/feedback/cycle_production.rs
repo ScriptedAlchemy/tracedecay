@@ -59,6 +59,10 @@ use crate::advisory::{
     ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1, ProximityThresholdPinV1,
     SharedCanonicalProximityEvidenceAuthorityV1, open_proximity_runtime,
 };
+use crate::diagnostics_publication::{
+    DiagnosticPillarV1, compiler_diagnostic_analyzer_revision_v1,
+    compiler_diagnostic_configuration_revision_v1,
+};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_configuration::ConfigurationCurrentStateV1;
 use tracedecay_configuration::config::analyzer::{
@@ -107,6 +111,7 @@ pub struct ProductionFeedbackDocumentIdentityV1 {
     pub generation_id: CodeGenerationId,
     pub generation_digest: ManifestDigest,
     pub file: FileOccurrenceId,
+    pub language: LanguageId,
     pub content_digest: ContentDigest,
 }
 
@@ -140,7 +145,7 @@ pub struct ProductionFeedbackCyclePartsV1 {
     pub policy_context: PolicyEvaluationContextV1,
     pub evidence_horizon: PolicyEvidenceHorizonV1,
     pub evaluated_at: UtcMicros,
-    pub provider_candidates: Vec<(DiagnosticProviderIdentity, AnalyzerAdmissionInputV1)>,
+    pub provider_candidates: Vec<ProductionDiagnosticProviderCandidateV1>,
     pub affected_tests: Arc<dyn tracedecay_contracts::AffectedTestsRetrievalPort + Send + Sync>,
     pub operation: ApplicationOperation,
     pub graph_operation: ApplicationOperation,
@@ -148,6 +153,22 @@ pub struct ProductionFeedbackCyclePartsV1 {
     pub lsp_input: FeedbackCycleLspInput,
     pub proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
+}
+
+pub enum ProductionDiagnosticProviderCandidateV1 {
+    Analyzer {
+        identity: DiagnosticProviderIdentity,
+        admission: AnalyzerAdmissionInputV1,
+    },
+    StoredPublication(DiagnosticProviderIdentity),
+}
+
+impl ProductionDiagnosticProviderCandidateV1 {
+    pub fn identity(&self) -> &DiagnosticProviderIdentity {
+        match self {
+            Self::Analyzer { identity, .. } | Self::StoredPublication(identity) => identity,
+        }
+    }
 }
 
 /// Exact saved-generation proximity contribution mounted into the canonical
@@ -429,33 +450,49 @@ pub async fn resolve_production_feedback_cycle_parts(
         policy_digest.clone(),
     )?;
     let provider_seed = input.provider_seed;
-    let provider_candidates = if input.mounted_providers.is_empty() {
-        vec![unavailable_lsp_candidate(
+    let mut provider_candidates = Vec::new();
+    if provider_seed.language.as_str() == "rust" {
+        provider_candidates.push(ProductionDiagnosticProviderCandidateV1::StoredPublication(
+            compiler_diagnostic_candidate(
+                &input.scope,
+                &access_configuration_digest,
+                &policy_digest,
+                evaluated_at,
+                &provider_seed,
+            )?,
+        ));
+    }
+    if input.mounted_providers.is_empty() {
+        let (identity, admission) = unavailable_lsp_candidate(
             &input.scope,
             &access_configuration_digest,
             &policy_digest,
             evaluated_at,
             &provider_seed,
             &configured_analyzers,
-        )?]
+        )?;
+        provider_candidates.push(ProductionDiagnosticProviderCandidateV1::Analyzer {
+            identity,
+            admission,
+        });
     } else {
-        input
-            .mounted_providers
-            .iter()
-            .map(|provider| {
-                managed_lsp_candidate(
-                    provider,
-                    AnalyzerAvailabilityV1::Available,
-                    &input.scope,
-                    &access_configuration_digest,
-                    &policy_digest,
-                    evaluated_at,
-                    &provider_seed,
-                    &configured_analyzers,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
+        for provider in &input.mounted_providers {
+            let (identity, admission) = managed_lsp_candidate(
+                provider,
+                AnalyzerAvailabilityV1::Available,
+                &input.scope,
+                &access_configuration_digest,
+                &policy_digest,
+                evaluated_at,
+                &provider_seed,
+                &configured_analyzers,
+            )?;
+            provider_candidates.push(ProductionDiagnosticProviderCandidateV1::Analyzer {
+                identity,
+                admission,
+            });
+        }
+    }
     let operation = required_surface_operation("feedback_diagnostics")?;
     let graph_operation = required_surface_operation("feedback_impact")?;
     let tests_operation = required_surface_operation("affected_tests")?;
@@ -468,7 +505,7 @@ pub async fn resolve_production_feedback_cycle_parts(
         policy_digest: policy_digest.clone(),
         providers: provider_candidates
             .iter()
-            .map(|(identity, _)| identity.clone())
+            .map(|candidate| candidate.identity().clone())
             .collect(),
         project_root: input.project_root,
         document_identity: input.document_identity,
@@ -493,6 +530,76 @@ pub async fn resolve_production_feedback_cycle_parts(
         lsp_input,
         proximity,
         runtime_state: input.runtime_state,
+    })
+}
+
+fn compiler_diagnostic_candidate(
+    scope: &ResolvedScope,
+    configuration_digest: &ManifestDigest,
+    policy_digest: &ManifestDigest,
+    evaluated_at: UtcMicros,
+    document: &ProductionFeedbackDocumentIdentityV1,
+) -> Result<DiagnosticProviderIdentity, ApplicationContractError> {
+    let capability = CapabilityId::new(MANAGED_CAPABILITY.to_owned()).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "compiler diagnostic capability",
+        }
+    })?;
+    let policy = PolicyDecisionRef::new(
+        "policy.decision.project-open.analyzer",
+        POLICY_REVISION_V1,
+        policy_digest.clone(),
+        ComponentVersion::new("policy.evaluator.analyzer.v1").map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "compiler diagnostic evaluator revision",
+            }
+        })?,
+    )?;
+    DiagnosticProviderIdentity::new(DiagnosticProviderIdentityParts {
+        scope: scope.clone(),
+        source: ProviderSourceIdentity::CleanGeneration {
+            generation: document.generation_id.clone(),
+        },
+        document: ProviderDocumentIdentity {
+            file: document.file.clone(),
+            content_digest: document.content_digest.clone(),
+            document_version: None,
+        },
+        producer: DiagnosticProviderDescriptor {
+            provider: ProviderId::new(DiagnosticPillarV1::Compiler.provider().to_owned()).map_err(
+                |_| ApplicationContractError::Inconsistent {
+                    field: "compiler diagnostic provider",
+                },
+            )?,
+            analyzer_revision: compiler_diagnostic_analyzer_revision_v1().map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "compiler diagnostic analyzer revision",
+                }
+            })?,
+            language: document.language.clone(),
+            language_descriptor_revision: LanguageDescriptorRevision::new(
+                "language.compiler.rust.v1".to_owned(),
+            )
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "compiler diagnostic language descriptor",
+            })?,
+        },
+        requested_capability: capability,
+        freshness: ProviderFreshness::current(evaluated_at),
+        coverage: ProviderCoverage::complete(1, 1),
+        provenance: ProviderProvenance {
+            origin: ProviderOrigin::CodeIntelligence,
+            anchor: None,
+        },
+        configuration: RevisionDigest {
+            revision: compiler_diagnostic_configuration_revision_v1().map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "compiler diagnostic configuration revision",
+                }
+            })?,
+            digest: configuration_digest.clone(),
+        },
+        policy,
     })
 }
 
@@ -1175,6 +1282,7 @@ mod tests {
             generation_id: CodeGenerationId::new("generation.test.current").expect("generation"),
             generation_digest: digest("generation"),
             file: FileOccurrenceId::new("file.test.src-lib").expect("file"),
+            language: LanguageId::new("rust".to_owned()).expect("language"),
             content_digest: ContentDigest::new(digest("file").as_str().to_owned())
                 .expect("content"),
         }
@@ -1185,6 +1293,33 @@ mod tests {
             language: language.to_owned(),
             command: format!("{language}-language-server"),
         }
+    }
+
+    #[test]
+    fn compiler_candidate_uses_the_diagnose_publication_identity() {
+        let document = document_identity();
+        let identity = compiler_diagnostic_candidate(
+            &scope(),
+            &digest("configuration"),
+            &digest("policy"),
+            UtcMicros(1),
+            &document,
+        )
+        .expect("compiler provider");
+
+        assert_eq!(
+            identity.producer.provider.as_str(),
+            DiagnosticPillarV1::Compiler.provider()
+        );
+        assert_eq!(
+            identity.producer.analyzer_revision,
+            compiler_diagnostic_analyzer_revision_v1().expect("analyzer revision")
+        );
+        assert_eq!(
+            identity.configuration.revision,
+            compiler_diagnostic_configuration_revision_v1().expect("configuration revision")
+        );
+        assert_eq!(identity.producer.language, document.language);
     }
 
     fn authorization(
