@@ -4,7 +4,7 @@
 //! so a root-crate edit no longer relinks a dozen ~700 MiB test binaries.
 
 #![recursion_limit = "256"]
-
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 

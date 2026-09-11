@@ -5,6 +5,7 @@
 //! no-RMCP project-open wall time, retained RSS, and high-water memory without
 //! shifting lazy global dispatch-catalog construction onto this lifecycle.
 
+#![allow(clippy::too_many_lines)]
 use std::time::Duration;
 
 use tracedecay::daemon::rmcp_benchmark::run_mcp_server_construction_fixture;

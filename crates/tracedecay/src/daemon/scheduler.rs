@@ -513,6 +513,10 @@ impl DaemonEngine {
     }
 
     #[hotpath::skip]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Locked scheduler reconcile is one compare-and-swap of the live automation handle."
+    )]
     pub(super) async fn reconcile_automation_scheduler_locked(
         &self,
         key: ProjectServerKey,
@@ -689,6 +693,10 @@ impl DaemonEngine {
     }
 
     #[hotpath::measure(label = "daemon.scheduler.start_automation", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Scheduler start is one handle-spawn and first-tick arming sequence."
+    )]
     pub(super) async fn start_automation_scheduler(
         &self,
         key: ProjectServerKey,
@@ -1115,6 +1123,10 @@ fn boxed_host_receipt_review<'a>(
 #[allow(
     clippy::too_many_arguments,
     reason = "The task owns its wake, generation and completion tokens until scheduler exit is committed."
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The automation scheduler loop is one wake-admit-tick cadence for a project."
 )]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
@@ -2008,6 +2020,10 @@ async fn automation_scheduler_has_work(
 #[allow(
     clippy::too_many_arguments,
     reason = "Job dispatch binds retained project memory and pinned configuration to the admitted backend and shared error result."
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "A user-jobs pass is one scan-and-dispatch of due profile jobs."
 )]
 async fn run_user_jobs_scheduler_pass(
     engine: &DaemonEngine,
