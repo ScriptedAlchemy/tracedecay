@@ -427,20 +427,6 @@ fn exact_spool_file_count(dashboard_root: &std::path::Path) -> usize {
     exact_spool_files(dashboard_root).len()
 }
 
-#[allow(dead_code)]
-fn retirement_capture_count(dashboard_root: &std::path::Path) -> usize {
-    std::fs::read_dir(dashboard_root)
-        .expect("retirement capture inventory")
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".fact_proposals.retirement-")
-        })
-        .count()
-}
-
 fn assert_admission_conflict(result: tracedecay_domain::errors::Result<ReservationResult>) {
     assert!(matches!(
         result.expect("valid durable mismatch"),
@@ -516,28 +502,6 @@ fn success_terminal(
                 accepted_count: 0,
                 rejected_count: 0,
                 skipped_count: 0,
-            },
-        },
-    )
-}
-
-#[allow(dead_code)]
-fn retirement_terminal(admission: &DurableAutomationAdmission) -> AutomationSettledTerminal {
-    result_terminal(
-        admission,
-        admission.request.run_id.as_str(),
-        AutomationTaskV1::SessionReflector,
-        AutomationRunTerminalV1::Skipped {
-            reason:
-                tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1::from_ledger_reason(
-                    "shipped_fact_proposal_history_retired",
-                )
-                .expect("retirement skip reason"),
-            summary: AutomationRunSummaryV1 {
-                reviewed_count: 0,
-                accepted_count: 0,
-                rejected_count: 0,
-                skipped_count: 1,
             },
         },
     )
