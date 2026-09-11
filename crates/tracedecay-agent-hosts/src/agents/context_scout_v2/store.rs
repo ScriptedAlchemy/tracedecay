@@ -230,13 +230,13 @@ impl ContextScoutPublicMutationV1 {
                 configuration_revision,
                 now,
                 lease,
-            } => Some(ContextScoutMutationResultV1::Claim(state.claim(
+            } => Some(ContextScoutMutationResultV1::Claim(Box::new(state.claim(
                 address,
                 Some(window),
                 Some(configuration_revision),
                 now,
                 lease,
-            ))),
+            )))),
             Self::Delivery {
                 work,
                 envelope_id,
@@ -1143,7 +1143,7 @@ impl ProjectContextScoutDurableStoreV1 {
         if observed.as_ref() != Some(&settlement) {
             return ContextScoutMutationSettlementOutcomeV1::Unavailable;
         }
-        ContextScoutMutationSettlementOutcomeV1::Reconciled(settlement)
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(Box::new(settlement))
     }
 
     #[hotpath::measure(

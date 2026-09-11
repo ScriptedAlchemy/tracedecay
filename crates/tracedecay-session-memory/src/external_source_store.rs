@@ -45,7 +45,7 @@ pub enum RuntimeExternalSourceErrorV1 {
         "external source runtime rejected {admission_bytes}-byte commit for {commit_count} source observations: {outcome:?}"
     )]
     SubmitRejected {
-        outcome: RuntimeSubmitOutcomeV1,
+        outcome: Box<RuntimeSubmitOutcomeV1>,
         admission_bytes: u64,
         commit_count: usize,
     },
@@ -57,7 +57,7 @@ pub enum RuntimeExternalSourceErrorV1 {
     #[error("external source runtime {phase} read was unavailable: {coverage:?}")]
     ReadUnavailable {
         phase: &'static str,
-        coverage: RuntimeReadCoverageV1,
+        coverage: Box<RuntimeReadCoverageV1>,
     },
     #[error("external source idempotency key conflicts with a prior command")]
     IdempotencyConflict,
@@ -477,7 +477,7 @@ impl RuntimeExternalSourceStore {
                 }
                 outcome => {
                     return Err(RuntimeExternalSourceErrorV1::SubmitRejected {
-                        outcome,
+                        outcome: Box::new(outcome),
                         admission_bytes,
                         commit_count,
                     });
@@ -836,7 +836,7 @@ impl RuntimeExternalSourceStore {
                 Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
             }
             outcome => Err(RuntimeExternalSourceErrorV1::SubmitRejected {
-                outcome,
+                outcome: Box::new(outcome),
                 admission_bytes: serialized_len(&projection)?,
                 commit_count: 1,
             }),
@@ -1189,7 +1189,7 @@ fn read_unavailable(
 ) -> RuntimeExternalSourceErrorV1 {
     RuntimeExternalSourceErrorV1::ReadUnavailable {
         phase,
-        coverage: coverage.clone(),
+        coverage: Box::new(coverage.clone()),
     }
 }
 
