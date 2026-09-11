@@ -8439,8 +8439,10 @@ async fn selected_generation_mints_feedback_identity_after_registry_lookup_close
 /// Fail-closed half of the busy-read witness: a seated generation whose
 /// currency was never proven (a boot-restored seat, a stale seat, or a
 /// withdrawn proof) must stay a typed abstention while the scheduler mutex is
-/// busy, exactly as before. Only the exact-source probe's own verdict may arm
-/// busy serving.
+/// busy, exactly as before. Only a reconcile pass may arm busy serving: it is
+/// the only thing that compares the checkout against the sealed digests, so it
+/// is the only thing whose verdict can bind a seat to proven source. Reads no
+/// longer walk the tree and so can never arm the witness themselves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_witness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
@@ -8745,14 +8747,19 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     registry.shutdown().await;
 }
 
-/// Busy-read stat proof reuse is explicitly bounded: an out-of-band write with
-/// no Git or scheduler hint may reuse the prior proof inside the memo window,
-/// but the first probe after that window must sweep and withdraw the witness.
+/// Busy-read proof reuse is explicitly bounded, but the bound belongs to the
+/// freshness fence, not to a per-read worktree sweep: an ordinary read never
+/// walks the checkout. An out-of-band write that moves no Git metadata and
+/// reaches no hint authority is therefore served from the live proof until
+/// that proof expires. The first read after it does declines the seat and
+/// hands the exact stat-plus-sealed-digest comparison to the retained worker,
+/// whose pass is the only authority that may withdraw the witness from the
+/// disproved generation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
 
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -8773,8 +8780,14 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
         .serving_source_witness_for_root(fixture.path())
         .await
         .expect("mounted worktree witness");
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree source fence");
+    // Hold the worker at its dequeue point so every observation below is the
+    // read path's own answer and never a pass that raced it.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
 
-    // Drift the worktree; the stat-signature fence disproves the seat.
     std::fs::write(
         fixture.path().join("src/main.rs"),
         "fn main() { drifted(); }\n",
@@ -8786,28 +8799,61 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_some(),
-        "a raw unhinted write may reuse the proof only inside the explicit bounded interval"
+        "an unhinted raw write reuses the live proof; a read never walks the checkout"
     );
-    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Expire that proof exactly as its own bound does, without waiting it out.
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the source proof past its own bound");
+    }
+    registry.clear_pending_wake_for_scope(&scope).await;
     assert!(
         registry
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_none(),
-        "a drifted worktree disproves the seated generation's currency"
+        "an expired proof disproves the seated generation's currency"
     );
-    // The probe posts a reconcile wake, so the worker may already be sealing a
-    // successor; what must hold is that the witness never keeps naming the
-    // disproved generation.
-    assert_ne!(
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "the declining read hands the exact source proof to the retained worker"
+    );
+    assert_eq!(
         witness
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|witness| witness.generation_id.clone()),
-        Some(disproved_generation_id),
-        "the disproving probe withdraws the busy-read witness"
+        Some(disproved_generation_id.clone()),
+        "a read that cannot verify source may not fabricate the disproof itself"
     );
+
+    // Release the worker: its pass re-derives the sealed digests, observes the
+    // drift, and the witness stops naming the disproved generation.
+    drop(admission);
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while witness
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|witness| witness.generation_id.clone())
+        == Some(disproved_generation_id.clone())
+    {
+        assert!(
+            Instant::now() <= deadline,
+            "the disproving reconcile pass never withdrew the busy-read witness"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     registry.shutdown().await;
 }
@@ -10156,8 +10202,13 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
     registry.shutdown().await;
 }
 
+/// A running source-verification pass is not itself a reason to decline query
+/// admission. What declines here is the freshness gate: the seat is servable
+/// and its proof is unexpired, so the query already has its answer and there is
+/// no remedy to schedule. The pass is held only to put the worktree in the
+/// verifying state whose dashboard projection this also pins.
 #[tokio::test]
-async fn active_source_verification_does_not_queue_a_second_query_pass() {
+async fn a_fresh_seat_declines_query_admission_during_source_verification() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
@@ -10170,12 +10221,12 @@ async fn active_source_verification_does_not_queue_a_second_query_pass() {
         .expect("mounted reconcile owner");
     assert!(
         !registry.request_query_background_reconcile(&scope).await,
-        "the active source proof already supplies the query's remedy"
+        "a servable seat under an unexpired proof is already the query's answer"
     );
     assert_eq!(
         registry.pending_wake_micros_for_scope(&scope).await,
         Some(0),
-        "query admission must not queue a duplicate pass after worker dequeue"
+        "a declined admission must leave the pending wake unclaimed"
     );
 
     let projected = registry
@@ -11887,12 +11938,11 @@ async fn wait_for_quiescent_owner_pass(
 ///
 /// Winning the permit only proves no *new* pass can start. The worker releases
 /// it after source reconciliation but keeps its `reconcile_in_progress` guard
-/// through text seating, so the permit is routinely free while a pass runs. A
-/// query that claims the pending wake in that window is suppressed as already
-/// covered by the running source proof and returns before it reaches the claim
-/// gate — so a test that then waits for the claim would wait on a rendezvous
-/// nothing will ever reach. With the permit held the counter is monotone to
-/// zero, so this settles once and stays settled for the rest of the test.
+/// through text seating, so the permit is routinely free while a pass runs and
+/// that pass still moves the serving seat, its witness, and the pending wake
+/// under a test that already believes the worker is parked. With the permit
+/// held the pass counter is monotone to zero, so this settles once and stays
+/// settled for the rest of the test.
 async fn quiesced_background_reconcile_admission(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -14345,20 +14395,16 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
 /// Publication broadcast and [`CodeIndexSchedulerRegistryV1::latest_generation_id`]
 /// stay behind optional graph seating. Unpinned exact/lexical queries resolve
 /// through the text owner, so that slot is the typed receipt this wait joins.
+/// The text lane publishes the per-worktree serving-generation watch, so
+/// [`wait_until_serving_seat`] blocks on that signal rather than sampling.
 async fn wait_for_queryable_text_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCodeTextGenerationV1 {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(text) = registry.latest_text_serving_for_root(path).await {
-                break text;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry.latest_text_serving_for_root(path).await
     })
     .await
-    .expect("queryable text generation seated")
 }
 
 /// The generation id of the text-current seat.
@@ -14383,24 +14429,22 @@ async fn wait_for_queryable_text_generation_id(
 }
 
 /// Wait until the text owner seats a generation distinct from `previous`.
+///
+/// Same signal as [`wait_for_queryable_text_generation`], narrowed to a
+/// successor: the seat that replaces `previous` is itself a per-worktree
+/// serving-generation change.
 async fn wait_for_queryable_text_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
     previous: &tracedecay_domain::CodeGenerationId,
 ) -> super::LatestCodeTextGenerationV1 {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(text) = registry.latest_text_serving_for_root(path).await {
-                let generation_id = text.metadata().manifest().generation_id.clone();
-                if &generation_id != previous {
-                    break text;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry
+            .latest_text_serving_for_root(path)
+            .await
+            .filter(|text| &text.metadata().manifest().generation_id != previous)
     })
     .await
-    .expect("changed queryable text generation seated")
 }
 
 /// Wait until the mounted worktree seats a generation distinct from `previous`.
@@ -17909,18 +17953,30 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         .await
         .expect("mount scheduler under configured graph policy");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let latest = loop {
-        if let Some((latest, _)) = registry
+    // The identity port answers only for a text owner the fence still proves
+    // current, so it must be resolved in the same wait that admits the owner:
+    // the fence's bounded proof expires on its own clock, and a pass renewing
+    // it republishes the owner. Sampling the owner once and resolving its
+    // identity afterwards turned either boundary into a red.
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let (latest, identity) = loop {
+        if let Some((latest, current)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await
             && latest.query_owners_are_warm()
+            && current
+            && let Some(identity) = <CodeIndexSchedulerRegistryV1 as tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1>::resolve_current_for_scope(
+                &registry,
+                fixture.path().to_path_buf(),
+                scope.clone(),
+            )
+            .await
         {
-            break latest;
+            break (latest, identity);
         }
         assert!(
-            std::time::Instant::now() <= deadline,
-            "configured graph refusal withheld the text-serving generation"
+            Instant::now() <= deadline,
+            "configured graph refusal withheld the ready text owner's publication identity"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
@@ -17937,13 +17993,6 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         .files
         .first()
         .expect("indexed file");
-    let identity = <CodeIndexSchedulerRegistryV1 as tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1>::resolve_current_for_scope(
-        &registry,
-        fixture.path().to_path_buf(),
-        scope.clone(),
-    )
-    .await
-    .expect("ready text owner retains file identity without a graph seat");
     assert_eq!(
         identity.generation_id(),
         &latest.metadata().manifest().generation_id

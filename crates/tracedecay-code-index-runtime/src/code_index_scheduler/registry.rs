@@ -2199,6 +2199,20 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|worktree| Arc::clone(&worktree.serving_source_witness))
     }
 
+    /// The shared source-freshness fence for one mounted root, so tests can
+    /// age its bounded proof instead of waiting the bound out in wall clock.
+    #[cfg(test)]
+    pub(crate) async fn source_freshness_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<super::SourceFreshnessFenceV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| worktree.source_freshness.clone())
+    }
+
     /// Drop the retained serving generation, reproducing a mount whose restore
     /// produced nothing servable.
     #[cfg(test)]
@@ -4516,6 +4530,18 @@ impl CodeIndexSchedulerRegistryV1 {
                             // converged on the durable head.
                             let publication_matches =
                                 scheduler.active_publication_matches(&latest)?;
+                            // The freshness fence is the single source-currency
+                            // authority; the witness only binds one of its
+                            // proofs to the seat. Asking the fence whether it
+                            // has verified *this* sealed snapshot is what makes
+                            // the binding truthful for a seat this pass did not
+                            // publish.
+                            let pass_proves_latest = source_freshness
+                                .serves_recently_verified_source(
+                                    &latest.generation().snapshot().content_identity,
+                                    &project_root,
+                                    &shutting_down,
+                                );
                             let mut serving = serving_generation
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4541,26 +4567,39 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .write()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                     Some(latest.text_generation_handle());
-                                // Only a generation extracted from the live
-                                // checkout this pass and seated as the active
-                                // publication carries its pass's freshness
-                                // proof into the witness. A stale seat and a
-                                // retained/restored seat stay unproven until
-                                // the quiet exact-source probe passes, so busy
-                                // verified reads never serve bytes no proof
-                                // has vouched for.
-                                *serving_source_witness
-                                    .write()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                    if published_pass
-                                        && matches!(outcome, ServingSwapOutcomeV1::Seated)
-                                    {
-                                        scheduler.source_currency_witness_for(
-                                            &latest.generation().manifest().generation_id,
-                                        )
-                                    } else {
-                                        None
-                                    };
+                            }
+                            // A pass is the only thing that verifies source
+                            // against the sealed digests, so it is also the
+                            // only thing that can re-prove a seat. `Offered`
+                            // is that case: the active publication already
+                            // serves and this pass re-observed the checkout it
+                            // was sealed from. Arming only on a publication
+                            // left a restored, retired, or withdrawn seat
+                            // permanently unproven — busy verified reads then
+                            // refused a generation whose source was current.
+                            match outcome {
+                                ServingSwapOutcomeV1::Seated | ServingSwapOutcomeV1::Offered => {
+                                    *serving_source_witness
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                        pass_proves_latest.then(|| super::ServingSourceWitnessV1 {
+                                            generation_id: latest
+                                                .generation()
+                                                .manifest()
+                                                .generation_id
+                                                .clone(),
+                                        });
+                                }
+                                // The durable pointer names a successor, so no
+                                // proof of this seat's currency exists to bind.
+                                ServingSwapOutcomeV1::SeatedStale => {
+                                    *serving_source_witness
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                                }
+                                // The slot kept a foreign incumbent; its
+                                // witness belongs to that generation.
+                                ServingSwapOutcomeV1::Superseded => {}
                             }
                             drop(serving);
                             // The serving slot is now fully published, including
@@ -6683,12 +6722,21 @@ impl CodeIndexSchedulerRegistryV1 {
     /// sealed source. Once that proof expires, the immutable owner remains
     /// available as stale while one coalesced wake asks the retained worker to
     /// run the exact stat/content proof. The read never performs that work or
-    /// waits for the scheduler mutex.
+    /// waits for the scheduler mutex — the pass counter is read only to
+    /// attribute the wake, never to decide currency.
     pub async fn latest_text_serving_freshness_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<(LatestCodeTextGenerationV1, bool)> {
-        let (root, source_freshness, text_generation, wake, pending_wake, shutting_down) = {
+        let (
+            root,
+            source_freshness,
+            text_generation,
+            wake,
+            pending_wake,
+            reconcile_in_progress,
+            shutting_down,
+        ) = {
             let mounted = self.mounted.lock().await;
             let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
             (
@@ -6697,6 +6745,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.reconcile_in_progress),
                 Arc::clone(&worktree.shutting_down),
             )
         };
@@ -6714,11 +6763,18 @@ impl CodeIndexSchedulerRegistryV1 {
             &shutting_down,
         );
         if !current {
-            Self::note_wake_if_idle(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
+            // Attribution, not admission. A read that cannot verify the owner
+            // while a pass already owns the worktree is a follow-up to that
+            // pass: its wake is served after the in-flight pass ends, so its
+            // event-to-ready latency measures the busy window, not the query
+            // ladder's. Reporting both as `QueryAdmission` buried an unrelated
+            // pass inside the query-admission cadence sample.
+            let trigger = if reconcile_in_progress.load(Ordering::Acquire) == 0 {
+                CodeIndexCadenceTriggerV1::QueryAdmission
+            } else {
+                CodeIndexCadenceTriggerV1::BusyFollowUp
+            };
+            Self::note_wake_if_idle(&pending_wake, &wake, trigger);
         }
         Some((latest, current))
     }
@@ -6857,6 +6913,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// ready, the shared source fence suppresses a wake while its proof is
     /// current. Authenticated metadata without those owners is still warming
     /// and always needs the worker's next bounded slice.
+    ///
+    /// An in-flight pass is deliberately *not* a third suppression. That pass
+    /// observed the checkout when it started, which may predate the state this
+    /// admission found unservable, so declining here strands the remedy until
+    /// an unrelated hint arrives. The claim above already coalesces the only
+    /// duplicate worth suppressing — a wake nobody has dequeued yet.
     pub async fn request_query_background_reconcile(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -6878,7 +6940,6 @@ impl CodeIndexSchedulerRegistryV1 {
             hints,
             wake,
             pending_wake,
-            reconcile_in_progress,
         ) = {
             let mounted = self.mounted.lock().await;
             let Some((root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
@@ -6893,7 +6954,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
-                Arc::clone(&worktree.reconcile_in_progress),
             )
         };
         #[cfg(test)]
@@ -6908,13 +6968,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let Some(wake_claim) = PendingWakeClaimV1::claim(Arc::clone(&pending_wake)) else {
             return false;
         };
-        // The pending marker covers admission until the worker dequeues it;
-        // the pass counter covers the interval after dequeue. A query arriving
-        // in that second interval is already covered by the running source
-        // proof and must not queue an identical follow-up pass.
-        if reconcile_in_progress.load(Ordering::Acquire) != 0 {
-            return false;
-        }
         #[cfg(test)]
         if let Some(test_control) = test_control.as_ref()
             && test_control.pauses_after_claim.load(Ordering::Acquire)
