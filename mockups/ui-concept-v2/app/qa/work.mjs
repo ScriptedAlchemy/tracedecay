@@ -29,6 +29,16 @@ try {
   const selectedBox = await page.locator('[data-task-id="T-102"]').boundingBox();
   const childBox = await page.locator('[data-task-id="T-103"]').boundingBox();
   assert(selectedBox && childBox && selectedBox.y < childBox.y, 'selected outcome root must sit above its real gating descendants');
+  const overlaps = (a, b) => a && b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  const taskBoxes = await page.locator('.wk-task').evaluateAll((elements) => elements.map((element) => {
+    const box = element.getBoundingClientRect();
+    return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+  }));
+  const obstructorBoxes = await page.locator('.wk-minimap, .wk-plan-context, [role="dialog"], [popover]:popover-open').evaluateAll((elements) => elements.map((element) => {
+    const box = element.getBoundingClientRect();
+    return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+  }));
+  assert(taskBoxes.every((task) => obstructorBoxes.every((obstructor) => !overlaps(task, obstructor))), 'task cards must not be occluded by minimap, stable plan lanes, or open evidence popovers');
   assert.equal(await page.locator('.wk-mini-relations path').count(), 4, 'minimap must retain every visible typed relation');
   assert.equal(await page.locator('.wk-minimap rect.is-selected').getAttribute('width'), '300', 'minimap selected bounds must match the readable selected task plate');
   const filterCamera = await page.locator('.wk-world').getAttribute('style');
