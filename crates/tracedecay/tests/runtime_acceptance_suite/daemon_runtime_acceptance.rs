@@ -9,7 +9,7 @@ use tracedecay_agent_hosts::agents::context_scout_v2::{
     ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
     ContextScoutSelectionInputV1, select_deterministic_context_scout,
 };
-use tracedecay_agent_hosts::agents::host_bundle_v2::{
+use tracedecay_agent_hosts::agents::host_bundle::{
     HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
 };
 use tracedecay_contracts::context_scout::{

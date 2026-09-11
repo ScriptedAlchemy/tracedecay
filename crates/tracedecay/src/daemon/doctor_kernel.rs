@@ -104,9 +104,9 @@ async fn observation_authority_audit_ok(
 // === Host/agent integration conformance (Advisory family) ====================
 
 fn host_integration_read_from_report(
-    report: &tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleDoctorReportV1,
+    report: &tracedecay_agent_hosts::agents::host_bundle::HostBundleDoctorReportV1,
 ) -> HostIntegrationReadV1 {
-    use tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorStateV1;
+    use tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentDoctorStateV1;
 
     if report.native_edit_stop_conformance.is_empty() {
         return HostIntegrationReadV1::Unsupported;

@@ -9,7 +9,7 @@ use tracedecay_agent_hosts::agents::host_bundle_registry::{
     unsupported_host_component_set_reason, verified_embedded_default_host_component_set,
     verified_embedded_host_bundle, verified_embedded_host_component_set,
 };
-use tracedecay_agent_hosts::agents::host_bundle_v2::{
+use tracedecay_agent_hosts::agents::host_bundle::{
     ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
     HostBundleComponentV1, HostBundleError, HostBundleExecutionRequestV1,
     HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleLifecycleRequestV1,

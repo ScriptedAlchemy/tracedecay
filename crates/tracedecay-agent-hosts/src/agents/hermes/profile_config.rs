@@ -80,8 +80,8 @@ pub fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
 
 pub(super) fn registration_state(
     config_path: &Path,
-) -> crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 {
-    use crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+) -> crate::agents::host_bundle::HostBundleRegistrationStateV1 {
+    use crate::agents::host_bundle::HostBundleRegistrationStateV1 as State;
 
     let Ok(contents) = std::fs::read_to_string(config_path) else {
         return State::Missing;
