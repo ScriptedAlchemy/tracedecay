@@ -653,6 +653,10 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
     clippy::too_many_arguments,
     reason = "Dashboard mounting composes independently optional provider authorities; their absence must remain explicit"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Dashboard handling is one action match onto the composed dashboard readers."
+)]
 pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,

@@ -550,6 +550,10 @@ impl McpServer {
     }
 
     #[hotpath::measure(label = "mcp.server.hook_event", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Hook-event notification is one decode-admit-ack of a host envelope."
+    )]
     pub(crate) async fn handle_hook_event_notification(
         &self,
         params: Option<&Value>,
@@ -1521,6 +1525,10 @@ impl McpServer {
     }
 
     #[hotpath::measure(label = "mcp.server.tools_call", future = true)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tools/call handling is one decode, dispatch, and typed-result write."
+    )]
     pub(crate) async fn handle_tools_call(
         &self,
         id: Value,

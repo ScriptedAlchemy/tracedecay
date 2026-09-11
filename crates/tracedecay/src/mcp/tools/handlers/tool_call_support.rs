@@ -93,6 +93,10 @@ pub(crate) async fn resolve_registered_project_route_for_tool(
 }
 
 #[hotpath::measure(future = true, label = "mcp.retrieve.handle.total")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Retrieve handling is one exact-or-semantic resolution through the mounted graph."
+)]
 pub(super) async fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
     let object = args.as_object().ok_or_else(|| TraceDecayError::Config {
         message: "tracedecay_retrieve arguments must be an object".to_string(),

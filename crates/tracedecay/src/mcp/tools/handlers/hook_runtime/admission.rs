@@ -278,6 +278,10 @@ pub(crate) async fn admit_hook_v2_envelope(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.admit")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Hook v2 admission is one envelope validate, lifecycle bind, and receipt."
+)]
 async fn admit_hook_v2_envelope_with_lifecycle(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
