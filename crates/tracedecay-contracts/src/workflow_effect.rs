@@ -415,10 +415,11 @@ pub enum WorkflowEffectSuccessV1 {
     HandoffRedeemed(Box<TaskHandoffRedeemed>),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowEffectProblemV1 {
     InvalidRequest,
+    InvalidRequestDiagnostic(crate::SafeDiagnostic),
     NotFoundOrNotAuthorized,
     Conflict,
     TimedOut,

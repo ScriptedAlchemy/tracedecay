@@ -21,10 +21,13 @@ use tracedecay_contracts::{
     WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkProductChangeDraftV1,
     WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
     WorkRetryAttemptOutcomeV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetrySourceV1,
-    WorkSynthesisAttemptV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowExecutionFence, WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
+    WorkSynthesisAttemptV1, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest, WorkflowExecutionFence,
+    WorkflowFailurePolicy, WorkflowFanOutInput, WorkflowFanOutStartV1,
     WorkflowProviderRegistration, WorkflowRunCancelRequest, WorkflowRunGetRequest,
-    WorkflowRunStartRequest,
+    WorkflowRunPauseRequest, WorkflowRunResumeRequest, WorkflowRunStartRequest,
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey,
@@ -52,8 +55,11 @@ use tracedecay_sdk::operations::{
     ApplicationConfigurationGet, ApplicationConfigurationObservedState,
     ApplicationConfigurationSet, WorkAttemptStatus, WorkMutateGraph, WorkPauseRun,
     WorkPrepareGraphMutation, WorkResumeRun, WorkRetrieveEvidence, WorkRetryAttempt,
-    WorkSynthesize, WorkViews, WorkflowActivateDefinition, WorkflowCancelRun, WorkflowGetRun,
-    WorkflowHandoffIssue, WorkflowHandoffRedeem, WorkflowRegisterDefinition, WorkflowStartRun,
+    WorkSynthesize, WorkViews, WorkflowActivateDefinition, WorkflowCancelRun,
+    WorkflowDefinitionHistory, WorkflowDiffDefinition, WorkflowGetRun, WorkflowHandoffIssue,
+    WorkflowHandoffRedeem, WorkflowListDefinitions, WorkflowPauseRun, WorkflowRegisterDefinition,
+    WorkflowRejectDefinition, WorkflowResumeRun, WorkflowRetireDefinition, WorkflowStartRun,
+    WorkflowValidateDefinition,
 };
 
 use super::common;
@@ -607,7 +613,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         ],
         policy_digest,
         resolved.effective_behavior_digest.clone(),
-        catalog_digest,
+        catalog_digest.clone(),
     )
     .expect("workflow definition");
     client
@@ -644,7 +650,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("candidate registration stays lenient before activation");
     let admission_denial = client
         .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
-            definition_id: uncataloged_definition_id,
+            definition_id: uncataloged_definition_id.clone(),
             definition_version: 1,
             expected_revision: 1,
         })
@@ -652,18 +658,126 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     assert!(
         matches!(
             admission_denial,
-            ClientError::Problem(ref problem) if problem.kind == "invalid_request"
+            ClientError::Problem(ref problem)
+                if problem.kind == "invalid_request"
+                    && problem.code == "workflow.catalog.operation_unknown"
+                    && problem.message.contains("fan-out")
+                    && problem.message.contains("operation.work.not_a_mounted_operation")
         ),
         "catalog admission denial must be a typed refusal: {admission_denial}"
     );
 
-    client
+    let stale_catalog_definition = WorkflowDefinition::new(
+        id("workflow.advanced-production-journey.stale-catalog"),
+        1,
+        project_id.clone(),
+        vec![WorkflowStep {
+            step_id: id("prepare"),
+            operation: id("operation.work.start_attempt"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fan_out: None,
+        }],
+        definition.pinned_policy_digest().clone(),
+        definition.pinned_configuration_digest().clone(),
+        id("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    .expect("stale-catalog workflow definition");
+    let stale_catalog_denial = client
+        .execute::<WorkflowValidateDefinition>(&WorkflowDefinitionValidateRequest {
+            definition: stale_catalog_definition,
+        })
+        .expect_err("validation must name the stale catalog pin");
+    assert!(
+        matches!(
+            stale_catalog_denial,
+            ClientError::Problem(ref problem)
+                if problem.kind == "invalid_request"
+                    && problem.code == "workflow.catalog.pin_mismatch"
+                    && problem.message.contains(&format!(
+                        "pinned_catalog_digest expected {}",
+                        catalog_digest.as_str()
+                    ))
+                    && problem.message.contains(
+                        "observed sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    )
+        ),
+        "catalog pin denial must report expected and observed digests: {stale_catalog_denial}"
+    );
+
+    let activated = client
         .execute::<WorkflowActivateDefinition>(&WorkflowDefinitionActivateRequest {
             definition_id: definition_id.clone(),
             definition_version: 1,
             expected_revision: 1,
         })
-        .expect("mounted workflow definition activation");
+        .expect("mounted workflow definition activation")
+        .result;
+    assert_eq!(
+        activated.state,
+        tracedecay_contracts::WorkflowDefinitionLifecycleState::Active
+    );
+    assert_eq!(activated.revision, 3);
+    let listed = client
+        .execute::<WorkflowListDefinitions>(&WorkflowDefinitionListRequest {})
+        .expect("list registered workflow definitions")
+        .result;
+    assert!(
+        listed
+            .iter()
+            .any(|candidate| candidate.definition_id() == &definition_id)
+    );
+    let version_two = WorkflowDefinition::new(
+        definition_id.clone(),
+        2,
+        project_id.clone(),
+        vec![WorkflowStep {
+            step_id: step_id.clone(),
+            operation: id("operation.work.start_attempt"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fan_out: None,
+        }],
+        definition.pinned_policy_digest().clone(),
+        definition.pinned_configuration_digest().clone(),
+        definition.pinned_catalog_digest().clone(),
+    )
+    .expect("second workflow definition version");
+    client
+        .execute::<WorkflowRegisterDefinition>(&WorkflowDefinitionRegisterRequest {
+            definition: version_two,
+        })
+        .expect("register second workflow definition version");
+    let history = client
+        .execute::<WorkflowDefinitionHistory>(&WorkflowDefinitionHistoryRequest {
+            definition_id: definition_id.clone(),
+        })
+        .expect("read workflow definition history")
+        .result;
+    assert_eq!(history.len(), 2);
+    let diff = client
+        .execute::<WorkflowDiffDefinition>(&WorkflowDefinitionDiffRequest {
+            definition_id: definition_id.clone(),
+            from_version: 1,
+            to_version: 2,
+        })
+        .expect("diff workflow definition versions")
+        .result;
+    assert!(diff.changed_steps.contains(&step_id));
+    let rejected = client
+        .execute::<WorkflowRejectDefinition>(&WorkflowDefinitionRejectRequest {
+            definition_id: uncataloged_definition_id,
+            definition_version: 1,
+            expected_revision: 1,
+        })
+        .expect("reject invalid workflow definition")
+        .result;
+    assert_eq!(
+        rejected.state,
+        tracedecay_contracts::WorkflowDefinitionLifecycleState::Rejected
+    );
 
     let route = WorkProviderRouteV1::new(
         id::<ProviderId>("provider.work.claude-code-cli"),
@@ -875,10 +989,28 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("durably recovered workflow run")
         .result;
     assert_eq!(running.status(), WorkflowRunStatus::Running);
+    let paused_workflow = client
+        .execute::<WorkflowPauseRun>(&WorkflowRunPauseRequest {
+            run_id: run_id.clone(),
+            expected_sequence: running.sequence(),
+            command_id: id("command.workflow.pause-after-restart"),
+        })
+        .expect("mounted workflow pause")
+        .result;
+    assert_eq!(paused_workflow.status(), WorkflowRunStatus::Paused);
+    let resumed_workflow = client
+        .execute::<WorkflowResumeRun>(&WorkflowRunResumeRequest {
+            run_id: run_id.clone(),
+            expected_sequence: paused_workflow.sequence(),
+            command_id: id("command.workflow.resume-after-restart"),
+        })
+        .expect("mounted workflow resume")
+        .result;
+    assert_eq!(resumed_workflow.status(), WorkflowRunStatus::Running);
     client
         .execute::<WorkflowCancelRun>(&WorkflowRunCancelRequest {
             run_id: run_id.clone(),
-            expected_sequence: running.sequence(),
+            expected_sequence: resumed_workflow.sequence(),
             command_id: id::<WorkCommandId>("command.workflow.cancel-after-restart"),
         })
         .expect("mounted workflow cancellation");
@@ -1166,7 +1298,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         project_id,
         repository_id,
         worktree_id,
-        definition_id,
+        definition_id.clone(),
         1,
         step_id,
         synthesis_task.clone(),
@@ -1217,5 +1349,17 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     assert!(
         matches!(replay, ClientError::Problem(ref problem) if problem.kind == "invalid_request"),
         "handoff replay must be a typed refusal: {replay}"
+    );
+    let retired = client
+        .execute::<WorkflowRetireDefinition>(&WorkflowDefinitionRetireRequest {
+            definition_id,
+            definition_version: 1,
+            expected_revision: activated.revision,
+        })
+        .expect("retire active workflow definition")
+        .result;
+    assert_eq!(
+        retired.state,
+        tracedecay_contracts::WorkflowDefinitionLifecycleState::Retired
     );
 }
