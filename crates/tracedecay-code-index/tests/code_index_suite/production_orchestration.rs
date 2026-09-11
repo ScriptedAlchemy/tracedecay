@@ -10,6 +10,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
+    capabilities::expected_seal_digest,
     chunks::{CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1, content_digest},
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError,
@@ -34,13 +35,14 @@ use tracedecay_code_index::{
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
-    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CodeSearchChunkGrainV1, CommitId,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId,
-    RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    StackNodeId, SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
+    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1,
+    CodeSearchChunkGrainV1, CommitId, EdgeAuthorityV1, ExtractorRevision, FileOccurrenceId,
+    LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RelationEdgeKindV1,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, StackNodeId,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -3729,6 +3731,66 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
 /// content address, so its bytes are never re-encoded, re-hashed or rewritten.
 /// Generation evidence is emitted as bounded authenticated pages in one pack
 /// beside that delta-proportional file publication.
+#[test]
+fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("revision fixture owner");
+    let parent = owner
+        .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
+        .expect("revision parent generation");
+    let parent_manifest = parent
+        .encode_partitioned_sealed(|_| Ok(()))
+        .expect("revision parent encoding");
+    let mut parent_envelope: serde_json::Value =
+        serde_json::from_slice(&parent_manifest).expect("parent manifest JSON");
+    let mut historical_manifest: CodeGenerationManifestV1 =
+        serde_json::from_value(parent_envelope["generation"]["manifest"].clone())
+            .expect("parent generation manifest");
+    let (_, revision) = historical_manifest
+        .extractor_revisions
+        .iter_mut()
+        .find(|(language, _)| language.as_str() == "rust")
+        .expect("Rust extractor revision");
+    *revision = ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
+    historical_manifest.seal.expected_digest =
+        expected_seal_digest(&historical_manifest).expect("historical manifest seal");
+    parent_envelope["generation"]["manifest"] =
+        serde_json::to_value(historical_manifest).expect("historical manifest JSON");
+    parent_envelope["state_digest"] = serde_json::to_value(
+        sealed_generation_payload_digest(
+            SEALED_GENERATION_FORMAT_REVISION_V1,
+            &parent_envelope["generation"],
+        )
+        .expect("historical envelope digest"),
+    )
+    .expect("historical digest JSON");
+    let historical_parent =
+        serde_json::to_vec(&parent_envelope).expect("historical parent encoding");
+
+    let child = owner
+        .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
+        .expect("revision child generation");
+    let mut published_files = 0;
+    child
+        .encode_partitioned_sealed_with_parent(Some(&historical_parent), |publication| {
+            if matches!(
+                publication,
+                SealedGenerationSegmentPublicationV1::File { .. }
+            ) {
+                published_files += 1;
+            }
+            Ok(())
+        })
+        .expect("revision child encoding");
+
+    assert_eq!(
+        published_files,
+        child.snapshot().files.len(),
+        "no file segment may cross an extractor revision"
+    );
+}
+
 #[test]
 fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let store = SharedPublicationStore::default();

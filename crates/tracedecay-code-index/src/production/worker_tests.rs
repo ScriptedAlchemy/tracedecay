@@ -103,8 +103,11 @@ fn worker_config() -> CodeIndexProductionConfigV1 {
     }
 }
 
-fn worker_request(file_occurrence: &str, sealed_at: i64) -> CodeIndexBuildRequestV1 {
-    let source = b"";
+fn worker_request_with_source(
+    file_occurrence: &str,
+    sealed_at: i64,
+    source: &[u8],
+) -> CodeIndexBuildRequestV1 {
     let file = SanitizedCodeFileV1 {
         file_occurrence_id: worker_id(file_occurrence),
         logical_path: "src/lib.rs".to_owned(),
@@ -126,7 +129,7 @@ fn worker_request(file_occurrence: &str, sealed_at: i64) -> CodeIndexBuildReques
         },
         captured_files: vec![CodeIndexCapturedFileV1 {
             file_occurrence_id: file.file_occurrence_id,
-            sanitized_bytes: Arc::from(source.as_slice()),
+            sanitized_bytes: Arc::from(source),
             sensitivity_level: SensitivityLevelV1::Public,
         }],
         changed_files: BTreeSet::new(),
@@ -143,6 +146,10 @@ fn worker_request(file_occurrence: &str, sealed_at: i64) -> CodeIndexBuildReques
         },
         sealed_at: UtcMicros(sealed_at),
     }
+}
+
+fn worker_request(file_occurrence: &str, sealed_at: i64) -> CodeIndexBuildRequestV1 {
+    worker_request_with_source(file_occurrence, sealed_at, b"")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -226,6 +233,129 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
         historical_import_digest
     );
     assert_eq!(upgraded.retained_parse_stats().full_extractions, 1);
+}
+
+#[test]
+fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
+    let source = b"mod inner { pub fn value() {} }\npub use inner::*;\n";
+    let pool = SharedPhysicalCodeArtifactPoolV1::default();
+    let mut seed = CodeIndexProductionOwnerV1::new(
+        worker_config(),
+        WorkerPublicationStore::default(),
+        WorkerProjectionSink,
+    )
+    .expect("seed production owner")
+    .with_physical_artifact_pool(pool.clone());
+    let generation = seed
+        .build_and_publish(
+            worker_request_with_source("file.worker.pool", 1_100_000, source),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("seed generation");
+    let mut stale = generation.files[0].as_ref().clone();
+    stale.extraction.extractor_revision =
+        ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
+    stale.extraction.parser_import_rows_digest =
+        canonical_sha256(&"historical import row schema").expect("historical row digest");
+    stale.artifacts.imports.clear();
+    let stale = Arc::new(stale);
+
+    let request = worker_request_with_source("file.worker.pool", 1_200_000, source);
+    let language = request.snapshot.files[0]
+        .language
+        .as_ref()
+        .expect("Rust language");
+    let registry = StaticLanguageRegistry::new();
+    let descriptor = registry
+        .descriptor(language)
+        .expect("compiled Rust descriptor");
+    let reuse_key = CodeIndexProductionOwnerV1::<
+        WorkerPublicationStore,
+        WorkerProjectionSink,
+    >::physical_reuse_key(
+        &worker_config(),
+        &request.snapshot.files[0],
+        descriptor,
+        SensitivityLevelV1::Public,
+    )
+    .expect("physical reuse key");
+    pool.insert(reuse_key, &stale);
+
+    let mut upgraded = CodeIndexProductionOwnerV1::new(
+        worker_config(),
+        WorkerPublicationStore::default(),
+        WorkerProjectionSink,
+    )
+    .expect("upgraded production owner")
+    .with_physical_artifact_pool(pool);
+    let rebuilt = upgraded
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
+        .expect("stale pooled artifact is re-extracted");
+
+    assert_eq!(
+        rebuilt.files[0].extraction.extractor_revision.as_str(),
+        "extractor.rust.v4"
+    );
+    assert!(
+        rebuilt.files[0]
+            .artifacts
+            .imports
+            .iter()
+            .any(|row| row.is_public && row.is_glob),
+        "replacement import evidence must have the v4 public-glob shape"
+    );
+}
+
+#[test]
+fn incremental_carry_forward_rejects_a_stale_extractor_revision() {
+    let source = b"mod inner { pub fn value() {} }\npub use inner::*;\n";
+    let store = WorkerPublicationStore::default();
+    let mut seed =
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
+            .expect("seed production owner");
+    let generation = seed
+        .build_and_publish(
+            worker_request_with_source("file.worker.increment", 1_100_000, source),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("seed generation");
+    drop(generation);
+    drop(seed);
+
+    {
+        let mut slot = store.active.lock().expect("publication lock");
+        let active = Arc::make_mut(slot.as_mut().expect("seeded active generation"));
+        let file = Arc::make_mut(&mut active.files[0]);
+        file.extraction.extractor_revision =
+            ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
+        file.extraction.parser_import_rows_digest =
+            canonical_sha256(&"historical import row schema").expect("historical row digest");
+        file.artifacts.imports.clear();
+        assert!(
+            active.validated.get().is_some(),
+            "fixture keeps the already-validated generation memo"
+        );
+    }
+
+    let mut upgraded =
+        CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
+            .expect("upgraded production owner");
+    let rebuilt = upgraded
+        .build_and_publish(
+            worker_request_with_source("file.worker.increment", 1_200_000, source),
+            &UninterruptibleCodeIndexControlV1,
+        )
+        .expect("stale carried artifact is re-extracted");
+
+    assert_eq!(upgraded.retained_parse_stats().full_extractions, 1);
+    assert!(
+        rebuilt.files[0]
+            .artifacts
+            .imports
+            .iter()
+            .any(|row| row.is_public && row.is_glob),
+        "replacement import evidence must have the current public-glob shape"
+    );
 }
 
 #[test]
