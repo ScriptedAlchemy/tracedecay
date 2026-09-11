@@ -402,26 +402,7 @@ impl CodeFileIndexArtifactsV1 {
                 IMPORT_AUTHORITY_MISMATCH.to_owned(),
             ));
         }
-        match (extraction.language.as_str(), &self.schema_evidence) {
-            ("protobuf" | "sql", None) => {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                    "schema extraction is missing its typed evidence".to_owned(),
-                ));
-            }
-            ("protobuf", Some(evidence))
-                if evidence.language != SchemaEvidenceLanguageV1::Protobuf =>
-            {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                    "schema evidence language does not match its extraction".to_owned(),
-                ));
-            }
-            ("sql", Some(evidence)) if evidence.language != SchemaEvidenceLanguageV1::Sql => {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                    "schema evidence language does not match its extraction".to_owned(),
-                ));
-            }
-            _ => {}
-        }
+        validate_schema_evidence_language(extraction.language.as_str(), &self.schema_evidence)?;
         Ok(())
     }
 
@@ -534,6 +515,47 @@ impl CodeFileIndexArtifactsV1 {
         };
         result.validate()?;
         Ok(result)
+    }
+}
+
+fn validate_schema_evidence_language(
+    language: &str,
+    evidence: &Option<ExtractedSchemaEvidenceV1>,
+) -> Result<(), ChunkingFailureV1> {
+    match (language, evidence) {
+        ("protobuf", Some(evidence)) if evidence.language == SchemaEvidenceLanguageV1::Protobuf => {
+        }
+        ("sql", Some(evidence)) if evidence.language == SchemaEvidenceLanguageV1::Sql => {}
+        ("protobuf" | "sql", None) => {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "schema extraction is missing its typed evidence".to_owned(),
+            ));
+        }
+        (_, None) => {}
+        (_, Some(_)) => {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "schema evidence language does not match its extraction".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod schema_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_schema_evidence_for_a_foreign_language() {
+        let evidence = Some(ExtractedSchemaEvidenceV1 {
+            logical_path: "src/lib.rs".to_owned(),
+            language: SchemaEvidenceLanguageV1::Sql,
+            status: SchemaEvidenceStatusV1::Complete,
+            issues: Vec::new(),
+            facts: Vec::new(),
+        });
+
+        assert!(validate_schema_evidence_language("rust", &evidence).is_err());
     }
 }
 
