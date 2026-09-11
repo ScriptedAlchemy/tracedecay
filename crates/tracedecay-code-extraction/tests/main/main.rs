@@ -72,6 +72,8 @@ mod ruby;
 mod rust;
 mod same_line_identity;
 mod scala;
+#[cfg(feature = "lang-sql")]
+mod sql;
 mod svelte;
 mod swift;
 #[cfg(feature = "lang-toml")]

@@ -1263,7 +1263,7 @@ pub mod test_support {
                 pooling: ManifestPoolingV1::Mean,
                 truncation: TruncationPolicyV1 {
                     side: TruncationSideV1::Right,
-                    max_length: 512,
+                    max_length: 4096,
                 },
                 precision: ManifestPrecisionV1::Fp32,
                 runtime: RuntimeCompatibilityV1 {
@@ -1281,7 +1281,7 @@ pub mod test_support {
                     max_resident_bytes,
                     max_threads: 4,
                     max_batch_size: 8,
-                    max_sequence_length: 512,
+                    max_sequence_length: 4096,
                     load_deadline_ms,
                 },
                 upstream: UpstreamSourceV1 {
@@ -1311,7 +1311,7 @@ pub mod test_support {
             document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
-            truncation_length: 512,
+            truncation_length: 4096,
             inference_batch_size: payload.resource_ceiling.max_batch_size,
             inference_batch_bytes: payload
                 .resource_ceiling
@@ -1504,6 +1504,26 @@ mod tests {
                 "release/acquire reuses the warmed session"
             );
         }
+    }
+
+    #[test]
+    fn generation_stripes_cold_load_at_most_the_session_width() {
+        const SESSION_WIDTH: usize = 4;
+        const STRIPES: usize = 12;
+        let pool = fake_pool(SESSION_WIDTH, Duration::from_mins(1), 1 << 20);
+        let authority = authority();
+
+        for _ in 0..STRIPES {
+            let stripe = (0..SESSION_WIDTH)
+                .map(|_| pool.acquire(&authority).expect("generation stripe session"))
+                .collect::<Vec<_>>();
+            drop(stripe);
+        }
+
+        let stats = pool.stats();
+        assert_eq!(stats.sessions_opened, SESSION_WIDTH);
+        assert_eq!(stats.idle, SESSION_WIDTH);
+        assert_eq!(stats.sessions_closed, 0);
     }
 
     #[test]

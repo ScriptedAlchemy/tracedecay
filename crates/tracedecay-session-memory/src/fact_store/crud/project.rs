@@ -8,6 +8,7 @@ use super::super::primitives::{
 use super::super::projection::{
     load_project_memory_projection_controlled_tx, load_project_memory_projection_tx,
     load_project_memory_projections_controlled_tx, load_project_memory_projections_tx,
+    project_retired_memory_fact_tx,
 };
 use super::{
     DEFAULT_TRUST, commit_fact_tx, query_fact_before_supersession_tx,
@@ -238,7 +239,17 @@ pub(in crate::fact_store) async fn get_project_memory_fact_controlled_tx(
     )
     .await?;
     ensure_project_memory_read_active(read_control)?;
-    Ok(projection)
+    if projection.is_some() {
+        return Ok(projection);
+    }
+    let Some((retired, superseded_by)) =
+        query_fact_before_supersession_tx(transaction, target.owner(), target.fact_id()).await?
+    else {
+        return Ok(None);
+    };
+    let projection = project_retired_memory_fact_tx(transaction, retired, superseded_by).await?;
+    ensure_project_memory_read_active(read_control)?;
+    Ok(Some(projection))
 }
 
 pub(in crate::fact_store) async fn find_project_memory_fact_by_content_digest_tx(
@@ -357,7 +368,7 @@ pub(in crate::fact_store) async fn project_memory_fact_history_controlled_tx(
     // A superseded fact leaves the current views but stays queryable through
     // this explicit historical path: the projection as of its supersession
     // event, payload and trust as stored.
-    if let Some(retired) = query_fact_before_supersession_tx(
+    if let Some((retired, _)) = query_fact_before_supersession_tx(
         transaction,
         query.target().owner(),
         query.target().fact_id(),

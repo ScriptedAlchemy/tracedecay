@@ -10,6 +10,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use tracedecay_code_extraction::incremental::ParseLimits;
 use tracedecay_code_index::{
+    capabilities::expected_seal_digest,
     chunks::{CodeIndexImportEvidenceV1, ExtractionAdmittedCodeSearchChunkV1, content_digest},
     graph_projection::{
         CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError,
@@ -34,8 +35,9 @@ use tracedecay_code_index::{
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
-    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, EdgeAuthorityV1,
-    FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1,
+    CodeSearchChunkGrainV1, CommitId, EdgeAuthorityV1, ExtractorRevision, FileOccurrenceId,
+    LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RelationEdgeKindV1,
     RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
@@ -1205,6 +1207,53 @@ fn active_generation_loads_share_the_published_allocation() {
         second.chunks().chunks().as_ptr(),
         "active reads must share the immutable generation instead of cloning its complete indices"
     );
+}
+
+#[test]
+fn sealed_store_drops_whitespace_only_window_chunks() {
+    const FUNCTIONS: usize = 32;
+    let source: String = (0..FUNCTIONS)
+        .map(|index| format!("pub fn symbol_{index}() {{}}\n\n"))
+        .collect();
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.whitespace-window-attribution",
+                1_260_000,
+                "commit.whitespace-window-attribution",
+                "tree.whitespace-window-attribution",
+                &source,
+            ),
+            &ActiveControl,
+        )
+        .expect("whitespace-heavy fixture publishes");
+    let chunks = generation.chunks().chunks();
+    assert!(
+        chunks.iter().all(|chunk| {
+            chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                || !chunk
+                    .sanitized_text
+                    .as_str()
+                    .chars()
+                    .all(char::is_whitespace)
+        }),
+        "sealed rows must not include whitespace-only FileWindow chunks"
+    );
+    // One-line functions previously minted signature + body + whitespace window
+    // (3N). Attribution keeps signature + body only.
+    assert_eq!(chunks.len(), FUNCTIONS * 2);
+    assert!(
+        chunks.len() < FUNCTIONS * 3,
+        "sealed chunk count must drop below the three-per-function baseline"
+    );
+    let sealed = generation.encode_sealed().expect("generation seals");
+    assert!(!sealed.is_empty(), "sealed store must carry bytes");
 }
 
 #[test]
@@ -3100,23 +3149,23 @@ fn partitioned_codec_fixture() -> (
 }
 
 const PARTITIONED_FORMAT_STATE_DIGEST: &str =
-    "sha256:f1741f8ee5b4fec3dfc723e6de9ab9794de3a016f837ef7d1186306e09526abf";
+    "sha256:9a4b5d2f23e4ab7d74e01977c18ae0e42a394e64d79c9f8f0633072d728743bd";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:0ae42f3ae5844c46e7fea6cfb07f91e09d6634e8f9c2f1df053d62cc7d7c1f24",
-        8_584,
+        "sha256:4db0d378108aa77b64bc33ab958b3e7167c9dcdfa1f7485803c9ba46dc4bcbf0",
+        7_958,
     ),
     (
-        "sha256:21d54dff99989ad1b91b8254ad1a7c1310fe866755e0c3157153c2ab18951b19",
-        3_856,
+        "sha256:c4188be2888d3542e61f96abb84106df795cdd646f7358dbd23ed2344391838a",
+        3_543,
     ),
     (
-        "sha256:4f03e051764f885e2eb5f3537a2f7d26741f72f936fd6e4dc5ec1fd53a0751da",
-        3_964,
+        "sha256:da48ed86c30e06f7eae795e983a1b943972e971604ff6e2093683b8857d7ceca",
+        3_651,
     ),
     (
-        "sha256:1bfa6399cd1a9f5d06ec697add39064ac1cc4f51dcfc866ba903c62ac3cad476",
-        11_830,
+        "sha256:9aacc4645ff8e7c898401e5ded39b158fef6770ff90987f9471518f661a8f281",
+        10_133,
     ),
 ];
 
@@ -3139,6 +3188,40 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
             .collect::<Vec<_>>(),
         PARTITIONED_FORMAT_SEGMENTS,
         "a file or evidence segment changed bytes"
+    );
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
+            .expect("partitioned text metadata parses")
+            .expect("revision seven partitioned manifest")
+            .generation_statistics(),
+        expected.generation_statistics().ok().as_ref(),
+        "a freshly sealed manifest carries the generation's own census"
+    );
+
+    // The same revision as a writer produced it before the census existed:
+    // these bytes minus that one field. Text owners still bind against it,
+    // and the census reads as unavailable rather than as a measured zero.
+    let mut pre_census: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
+    pre_census["generation"]
+        .as_object_mut()
+        .expect("generation payload")
+        .remove("statistics")
+        .expect("a fresh manifest carries a census to remove");
+    pre_census["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&pre_census["generation"]).expect("pre-census payload bytes")
+        ))
+    ));
+    let pre_census = serde_json::to_vec(&pre_census).expect("pre-census manifest bytes");
+    assert_eq!(
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&pre_census)
+            .expect("a manifest written without a census still authenticates")
+            .expect("revision seven partitioned manifest")
+            .generation_statistics(),
+        None,
+        "an absent census must read as unavailable, not as a measured zero"
     );
 
     // Decode at width two with three file segments: the third file read must
@@ -3200,6 +3283,7 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
                     evidence_buffer_address.set(Some(address));
                 }
                 largest_evidence_page.set(largest_evidence_page.get().max(end - start));
+                evidence_buffer_capacity.set(buffer.capacity());
             }
             segment_reads.set(segment_reads.get() + 1);
             Ok(())
@@ -3645,6 +3729,66 @@ fn partitioned_descriptor_readers_share_validation_without_sharing_authenticatio
 /// content address, so its bytes are never re-encoded, re-hashed or rewritten.
 /// Generation evidence is emitted as bounded authenticated pages in one pack
 /// beside that delta-proportional file publication.
+#[test]
+fn partitioned_encode_rewrites_file_segments_across_extractor_revisions() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("revision fixture owner");
+    let parent = owner
+        .build_and_publish(partitioned_codec_request(1, 1_100_000), &ActiveControl)
+        .expect("revision parent generation");
+    let parent_manifest = parent
+        .encode_partitioned_sealed(|_| Ok(()))
+        .expect("revision parent encoding");
+    let mut parent_envelope: serde_json::Value =
+        serde_json::from_slice(&parent_manifest).expect("parent manifest JSON");
+    let mut historical_manifest: CodeGenerationManifestV1 =
+        serde_json::from_value(parent_envelope["generation"]["manifest"].clone())
+            .expect("parent generation manifest");
+    let (_, revision) = historical_manifest
+        .extractor_revisions
+        .iter_mut()
+        .find(|(language, _)| language.as_str() == "rust")
+        .expect("Rust extractor revision");
+    *revision = ExtractorRevision::new("extractor.rust.v3").expect("historical extractor revision");
+    historical_manifest.seal.expected_digest =
+        expected_seal_digest(&historical_manifest).expect("historical manifest seal");
+    parent_envelope["generation"]["manifest"] =
+        serde_json::to_value(historical_manifest).expect("historical manifest JSON");
+    parent_envelope["state_digest"] = serde_json::to_value(
+        sealed_generation_payload_digest(
+            SEALED_GENERATION_FORMAT_REVISION_V1,
+            &parent_envelope["generation"],
+        )
+        .expect("historical envelope digest"),
+    )
+    .expect("historical digest JSON");
+    let historical_parent =
+        serde_json::to_vec(&parent_envelope).expect("historical parent encoding");
+
+    let child = owner
+        .build_and_publish(partitioned_codec_request(2, 1_200_000), &ActiveControl)
+        .expect("revision child generation");
+    let mut published_files = 0;
+    child
+        .encode_partitioned_sealed_with_parent(Some(&historical_parent), |publication| {
+            if matches!(
+                publication,
+                SealedGenerationSegmentPublicationV1::File { .. }
+            ) {
+                published_files += 1;
+            }
+            Ok(())
+        })
+        .expect("revision child encoding");
+
+    assert_eq!(
+        published_files,
+        child.snapshot().files.len(),
+        "no file segment may cross an extractor revision"
+    );
+}
+
 #[test]
 fn partitioned_encode_publishes_only_the_edited_file_segment() {
     let store = SharedPublicationStore::default();

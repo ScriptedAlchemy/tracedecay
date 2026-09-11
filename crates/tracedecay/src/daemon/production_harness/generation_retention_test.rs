@@ -232,7 +232,7 @@ fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
         document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
-        truncation_length: 512,
+        truncation_length: 4096,
         inference_batch_size: 8,
         inference_batch_bytes: 16 * 1024,
         runtime_backend: "fastembed-ort".to_owned(),

@@ -1266,7 +1266,12 @@ impl DeterministicCodeChunker {
             )
         })?;
         let symbols = hotpath::measure_block!("code_index.chunk.lineage", {
-            self.lineage_symbols(source, &file_identity, &symbol_rows)
+            self.lineage_symbols(
+                source,
+                &file_identity,
+                &symbol_rows,
+                &published_symbol_spans(chunks.iter()),
+            )
         })?;
         let (mut edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
         let (same_file_edges, unresolved_references) =
@@ -1475,15 +1480,22 @@ impl DeterministicCodeChunker {
         source: &str,
         file_identity: &FileIdentityDigest,
         rows: &[SymbolRow],
+        published_spans: &BTreeMap<SymbolOccurrenceId, SourceSpan>,
     ) -> Result<Vec<LineageSymbolRecordV1>, ChunkingFailureV1> {
         let mut symbols = Vec::with_capacity(rows.len());
         for row in rows {
-            let start = usize::try_from(row.span.start_byte).map_err(|error| {
+            let span = published_spans.get(&row.occurrence).ok_or_else(|| {
+                ChunkingFailureV1::NonCanonicalIdentity(format!(
+                    "symbol {} has no published source span",
+                    row.qualified_name
+                ))
+            })?;
+            let start = usize::try_from(span.start_byte).map_err(|error| {
                 ChunkingFailureV1::NonCanonicalIdentity(format!(
                     "symbol start offset does not fit this host: {error}"
                 ))
             })?;
-            let end = usize::try_from(row.span.end_byte).map_err(|error| {
+            let end = usize::try_from(span.end_byte).map_err(|error| {
                 ChunkingFailureV1::NonCanonicalIdentity(format!(
                     "symbol end offset does not fit this host: {error}"
                 ))
@@ -1694,6 +1706,7 @@ impl DeterministicCodeChunker {
             if cursor < len {
                 emit_windows(source, cursor, len, gap_ordinal, &mut pending);
             }
+            attribute_whitespace_only_windows(source, &mut pending);
             Ok::<_, ChunkingFailureV1>((pending, emissions))
         })?;
 
@@ -1804,6 +1817,30 @@ impl DeterministicCodeChunker {
             Ok(chunks)
         })
     }
+}
+
+/// Canonical source span recorded for each published symbol.
+///
+/// Retrieval grains may expand to absorb adjacent whitespace, so both symbol
+/// content identity and graph projection must derive their span from this
+/// post-attribution chunk set.
+pub(crate) fn published_symbol_spans<'a>(
+    chunks: impl IntoIterator<Item = &'a CodeSearchChunkV1>,
+) -> BTreeMap<SymbolOccurrenceId, SourceSpan> {
+    let mut spans = BTreeMap::<SymbolOccurrenceId, SourceSpan>::new();
+    for chunk in chunks {
+        let Some(symbol) = &chunk.anchor.symbol_occurrence_id else {
+            continue;
+        };
+        spans
+            .entry(symbol.clone())
+            .and_modify(|span| {
+                span.start_byte = span.start_byte.min(chunk.anchor.source_span.start_byte);
+                span.end_byte = span.end_byte.max(chunk.anchor.source_span.end_byte);
+            })
+            .or_insert(chunk.anchor.source_span);
+    }
+    spans
 }
 
 /// Names too ubiquitous to resolve across files by name alone: standard
@@ -2353,6 +2390,116 @@ fn emit_windows(
     }
 }
 
+fn span_is_whitespace_only(source: &str, span: SourceSpan) -> bool {
+    if span.is_empty() {
+        return false;
+    }
+    let text = &source[span.start_byte as usize..span.end_byte as usize];
+    !text.is_empty() && text.chars().all(char::is_whitespace)
+}
+
+/// Fold whitespace-only `FileWindow` pieces into an adjacent retrievable
+/// grain so those bytes stay covered without minting an unreachable row.
+///
+/// The target is the nearest piece by span: the preceding retrievable
+/// piece whose `end_byte` equals the window start, otherwise the
+/// following retrievable piece whose `start_byte` equals the window end.
+/// Any retrievable grain, including [`CodeSearchChunkGrainV1::SymbolBody`],
+/// may be the target. Overlapping fallback windows in one whitespace gap
+/// are attributed as one contiguous range; a piece that merely overlaps the
+/// run without abutting it (possible only inside an oversized unowned
+/// region) is not a target. A window is left in place only when no such
+/// neighbor exists or folding it would exceed [`MAX_CHUNK_TEXT_BYTES`].
+fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChunk>) {
+    let whitespace_windows: Vec<usize> = pending
+        .iter()
+        .enumerate()
+        .filter(|(_, piece)| {
+            piece.grain == CodeSearchChunkGrainV1::FileWindow
+                && span_is_whitespace_only(source, piece.span)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if whitespace_windows.is_empty() {
+        return;
+    }
+
+    let mut ordered = whitespace_windows;
+    ordered.sort_by_key(|&index| (pending[index].span.start_byte, pending[index].span.end_byte));
+
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    for index in ordered {
+        if let Some(run) = runs.last_mut() {
+            let run_end = run
+                .iter()
+                .map(|&member| pending[member].span.end_byte)
+                .max()
+                .unwrap_or(0);
+            if pending[index].span.start_byte <= run_end {
+                run.push(index);
+                continue;
+            }
+        }
+        runs.push(vec![index]);
+    }
+
+    let mut drop = vec![false; pending.len()];
+    for run in runs {
+        let start = run
+            .iter()
+            .map(|&index| pending[index].span.start_byte)
+            .min()
+            .unwrap_or(0);
+        let end = run
+            .iter()
+            .map(|&index| pending[index].span.end_byte)
+            .max()
+            .unwrap_or(0);
+        let in_run = |index: usize| run.contains(&index);
+        let retrievable = |index: usize, piece: &PendingChunk| {
+            !in_run(index)
+                && !drop[index]
+                && !piece.span.is_empty()
+                && !span_is_whitespace_only(source, piece.span)
+        };
+        // Nearest by span, not pending-vector order: an enclosing parent
+        // can appear first and is not the abutting neighbor.
+        let preceding = pending
+            .iter()
+            .enumerate()
+            .filter(|(index, piece)| retrievable(*index, piece) && piece.span.end_byte == start)
+            .max_by_key(|(_, piece)| piece.span.start_byte)
+            .map(|(index, _)| index);
+        let following = pending
+            .iter()
+            .enumerate()
+            .filter(|(index, piece)| retrievable(*index, piece) && piece.span.start_byte == end)
+            .min_by_key(|(_, piece)| piece.span.end_byte)
+            .map(|(index, _)| index);
+        let Some(target) = preceding.or(following) else {
+            continue;
+        };
+        let new_start = pending[target].span.start_byte.min(start);
+        let new_end = pending[target].span.end_byte.max(end);
+        if new_end.saturating_sub(new_start) > MAX_CHUNK_TEXT_BYTES as u64 {
+            continue;
+        }
+        pending[target].span.start_byte = new_start;
+        pending[target].span.end_byte = new_end;
+        for index in run {
+            drop[index] = true;
+        }
+    }
+
+    let mut kept = Vec::with_capacity(pending.len());
+    for (index, piece) in std::mem::take(pending).into_iter().enumerate() {
+        if !drop[index] {
+            kept.push(piece);
+        }
+    }
+    *pending = kept;
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
@@ -2635,6 +2782,23 @@ mod tests {
 
     fn batch_for(file: &ReceiptBoundCodeFileV1, outcome: ParseOutcomeV1) -> ExtractionBatchV1 {
         let descriptor = rust_descriptor();
+        // The parser import digest is the extractor's to state, never the
+        // fixture's: chunking re-derives the rows and refuses a batch that
+        // declares different ones. An outcome that attests no structure
+        // carries no rows at all, which is what the unsupported-document path
+        // builds its artifacts from.
+        let parser_import_rows_digest = match &outcome {
+            ParseOutcomeV1::Complete | ParseOutcomeV1::Partial { .. } => TreeSitterExtractor::new()
+                .extract(file, &descriptor, &NeverCancelled)
+                .expect("fixture extraction")
+                .batch()
+                .parser_import_rows_digest
+                .clone(),
+            ParseOutcomeV1::Failed { .. }
+            | ParseOutcomeV1::TimedOut
+            | ParseOutcomeV1::Cancelled => crate::extract::parser_import_rows_digest(&[])
+                .expect("empty parser import rows digest"),
+        };
         ExtractionBatchV1 {
             generation_id: file.generation_id.clone(),
             file_occurrence_id: file.file.file_occurrence_id.clone(),
@@ -2654,8 +2818,7 @@ mod tests {
                 parsed_bytes: file.sanitized_bytes.len() as u64,
                 ..ExtractionCoverageV1::default()
             },
-            parser_import_rows_digest: crate::extract::parser_import_rows_digest(&[])
-                .expect("empty parser import rows digest"),
+            parser_import_rows_digest,
             rows_digest: id::<ManifestDigest>(&digest('d')),
         }
     }
@@ -2669,9 +2832,12 @@ mod tests {
 
     fn chunk_source(source: &str) -> CodeFileChunksV1 {
         let file = validated_file("src/lib.rs", source.as_bytes());
-        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let descriptor = rust_descriptor();
+        let extracted = TreeSitterExtractor::new()
+            .extract(&file, &descriptor, &NeverCancelled)
+            .expect("extract source");
         chunker()
-            .chunk_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .chunk_file(&file, extracted.batch(), &descriptor, &NeverCancelled)
             .expect("chunking succeeds")
     }
 
@@ -2939,6 +3105,267 @@ mod tests {
         }));
     }
 
+    fn whitespace_heavy_functions(count: usize) -> String {
+        (0..count)
+            .map(|index| format!("pub fn symbol_{index}() {{}}\n\n"))
+            .collect()
+    }
+
+    fn assert_byte_exact_coverage(source: &str, chunks: &CodeFileChunksV1) {
+        let mut covered = vec![false; source.len()];
+        for chunk in &chunks.chunks {
+            for covered_byte in &mut covered[chunk.anchor.source_span.start_byte as usize
+                ..chunk.anchor.source_span.end_byte as usize]
+            {
+                *covered_byte = true;
+            }
+        }
+        assert!(covered.iter().all(|covered| *covered), "full byte coverage");
+    }
+
+    #[test]
+    fn whitespace_only_windows_are_attributed_to_neighboring_grains() {
+        let source = whitespace_heavy_functions(8);
+        let result = chunk_source(&source);
+        result.validate().expect("valid chunk set");
+        assert_byte_exact_coverage(&source, &result);
+
+        assert!(
+            result.chunks.iter().all(|chunk| {
+                chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                    || !span_is_whitespace_only(source.as_str(), chunk.anchor.source_span)
+            }),
+            "whitespace-only FileWindow chunks must not be emitted"
+        );
+
+        let alpha_source = "pub fn alpha() {}\n\npub fn beta() {}\n";
+        let alpha = chunk_source(alpha_source);
+        alpha.validate().expect("valid adjacent-literal fixture");
+        assert_byte_exact_coverage(alpha_source, &alpha);
+        assert!(alpha.chunks.iter().all(|chunk| {
+            chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                || !span_is_whitespace_only(alpha_source, chunk.anchor.source_span)
+        }));
+
+        let literal = b"alpha";
+        let literal_start = alpha_source.find("alpha").expect("alpha literal") as u64;
+        let literal_end = literal_start + literal.len() as u64;
+        let folded_start = alpha_source.find("\n\n").expect("folded gap") as u64;
+        let folded_end = folded_start + 2;
+        let term = alpha
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.exact_terms.iter())
+            .find(|term| term.original_bytes() == literal)
+            .expect("exact term for alpha");
+        assert_eq!(
+            term.span(),
+            SourceSpan {
+                start_byte: literal_start,
+                end_byte: literal_end,
+            }
+        );
+        assert!(
+            term.span().end_byte <= folded_start || term.span().start_byte >= folded_end,
+            "exact occurrence must not cross the folded whitespace range"
+        );
+        for term in alpha
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.exact_terms.iter())
+        {
+            let start = term.span().start_byte as usize;
+            let end = term.span().end_byte as usize;
+            assert_eq!(
+                &alpha_source.as_bytes()[start..end],
+                term.original_bytes(),
+                "exact term bytes stay on the literal"
+            );
+            assert!(
+                !alpha_source[start..end].chars().all(char::is_whitespace),
+                "exact occurrence must not land in a folded whitespace region"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_whitespace_window_folds_forward_into_the_next_retrievable_grain() {
+        let source = "   hello";
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![1],
+                span: SourceSpan {
+                    start_byte: 3,
+                    end_byte: 8,
+                },
+                parent: None,
+            },
+        ];
+        attribute_whitespace_only_windows(source, &mut pending);
+        assert_eq!(pending.len(), 1, "the leading whitespace window folds away");
+        assert_eq!(
+            pending[0].span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: 8,
+            }
+        );
+        assert_eq!(&source[0..8], "   hello");
+        assert_eq!(pending[0].split_path, vec![1]);
+    }
+
+    #[test]
+    fn all_whitespace_source_retains_whitespace_only_windows() {
+        let source = "   \n\n\t  \n";
+        let result = chunk_source(source);
+        result.validate().expect("valid all-whitespace chunk set");
+        assert_byte_exact_coverage(source, &result);
+        assert!(
+            !result.chunks.is_empty(),
+            "an all-whitespace file must keep its FileWindow grains"
+        );
+        assert!(
+            result.chunks.iter().all(|chunk| {
+                chunk.anchor.grain == CodeSearchChunkGrainV1::FileWindow
+                    && span_is_whitespace_only(source, chunk.anchor.source_span)
+            }),
+            "all-whitespace FileWindows must be retained when no retrievable neighbor exists"
+        );
+    }
+
+    #[test]
+    fn fold_that_exceeds_max_chunk_text_bytes_retains_the_window() {
+        let mut source = "x".repeat(MAX_CHUNK_TEXT_BYTES);
+        source.push_str("  ");
+        let max = MAX_CHUNK_TEXT_BYTES as u64;
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(0),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: max,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: max,
+                    end_byte: max + 2,
+                },
+                parent: None,
+            },
+        ];
+        attribute_whitespace_only_windows(&source, &mut pending);
+        assert_eq!(
+            pending.len(),
+            2,
+            "a fold that would exceed MAX_CHUNK_TEXT_BYTES must keep the window"
+        );
+        assert_eq!(
+            pending[0].span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: max,
+            },
+            "the retrievable target span must stay unchanged"
+        );
+        assert_eq!(pending[1].grain, CodeSearchChunkGrainV1::FileWindow);
+        assert!(span_is_whitespace_only(&source, pending[1].span));
+    }
+
+    #[test]
+    fn whitespace_window_folds_into_the_abutting_body_not_the_enclosing_parent() {
+        let source = "aaaa  bbbb";
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolSignature,
+                symbol: Some(0),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 10,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(1),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 4,
+                },
+                parent: Some((0, vec![])),
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: 4,
+                    end_byte: 6,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(2),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 6,
+                    end_byte: 10,
+                },
+                parent: Some((0, vec![])),
+            },
+        ];
+        attribute_whitespace_only_windows(source, &mut pending);
+        let body = pending
+            .iter()
+            .find(|piece| {
+                piece.grain == CodeSearchChunkGrainV1::SymbolBody && piece.symbol == Some(1)
+            })
+            .expect("abutting body remains");
+        assert_eq!(
+            body.span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: 6,
+            },
+            "the window must fold into the abutting SymbolBody, not the enclosing parent"
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .find(|piece| piece.grain == CodeSearchChunkGrainV1::SymbolSignature)
+                .expect("parent remains")
+                .span
+                .end_byte,
+            10,
+            "the enclosing parent span must stay unchanged"
+        );
+        assert!(pending.iter().all(|piece| {
+            piece.grain != CodeSearchChunkGrainV1::FileWindow
+                || !span_is_whitespace_only(source, piece.span)
+        }));
+    }
+
     #[test]
     fn symbol_member_chunks_include_leading_attributes() {
         let result = chunk_source(
@@ -3002,6 +3429,19 @@ mod tests {
         fn extract(&self, file_path: &str, source: &str) -> tracedecay_domain::ExtractionResult {
             self.calls.fetch_add(1, Ordering::Relaxed);
             tracedecay_code_extraction::RustExtractor.extract(file_path, source)
+        }
+
+        // Delegating to the real artifact walk, not to the trait default over
+        // `extract`, is what keeps the counting double honest: the default
+        // carries no import evidence, so a batch minted through it would
+        // declare rows the live extractor does not agree with.
+        fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tracedecay_code_extraction::LanguageExtractor::extract_artifact(
+                &tracedecay_code_extraction::RustExtractor,
+                file_path,
+                source,
+            )
         }
 
         fn extract_parsed(
@@ -3465,7 +3905,15 @@ pub fn real_symbol() {}
         ];
 
         let symbols = chunker()
-            .lineage_symbols(source, &file_identity, &rows)
+            .lineage_symbols(
+                source,
+                &file_identity,
+                &rows,
+                &rows
+                    .iter()
+                    .map(|row| (row.occurrence.clone(), row.span))
+                    .collect(),
+            )
             .expect("valid symbol lineage records");
 
         assert_eq!(

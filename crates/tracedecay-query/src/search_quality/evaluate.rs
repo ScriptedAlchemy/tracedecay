@@ -1074,10 +1074,18 @@ fn pairwise_candidate_evaluation(
             .saturating_sub(baseline_natural.ndcg_at_10_ppm)
             < REQUIRED_NATURAL_LANGUAGE_NDCG_GAIN_PPM
         {
+            // A lexical baseline already at the metric ceiling leaves no
+            // room to demonstrate gain; name that so a small corpus is not
+            // mistaken for a semantic quality regression.
+            let saturated = if u64::from(baseline_natural.ndcg_at_10_ppm) >= METRIC_SCALE_PPM {
+                " (lexical baseline is saturated on this corpus; semantic gain cannot be demonstrated here)"
+            } else {
+                ""
+            };
             return (
                 DirectEvaluationStatusV1::Fail,
                 Some(format!(
-                    "pairwise candidate quality failed: profile={} partition={} stratum=natural_language metric=ndcg_at_10_ppm baseline={} candidate={} required_gain={}",
+                    "pairwise candidate quality failed: profile={} partition={} stratum=natural_language metric=ndcg_at_10_ppm baseline={} candidate={} required_gain={}{saturated}",
                     candidate.profile_id,
                     candidate.partition,
                     baseline_natural.ndcg_at_10_ppm,
@@ -1424,6 +1432,21 @@ mod tests {
                 Some(expected.as_str())
             );
         }
+    }
+
+    #[test]
+    fn saturated_baseline_names_why_gain_cannot_be_demonstrated() {
+        let baseline = passing_profile(QUERY_BASELINE_PROFILE, 1_000_000, 1_000_000);
+        let candidate = passing_profile(SEMANTIC_PROFILE, 1_000_000, 1_000_000);
+
+        assert_eq!(
+            aggregate_profile_status(&[baseline.clone(), candidate.clone()]),
+            super::DirectEvaluationStatusV1::Fail
+        );
+        let diagnostic = super::pairwise_candidate_failure_diagnostic(&[baseline, candidate])
+            .expect("saturated baseline still refuses activation");
+        assert!(diagnostic.contains("baseline=1000000 candidate=1000000 required_gain=1"));
+        assert!(diagnostic.contains("lexical baseline is saturated"));
     }
 
     #[test]

@@ -129,6 +129,7 @@ async function settingsLifecycle() {
       await page.locator(".st-impact").innerText(),
       /VALIDATION\s+valid[\s\S]*PERSISTED\s+conflicted · stale revision[\s\S]*READ-BACK\s+not run/,
     );
+    await page.waitForFunction(() => document.activeElement?.classList.contains("st-row"));
     assert.match(await page.locator(".st-row.is-sel").innerText(), /0\.82/);
     assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("st-row")), true);
 
@@ -138,6 +139,7 @@ async function settingsLifecycle() {
       await page.locator(".st-impact").innerText(),
       /PERSISTED\s+persisted[\s\S]*READ-BACK\s+confirmed[\s\S]*RUNTIME\s+adopted/,
     );
+    await page.waitForFunction(() => document.activeElement?.classList.contains("st-row"));
     assert.match(await page.locator(".st-card").first().innerText(), /fixture-r13/);
     assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("st-row")), true);
 

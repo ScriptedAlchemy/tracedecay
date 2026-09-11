@@ -41,6 +41,44 @@ export type FieldLayout = {
   height: number;
 };
 
+function separateBodies(bodies: BodyLayout[], top: number, bottom: number) {
+  const ordered = [...bodies].sort((a, b) => a.y - b.y || (a.project.id < b.project.id ? -1 : 1));
+  for (let pass = 0; pass < 64; pass++) {
+    let moved = false;
+    for (let i = 0; i < ordered.length; i++) {
+      for (let j = i + 1; j < ordered.length; j++) {
+        const a = ordered[i], b = ordered[j];
+        const dy = b.y - a.y;
+        const needed = a.capR + b.capR + 4;
+        const separation = Math.sqrt(Math.max(0, needed * needed - (b.x - a.x) ** 2));
+        if (Math.abs(dy) >= separation) continue;
+        const push = separation - Math.abs(dy) + 0.1;
+        const upper = a, lower = b;
+        const up = Math.min(push / 2, upper.y - (top + upper.capR));
+        const down = push - up;
+        upper.y -= up;
+        lower.y += down;
+        moved = true;
+      }
+    }
+    for (const body of bodies) body.y = Math.max(top + body.capR, Math.min(bottom - body.capR, body.y));
+    if (!moved) break;
+  }
+  // A final ordered sweep prevents a later pair from re-compressing an
+  // already-separated vertical lane. The field has room for this registry.
+  for (let i = 0; i < ordered.length; i++) for (let j = i + 1; j < ordered.length; j++) {
+    const a = ordered[i], b = ordered[j];
+    const separation = Math.sqrt(Math.max(0, (a.capR + b.capR + 4) ** 2 - (b.x - a.x) ** 2));
+    b.y = Math.max(b.y, a.y + separation);
+  }
+}
+
+function circleHitsBox(circle: BodyLayout, box: { x: number; y: number; w: number; h: number }) {
+  const x = Math.max(box.x, Math.min(circle.x, box.x + box.w));
+  const y = Math.max(box.y, Math.min(circle.y, box.y + box.h));
+  return Math.hypot(circle.x - x, circle.y - y) < circle.capR + 3;
+}
+
 /**
  * x = measured recency bucket. y = indexed mass (log), high mass at top.
  * Peers inside one bucket stay inside their column band; only mass
@@ -74,25 +112,9 @@ export function layoutField(width: number, height: number): FieldLayout {
     };
   });
 
-  // nudge apart bodies that share both column and mass band
-  for (let i = 0; i < bodies.length; i++) {
-    for (let j = i + 1; j < bodies.length; j++) {
-      const a = bodies[i];
-      const b = bodies[j];
-      const dy = Math.abs(a.y - b.y);
-      const dx = Math.abs(a.x - b.x);
-      if (dx < (a.capR + b.capR) * 0.5 && dy < 44) {
-        const push = (44 - dy) / 2 + 4;
-        if (a.y <= b.y) {
-          a.y -= push;
-          b.y += push;
-        } else {
-          a.y += push;
-          b.y -= push;
-        }
-      }
-    }
-  }
+  // Recency owns x. A stable, bounded relaxation assigns only y, so close
+  // timestamps can never make their indexed-mass bodies overlap.
+  separateBodies(bodies, top, top + innerH);
 
   // Keep captions near their soma without putting text over arbors or the HUD.
   type Box = { x: number; y: number; w: number; h: number };
@@ -128,6 +150,7 @@ export function layoutField(width: number, height: number): FieldLayout {
         y: Math.max(96, Math.min(height - h - 12, body.y + dy)), w, h });
     }
     const cost = (box: Box) => occupied.reduce((sum, other) => sum + overlap(box, other), 0) * 10000
+      + bodies.filter(other => other !== body).reduce((sum, other) => sum + (circleHitsBox(other, box) ? 1e9 : 0), 0)
       + Math.hypot(box.x + w / 2 - body.x, box.y + h / 2 - body.y)
       + Math.hypot(box.x - body.x - body.labelDx, box.y - body.y - body.labelDy) * 0.15;
     const best = candidates.reduce((a, b) => cost(a) <= cost(b) ? a : b);

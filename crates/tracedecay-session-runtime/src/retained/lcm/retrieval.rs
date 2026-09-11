@@ -231,9 +231,51 @@ pub(super) async fn execute_grep(
         )
         .await,
     )?;
+    let raw_identities = results
+        .iter()
+        .filter(|result| result.message.kind.as_deref() != Some("summary"))
+        .map(|result| {
+            (
+                result.message.provider.clone(),
+                result.message.message_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let store_ids = tokio::select! {
+        () = context.cancellation_signal.cancelled() => {
+            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_contracts::CancellationStage::DuringRead,
+            ));
+        }
+        result = hotpath::future!(
+            crate::retained::bounded_execution(
+                context,
+                service.lcm_raw_store_ids_admitted(raw_identities),
+            ),
+            label = "daemon.store_runtime.lcm.grep.store_ids"
+        ) => match result {
+            Ok(store_ids) => store_ids,
+            Err(error @ (
+                RetainedSurfaceExecutionErrorV1::Cancelled(_)
+                | RetainedSurfaceExecutionErrorV1::TimedOut(_)
+            )) => return Err(error),
+            Err(_) => {
+                hotpath::gauge!("daemon.store_runtime.lcm.grep.store_ids_unavailable").inc(1.0);
+                BTreeMap::new()
+            }
+        },
+    };
     let hits = results
         .into_iter()
-        .map(|result| output::grep_hit(result, DEFAULT_CONTENT_LIMIT))
+        .map(|result| {
+            let store_id = store_ids
+                .get(&(
+                    result.message.provider.clone(),
+                    result.message.message_id.clone(),
+                ))
+                .copied();
+            output::grep_hit(result, store_id, DEFAULT_CONTENT_LIMIT)
+        })
         .collect::<Vec<_>>();
     evidence_outcome(
         context,
@@ -590,8 +632,13 @@ fn retrieval_query(
         context_budget,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
-    .with_retrieval_scope(retrieval_scope)
-    .with_execution_limits(crate::session_retrieval::admitted_execution_limits(limit));
+    .with_retrieval_scope(retrieval_scope);
+    let execution_limits = if query_text.is_empty() {
+        crate::session_retrieval::admitted_browse_execution_limits(limit)
+    } else {
+        crate::session_retrieval::admitted_execution_limits(limit)
+    };
+    let query = query.with_execution_limits(execution_limits);
     Ok(SessionRetrievalCommand::new(
         query,
         SessionRetrievalFilters {

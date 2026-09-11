@@ -29,8 +29,8 @@ use self::hydration::{HydrationBatch, HydrationError, TemporalHydrationPort};
 use self::ports::{
     CandidateReadState, PageLimits, PageStatus, SessionCursorAuthenticator,
     TemporalExecutionSnapshot, TemporalPortError, TemporalReadPort, TemporalRecord,
-    TemporalRecordBatch, TemporalRecordReadState, TemporalRetrievalScope, pull_candidate_page,
-    pull_temporal_record_page,
+    TemporalRecordBatch, TemporalRecordReadState, TemporalRetrievalScope,
+    pull_bounded_candidate_cohort_page, pull_temporal_record_page,
 };
 use self::ranking::{DiversityLimits, RankedCandidate, RankingError, rank_candidates};
 use self::resolution::resolver::resolve_temporal_controlled;
@@ -387,12 +387,17 @@ pub async fn execute_temporal_candidate_export(
         let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
         hotpath::measure_block!("temporal_query.candidates.generate", {
             loop {
-                let page = pull_candidate_page(read_port, &snapshot, &plan, &mut candidate_state)
-                    .await
-                    .map_err(map_port_error)?;
+                let page = pull_bounded_candidate_cohort_page(
+                    read_port,
+                    &snapshot,
+                    &plan,
+                    &mut candidate_state,
+                )
+                .await
+                .map_err(map_port_error)?;
                 let status = page.status();
                 candidates.extend(page.into_items());
-                if status == PageStatus::Complete {
+                if status == PageStatus::Complete || candidates.len() == limits.candidate_limit {
                     break;
                 }
             }

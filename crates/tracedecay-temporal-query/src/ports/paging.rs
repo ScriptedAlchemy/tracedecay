@@ -308,6 +308,10 @@ impl<T> ReadState<T> {
             || self.consumed_bytes == self.limits.max_total_bytes
     }
 
+    pub(super) fn item_limit_exhausted(&self) -> bool {
+        self.consumed_items == self.limits.max_items
+    }
+
     pub fn begin_page<'a>(
         &'a mut self,
         control: &'a ExecutionControl,

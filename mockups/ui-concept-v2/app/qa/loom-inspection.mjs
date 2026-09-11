@@ -38,8 +38,8 @@ try {
   }
   await page.goto(`${base}/?surface=loom&loom_source=design&state=03&loom_replay=1&loom_time=${Date.parse('2025-05-12T09:50:00Z')/1000}`);
   await page.getByRole('button',{name:'COLLAPSE CHILDREN',exact:true}).click();
-  assert.match(await page.getByRole('button',{name:/^Collapsed children/}).innerText(),/[1-9]\d* withheld/);
-  assert.match(await page.locator('.journey-session-evidence').first().innerText(),/revealed · \d+ withheld/);
+  assert.match(await page.getByRole('button',{name:/^Collapsed children/}).innerText(),/future not revealed/);
+  assert.match(await page.locator('.journey-session-evidence').first().innerText(),/revealed · relations:/);
 
   await page.goto(`${base}/?surface=loom&loom_source=design&state=05`);
   await page.getByRole('slider',{name:'Evidence pane width',exact:true}).fill('60');

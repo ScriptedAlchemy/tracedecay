@@ -332,6 +332,7 @@ pub struct WorktreeInventoryEntryV1 {
     pub worktree_id: Option<WorktreeId>,
     pub reference: Option<RefId>,
     pub head: Option<GitOidV1>,
+    /// Whether Git status contains no tracked or untracked changes.
     pub clean: WorktreeObservationV1,
     pub locked: WorktreeObservationV1,
     pub holder: WorktreeObservationV1,
@@ -364,6 +365,7 @@ pub struct WorktreeInspectionV1 {
     pub worktree_id: WorktreeId,
     pub reference: Option<RefId>,
     pub head: Option<GitOidV1>,
+    /// Whether Git status contains no tracked or untracked changes.
     pub clean: WorktreeObservationV1,
     pub locked: WorktreeObservationV1,
     pub holder: WorktreeObservationV1,
@@ -377,7 +379,7 @@ impl WorktreeInspectionV1 {
     pub fn removal_eligible(&self) -> bool {
         self.presence == WorktreePresenceV1::Present
             && self.kind == Some(WorktreeKindV1::Linked)
-            && self.clean == WorktreeObservationV1::No
+            && self.clean == WorktreeObservationV1::Yes
             && self.locked == WorktreeObservationV1::No
             && self.holder == WorktreeObservationV1::No
             && self.unique_data == WorktreeObservationV1::No

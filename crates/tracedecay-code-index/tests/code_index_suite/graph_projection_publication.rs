@@ -81,6 +81,8 @@ fn expected_import() -> CodeIndexImportEvidenceV1 {
         module_specifier: "pkg".to_owned(),
         imported_name: Some("Foo".to_owned()),
         local_name: Some("LocalFoo".to_owned()),
+        is_public: false,
+        is_glob: false,
         namespace: ImportNamespaceV1::Type,
         module_kind: ImportModuleKindV1::BareModule,
         span: SourceSpan {

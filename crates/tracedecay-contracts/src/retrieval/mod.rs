@@ -131,12 +131,13 @@ pub use source_read::{
     SourceReadPortOutcome, SourceReadPrimitivePort, SourceReadPrimitiveRequest, SourceReadResultV1,
 };
 pub use symbol_graph::{
-    ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationSelector,
-    ImplementationsRequest, MAX_SYMBOL_GRAPH_DEPTH, MAX_SYMBOL_GRAPH_FILTERS,
-    MAX_SYMBOL_GRAPH_QUERY_BYTES, PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap,
-    SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture,
-    SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope, SymbolPrimitiveRecord,
-    SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord, TypeHierarchyRequest,
+    CodeGraphReadFreshnessV1, ExactSymbolRequest, GraphImpactPrimitiveRequest,
+    GraphRelationRequest, ImplementationSelector, ImplementationsRequest, MAX_SYMBOL_GRAPH_DEPTH,
+    MAX_SYMBOL_GRAPH_FILTERS, MAX_SYMBOL_GRAPH_QUERY_BYTES, PrimitiveFailure, PrimitiveFailureKind,
+    PrimitiveSupportGap, SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext,
+    SymbolGraphPortFuture, SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope,
+    SymbolPrimitiveRecord, SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord,
+    TypeHierarchyRequest,
 };
 pub use test_attribution::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, MAX_TEST_FILTER_BYTES,

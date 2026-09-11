@@ -311,6 +311,7 @@ use std::io::{self, Read};
     assert_eq!(import.module_specifier, "crate::target");
     assert_eq!(import.imported_name.as_deref(), Some("helper"));
     assert_eq!(import.local_name.as_deref(), Some("helper"));
+    assert!(!import.is_public);
     assert_eq!(import.module_kind, ImportModuleKindV1::ProjectRelative);
     let root_import = artifact
         .imports
@@ -333,6 +334,7 @@ use std::io::{self, Read};
         .unwrap();
     assert_eq!(sibling.module_specifier, "self::read::nested");
     assert_eq!(sibling.imported_name.as_deref(), Some("Detail"));
+    assert!(sibling.is_public);
     assert_eq!(sibling.module_kind, ImportModuleKindV1::ProjectRelative);
 }
 

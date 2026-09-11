@@ -189,11 +189,12 @@ pub struct AnchorExpandResult {
     pub anchors: Vec<RetrievalAnchorId>,
 }
 
+/// The health read takes no parameters: it reports one serving status, with no
+/// page, projection, or temporal selection to make. The page and deadline
+/// controls every surface supplies travel in the dispatch envelope, not here.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct HealthReadRequest {
-    pub meta: RetrievalRequestMeta,
-}
+pub struct HealthReadRequest {}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

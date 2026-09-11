@@ -512,6 +512,7 @@ function Field(props: { sel: string | null; onPick: (id: string) => void }) {
             >
               <path className={e.missing ? "ag-edge is-ghost" : "ag-edge"} d={d} />
               <path className="ag-edge-hit" d={d} />
+              {!e.missing ? <text className="ag-edge-grade" x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 4}>EXACT · SPAWN</text> : null}
             </g>
           );
         })}
@@ -589,7 +590,10 @@ function SnapshotAgentsPage(props: { initialSessionId?: string; onInspect?: unkn
   const initialSelection = props.initialSessionId && nodeById(props.initialSessionId) ? props.initialSessionId : defaultSelectedId();
   const [sel, setSel] = useWorkspaceState<string | null>("agents:selected", initialSelection);
   const [pane, setPane] = useWorkspaceState<"topology" | "details">("agents:pane", "topology");
+  const [exact, setExact] = useWorkspaceState("agents:snapshot-exact", false);
+  const [query, setQuery] = useWorkspaceState("agents:snapshot-query", "");
   const tape = RECENT_TOOLS.slice(0, 5);
+  const matching = [...FAMILIES.flatMap((family) => [family, ...family.children]), ...DANGLING, ...UNLINKED].filter((node) => `${node.session.id} ${node.session.agentId ?? ""} ${node.session.project}`.toLowerCase().includes(query.toLowerCase()));
 
   useEffect(() => {
     if (props.initialSessionId && nodeById(props.initialSessionId)) setSel(props.initialSessionId);
@@ -683,11 +687,13 @@ function SnapshotAgentsPage(props: { initialSessionId?: string; onInspect?: unkn
             </span>
           </div>
           <div className="ag-topo-legend">
-            left-to-right by generation · size by messages · <i className="cy">solid cyan = recorded parentage</i> · <i className="am">dashed amber = missing parent</i>
-            <span className="ag-risk-unavailable">issue / risk filter unavailable — failure authority was not captured</span>
+            left-to-right generations · size = messages · <i className="cy">solid = EXACT spawn / parent record</i> · <i className="am">dashed = UNAVAILABLE parent record</i> · handoff / rejoin: unavailable
+            <span className="ag-risk-unavailable">issue / risk filter unavailable — failure authority was not captured. Token and downstream-work authorities remain unavailable; this topology does not infer them.</span>
           </div>
+          <div className="ag-snapshot-controls"><button type="button" aria-pressed={exact} onClick={() => setExact((value) => !value)}>EXACT ROWS</button><button type="button" onClick={() => { setSel(defaultSelectedId()); setExact(false); setQuery(""); }}>FIT SELECTION</button><input type="search" aria-label="Search snapshot agents" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search agent, session, project" /></div>
           <Field sel={sel} onPick={pick} />
           <TreeFallback sel={sel} onPick={pick} />
+          {exact || query ? <div className="ag-exact ag-snapshot-exact"><div className="ag-exact-head"><b>EXACT SNAPSHOT ROWS</b><span>{matching.length} / {TOTALS.sessions}</span></div><div className="ag-exact-table" role="table" aria-label="Exact snapshot agents">{matching.map((node) => <button type="button" role="row" key={node.session.id} className={node.session.id === sel ? "is-on" : ""} onClick={() => pick(node.session.id)}><span role="cell">{node.session.agentId ?? "agent unavailable"}</span><span role="cell">{node.session.id}</span><span role="cell">GEN {node.depth}</span><span role="cell">{node.session.messages.toLocaleString()} msg</span><span role="cell">{node.parentInSnapshot ? "EXACT spawn" : node.session.parentId ? "parent unavailable" : "source"}</span><span role="cell">{node.session.project}</span></button>)}</div></div> : null}
         </section>
       </div>
       <Inspector sel={sel} />
