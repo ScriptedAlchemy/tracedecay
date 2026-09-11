@@ -388,15 +388,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::{GraphCancellation, GraphDbLocation, GraphDbOpenOptions, GraphDurability};
-
-    struct NeverCancelled;
-
-    impl GraphCancellation for NeverCancelled {
-        fn is_cancelled(&self) -> bool {
-            false
-        }
-    }
+    use crate::{GraphDbLocation, GraphDbOpenOptions, GraphDurability, NeverCancelled};
 
     fn corrupt(message: &str) -> GraphDbError {
         GraphDbError::Corrupt {
