@@ -143,22 +143,21 @@ pub fn build_branch_diagnostics(
     serving_source: Option<(&str, &str)>,
 ) -> BranchDiagnostics {
     let meta = branch_meta::load_branch_meta(data_root);
-    let observed_serving_branch = serving_source
-        .and_then(|(reference, revision)| {
-            meta.as_ref().and_then(|meta| {
-                meta.branches.iter().find_map(|(name, entry)| {
-                    entry
-                        .graph_source
-                        .as_ref()
-                        .filter(|source| {
-                            source.reference == reference
-                                && source.source_oid == revision
-                                && meta.is_query_eligible(name)
-                        })
-                        .map(|_| name.clone())
-                })
+    let observed_serving_branch = serving_source.and_then(|(reference, revision)| {
+        meta.as_ref().and_then(|meta| {
+            meta.branches.iter().find_map(|(name, entry)| {
+                entry
+                    .graph_source
+                    .as_ref()
+                    .filter(|source| {
+                        source.reference == reference
+                            && source.source_oid == revision
+                            && meta.is_query_eligible(name)
+                    })
+                    .map(|_| name.clone())
             })
-        });
+        })
+    });
     let (open_active_branch, serving_branch, fallback_warning) =
         if let Some(branch) = observed_serving_branch {
             (Some(branch.clone()), Some(branch), None)
