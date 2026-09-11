@@ -249,7 +249,7 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
                     }
                 }
                 GitNativePreflightDisposition::Eligible => match analysis.as_ref() {
-                    Some(report) if report.is_complete() && report.conflicts.is_empty() => {
+                    Some(report) if report.authorizes_mechanical_integration() => {
                         NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(mode)
                     }
                     Some(report) => NativeIntegrationPreviewDispositionV1::SemanticReviewRequired {
@@ -381,19 +381,6 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
         let Some(report) = &preview.analysis else {
             return Ok(NativeIntegrationAnalysisRevalidationV1::Stale);
         };
-        let source_tip = self
-            .repository
-            .exact_reference_tip(preview.repository_snapshot.source_ref.as_str())
-            .map_err(native_error)?;
-        let destination_tip = self
-            .repository
-            .exact_reference_tip(preview.repository_snapshot.destination_ref.as_str())
-            .map_err(native_error)?;
-        if source_tip != preview.repository_snapshot.source_tip
-            || destination_tip != preview.repository_snapshot.destination_tip
-        {
-            return Ok(NativeIntegrationAnalysisRevalidationV1::Stale);
-        }
         self.analysis.revalidate(report, deadline, cancellation)
     }
 

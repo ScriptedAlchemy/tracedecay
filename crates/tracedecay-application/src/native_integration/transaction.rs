@@ -244,18 +244,17 @@ where
         {
             return Err(NativeIntegrationPortError::Denied);
         }
-        match self.native.revalidate_analysis(
+        // Stale analysis is not refused here: the transaction begins durably
+        // and the post-begin revalidation settles it from a live probe as a
+        // truthful `AbortedNoChange` terminal receipt. Only an unavailable
+        // analysis authority is a pre-admission refusal.
+        if self.native.revalidate_analysis(
             &request.preview,
             request.context.deadline(),
             external_cancellation,
-        )? {
-            NativeIntegrationAnalysisRevalidationV1::Current => {}
-            NativeIntegrationAnalysisRevalidationV1::Stale => {
-                return Err(NativeIntegrationPortError::Stale);
-            }
-            NativeIntegrationAnalysisRevalidationV1::Unavailable => {
-                return Err(NativeIntegrationPortError::Unavailable);
-            }
+        )? == NativeIntegrationAnalysisRevalidationV1::Unavailable
+        {
+            return Err(NativeIntegrationPortError::Unavailable);
         }
         let cancellation =
             CancellationToken::for_application_request(request.context.request_id().as_str());
@@ -318,7 +317,12 @@ where
             request.observed_at,
         ) {
             Ok(status) => status,
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    transaction_id = %record.status.transaction_id,
+                    "candidate verification status advance failed; settling from live probe"
+                );
                 let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
@@ -340,18 +344,30 @@ where
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
-        let analysis_current = matches!(
-            self.native.revalidate_analysis(
-                &record.preview,
-                request.context.deadline(),
-                external_cancellation,
-            ),
-            Ok(NativeIntegrationAnalysisRevalidationV1::Current)
-        );
-        if !analysis_current {
-            let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
-            self.clear_cancellation(&request.transaction_id)?;
-            return receipt;
+        match self.native.revalidate_analysis(
+            &record.preview,
+            request.context.deadline(),
+            external_cancellation,
+        ) {
+            Ok(NativeIntegrationAnalysisRevalidationV1::Current) => {}
+            Ok(
+                NativeIntegrationAnalysisRevalidationV1::Stale
+                | NativeIntegrationAnalysisRevalidationV1::Unavailable,
+            ) => {
+                let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+                self.clear_cancellation(&request.transaction_id)?;
+                return receipt;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    transaction_id = %record.status.transaction_id,
+                    "semantic revalidation failed after durable begin; settling from live probe"
+                );
+                let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+                self.clear_cancellation(&request.transaction_id)?;
+                return receipt;
+            }
         }
         // Re-read the exact native state before crossing the durable ref
         // commit boundary. A changed ref, index, or worktree is an ordinary
@@ -382,9 +398,18 @@ where
             // first write cannot be attributed to this transaction. Preserve
             // the existing fail-closed inspection path for that ambiguity.
             Ok(NativeIntegrationProbeV1::CommittedState { .. })
-            | Ok(NativeIntegrationProbeV1::Unavailable)
-            | Err(_) => {
+            | Ok(NativeIntegrationProbeV1::Unavailable) => {
                 let receipt = self.needs_inspection(&record, request.observed_at);
+                self.clear_cancellation(&request.transaction_id)?;
+                return receipt;
+            }
+            Err(error) => {
+                let receipt = self.needs_inspection_after_error(
+                    &record,
+                    request.observed_at,
+                    "pre-commit probe",
+                    error,
+                );
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
@@ -397,7 +422,12 @@ where
             request.observed_at,
         ) {
             Ok(status) => status,
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    transaction_id = %record.status.transaction_id,
+                    "commit-start status advance failed; settling from live probe"
+                );
                 let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
@@ -409,7 +439,12 @@ where
         };
         let effect = self.native.apply(&record.preview, &cancellation);
         let receipt = match effect {
-            Err(_) => self.needs_inspection(&record, request.observed_at),
+            Err(error) => self.needs_inspection_after_error(
+                &record,
+                request.observed_at,
+                "native apply",
+                error,
+            ),
             Ok(NativeApplyEffectV1::Committed {
                 new_tip,
                 final_tree,
@@ -437,11 +472,21 @@ where
                                 rolled_back,
                                 request.observed_at,
                             ),
-                            Err(_) => self.needs_inspection(&record, request.observed_at),
+                            Err(error) => self.needs_inspection_after_error(
+                                &record,
+                                request.observed_at,
+                                "native rollback",
+                                error,
+                            ),
                         }
                     }
                     (Ok(probe), _) => self.finish_from_probe(&record, probe, request.observed_at),
-                    (Err(_), _) => self.needs_inspection(&record, request.observed_at),
+                    (Err(error), _) => self.needs_inspection_after_error(
+                        &record,
+                        request.observed_at,
+                        "post-commit probe",
+                        error,
+                    ),
                 }
             }
         };
@@ -586,8 +631,15 @@ where
                 observed_at,
             ),
             Ok(NativeIntegrationProbeV1::CommittedState { .. })
-            | Ok(NativeIntegrationProbeV1::Unavailable)
-            | Err(_) => self.needs_inspection(record, observed_at),
+            | Ok(NativeIntegrationProbeV1::Unavailable) => {
+                self.needs_inspection(record, observed_at)
+            }
+            Err(error) => self.needs_inspection_after_error(
+                record,
+                observed_at,
+                "pre-commit settlement probe",
+                error,
+            ),
         }
     }
 
@@ -598,8 +650,29 @@ where
     ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError> {
         match self.native.probe(record) {
             Ok(probe) => self.finish_from_probe(record, probe, observed_at),
-            Err(_) => self.needs_inspection(record, observed_at),
+            Err(error) => self.needs_inspection_after_error(
+                record,
+                observed_at,
+                "terminal settlement probe",
+                error,
+            ),
         }
+    }
+
+    fn needs_inspection_after_error(
+        &self,
+        record: &NativeIntegrationRecordV1,
+        observed_at: UtcMicros,
+        operation: &'static str,
+        error: NativeIntegrationPortError,
+    ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError> {
+        tracing::warn!(
+            ?error,
+            transaction_id = %record.status.transaction_id,
+            operation,
+            "native transaction state is uncertain after an operation error"
+        );
+        self.needs_inspection(record, observed_at)
     }
 
     fn finish_from_probe(
