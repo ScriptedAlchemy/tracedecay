@@ -177,7 +177,7 @@
   .cd-root { position: absolute; inset: 0; display: block; height: 100%; min-height: 0; overflow-x: hidden; overflow-y: auto; }
   .cd-root.is-core { display: block; }
   .cd-root.is-files { height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
-  .cd-main { height: 650px; min-height: 650px; box-sizing: border-box; padding: 7px; }
+  .cd-main { height: 690px; min-height: 690px; box-sizing: border-box; padding: 7px; }
   .cd-root.is-files .cd-main { height: 100%; min-height: 0; }
   .cd-inspect { height: 440px; border-left: 0; border-top: 1px solid rgba(77, 176, 192, .25); }
   .cd-core-inspect { height: 760px; }
