@@ -4516,6 +4516,18 @@ impl CodeIndexSchedulerRegistryV1 {
                             // converged on the durable head.
                             let publication_matches =
                                 scheduler.active_publication_matches(&latest)?;
+                            // The freshness fence is the single source-currency
+                            // authority; the witness only binds one of its
+                            // proofs to the seat. Asking the fence whether it
+                            // has verified *this* sealed snapshot is what makes
+                            // the binding truthful for a seat this pass did not
+                            // publish.
+                            let pass_proves_latest = source_freshness
+                                .serves_recently_verified_source(
+                                    &latest.generation().snapshot().content_identity,
+                                    &project_root,
+                                    &shutting_down,
+                                );
                             let mut serving = serving_generation
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4541,26 +4553,39 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .write()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                     Some(latest.text_generation_handle());
-                                // Only a generation extracted from the live
-                                // checkout this pass and seated as the active
-                                // publication carries its pass's freshness
-                                // proof into the witness. A stale seat and a
-                                // retained/restored seat stay unproven until
-                                // the quiet exact-source probe passes, so busy
-                                // verified reads never serve bytes no proof
-                                // has vouched for.
-                                *serving_source_witness
-                                    .write()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                    if published_pass
-                                        && matches!(outcome, ServingSwapOutcomeV1::Seated)
-                                    {
-                                        scheduler.source_currency_witness_for(
-                                            &latest.generation().manifest().generation_id,
-                                        )
-                                    } else {
-                                        None
-                                    };
+                            }
+                            // A pass is the only thing that verifies source
+                            // against the sealed digests, so it is also the
+                            // only thing that can re-prove a seat. `Offered`
+                            // is that case: the active publication already
+                            // serves and this pass re-observed the checkout it
+                            // was sealed from. Arming only on a publication
+                            // left a restored, retired, or withdrawn seat
+                            // permanently unproven — busy verified reads then
+                            // refused a generation whose source was current.
+                            match outcome {
+                                ServingSwapOutcomeV1::Seated | ServingSwapOutcomeV1::Offered => {
+                                    *serving_source_witness
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                        pass_proves_latest.then(|| super::ServingSourceWitnessV1 {
+                                            generation_id: latest
+                                                .generation()
+                                                .manifest()
+                                                .generation_id
+                                                .clone(),
+                                        });
+                                }
+                                // The durable pointer names a successor, so no
+                                // proof of this seat's currency exists to bind.
+                                ServingSwapOutcomeV1::SeatedStale => {
+                                    *serving_source_witness
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                                }
+                                // The slot kept a foreign incumbent; its
+                                // witness belongs to that generation.
+                                ServingSwapOutcomeV1::Superseded => {}
                             }
                             drop(serving);
                             // The serving slot is now fully published, including
