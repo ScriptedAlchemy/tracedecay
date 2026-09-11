@@ -12,10 +12,41 @@ use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
 
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactGitTreeSourceV1 {
     pub reference: tracedecay_domain::RefId,
     pub revision: tracedecay_domain::CommitId,
     pub tree: tracedecay_domain::TreeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeCandidateGenerationSourcesV1 {
+    pub merge_base: ExactGitTreeSourceV1,
+    pub source: ExactGitTreeSourceV1,
+    pub destination: ExactGitTreeSourceV1,
+    pub candidate_reference: tracedecay_domain::RefId,
+    pub candidate_tree: tracedecay_domain::TreeId,
+}
+
+pub struct NativeCandidateGenerationBindingsV1 {
+    pub merge_base: LatestCompleteCodeIndexV1,
+    pub source: LatestCompleteCodeIndexV1,
+    pub destination: LatestCompleteCodeIndexV1,
+    pub candidate: LatestCompleteCodeIndexV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeCandidateGenerationIdentityV1 {
+    pub generation_id: tracedecay_domain::CodeGenerationId,
+    pub project_id: tracedecay_domain::ProjectId,
+    pub repository_id: tracedecay_domain::RepositoryId,
+    pub worktree_id: Option<tracedecay_domain::WorktreeId>,
+    pub reference: Option<tracedecay_domain::RefId>,
+    pub snapshot_digest: tracedecay_domain::ManifestDigest,
+    pub content_identity: tracedecay_domain::ContentDigest,
+    pub source_revision: Option<tracedecay_domain::GitOidV1>,
+    pub source_tree: tracedecay_domain::GitOidV1,
+    pub seal_digest: tracedecay_domain::ManifestDigest,
 }
 
 /// One source path the privacy boundary refused to hand on.
@@ -361,16 +392,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         control.termination().map_or(Ok(()), Err)?;
         let repository = gix::open(&self.project_root)
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-        // The reference is required to exist, so a capture can never mint a
-        // generation stamped with a branch name this repository does not have.
-        // It is not, however, allowed to *select* the commit: peeling the ref
-        // and demanding it equal `source.revision` made every revision that is
-        // not the current tip permanently uncapturable — a base whose branch
-        // advanced between the caller's rev-parse and this capture, a
-        // merge-base, or any deliberately pinned older commit. Committed
-        // objects are immutable, so resolving `source.revision` in the object
-        // database is the honest identity check; the tree equality below is
-        // what actually binds the requested tree to that commit.
         if repository
             .try_find_reference(source.reference.as_str())
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
@@ -398,6 +419,70 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
         entries.sort_by(|left, right| left.filepath.cmp(&right.filepath));
 
+        self.capture_git_tree_blobs_snapshot(
+            source.reference.clone(),
+            Some(source.revision.clone()),
+            source.tree.clone(),
+            control,
+            |visitor| {
+                for entry in entries {
+                    control.termination().map_or(Ok(()), Err)?;
+                    if entry.mode.is_tree() || entry.mode.is_commit() {
+                        continue;
+                    }
+                    let logical_path = entry.filepath.to_str_lossy();
+                    let blob = repository
+                        .find_blob(entry.oid)
+                        .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
+                    visitor(&logical_path, &blob.data)?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    #[hotpath::measure(label = "daemon.code_index.capture.native_candidate_tree")]
+    fn capture_native_candidate_tree_snapshot(
+        &self,
+        reference: tracedecay_domain::RefId,
+        expected_tree: &tracedecay_domain::TreeId,
+        candidate: &tracedecay_runtime_core::git_repository::GitNativeCandidateTreeV1<'_>,
+        control: &branch_generations::BranchGenerationReadControlV1,
+    ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
+        let actual_tree = candidate
+            .tree()
+            .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
+        if actual_tree.as_str() != expected_tree.as_str() {
+            return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
+        }
+        self.capture_git_tree_blobs_snapshot(
+            reference,
+            None,
+            expected_tree.clone(),
+            control,
+            |visitor| {
+                candidate.visit_blobs(visitor).map_err(|error| match error {
+                    tracedecay_runtime_core::git_repository::GitNativeCandidateTreeVisitError::Repository(_) => {
+                        control
+                            .termination()
+                            .unwrap_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
+                    }
+                    tracedecay_runtime_core::git_repository::GitNativeCandidateTreeVisitError::Visitor(reason) => reason,
+                })
+            },
+        )
+    }
+
+    fn capture_git_tree_blobs_snapshot(
+        &self,
+        reference: tracedecay_domain::RefId,
+        source_revision: Option<tracedecay_domain::CommitId>,
+        tree: tracedecay_domain::TreeId,
+        control: &branch_generations::BranchGenerationReadControlV1,
+        visit: impl FnOnce(
+            &mut dyn FnMut(&str, &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
+        ) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
+    ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         let registry = StaticLanguageRegistry::new();
         let progress = CaptureProgressV1::new();
         let mut files = Vec::new();
@@ -405,36 +490,28 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut sanitization_receipts = BTreeSet::new();
         let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
         let mut retained_reservations = Vec::new();
-        let mut changed_paths = BTreeSet::new();
         let mut withheld_sources = Vec::new();
-        for entry in entries {
+        visit(&mut |logical_path, raw_bytes| {
             control.termination().map_or(Ok(()), Err)?;
-            if entry.mode.is_tree() || entry.mode.is_commit() {
-                continue;
+            if crate::config::is_generated_path_segment(logical_path) {
+                return Ok(());
             }
-            let logical_path = entry.filepath.to_str_lossy().into_owned();
-            if crate::config::is_generated_path_segment(&logical_path) {
-                continue;
-            }
-            let blob = repository
-                .find_blob(entry.oid)
-                .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
             let candidate = match self.capture_candidate_bytes_with_progress(
                 &registry,
-                &logical_path,
-                &blob.data,
+                logical_path,
+                raw_bytes,
                 Some(&progress),
             ) {
                 Ok(Some(candidate)) => candidate,
-                Ok(None) => continue,
+                Ok(None) => return Ok(()),
                 Err(error) => {
                     if self.shutting_down.load(Ordering::Acquire) {
                         return Err(CodeIndexSearchUnavailableReasonV1::Cancelled);
                     }
-                    match classify_capture_failure(&logical_path, error) {
+                    match classify_capture_failure(logical_path, error) {
                         Ok(withheld) => {
                             withheld_sources.push(withheld);
-                            continue;
+                            return Ok(());
                         }
                         Err(error) => {
                             if matches!(
@@ -448,7 +525,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                             tracing::warn!(
                                 error = %error,
                                 path = %logical_path,
-                                "exact_git_tree_capture_failed"
+                                "git_tree_capture_failed"
                             );
                             return Err(CodeIndexSearchUnavailableReasonV1::Internal);
                         }
@@ -462,23 +539,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_bytes.push(candidate.retained);
             files.push(candidate.file);
             captured_files.push(candidate.captured);
-        }
+            Ok(())
+        })?;
         report_withheld_sources(&withheld_sources);
-        // Withholding every indexable file is not a degraded generation, it is
-        // no generation: publishing an empty index over a tree that has sources
-        // would answer later queries with a confident, false "nothing here".
         if files.is_empty() && !withheld_sources.is_empty() {
             return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
         }
-        // The changed-path hint narrows downstream work and feeds reconcile
-        // evidence; content digests remain the reuse authority. Declaring the
-        // whole tree changed on every committed capture reported a corpus-sized
-        // re-extraction for provenance-only tip moves (a commit of content the
-        // index already serves), so the hint is the truthful digest diff
-        // against the active generation: added or content-changed captured
-        // paths, plus active paths absent from this tree (deletions flow as
-        // tombstone hints). Without an active generation everything is
-        // genuinely new.
+        let mut changed_paths = BTreeSet::new();
         if let Some(active) = self
             .publication
             .load_active_shared()
@@ -521,17 +588,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
         let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
         Ok(CapturedSnapshotV1 {
-            // An exact sealed Git tree is immutable committed state: the parse
-            // identity is the tree itself and can never be dirty.
             repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
-                tree: Some(source.tree.clone()),
+                tree: Some(tree),
                 dirty: tracedecay_domain::RepositoryDirtyStateV1::Clean,
             },
             snapshot: SanitizedCodeSnapshotV1 {
                 repository: self.repository_id.clone(),
                 worktree: Some(self.worktree_id.clone()),
-                reference: Some(source.reference.clone()),
-                source_revision: Some(source.revision.clone()),
+                reference: Some(reference),
+                source_revision,
                 sanitizer_revision: id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)
                     .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,
                 sanitization_receipts,
@@ -560,6 +625,15 @@ impl CodeIndexWorktreeSchedulerV1 {
             _ => CodeIndexSearchUnavailableReasonV1::Internal,
         })?;
         let captured = self.capture_exact_git_tree_snapshot(source, control)?;
+        self.publish_captured_git_tree_generation(captured, control, false)
+    }
+
+    fn publish_captured_git_tree_generation(
+        &mut self,
+        captured: CapturedSnapshotV1,
+        control: &branch_generations::BranchGenerationReadControlV1,
+        require_retained_history: bool,
+    ) -> Result<LatestCompleteCodeIndexV1, CodeIndexSearchUnavailableReasonV1> {
         let CapturedSnapshotV1 {
             snapshot,
             repository_parse_identity,
@@ -597,6 +671,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 self.publication
                     .for_undecoded_active_rebuild(&pointer)
                     .retained_history()
+            }
+            None if require_retained_history => {
+                return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
             }
             None => self.publication.clone(),
         };
@@ -636,6 +713,153 @@ impl CodeIndexWorktreeSchedulerV1 {
             })?;
         Ok(self.bind_latest_complete(generation, None))
     }
+
+    fn existing_exact_git_tree_generation(
+        &self,
+        source: &ExactGitTreeSourceV1,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSearchUnavailableReasonV1> {
+        let Some(pointer) = self
+            .publication
+            .read_publication_pointer()
+            .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
+        else {
+            return Ok(None);
+        };
+        let Some(entry) = pointer.generation_index.iter().find(|entry| {
+            entry.source_reference.as_deref() == Some(source.reference.as_str())
+                && entry.source_revision.as_deref() == Some(source.revision.as_str())
+                && entry.source_tree.as_deref() == Some(source.tree.as_str())
+        }) else {
+            return Ok(None);
+        };
+        self.publication
+            .validate_exact_git_evidence(source.revision.as_str(), source.tree.as_str())
+            .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?;
+        let generation_id = tracedecay_domain::CodeGenerationId::new(entry.generation_id.clone())
+            .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?;
+        let Some(generation) = self
+            .publication
+            .load_generation(&generation_id)
+            .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
+        else {
+            return Ok(None);
+        };
+        if generation.snapshot().repository != self.repository_id
+            || generation.snapshot().worktree.as_ref() != Some(&self.worktree_id)
+            || generation.snapshot().reference.as_ref() != Some(&source.reference)
+            || generation.snapshot().source_revision.as_ref() != Some(&source.revision)
+            || generation.repository_parse_identity().tree.as_ref() != Some(&source.tree)
+            || generation.snapshot().content_identity.as_str()
+                != entry.snapshot_content_identity.as_str()
+        {
+            return Err(CodeIndexSearchUnavailableReasonV1::Internal);
+        }
+        Ok(Some(self.bind_latest_complete(generation, None)))
+    }
+
+    fn exact_git_tree_generation(
+        &mut self,
+        source: &ExactGitTreeSourceV1,
+        control: &branch_generations::BranchGenerationReadControlV1,
+    ) -> Result<LatestCompleteCodeIndexV1, CodeIndexSearchUnavailableReasonV1> {
+        if let Some(generation) = self.existing_exact_git_tree_generation(source)? {
+            return Ok(generation);
+        }
+        self.publish_exact_git_tree_generation(source, control)
+    }
+
+    /// Seal one native candidate and its three committed comparison sources
+    /// under the existing publication authority without changing its active
+    /// generation.
+    pub fn publish_native_candidate_generations(
+        &mut self,
+        sources: &NativeCandidateGenerationSourcesV1,
+        candidate: &tracedecay_runtime_core::git_repository::GitNativeCandidateTreeV1<'_>,
+        control: &branch_generations::BranchGenerationReadControlV1,
+    ) -> Result<NativeCandidateGenerationBindingsV1, CodeIndexSearchUnavailableReasonV1> {
+        let active_before = self
+            .publication
+            .read_publication_pointer()
+            .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
+            .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+            .generation_id;
+        let merge_base = self.exact_git_tree_generation(&sources.merge_base, control)?;
+        let source = self.exact_git_tree_generation(&sources.source, control)?;
+        let destination = self.exact_git_tree_generation(&sources.destination, control)?;
+        self.ensure_worker_plan()
+            .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?;
+        let _worker_memory = self.reserve_worker_memory().map_err(|error| match error {
+            CodeIndexSchedulerErrorV1::WorkerMemoryAdmission(_) => {
+                CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
+            }
+            _ => CodeIndexSearchUnavailableReasonV1::Internal,
+        })?;
+        let captured = self.capture_native_candidate_tree_snapshot(
+            sources.candidate_reference.clone(),
+            &sources.candidate_tree,
+            candidate,
+            control,
+        )?;
+        let candidate = self.publish_captured_git_tree_generation(captured, control, true)?;
+        let active_after = self
+            .publication
+            .read_publication_pointer()
+            .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
+            .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+            .generation_id;
+        if active_after != active_before {
+            return Err(CodeIndexSearchUnavailableReasonV1::Internal);
+        }
+        Ok(NativeCandidateGenerationBindingsV1 {
+            merge_base,
+            source,
+            destination,
+            candidate,
+        })
+    }
+
+    /// Reopen only the exact sealed candidate named by a durable preview.
+    /// Any missing or mismatched witness is an ordinary stale preview (`None`).
+    pub fn load_native_candidate_generation(
+        &self,
+        expected: &NativeCandidateGenerationIdentityV1,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSearchUnavailableReasonV1> {
+        let Some(generation) = self
+            .publication
+            .load_generation(&expected.generation_id)
+            .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
+        else {
+            return Ok(None);
+        };
+        let snapshot = generation.snapshot();
+        let manifest = generation.manifest();
+        let matches = manifest.project_id == expected.project_id
+            && manifest.generation_id == expected.generation_id
+            && snapshot.repository == expected.repository_id
+            && snapshot.worktree == expected.worktree_id
+            && snapshot.reference == expected.reference
+            && manifest.snapshot_digest == expected.snapshot_digest
+            && snapshot.content_identity == expected.content_identity
+            && snapshot
+                .source_revision
+                .as_ref()
+                .map(|revision| revision.as_str())
+                == expected
+                    .source_revision
+                    .as_ref()
+                    .map(tracedecay_domain::GitOidV1::as_str)
+            && generation
+                .repository_parse_identity()
+                .tree
+                .as_ref()
+                .map(tracedecay_domain::TreeId::as_str)
+                == Some(expected.source_tree.as_str())
+            && manifest.seal.expected_digest == expected.seal_digest;
+        if !matches {
+            return Ok(None);
+        }
+        Ok(Some(self.bind_latest_complete(generation, None)))
+    }
 }
 
 #[cfg(test)]
@@ -647,11 +871,16 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
     use tracedecay_domain::ProjectId;
+    use tracedecay_runtime_core::cancellation::CancellationToken;
+    use tracedecay_runtime_core::git_repository::{
+        GitNativeIntegrationMode, GitRepositoryAuthority,
+    };
 
     use super::{
         CodeIndexSchedulerErrorV1, CodeIndexSearchUnavailableReasonV1,
-        CodeIndexWorktreeSchedulerV1, ExactGitTreeSourceV1, SharedCodeIndexBytePoolV1,
-        branch_generations, classify_capture_failure,
+        CodeIndexWorktreeSchedulerV1, ExactGitTreeSourceV1, NativeCandidateGenerationIdentityV1,
+        NativeCandidateGenerationSourcesV1, SharedCodeIndexBytePoolV1, branch_generations,
+        classify_capture_failure,
     };
 
     #[cfg(feature = "hotpath")]
@@ -941,6 +1170,229 @@ mod tests {
                 .iter()
                 .any(|retained| Arc::ptr_eq(&captured_file.sanitized_bytes, retained))),
             "production input must retain the snapshot's canonical byte allocation"
+        );
+    }
+
+    #[test]
+    fn synthetic_merge_candidate_seals_graph_as_retained_history() {
+        let project = TempDir::new().expect("project root");
+        git(project.path(), &["init", "-q", "-b", "main"]);
+        git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+        git(
+            project.path(),
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+        std::fs::write(
+            project.path().join("src/base.rs"),
+            "pub fn shared_base() -> usize { 1 }\n",
+        )
+        .expect("base source");
+        std::fs::write(
+            project.path().join("malformed.json"),
+            "{ definitely not json",
+        )
+        .expect("malformed structured source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "base"]);
+        git(project.path(), &["branch", "feature"]);
+        std::fs::write(
+            project.path().join("src/main.rs"),
+            "pub fn main_only() -> usize { shared_base() }\n",
+        )
+        .expect("destination source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "main"]);
+        let destination = git_output(project.path(), &["rev-parse", "HEAD"]);
+        git(project.path(), &["switch", "-q", "feature"]);
+        std::fs::write(
+            project.path().join("src/feature.rs"),
+            "pub fn feature_only() -> usize { shared_base() }\n",
+        )
+        .expect("source source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "feature"]);
+        let source = git_output(project.path(), &["rev-parse", "HEAD"]);
+
+        let project_id = ProjectId::new("project.native-candidate").expect("project id");
+        let store = TempDir::new().expect("code-index store");
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            project.path(),
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open scheduler");
+        scheduler.reconcile_now().expect("seed active generation");
+        let active_before = scheduler
+            .latest_complete()
+            .expect("active generation")
+            .generation()
+            .manifest()
+            .generation_id
+            .clone();
+        let authority = GitRepositoryAuthority::discover(project.path()).expect("repository");
+        let control = branch_generations::BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+        let source_oid = tracedecay_domain::GitOidV1::new(source).expect("source oid");
+        let destination_oid =
+            tracedecay_domain::GitOidV1::new(destination).expect("destination oid");
+        let (preflight, bindings) = authority
+            .preflight_native_integration_with_candidate(
+                "refs/heads/feature",
+                "refs/heads/main",
+                &source_oid,
+                &destination_oid,
+                GitNativeIntegrationMode::TwoParentMerge,
+                &CancellationToken::new(),
+                |preflight, candidate| {
+                    let exact =
+                        |reference: &str,
+                         revision: &tracedecay_domain::GitOidV1,
+                         tree: &tracedecay_domain::GitOidV1| {
+                            ExactGitTreeSourceV1 {
+                                reference: tracedecay_domain::RefId::new(reference)
+                                    .expect("reference"),
+                                revision: tracedecay_domain::CommitId::new(
+                                    revision.as_str().to_owned(),
+                                )
+                                .expect("revision"),
+                                tree: tracedecay_domain::TreeId::new(tree.as_str().to_owned())
+                                    .expect("tree"),
+                            }
+                        };
+                    scheduler.publish_native_candidate_generations(
+                        &NativeCandidateGenerationSourcesV1 {
+                            merge_base: exact(
+                                "refs/heads/main",
+                                &preflight.merge_base,
+                                &preflight.merge_base_tree,
+                            ),
+                            source: exact(
+                                "refs/heads/feature",
+                                &preflight.source_tip,
+                                &preflight.source_tree,
+                            ),
+                            destination: exact(
+                                "refs/heads/main",
+                                &preflight.destination_tip,
+                                &preflight.destination_tree,
+                            ),
+                            candidate_reference: tracedecay_domain::RefId::new("refs/heads/main")
+                                .expect("candidate reference"),
+                            candidate_tree: tracedecay_domain::TreeId::new(
+                                preflight
+                                    .candidate_tree
+                                    .as_ref()
+                                    .expect("candidate tree")
+                                    .as_str()
+                                    .to_owned(),
+                            )
+                            .expect("candidate tree"),
+                        },
+                        candidate,
+                        &control,
+                    )
+                },
+            )
+            .expect("native preflight");
+        let bindings = bindings.expect("eligible candidate bindings");
+
+        let candidate = bindings.candidate.generation();
+        assert_eq!(
+            bindings.source.generation().manifest().generation_id,
+            active_before,
+            "an already sealed exact source generation is reused"
+        );
+        assert!(candidate.snapshot().source_revision.is_none());
+        assert_eq!(
+            candidate
+                .repository_parse_identity()
+                .tree
+                .as_ref()
+                .map(tracedecay_domain::TreeId::as_str),
+            preflight
+                .candidate_tree
+                .as_ref()
+                .map(tracedecay_domain::GitOidV1::as_str)
+        );
+        let names = candidate
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.simple_name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(names.contains("main_only") && names.contains("feature_only"));
+        assert!(
+            candidate
+                .snapshot()
+                .files
+                .iter()
+                .all(|file| file.logical_path != "malformed.json"),
+            "privacy-refused candidate files remain withheld"
+        );
+        assert_eq!(
+            scheduler
+                .latest_complete()
+                .expect("active generation remains")
+                .generation()
+                .manifest()
+                .generation_id,
+            active_before
+        );
+
+        let snapshot = candidate.snapshot();
+        let identity = NativeCandidateGenerationIdentityV1 {
+            generation_id: candidate.manifest().generation_id.clone(),
+            project_id: project_id.clone(),
+            repository_id: snapshot.repository.clone(),
+            worktree_id: snapshot.worktree.clone(),
+            reference: snapshot.reference.clone(),
+            snapshot_digest: candidate.manifest().snapshot_digest.clone(),
+            content_identity: snapshot.content_identity.clone(),
+            source_revision: None,
+            source_tree: tracedecay_domain::GitOidV1::new(
+                candidate
+                    .repository_parse_identity()
+                    .tree
+                    .as_ref()
+                    .expect("tree")
+                    .as_str()
+                    .to_owned(),
+            )
+            .expect("tree oid"),
+            seal_digest: candidate.manifest().seal.expected_digest.clone(),
+        };
+        let stale_content_identity = bindings
+            .source
+            .generation()
+            .snapshot()
+            .content_identity
+            .clone();
+        drop(bindings);
+        drop(scheduler);
+        let reopened = CodeIndexWorktreeSchedulerV1::open(
+            project_id,
+            project.path(),
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("reopen scheduler");
+        assert!(
+            reopened
+                .load_native_candidate_generation(&identity)
+                .expect("load retained candidate after restart")
+                .is_some()
+        );
+        let mut stale = identity;
+        stale.content_identity = stale_content_identity;
+        assert!(
+            reopened
+                .load_native_candidate_generation(&stale)
+                .expect("stale binding")
+                .is_none()
         );
     }
 

@@ -229,6 +229,55 @@ impl DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    /// Run one native candidate producer against the exact mounted scope.
+    ///
+    /// Native preflight drives this future from its existing blocking owner,
+    /// because the borrowed gix object-memory tree cannot outlive that call.
+    /// The callback runs only while the canonical publication fence is held
+    /// and never receives a scheduler handle it could retain.
+    pub async fn with_native_candidate_generation_producer<T>(
+        &self,
+        scope: &tracedecay_contracts::ResolvedScope,
+        control: BranchGenerationReadControlV1,
+        produce: impl FnOnce(
+            &mut super::CodeIndexWorktreeSchedulerV1,
+            &BranchGenerationReadControlV1,
+        ) -> Result<T, CodeIndexSearchUnavailableReasonV1>,
+    ) -> Result<T, CodeIndexSearchUnavailableReasonV1> {
+        let (scheduler, build_publication_lock) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = unique_mounted_for_scope(&mounted, scope)
+                .unique()
+                .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+                .1;
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.build_publication_lock),
+            )
+        };
+        let mut build_publication = std::pin::pin!(build_publication_lock.lock_owned());
+        let _build_publication = loop {
+            tokio::select! {
+                guard = &mut build_publication => break guard,
+                () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                    if let Some(reason) = control.termination() {
+                        return Err(reason);
+                    }
+                }
+            }
+        };
+        let mut scheduler = match scheduler.try_lock() {
+            Ok(scheduler) => scheduler,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(CodeIndexSearchUnavailableReasonV1::Internal);
+            }
+        };
+        produce(&mut scheduler, &control)
+    }
+
     pub async fn generations_for_revisions(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,

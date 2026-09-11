@@ -8971,6 +8971,10 @@ mod cadence;
 mod classification;
 mod freshness_witness;
 mod git_tree_capture;
+pub use git_tree_capture::{
+    ExactGitTreeSourceV1, NativeCandidateGenerationBindingsV1, NativeCandidateGenerationIdentityV1,
+    NativeCandidateGenerationSourcesV1,
+};
 mod graph_activation;
 pub mod identity;
 pub mod ignored_dependencies;
