@@ -495,15 +495,37 @@ pub(crate) async fn persist_raw_predecessor_ranges_for_store_range(
     Ok(())
 }
 
-/// Wipe and rewrite every predecessor range from the current role-aware
-/// authority. Used by the one-shot store journal so rows ingested before the
-/// policy-anchor filter keep the same interval new ingest writes.
-pub(crate) async fn rewrite_all_predecessor_ranges(
+/// Rewrite persisted predecessor ranges for one keyset page of raw messages.
+///
+/// Rows ingested before the policy-anchor filter hold unfiltered intervals,
+/// and a row whose only earlier rows are policy anchors must lose its range
+/// entirely rather than keep a widened one, so the page deletes the selected
+/// rows' ranges before re-deriving them from the current authority. Both
+/// statements are set-based over the same keyset window.
+pub(crate) async fn rewrite_predecessor_ranges_for_store_range(
     conn: &(impl Executor + ?Sized),
+    from_store_id_exclusive: i64,
+    to_store_id_inclusive: i64,
 ) -> Result<(), LcmError> {
-    conn.execute("DELETE FROM lcm_raw_predecessor_ranges", ())
-        .await?;
-    persist_raw_predecessor_ranges_for_store_range(conn, 0, i64::MAX).await
+    conn.execute(
+        "DELETE FROM lcm_raw_predecessor_ranges
+         WHERE EXISTS (
+             SELECT 1
+             FROM lcm_raw_messages AS owner
+             WHERE owner.provider = lcm_raw_predecessor_ranges.provider
+               AND owner.message_id = lcm_raw_predecessor_ranges.message_id
+               AND owner.store_id > ?1
+               AND owner.store_id <= ?2
+         )",
+        params![from_store_id_exclusive, to_store_id_inclusive],
+    )
+    .await?;
+    persist_raw_predecessor_ranges_for_store_range(
+        conn,
+        from_store_id_exclusive,
+        to_store_id_inclusive,
+    )
+    .await
 }
 
 fn externalized_payload_metadata(
