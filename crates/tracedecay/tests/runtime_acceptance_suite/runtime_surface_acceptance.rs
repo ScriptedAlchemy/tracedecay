@@ -3207,7 +3207,9 @@ async fn application_markdown_is_payload_first_and_json_stays_exact() {
     let payload = &json["outcome"]["value"]["payload"];
     let payload_markdown = format!(
         "    {}",
-        serde_json::to_string_pretty(payload).expect("serialize storage status payload").replace('\n', "\n    ")
+        serde_json::to_string_pretty(payload)
+            .expect("serialize storage status payload")
+            .replace('\n', "\n    ")
     );
     assert!(
         markdown.starts_with("## storage\\_status\n\n### Payload\n\n"),
