@@ -340,36 +340,6 @@ pub(super) fn decode_canonical_observation_metadata(
         .unwrap_or(CanonicalObservationMetadata::Unrecognized))
 }
 
-#[cfg(test)]
-mod decode_canonical_observation_metadata_tests {
-    use super::{CanonicalObservationMetadata, decode_canonical_observation_metadata};
-    use serde_json::json;
-
-    #[test]
-    fn nested_envelope_decode_failure_is_typed() {
-        let error = decode_canonical_observation_metadata(json!({
-            "canonical_envelope": {"not": "an envelope"}
-        }))
-        .expect_err("broken nested envelope must not fall through");
-        assert!(
-            error
-                .to_string()
-                .contains("canonical_envelope decode failed"),
-            "typed envelope failure: {error}"
-        );
-    }
-
-    #[test]
-    fn missing_nested_envelope_stays_unrecognized() {
-        let decoded = decode_canonical_observation_metadata(json!({"source": "codex"}))
-            .expect("absent nested envelope is not a decode error");
-        assert!(matches!(
-            decoded,
-            CanonicalObservationMetadata::Unrecognized
-        ));
-    }
-}
-
 async fn native_source_membership_is_exact(
     snapshot: &impl QueryExecutor,
     provider: &str,
@@ -427,5 +397,35 @@ pub(super) enum SummaryResolutionError {
 impl From<LcmError> for SummaryResolutionError {
     fn from(error: LcmError) -> Self {
         Self::Storage(error)
+    }
+}
+
+#[cfg(test)]
+mod decode_canonical_observation_metadata_tests {
+    use super::{CanonicalObservationMetadata, decode_canonical_observation_metadata};
+    use serde_json::json;
+
+    #[test]
+    fn nested_envelope_decode_failure_is_typed() {
+        let error = decode_canonical_observation_metadata(json!({
+            "canonical_envelope": {"not": "an envelope"}
+        }))
+        .expect_err("broken nested envelope must not fall through");
+        assert!(
+            error
+                .to_string()
+                .contains("canonical_envelope decode failed"),
+            "typed envelope failure: {error}"
+        );
+    }
+
+    #[test]
+    fn missing_nested_envelope_stays_unrecognized() {
+        let decoded = decode_canonical_observation_metadata(json!({"source": "codex"}))
+            .expect("absent nested envelope is not a decode error");
+        assert!(matches!(
+            decoded,
+            CanonicalObservationMetadata::Unrecognized
+        ));
     }
 }
