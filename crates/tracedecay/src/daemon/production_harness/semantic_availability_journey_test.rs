@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::journey_test_support::{git, tool_answer, tool_payload};
+use super::journey_test_support::{git, resolved, tool_answer, tool_payload};
 use super::semantic_activation_journey_test::{
     assert_semantic_probe_contribution, evaluate_native_profile,
     install_project_distribution_fixture, installed_selection_material, selection,
@@ -65,55 +65,6 @@ pub(super) async fn answered(
 ) -> Value {
     let payload = called(harness, project, tool, arguments).await;
     resolved(harness, project, tool, payload).await
-}
-
-/// The full payload behind a possibly truncated answer.
-async fn resolved(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    tool: &str,
-    payload: Value,
-) -> Value {
-    if payload["truncated"] != json!(true) {
-        return payload;
-    }
-    let handle = payload["handle"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{tool} truncated its answer without a handle: {payload}"))
-        .to_owned();
-    // `tracedecay_retrieve` pages the stored response through
-    // `offset` / `next_offset` / `has_more`; reassemble it exactly as an
-    // agent does before parsing.
-    let mut content = String::new();
-    let mut offset = 0_u64;
-    loop {
-        let retrieved = called(
-            harness,
-            project,
-            "tracedecay_retrieve",
-            json!({"handle": handle, "format": "json", "offset": offset}),
-        )
-        .await;
-        content.push_str(
-            retrieved["content"].as_str().unwrap_or_else(|| {
-                panic!("{tool} response handle carried no content: {retrieved}")
-            }),
-        );
-        if retrieved["has_more"] != json!(true) {
-            break;
-        }
-        let next_offset = retrieved["next_offset"].as_u64().unwrap_or_else(|| {
-            panic!("{tool} retrieval reported more pages without a next offset: {retrieved}")
-        });
-        assert!(
-            next_offset > offset,
-            "{tool} retrieval did not advance past offset {offset}: {retrieved}"
-        );
-        offset = next_offset;
-    }
-    serde_json::from_str(&content).unwrap_or_else(|error| {
-        panic!("{tool} response handle content is not JSON: {error}; content={content}")
-    })
 }
 
 fn search_arguments(strict: bool) -> Value {

@@ -20,7 +20,7 @@ use tracedecay_runtime_core::db::{
 };
 
 use super::cursor_agent::{CursorAgentSummaryConfig, summarize_with_cursor_agent};
-use super::{AuthoritativeSummary, SummaryResolutionError};
+use super::{AuthoritativeSummary, LcmPredecessorRangeState, SummaryResolutionError};
 
 /// One `session_messages` row offered to the recognizers.
 ///
@@ -208,15 +208,28 @@ async fn claude_summary_pair_is_exact(
     if summary_id.as_str() != summary_message_id {
         return Ok(false);
     }
+    // Production Claude ingest stores the boundary as `compact_boundary:{uuid}`
+    // while the summary parent remains the raw uuid. Accept either spelling.
+    let production_boundary_id = format!("compact_boundary:{}", boundary_id.as_str());
     let mut rows = snapshot
         .query(
             "SELECT metadata_json
              FROM session_messages
-             WHERE provider = ?1 AND message_id = ?2
-               AND session_id = ?3
+             WHERE provider = ?1 AND session_id = ?2
+               AND message_id IN (?3, ?4)
                AND kind IN ('compact_boundary', 'compaction')
+             ORDER BY
+               CASE WHEN json_extract(metadata_json, '$.canonical_envelope') IS NOT NULL
+                    THEN 0 ELSE 1 END,
+               CASE WHEN message_id LIKE 'compact_boundary:%' THEN 0 ELSE 1 END,
+               message_id
              LIMIT 1",
-            params![provider, boundary_id.as_str(), session_id.as_str()],
+            params![
+                provider,
+                session_id.as_str(),
+                boundary_id.as_str(),
+                production_boundary_id.as_str(),
+            ],
         )
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -230,12 +243,15 @@ async fn claude_summary_pair_is_exact(
     let metadata = row
         .get::<Option<String>>(0)
         .map_err(|error| LcmError::Db(error.to_string()))?;
-    let Some(boundary) = metadata
+    let Some(metadata) = metadata
         .as_deref()
         .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
-        .and_then(super::decode_canonical_observation_metadata)
     else {
         return Ok(false);
+    };
+    let boundary = match super::decode_canonical_observation_metadata(metadata)? {
+        super::CanonicalObservationMetadata::Envelope(envelope) => envelope,
+        super::CanonicalObservationMetadata::Unrecognized => return Ok(false),
     };
     let anchor = boundary.facts().iter().find_map(|fact| match fact {
         CanonicalObservationFactV1::Compaction {
@@ -287,7 +303,7 @@ async fn cursor_agent_summary(
     Ok(AuthoritativeSummary {
         text,
         route: "cursor_agent".to_string(),
-        source_range: Some(source_range),
+        source_range: LcmPredecessorRangeState::Interval(source_range),
     })
 }
 
@@ -325,7 +341,7 @@ async fn codex_app_server_summary(
             || "codex_app_server".to_string(),
             |model| format!("codex_app_server:{model}"),
         ),
-        source_range: Some(source_range),
+        source_range: LcmPredecessorRangeState::Interval(source_range),
     })
 }
 
