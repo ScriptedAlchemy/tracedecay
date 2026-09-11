@@ -1619,7 +1619,9 @@ mod tests {
         DurablePublicationPointerV1, acquire_code_generation_store_lock,
         run_code_generation_retention,
     };
-    use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId, UtcMicros};
+    use tracedecay_domain::{
+        CodeGenerationId, ProjectId, RepositoryId, UtcMicros, sha256_hex_suffix,
+    };
     use tracedecay_graph_db::{
         GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphNamespace,
         GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
