@@ -2,6 +2,7 @@ use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::VectorGenerationIdV1;
+use tracedecay_domain::sha256_hex_suffix;
 
 use super::super::{
     CodeShardScopeV1, GraphProjectionIdentityV1, GraphPublicationKeyV1, GraphPublicationReplayV1,
@@ -114,7 +115,7 @@ macro_rules! sha256_digest {
 }
 
 fn validate_sha256(value: &str, field: &'static str) -> Result<(), StorageRuntimeContractErrorV1> {
-    let Some(hex) = value.strip_prefix("sha256:") else {
+    let Some(hex) = sha256_hex_suffix(value) else {
         return Err(StorageRuntimeContractErrorV1::NonCanonical { field });
     };
     if hex.len() != 64
