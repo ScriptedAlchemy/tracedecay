@@ -340,7 +340,7 @@ export function KnowledgePage(_props: { state?: string; onState?: (id: string) =
         <div className="kn-controls">
           <div className="kn-tabs" role="tablist" aria-label="Knowledge cameras">
             {CAMERAS.map((camera, index) => (
-              <button key={camera} type="button" role="tab" id={`kn-tab-${camera}`} aria-selected={cam === camera}
+              <button key={camera} type="button" role="tab" aria-label={camera} id={`kn-tab-${camera}`} aria-selected={cam === camera}
                 aria-controls="kn-camera-panel" tabIndex={cam === camera ? 0 : -1}
                 onKeyDown={(event) => {
                   const target = event.key === "Home" ? 0 : event.key === "End" ? CAMERAS.length - 1
