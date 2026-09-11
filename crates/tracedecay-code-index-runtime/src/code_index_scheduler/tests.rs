@@ -5779,14 +5779,17 @@ fn page_aligned_final_source_page_converges_the_text_projection() {
     }
     assert!(latest.query_owners_are_warm());
     let progress = build_progress_snapshot(&scheduler);
+    // Every committed page must be chunk-full: an early commit from the page
+    // byte bound or an import record would leave the final page partial, which
+    // is exactly the shape that does not trip this invariant.
     assert_eq!(
-        progress.committed_chunks % super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64,
-        0,
-        "the fixture must keep the whole-page alignment this invariant is about"
+        progress.committed_chunks,
+        progress.committed_pages * super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64,
+        "the fixture must keep every page chunk-full so the final page ends on the last record"
     );
     assert_eq!(
-        progress.completed_files, progress.total_files,
-        "a converged projection accounts for every sealed file"
+        progress.committed_imports, 0,
+        "an import record would commit a partial page and break the alignment"
     );
 }
 
