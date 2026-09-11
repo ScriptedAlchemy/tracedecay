@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, acquire_code_generation_store_lock,
+    durable_generation_index_digest,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, SanitizerRevision, UtcMicros, encode_lowercase_hex,
@@ -1870,7 +1871,10 @@ fn captured_tracing<T>(scope: impl FnOnce() -> T) -> (T, String) {
     )
 }
 
-fn rewrite_active_generation_as_revision_seven(store: &Path, keeps_census: bool) {
+fn rewrite_active_generation_as_revision_seven(
+    store: &Path,
+    keeps_census: bool,
+) -> DurablePublicationPointerV1 {
     let pointer_path = store.join("active-code-generation-v1.json");
     let mut pointer: DurablePublicationPointerV1 =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
@@ -1891,13 +1895,13 @@ fn rewrite_active_generation_as_revision_seven(store: &Path, keeps_census: bool)
     }
     manifest["state_digest"] = serde_json::json!(format!(
         "sha256:{}",
-        hex::encode(Sha256::digest(
+        encode_lowercase_hex(&Sha256::digest(
             serde_json::to_vec(&manifest["generation"]).expect("retired payload bytes")
         ))
     ));
 
     let bytes = serde_json::to_vec(&manifest).expect("retired manifest bytes");
-    let file_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
+    let file_digest = format!("sha256:{}", encode_lowercase_hex(&Sha256::digest(&bytes)));
     let generation_file = format!(
         "generation-{}.json",
         file_digest
@@ -1916,18 +1920,23 @@ fn rewrite_active_generation_as_revision_seven(store: &Path, keeps_census: bool)
     }
     pointer.generation_file = generation_file;
     pointer.state_digest = file_digest;
+    write_repaired_pointer(&pointer_path, &mut pointer);
+    pointer
+}
+
+fn write_repaired_pointer(pointer_path: &Path, pointer: &mut DurablePublicationPointerV1) {
     pointer.generation_index_digest = Some(
-        super::super::durable_generation_index_digest(
+        durable_generation_index_digest(
             &pointer.generation_index,
             pointer.generation_index_truncated,
         )
         .expect("generation index digest"),
     );
     std::fs::write(
-        &pointer_path,
-        serde_json::to_vec(&pointer).expect("encode retired pointer"),
+        pointer_path,
+        serde_json::to_vec(pointer).expect("encode pointer"),
     )
-    .expect("write retired pointer");
+    .expect("write pointer");
 }
 
 #[test]
@@ -2003,4 +2012,66 @@ fn retired_sealed_manifest_revision_is_rebuilt_and_logged() {
             "the current revision carries its census as a required field"
         );
     }
+}
+
+#[test]
+fn publication_over_an_undecodable_active_generation_refuses_a_moved_pointer() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("initial publish"));
+    let seeded = scheduler
+        .latest_complete_already_decoded()
+        .expect("published generation remains decoded")
+        .generation;
+    let scope = seeded.sealed_scope();
+    drop(scheduler);
+    let observed = rewrite_active_generation_as_revision_seven(store.path(), true);
+
+    let publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open publication store over a retired generation");
+
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let mut moved = observed.clone();
+    let moved_generation = "generation.v1.moved-under-the-writer".to_owned();
+    for entry in &mut moved.generation_index {
+        if entry.generation_id == moved.generation_id {
+            entry.generation_id = moved_generation.clone();
+        }
+    }
+    moved.generation_id = moved_generation;
+    write_repaired_pointer(&pointer_path, &mut moved);
+
+    let mut refusing = publication.for_undecoded_active_rebuild(&observed);
+    let error = refusing
+        .publish_atomically(&scope, None, Arc::clone(&seeded))
+        .expect_err("a pointer that moved under the writer must refuse the publication");
+    assert!(
+        matches!(error, CodeIndexPublicationStoreErrorV1::CompareAndSwap),
+        "a moved pointer reached the wrong refusal: {error}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<DurablePublicationPointerV1>(
+            &std::fs::read(&pointer_path).expect("read active pointer")
+        )
+        .expect("decode active pointer"),
+        moved,
+        "a refused publication must leave the pointer it did not expect untouched"
+    );
+
+    let mut restored = observed.clone();
+    write_repaired_pointer(&pointer_path, &mut restored);
+    let mut admitting = publication.for_undecoded_active_rebuild(&observed);
+    admitting
+        .publish_atomically(&scope, None, seeded)
+        .expect("the observed identity still admits the rebuild");
 }
