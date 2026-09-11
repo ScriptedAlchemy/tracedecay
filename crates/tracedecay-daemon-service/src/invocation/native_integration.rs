@@ -336,17 +336,28 @@ async fn execute_with_owner(
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
             let outcome = hotpath::future!(
                 tokio::task::spawn_blocking(move || {
-                    let resolution = registered_topology_request(&owner, *snapshot, observed_at)?;
-                    owner.stack_snapshot(resolution, &signal)
+                    let sealed_snapshot = (*snapshot)
+                        .seal()
+                        .map_err(NativeIntegrationContractError::from)?;
+                    let resolution =
+                        registered_topology_request(&owner, sealed_snapshot.clone(), observed_at)?;
+                    owner
+                        .stack_snapshot(resolution, &signal)
+                        .map(|outcome| (outcome, sealed_snapshot))
                 }),
                 label = "daemon.service.native_integration.stack_snapshot"
             )
             .await
             .map_err(|_| unavailable_native_integration())?;
             match outcome {
-                Ok(outcome) => NativeIntegrationSurfaceResultV1::from_stack_resolution(&outcome)
+                Ok((outcome, sealed_snapshot)) => {
+                    NativeIntegrationSurfaceResultV1::from_stack_resolution(
+                        &outcome,
+                        sealed_snapshot,
+                    )
                     .map(NativeIntegrationExecutionV1::without_preview)
-                    .map_err(|_| invalid()),
+                    .map_err(|_| invalid())
+                }
                 Err(error) => surface_result_from_contract_error(error)
                     .map(NativeIntegrationExecutionV1::without_preview),
             }
@@ -812,7 +823,7 @@ fn worktree_unavailable_for_operation(
 
 fn registered_topology_request(
     owner: &DaemonNativeIntegrationOwner,
-    snapshot: tracedecay_contracts::NativeIntegrationStackSnapshotSurfaceRequest,
+    snapshot: tracedecay_contracts::NativeIntegrationSealedStackSnapshotV1,
     observed_at: UtcMicros,
 ) -> Result<
     tracedecay_contracts::NativeIntegrationStackResolutionRequestV1,

@@ -57,20 +57,22 @@ fn stack_snapshot_requires_an_exact_selection_binding() {
         .expect("stack snapshot definition");
     assert_eq!(
         definition.input_schema["properties"]["selection"]["$ref"],
-        "#/$defs/NativeIntegrationSelectionBindingV1"
+        "#/$defs/NativeIntegrationSelectionDeclarationV1"
     );
-    let selection = &definition.input_schema["$defs"]["NativeIntegrationSelectionBindingV1"];
+    let selection = &definition.input_schema["$defs"]["NativeIntegrationSelectionDeclarationV1"];
 
     assert_eq!(selection["oneOf"].as_array().map(Vec::len), Some(2));
     assert_eq!(
         selection["oneOf"][0]["properties"]["kind"]["const"],
         "declared_stack_edge"
     );
-    assert!(
-        selection["oneOf"][0]["properties"]["binding"]["required"]
-            .as_array()
-            .is_some_and(|required| required.contains(&json!("declared_revision")))
-    );
+    let required = selection["oneOf"][0]["properties"]["binding"]["required"]
+        .as_array()
+        .expect("declared stack fields");
+    assert!(required.contains(&json!("nodes")));
+    assert!(required.contains(&json!("edges")));
+    assert!(!required.contains(&json!("canonical_order")));
+    assert!(!required.contains(&json!("digest")));
     assert_eq!(
         selection["oneOf"][1]["properties"]["kind"]["const"],
         "independent_branch"
