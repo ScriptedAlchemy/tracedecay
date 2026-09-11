@@ -503,62 +503,27 @@ impl SessionSyncProjectContext {
         )
     }
 
-    #[hotpath::measure(label = "daemon.session_sync.ingest.project", future = true)]
-    async fn ingest_project_transcripts(
-        &self,
-        authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
-        cancellation: &tracedecay_application::observation::ObservationCancellation,
-    ) -> tracedecay_sessions::runtime::TranscriptIngestOutcome {
-        let pass =
-            tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
-                &self.brain_id,
-                &self.profile_id,
-                authority,
-                &self.project_root,
-                Some(self.project_id.clone()),
-                None,
-                true,
-                cancellation,
-            );
-        Box::pin(pass).await
-    }
-
-    #[hotpath::measure(label = "daemon.session_sync.ingest.profile", future = true)]
-    async fn ingest_profile_transcripts(
-        &self,
-        user_authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
-        registry_authority: &GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1>,
-        cancellation: &tracedecay_application::observation::ObservationCancellation,
-    ) -> tracedecay_sessions::runtime::TranscriptIngestOutcome {
-        let pass = tracedecay_sessions::runtime::ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
-            &self.brain_id,
-            &self.profile_id,
-            user_authority,
-            registry_authority,
-            &self.profile_root,
-            None,
-            cancellation,
-        );
-        Box::pin(pass).await
-    }
-
     #[hotpath::skip]
     pub(super) async fn import_transcripts(
         &self,
         service: &DaemonSessionSyncService,
         journal_key: &str,
-        admitted_at: UtcMicros,
         request: &SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
+        let history_current = match service
+            .await_import_history(self, &project_sessions, request)
+            .await
+        {
+            Ok(()) => true,
+            Err(Some(interruption)) => {
+                return SessionSyncWorkResult::Interrupted(interruption);
+            }
+            Err(None) => false,
+        };
         let cancellation = tracedecay_application::observation::ObservationCancellation::default();
         let pass_cancellation = cancellation.clone();
         let pass = async {
-            let project_authority = GlobalDbSessionIngestAuthority::new(project_sessions.clone())
-                .with_background_cpu(Arc::clone(&self.background_cpu));
-            let project = self
-                .ingest_project_transcripts(&project_authority, &pass_cancellation)
-                .await;
             let git_convergence = if pass_cancellation.is_cancelled() {
                 None
             } else {
@@ -572,8 +537,8 @@ impl SessionSyncProjectContext {
                         .await,
                 )
             };
-            let project_stats = import_transcript_stats(
-                project.stats,
+            let stats = import_transcript_stats(
+                tracedecay_sessions::TranscriptIngestStats::default(),
                 git_convergence
                     .as_ref()
                     .and_then(|result| result.as_ref().ok())
@@ -592,8 +557,16 @@ impl SessionSyncProjectContext {
                 }
                 None => 1,
             };
-            let project_coverage = vec![
-                source_coverage("project", project.coverage),
+            let transcript_coverage = if history_current {
+                SessionSyncCoverageV1::Complete
+            } else {
+                SessionSyncCoverageV1::Partial { deferred_units: 1 }
+            };
+            let coverage = vec![
+                SessionSyncSourceCoverageV1 {
+                    store_scope: "project".to_owned(),
+                    coverage: transcript_coverage.clone(),
+                },
                 SessionSyncSourceCoverageV1 {
                     store_scope: "git".to_owned(),
                     coverage: if git_deferred_units == 0 {
@@ -604,96 +577,11 @@ impl SessionSyncProjectContext {
                         }
                     },
                 },
-            ];
-            let project_progress = hotpath::future!(
-                service.persist_progress(
-                    self,
-                    &project_sessions,
-                    journal_key,
-                    project_stats.clone(),
-                    project_coverage.clone(),
-                ),
-                label = "daemon.session_sync.project_frontier_persist"
-            )
-            .await;
-            let project_progress_failed = project_progress.is_err();
-            let project_frontiers = project_progress.unwrap_or_default();
-            let git_convergence_committed = git_convergence.as_ref().is_some_and(|result| {
-                result.as_ref().is_ok_and(
-                    tracedecay_global_db::GitEvidenceConvergenceOutcome::committed_progress,
-                )
-            });
-
-            let profile_sweep_satisfied = {
-                let completed_profile_sweeps = service
-                    .completed_profile_sweeps
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                completed_profile_sweep_covers(
-                    completed_profile_sweeps.get(self.profile_id.as_str()),
-                    admitted_at,
-                )
-            };
-            let (user, profile_sweep_started_at) = if profile_sweep_satisfied
-                || pass_cancellation.is_cancelled()
-            {
-                (None, None)
-            } else {
-                let profile_sweep_started_at = now_micros();
-                let user_authority =
-                    GlobalDbSessionIngestAuthority::new(self.user_sessions.clone())
-                        .with_background_cpu(Arc::clone(&self.background_cpu));
-                let registry_authority = GlobalDbSessionIngestAuthority::new(self.registry.clone())
-                    .with_background_cpu(Arc::clone(&self.background_cpu));
-                let user = self
-                    .ingest_profile_transcripts(
-                        &user_authority,
-                        &registry_authority,
-                        &pass_cancellation,
-                    )
-                    .await;
-                (Some(user), Some(profile_sweep_started_at))
-            };
-            if let Some(user) = user.as_ref()
-                && user.coverage.is_complete()
-                && user.failures.is_empty()
-                && let Some(profile_sweep_started_at) = profile_sweep_started_at
-            {
-                service
-                    .completed_profile_sweeps
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(
-                        self.profile_id.as_str().to_owned(),
-                        profile_sweep_started_at,
-                    );
-            }
-            let combined = user
-                .as_ref()
-                .map_or(project.stats, |user| project.stats.merge(user.stats));
-            let stats = import_transcript_stats(
-                combined,
-                git_convergence
-                    .as_ref()
-                    .and_then(|result| result.as_ref().ok())
-                    .map(tracedecay_global_db::GitEvidenceConvergenceOutcome::stats),
-            );
-            let mut coverage = project_coverage;
-            coverage.push(user.as_ref().map_or_else(
-                || {
-                    source_coverage(
-                        "profile",
-                        if profile_sweep_satisfied {
-                            tracedecay_sessions::runtime::IngestPassCoverage::Complete
-                        } else {
-                            tracedecay_sessions::runtime::IngestPassCoverage::Partial {
-                                deferred_units: 1,
-                            }
-                        },
-                    )
+                SessionSyncSourceCoverageV1 {
+                    store_scope: "profile".to_owned(),
+                    coverage: transcript_coverage,
                 },
-                |user| source_coverage("profile", user.coverage),
-            ));
+            ];
             let source_frontiers = hotpath::future!(
                 service.persist_progress(
                     self,
@@ -706,26 +594,17 @@ impl SessionSyncProjectContext {
             )
             .await;
             (
-                project,
-                user,
                 stats,
                 coverage,
                 source_frontiers,
-                project_frontiers,
-                project_progress_failed,
-                git_convergence.is_some_and(|result| result.is_err()),
+                git_convergence.as_ref().is_some_and(|result| result.is_err()),
                 git_deferred_units > 0,
-                git_convergence_committed,
+                git_convergence.as_ref().is_some_and(|result| {
+                    result.as_ref().is_ok_and(
+                        tracedecay_global_db::GitEvidenceConvergenceOutcome::committed_progress,
+                    )
+                }),
             )
-        };
-        let pass = async {
-            match &self.transcript_source_home {
-                Some(home) => {
-                    tracedecay_sessions::runtime::with_transcript_source_home(home.clone(), pass)
-                        .await
-                }
-                None => pass.await,
-            }
         };
         tokio::pin!(pass);
         let (outcomes, interrupted) = tokio::select! {
@@ -737,30 +616,18 @@ impl SessionSyncProjectContext {
             }
         };
         let (
-            project,
-            user,
             stats,
             coverage,
             source_frontiers,
-            project_frontiers,
-            project_progress_failed,
             git_convergence_failed,
             git_convergence_incomplete,
             git_convergence_committed,
         ) = outcomes;
-        let committed = project.scheduling_state_written
-            || user
-                .as_ref()
-                .is_some_and(|outcome| outcome.scheduling_state_written)
-            || git_convergence_committed
-            || stats != SessionSyncStatsV1::default();
-        let mut failure_codes = project
-            .failures
-            .into_iter()
-            .chain(user.into_iter().flat_map(|outcome| outcome.failures))
-            .map(|failure| failure.reason_code.to_owned())
-            .collect::<Vec<_>>();
-        if project_progress_failed || source_frontiers.is_err() {
+        let mut failure_codes = Vec::new();
+        if !history_current {
+            failure_codes.push("session_history_not_current".to_owned());
+        }
+        if source_frontiers.is_err() {
             failure_codes.push("session_sync_frontier_persist_failed".to_owned());
         }
         if git_convergence_failed {
@@ -768,27 +635,16 @@ impl SessionSyncProjectContext {
         } else if git_convergence_incomplete {
             failure_codes.push("git_convergence_incomplete".to_owned());
         }
-        let source_frontiers = source_frontiers.unwrap_or(project_frontiers);
-        if committed {
-            return SessionSyncWorkResult::Finished {
-                interruption: interrupted,
-                committed: true,
-                stats,
-                coverage,
-                source_frontiers,
-                failure_codes,
-            };
-        }
-        match interrupted {
-            Some(interrupted) => SessionSyncWorkResult::Interrupted(interrupted),
-            None => SessionSyncWorkResult::Finished {
-                interruption: None,
-                committed: false,
-                stats,
-                coverage,
-                source_frontiers,
-                failure_codes,
-            },
+        let committed = history_current
+            || git_convergence_committed
+            || stats != SessionSyncStatsV1::default();
+        SessionSyncWorkResult::Finished {
+            interruption: interrupted,
+            committed,
+            stats,
+            coverage,
+            source_frontiers: source_frontiers.unwrap_or_default(),
+            failure_codes,
         }
     }
 
