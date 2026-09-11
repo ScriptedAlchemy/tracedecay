@@ -218,6 +218,11 @@ async fn claude_summary_pair_is_exact(
              WHERE provider = ?1 AND session_id = ?2
                AND message_id IN (?3, ?4)
                AND kind IN ('compact_boundary', 'compaction')
+             ORDER BY
+               CASE WHEN json_extract(metadata_json, '$.canonical_envelope') IS NOT NULL
+                    THEN 0 ELSE 1 END,
+               CASE WHEN message_id LIKE 'compact_boundary:%' THEN 0 ELSE 1 END,
+               message_id
              LIMIT 1",
             params![
                 provider,
@@ -238,12 +243,15 @@ async fn claude_summary_pair_is_exact(
     let metadata = row
         .get::<Option<String>>(0)
         .map_err(|error| LcmError::Db(error.to_string()))?;
-    let Some(boundary) = metadata
+    let Some(metadata) = metadata
         .as_deref()
         .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
-        .and_then(super::decode_canonical_observation_metadata)
     else {
         return Ok(false);
+    };
+    let boundary = match super::decode_canonical_observation_metadata(metadata)? {
+        super::CanonicalObservationMetadata::Envelope(envelope) => envelope,
+        super::CanonicalObservationMetadata::Unrecognized => return Ok(false),
     };
     let anchor = boundary.facts().iter().find_map(|fact| match fact {
         CanonicalObservationFactV1::Compaction {

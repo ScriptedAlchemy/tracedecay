@@ -101,24 +101,7 @@ pub(super) async fn native_summary_evidence(
     } else {
         (
             "SELECT message.message_id, message.text, message.kind, message.metadata_json,
-                    COALESCE(source_range.from_store_id, (
-                        SELECT predecessor.store_id
-                        FROM lcm_raw_messages AS predecessor
-                        WHERE predecessor.provider = message.provider
-                          AND predecessor.session_id = message.session_id
-                          AND predecessor.store_id < raw.store_id
-                        ORDER BY predecessor.store_id
-                        LIMIT 1
-                    )),
-                    COALESCE(source_range.to_store_id, (
-                        SELECT predecessor.store_id
-                        FROM lcm_raw_messages AS predecessor
-                        WHERE predecessor.provider = message.provider
-                          AND predecessor.session_id = message.session_id
-                          AND predecessor.store_id < raw.store_id
-                        ORDER BY predecessor.store_id DESC
-                        LIMIT 1
-                    )), raw.store_id
+                    source_range.from_store_id, source_range.to_store_id, raw.store_id
              FROM session_messages AS message
              LEFT JOIN lcm_raw_messages AS raw
                ON raw.provider = message.provider
@@ -175,11 +158,10 @@ pub(super) async fn native_summary_evidence(
         else {
             continue;
         };
-        // Envelope decoding is best-effort rather than a gate: a provider that
-        // records raw metadata instead of a canonical envelope still has to be
-        // recognizable, so failure to decode leaves `envelope` empty and lets
-        // the recognizers decide.
-        let envelope = decode_canonical_observation_metadata(metadata.clone());
+        let envelope = match decode_canonical_observation_metadata(metadata.clone())? {
+            CanonicalObservationMetadata::Envelope(envelope) => Some(envelope),
+            CanonicalObservationMetadata::Unrecognized => None,
+        };
         let candidate = NativeSummaryCandidate {
             provider,
             message_id: &message_id,
@@ -288,7 +270,10 @@ async fn native_store_is_recognized(
     let Some(metadata) = metadata else {
         return Ok(false);
     };
-    let envelope = decode_canonical_observation_metadata(metadata.clone());
+    let envelope = match decode_canonical_observation_metadata(metadata.clone())? {
+        CanonicalObservationMetadata::Envelope(envelope) => Some(envelope),
+        CanonicalObservationMetadata::Unrecognized => None,
+    };
     let candidate = NativeSummaryCandidate {
         provider,
         message_id: &message_id,
@@ -305,17 +290,64 @@ async fn native_store_is_recognized(
     Ok(false)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CanonicalObservationMetadata {
+    Envelope(CanonicalObservationEnvelopeV1),
+    Unrecognized,
+}
+
+/// Decode persisted observation metadata.
+///
+/// A nested `canonical_envelope` is the persisted pairing authority: if that
+/// key is present it must decode, and a broken envelope is a typed error
+/// rather than a silent fallthrough onto the stripped metadata. Providers
+/// that never persist the nested key still decode the whole object, and a
+/// missing or non-envelope object is [`CanonicalObservationMetadata::Unrecognized`].
 pub(super) fn decode_canonical_observation_metadata(
     mut metadata: Value,
-) -> Option<CanonicalObservationEnvelopeV1> {
-    let object = metadata.as_object_mut()?;
+) -> Result<CanonicalObservationMetadata, LcmError> {
+    let Some(object) = metadata.as_object_mut() else {
+        return Ok(CanonicalObservationMetadata::Unrecognized);
+    };
     object.remove("ingest_protection");
-    if let Some(envelope) = object.remove("canonical_envelope")
-        && let Ok(decoded) = serde_json::from_value(envelope)
-    {
-        return Some(decoded);
+    if let Some(envelope) = object.remove("canonical_envelope") {
+        return serde_json::from_value(envelope)
+            .map(CanonicalObservationMetadata::Envelope)
+            .map_err(|error| LcmError::Db(format!("canonical_envelope decode failed: {error}")));
     }
-    serde_json::from_value(metadata).ok()
+    Ok(serde_json::from_value(metadata)
+        .map(CanonicalObservationMetadata::Envelope)
+        .unwrap_or(CanonicalObservationMetadata::Unrecognized))
+}
+
+#[cfg(test)]
+mod decode_canonical_observation_metadata_tests {
+    use super::{CanonicalObservationMetadata, decode_canonical_observation_metadata};
+    use serde_json::json;
+
+    #[test]
+    fn nested_envelope_decode_failure_is_typed() {
+        let error = decode_canonical_observation_metadata(json!({
+            "canonical_envelope": {"not": "an envelope"}
+        }))
+        .expect_err("broken nested envelope must not fall through");
+        assert!(
+            error
+                .to_string()
+                .contains("canonical_envelope decode failed"),
+            "typed envelope failure: {error}"
+        );
+    }
+
+    #[test]
+    fn missing_nested_envelope_stays_unrecognized() {
+        let decoded = decode_canonical_observation_metadata(json!({"source": "codex"}))
+            .expect("absent nested envelope is not a decode error");
+        assert!(matches!(
+            decoded,
+            CanonicalObservationMetadata::Unrecognized
+        ));
+    }
 }
 
 async fn native_source_membership_is_exact(
