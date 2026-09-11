@@ -272,6 +272,7 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
     let selection = repository_selection(fixture);
     let dashboard = DashboardProcess::start(fixture);
     dashboard.wait_until_serving(agent, "the graded pass");
+    assert_both_attempt_reads_bind_the_executor_journal(agent, fixture, &dashboard, &identity);
     assert_both_mounts(
         agent,
         fixture,
@@ -443,6 +444,126 @@ fn assert_no_git_selection_reads_its_covered_slice(
         ),
         "the widened selection must carry the scoped relation the slice omitted: {whole}"
     );
+}
+
+/// The attempt page and the execution history read one journal, graded against
+/// the other journal's live generation, on both published mounts.
+///
+/// `list_attempts` and `execution_history` project the same attempt page under
+/// the same topology `generation`, which is the cursor identity for both
+/// (`WorkAttemptService::list`), so a cursor minted by either is judged by the
+/// other and they must bind one authority. That authority is the executor
+/// task-command journal (`work_events_v1`), and no production path appends to
+/// it — `RegisteredWorkApplicationServicesV1::commands()` is only ever read
+/// from — so a `listed` page is not a state any production journey reaches,
+/// and every scope answers the typed `absent`.
+///
+/// The other journal is live here: the product graph carries this journey's
+/// committed task, and `hydrate_artifacts` deliberately binds it, so hydration
+/// answers a real generation over the real settled attempt row. That generation
+/// is the discriminator. Fed back as a cursor it must be refused as stale by
+/// both attempt reads, because the journal they bind has no generation for this
+/// scope at all. A read bound to the product graph would recognise its own
+/// generation and answer a page instead — which is what `execution_history`
+/// did before it was moved back onto the executor journal.
+fn assert_both_attempt_reads_bind_the_executor_journal(
+    agent: &ureq::Agent,
+    fixture: &ProductionDaemon,
+    dashboard: &DashboardProcess,
+    identity: &Value,
+) {
+    let first_page = json!({ "page_size": 25, "cursor": Value::Null });
+    let hydrated = attempt_read(agent, fixture, dashboard, "hydrate-artifacts", &first_page);
+    assert_eq!(
+        hydrated["state"], "hydrated",
+        "hydration must read the product graph this journey committed to: {hydrated}"
+    );
+    assert!(
+        hydrated["attempts"]
+            .as_array()
+            .is_some_and(|attempts| attempts
+                .iter()
+                .any(|attempt| attempt["identity"] == *identity)),
+        "hydration must carry the settled attempt: {hydrated}"
+    );
+    let generation = hydrated["topology"]["generation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("hydration must name its topology generation: {hydrated}"))
+        .to_owned();
+    assert!(
+        !generation.is_empty(),
+        "the product topology generation must be a real identity: {hydrated}"
+    );
+
+    for operation in ["list-attempts", "execution-history"] {
+        let payload = attempt_read(agent, fixture, dashboard, operation, &first_page);
+        assert_eq!(
+            payload["state"], "absent",
+            "work/{operation} must answer the executor journal's absence, \
+             not the product graph's page: {payload}"
+        );
+    }
+
+    let resumed = json!({
+        "page_size": 25,
+        "cursor": { "generation": generation, "start_after": identity },
+    });
+    for operation in ["list-attempts", "execution-history"] {
+        let daemon_label = format!("daemon work/{operation} (product generation cursor)");
+        let (status, body) = super::poll_past_warming(&daemon_label, &mut || {
+            post_envelope(
+                agent,
+                &fixture.external_url(&format!("/application/work/{operation}")),
+                fixture,
+                &resumed,
+            )
+        });
+        super::assert_typed_problem(&daemon_label, status, &body, (409, "stale", true));
+
+        let dashboard_label = format!("dashboard api/work/{operation} (product generation cursor)");
+        let (status, body) = post_dashboard_envelope(
+            agent,
+            &format!("{}/api/work/{operation}", dashboard.base_url),
+            &resumed,
+        );
+        super::assert_typed_problem(&dashboard_label, status, &body, (409, "stale", true));
+    }
+}
+
+/// Posts one attempt-scoped Work read to both mounts and returns the payload
+/// they must agree on.
+fn attempt_read(
+    agent: &ureq::Agent,
+    fixture: &ProductionDaemon,
+    dashboard: &DashboardProcess,
+    operation: &str,
+    request: &Value,
+) -> Value {
+    let daemon_label = format!("daemon work/{operation}");
+    let (status, body) = super::poll_past_warming(&daemon_label, &mut || {
+        post_envelope(
+            agent,
+            &fixture.external_url(&format!("/application/work/{operation}")),
+            fixture,
+            request,
+        )
+    });
+    assert_canonical_envelope(&daemon_label, status, &body);
+    let daemon_payload = body["value"]["outcome"]["value"]["payload"].clone();
+
+    let dashboard_label = format!("dashboard api/work/{operation}");
+    let (status, body) = post_dashboard_envelope(
+        agent,
+        &format!("{}/api/work/{operation}", dashboard.base_url),
+        request,
+    );
+    assert_canonical_envelope(&dashboard_label, status, &body);
+    let dashboard_payload = body["value"]["outcome"]["value"]["payload"].clone();
+    assert_eq!(
+        daemon_payload, dashboard_payload,
+        "both published mounts must answer the same {operation} payload"
+    );
+    daemon_payload
 }
 
 /// One graded pass over both mounts and all four temporal modes.

@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { useWorkspaceState } from "../app/workspace";
 import {
   AGENT_FILTERS,
@@ -208,35 +208,58 @@ const DELIVERY_BEACONS = [
 function DeliveryEvidenceGraph() {
   const [selectedId, setSelectedId] = useState("#12977");
   const [beacon, setBeacon] = useState<string | null>(null);
+  const [camera, setCamera] = useState({ zoom: 1, x: 0, y: 0 });
+  const drag = useRef<{ x: number; y: number; camera: typeof camera } | null>(null);
+  const admitted = DELIVERY_FIXTURE_PRS.filter((pr) => pr.admission === "joined");
+  const unadmitted = DELIVERY_FIXTURE_PRS.filter((pr) => pr.admission === "not-joined");
+  const repositories = [...new Set(admitted.map((pr) => pr.repository))].sort();
+  const edges = admitted.flatMap((pr) => (pr.edges ?? []).map((edge) => ({ from: pr.id, ...edge })));
   const visible = DELIVERY_FIXTURE_PRS.filter((pr) => !beacon || pr.attention.includes(beacon as DeliveryFixturePr["attention"][number]));
   const selected = DELIVERY_FIXTURE_PRS.find((pr) => pr.id === selectedId) ?? DELIVERY_FIXTURE_PRS[0];
   const select = (pr: DeliveryFixturePr) => setSelectedId(pr.id);
+  const nodeX = (pr: DeliveryFixturePr) => 180 + ((pr.lastActivity - 8) / 14) * 980;
+  const laneY = (repository: string) => 190 + repositories.indexOf(repository) * 122;
+  const resetCamera = () => setCamera({ zoom: 1, x: 0, y: 0 });
+  const onWheel = (event: React.WheelEvent<SVGSVGElement>) => {
+    event.preventDefault();
+    setCamera((current) => ({ ...current, zoom: Math.max(0.65, Math.min(2.4, current.zoom * (event.deltaY < 0 ? 1.12 : 0.89))) }));
+  };
   return <div className="dl-stage is-delivery-evidence">
     <aside className="dl-pane">
-      <h3>ADMITTED PRS <span>REGISTERED × TRACKED HEAD</span></h3>
+      <h3>ADMITTED PRS <span>{admitted.length} JOINED · {unadmitted.length} UNADMITTED</span></h3>
       <div className="dl-scroll">
         <div className="dl-delivery-beacons" aria-label="Attention signal legend">
           {DELIVERY_BEACONS.map((item) => <button key={item.id} className={beacon === item.id ? "is-on" : ""} aria-pressed={beacon === item.id} onClick={() => setBeacon(beacon === item.id ? null : item.id)}>{item.label}</button>)}
         </div>
-        <p className="dl-microbody">Named attention filters the graph and list. It does not establish a relationship.</p>
+        <p className="dl-microbody">Named attention dims unrelated nodes. It does not establish a relationship.</p>
         {visible.map((pr) => <button key={pr.id} className={`dl-delivery-pr-row${selected.id === pr.id ? " is-selected" : ""}${pr.admission === "not-joined" ? " is-gap" : ""}`} aria-pressed={selected.id === pr.id} onClick={() => select(pr)}>
-          <strong>{pr.id} · {pr.title}</strong><span>{pr.repository}</span><em>{pr.admission === "joined" ? `indexed ${pr.trackedHead}` : pr.gap}</em>
+          <strong>{pr.id} · {pr.title}</strong><span>{pr.repository} · {pr.lastActivity.toFixed(1)} UTC</span><em>{pr.admission === "joined" ? `${pr.changedFiles} files · indexed ${pr.trackedHead}` : pr.gap}</em>
         </button>)}
         {!visible.length && <p className="dl-local-notice">No admitted PR has this named signal in the authored fixture.</p>}
       </div>
     </aside>
     <section className="dl-pane">
-      <h3>DELIVERY EVIDENCE GRAPH <span>EDGES REQUIRE NAMED EVIDENCE</span></h3>
-      <div className="dl-delivery-graph" aria-label="Registered repositories, tracked heads and admitted pull requests">
-        <div className="dl-graph-legend"><b>GRAPH LEGEND</b><span>□ registered repository</span><span>◇ tracked indexed head</span><span>● admitted pull request</span><span>— labeled explicit evidence edge</span><span>▧ typed absence / not admitted</span></div>
-        {visible.map((pr) => <article key={pr.id} className={`dl-delivery-node${selected.id === pr.id ? " is-selected" : ""}${pr.admission === "not-joined" ? " is-gap" : ""}`}>
-          <button onClick={() => select(pr)} aria-pressed={selected.id === pr.id}>
-            <span className="repo">□ {pr.repository}</span>
-            {pr.admission === "joined" ? <><span className="head">◇ indexed head {pr.trackedHead}</span><strong>● {pr.id} · {pr.title}</strong></> : <><span className="head">▧ {pr.gap}</span><strong>● {pr.id} · provider context only</strong></>}
-          </button>
-          {pr.edges?.map((edge) => <div className="dl-evidence-edge" key={edge.to}>— {edge.kind} → {edge.to}</div>)}
-          <div className="dl-node-beacons">{pr.attention.map((signal) => <span key={signal}>{DELIVERY_BEACONS.find((item) => item.id === signal)?.label}</span>)}</div>
-        </article>)}
+      <h3>DELIVERY EVIDENCE GRAPH <span>{admitted.length} ADMITTED · {unadmitted.length} UNADMITTED · {repositories.length} REPOSITORIES · {edges.length} EVIDENCE EDGE</span></h3>
+      <div className="dl-delivery-graph" aria-label="Repository lanes, indexed heads, admitted pull requests and evidence relationships">
+        <div className="dl-graph-legend"><b>NODE & ATTENTION LEGEND</b><span>◇ indexed head / fresh</span><span>ring = changed-file count</span><span>✕ CI failed · ◉ review · ! diagnostics</span><span>◌ stale · ⚡ conflicting edits</span><span>solid edge = exact evidence</span></div>
+        <div className="dl-graph-controls"><button onClick={() => setCamera((value) => ({ ...value, zoom: Math.max(.65, value.zoom - .2) }))}>−</button><span>{Math.round(camera.zoom * 100)}%</span><button onClick={() => setCamera((value) => ({ ...value, zoom: Math.min(2.4, value.zoom + .2) }))}>+</button><button onClick={resetCamera}>Fit</button></div>
+        <svg className="dl-delivery-svg" viewBox="0 0 1280 700" role="group" aria-label="Delivery time axis graph. Scroll to zoom and drag to pan."
+          onWheel={onWheel}
+          onPointerDown={(event) => { drag.current = { x: event.clientX, y: event.clientY, camera }; event.currentTarget.setPointerCapture(event.pointerId); }}
+          onPointerMove={(event) => { if (drag.current) setCamera({ ...drag.current.camera, x: drag.current.camera.x + event.clientX - drag.current.x, y: drag.current.camera.y + event.clientY - drag.current.y }); }}
+          onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
+          <g transform={`translate(${camera.x} ${camera.y}) scale(${camera.zoom})`}>
+            <text x="22" y="66" className="dl-delivery-axis-label">LAST ACTIVITY · UTC</text>
+            <line x1="180" y1="72" x2="1160" y2="72" className="dl-delivery-axis" />
+            {[8, 10, 12, 14, 16, 18, 20, 22].map((hour) => <g key={hour}><line x1={180 + ((hour - 8) / 14) * 980} x2={180 + ((hour - 8) / 14) * 980} y1="68" y2="610" className="dl-delivery-tick" /><text x={180 + ((hour - 8) / 14) * 980} y="57" textAnchor="middle" className="dl-delivery-tick-label">{String(hour).padStart(2, "0")}:00</text></g>)}
+            {repositories.map((repository) => { const y = laneY(repository); const head = admitted.find((pr) => pr.repository === repository)!; return <g key={repository}><text x="22" y={y - 16} className="dl-delivery-repo">{repository}</text><text x="22" y={y + 1} className="dl-delivery-fresh">INDEX FRESH · {head.trackedHead}</text><line x1="180" x2="1160" y1={y} y2={y} className="dl-delivery-lane" /><rect x="158" y={y - 9} width="18" height="18" className="dl-delivery-head" transform={`rotate(45 167 ${y})`} /><text x="188" y={y + 4} className="dl-delivery-head-label">HEAD</text></g>; })}
+            {edges.map((edge) => { const from = admitted.find((pr) => pr.id === edge.from)!; const to = admitted.find((pr) => pr.id === edge.to)!; const x1 = nodeX(from), y1 = laneY(from.repository), x2 = nodeX(to), y2 = laneY(to.repository); return <g key={`${edge.from}-${edge.to}`} className={selected.id === edge.from || selected.id === edge.to ? "is-selected" : ""}><path d={`M ${x1} ${y1} C ${(x1 + x2) / 2} ${y1 - 70}, ${(x1 + x2) / 2} ${y2 - 70}, ${x2} ${y2}`} className="dl-delivery-edge-path" /><text x={(x1 + x2) / 2} y={Math.min(y1, y2) - 42} textAnchor="middle" className="dl-delivery-edge-label">{edge.kind}</text></g>; })}
+            {admitted.map((pr) => { const highlighted = !beacon || pr.attention.includes(beacon as DeliveryFixturePr["attention"][number]); const selectedNode = selected.id === pr.id; const radius = 12 + Math.min(16, Math.sqrt(pr.changedFiles ?? 0)); return <g key={pr.id} className={`dl-delivery-pr-node${selectedNode ? " is-selected" : ""}${highlighted ? "" : " is-dim"}`} role="button" tabIndex={0} aria-label={`Select ${pr.id}, ${pr.changedFiles} changed files`} onPointerDown={(event) => event.stopPropagation()} onClick={() => select(pr)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(pr); } }}><circle cx={nodeX(pr)} cy={laneY(pr.repository)} r={radius} /><circle cx={nodeX(pr)} cy={laneY(pr.repository)} r="5" /><text x={nodeX(pr)} y={laneY(pr.repository) + radius + 16} textAnchor="middle">{pr.id}</text><text x={nodeX(pr)} y={laneY(pr.repository) + radius + 29} textAnchor="middle" className="dl-delivery-file-count">{pr.changedFiles} files</text>{pr.attention.map((signal, index) => <text key={signal} x={nodeX(pr) + radius + 6} y={laneY(pr.repository) - radius + index * 13} className="dl-delivery-beacon">{signal === "ci-failed" ? "✕" : signal === "review" ? "◉" : signal === "diagnostics" ? "!" : signal === "stale" ? "◌" : "⚡"}</text>)}</g>; })}
+            <rect x="22" y="600" width="1138" height="76" className="dl-unadmitted-band" /><text x="34" y="621" className="dl-delivery-axis-label">UNADMITTED · NOT JOINED TO INDEXED HEAD</text>
+            {unadmitted.map((pr) => <g key={pr.id} className={`dl-delivery-pr-node is-unadmitted${selected.id === pr.id ? " is-selected" : ""}`} role="button" tabIndex={0} aria-label={`Select unadmitted ${pr.id}`} onPointerDown={(event) => event.stopPropagation()} onClick={() => select(pr)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(pr); } }}><circle cx={nodeX(pr)} cy="647" r="18" /><text x={nodeX(pr)} y="652" textAnchor="middle">{pr.id}</text><text x={nodeX(pr)} y="672" textAnchor="middle" className="dl-delivery-file-count">{pr.gap}</text><text x={nodeX(pr) + 23} y="639" className="dl-delivery-beacon">⚡</text></g>)}
+          </g>
+        </svg>
+        <div className="dl-delivery-minimap" aria-label="Delivery graph minimap"><svg viewBox="0 0 1280 700" preserveAspectRatio="none" aria-hidden="true">{repositories.map((repository) => <line key={repository} x1="180" x2="1160" y1={laneY(repository)} y2={laneY(repository)} />)}{admitted.map((pr) => <circle key={pr.id} cx={nodeX(pr)} cy={laneY(pr.repository)} r="13" />)}<rect x={Math.max(0, -camera.x / camera.zoom)} y={Math.max(0, -camera.y / camera.zoom)} width={1280 / camera.zoom} height={700 / camera.zoom} /></svg></div>
       </div>
     </section>
     <aside className="dl-pane">
@@ -244,12 +267,7 @@ function DeliveryEvidenceGraph() {
       <div className="dl-scroll dl-delivery-inspector">
         <h2>{selected.title}</h2><p>{selected.repository}</p>
         <dl><dt>Admission</dt><dd>{selected.admission === "joined" ? `registered repository + tracked indexed head ${selected.trackedHead}` : selected.gap}</dd></dl>
-        <ol className="dl-causal-chain">
-          <li><b>Agent session</b><span>{selected.agent}</span></li>
-          <li><b>Code change</b><span>{selected.code ?? "UNAVAILABLE · not joined to indexed head"}</span></li>
-          <li><b>CI / review</b><span>{selected.ci ?? "UNAVAILABLE"} · {selected.review ?? "review UNAVAILABLE"}</span></li>
-          <li><b>Next action</b><span>{selected.nextAction}</span></li>
-        </ol>
+        <ol className="dl-causal-chain"><li><b>Agent session</b><span>{selected.agent}</span></li><li><b>Code change</b><span>{selected.code ?? "UNAVAILABLE · not joined to indexed head"}</span></li><li><b>CI / review</b><span>{selected.ci ?? "UNAVAILABLE"} · {selected.review ?? "review UNAVAILABLE"}</span></li><li><b>Next action</b><span>{selected.nextAction}</span></li></ol>
         <p className="dl-hint">Fixture-only causal projection. Gaps remain typed; the graph does not infer membership, outcome, or dependency from shared display.</p>
       </div>
     </aside>

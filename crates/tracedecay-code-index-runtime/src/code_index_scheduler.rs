@@ -81,7 +81,6 @@ use crate::{
             VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
             VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
             VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
-            generation_language_revisions_are_current,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -6314,11 +6313,27 @@ impl CodeIndexWorktreeSchedulerV1 {
         generation: &CodeIndexPublishedGenerationV1,
     ) -> CodeIndexGenerationCompatibilityV1 {
         let compatibility = generation.compatibility_with(&self.production_config);
+        self.observe_compatibility(&generation.manifest().generation_id, compatibility)
+    }
+
+    fn observe_retained_text_compatibility(
+        &self,
+        metadata: &VerifiedSealedTextGenerationMetadataV1,
+    ) -> CodeIndexGenerationCompatibilityV1 {
+        let compatibility = metadata.manifest_compatibility_with(&self.production_config);
+        self.observe_compatibility(&metadata.manifest().generation_id, compatibility)
+    }
+
+    fn observe_compatibility(
+        &self,
+        generation_id: &CodeGenerationId,
+        compatibility: CodeIndexGenerationCompatibilityV1,
+    ) -> CodeIndexGenerationCompatibilityV1 {
         let next = if compatibility.is_reusable() {
             None
         } else {
             Some(CodeIndexGenerationRecoveryV1 {
-                incompatible_generation_id: generation.manifest().generation_id.as_str().to_owned(),
+                incompatible_generation_id: generation_id.as_str().to_owned(),
                 incompatibilities: compatibility
                     .incompatibilities()
                     .iter()
@@ -6346,7 +6361,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ),
                 None if observed.is_some() => tracing::info!(
                     event = "code_index_generation_configuration_recovered",
-                    generation_id = %generation.manifest().generation_id,
+                    generation_id = %generation_id,
                     "the compatible replacement generation is now active"
                 ),
                 None => {}
@@ -6761,6 +6776,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             return Ok(None);
         }
+        let retained_is_reusable = self
+            .observe_retained_text_compatibility(metadata)
+            .is_reusable();
         let witness = RestoreFreshnessWitnessV1::load(&self.store_root);
         if witness.as_ref().is_some_and(|witness| {
             witness.generation_id != metadata.manifest().generation_id.as_str()
@@ -6792,7 +6810,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         // generation's sealed file digests; its matching stat signature is
         // the negative cache that lets a moved tree skip the byte comparison.
         let source_manifest = SourceContentManifestV1::for_snapshot(metadata.snapshot());
-        if !has_hints
+        if retained_is_reusable
+            && !has_hints
             && let Some(witness) = witness.as_ref()
             && witness.git_metadata_signature == sampled_metadata.stable_signature()
             && witness.stat_signature == sampled_sweep.signature
@@ -6819,10 +6838,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             )));
         }
 
-        // Witness did not prove a quiet tree. Graph-on remounts fall through
-        // to `reconcile_now` so the successor rebuild reuses the sealed
-        // generation instead of extracting the whole worktree on this path.
-        if !rebuild_changed_source_without_decode {
+        // A compatible generation whose witness did not prove a quiet tree
+        // falls through to the full graph-on reconcile. An incompatible
+        // lightweight owner rebuilds here without decoding the retained graph.
+        if retained_is_reusable && !rebuild_changed_source_without_decode {
             return Ok(None);
         }
 
@@ -6877,7 +6896,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         if control.is_cancelled() {
             return Ok(None);
         }
-        if captured.snapshot.reference != metadata.snapshot().reference
+        let rebuild_incompatible_generation = !self
+            .observe_retained_text_compatibility(metadata)
+            .is_reusable();
+        if rebuild_incompatible_generation
+            || captured.snapshot.reference != metadata.snapshot().reference
             || captured.snapshot.source_revision != metadata.snapshot().source_revision
             || captured.snapshot.content_identity != metadata.snapshot().content_identity
         {
@@ -6948,6 +6971,15 @@ impl CodeIndexWorktreeSchedulerV1 {
                     &control,
                 )?
             };
+            if !self
+                .observe_generation_compatibility(&generation)
+                .is_reusable()
+            {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "newly published generation is incompatible with its production owner"
+                        .to_owned(),
+                ));
+            }
             Self::finish_snapshot_build_memory(&mut captured.retained_reservations)?;
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             self._retained_snapshot_memory = std::mem::take(&mut captured.retained_reservations);
@@ -7244,14 +7276,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             text_control.retire();
             return None;
         }
-        if !generation_language_revisions_are_current(metadata.manifest(), metadata.snapshot()) {
-            tracing::info!(
-                event = "code_index_retained_generation_language_incompatible",
-                generation_id = %generation_id,
-                "retained generation refused: language registry, grammar, or extractor revision is no longer current"
-            );
+        let compatibility = self.observe_retained_text_compatibility(&metadata);
+        if !compatibility.may_serve_while_rebuilding() {
             text_control.retire();
+            self.request_background_reconcile();
             return None;
+        }
+        if !compatibility.is_reusable() {
+            self.request_background_reconcile();
         }
         if self
             .publication

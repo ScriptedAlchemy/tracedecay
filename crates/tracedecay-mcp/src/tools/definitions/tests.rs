@@ -79,6 +79,43 @@ fn stack_snapshot_requires_an_exact_selection_binding() {
     );
 }
 
+/// `health_read` takes no parameters, so `{}` is the whole request.
+///
+/// The advertised MCP schema and the reviewed request contract are the same
+/// authority, and CLI and MCP reach it through one adapter. Grading the
+/// advertised schema and that adapter together is what keeps an argument a
+/// host may legitimately send from being accepted on one surface and refused
+/// on another.
+#[test]
+fn health_read_accepts_the_empty_argument_object_on_every_surface() {
+    let definition = get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .find(|definition| definition.name == "tracedecay_health_read")
+        .expect("health read is advertised");
+    assert_eq!(
+        definition.input_schema["required"]
+            .as_array()
+            .map_or(0, Vec::len),
+        0,
+        "the advertised health read schema must require no argument: {}",
+        definition.input_schema
+    );
+
+    let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(
+        "tracedecay_health_read",
+        json!({}),
+    )
+    .expect("the shared CLI/MCP adapter accepts the empty object");
+    assert_eq!(adapted.request, json!({}));
+    let request = tracedecay_daemon_protocol::parse_application_surface_request(
+        ApplicationSurfaceOperation::HealthRead,
+        adapted.request,
+    )
+    .expect("the reviewed health read contract accepts the empty object");
+    assert!(request.matches(ApplicationSurfaceOperation::HealthRead));
+}
+
 #[test]
 fn test_explore_call_budget_tiers() {
     assert_eq!(explore_call_budget(0), 3);
