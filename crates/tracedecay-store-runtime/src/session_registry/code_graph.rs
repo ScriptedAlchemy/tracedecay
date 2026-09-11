@@ -1988,7 +1988,7 @@ impl RetainedCodeGraphRuntimeV1 {
                             event = "code_graph_verified_head_repair_started",
                             generation = %prepared.publication_key.generation,
                             error = %error,
-                            "verified head matched the revision-7 manifest but its derived \
+                            "verified head matched the partitioned manifest but its derived \
                              Grafeo state was invalid; replaying the canonical generation"
                         );
                         return publish(
@@ -2019,7 +2019,7 @@ impl RetainedCodeGraphRuntimeV1 {
                             generation = %prepared.publication_key.generation,
                             error = %error,
                             "verified Grafeo staging state was invalid; replaying the \
-                             canonical revision-7 generation"
+                             canonical partitioned generation"
                         );
                         return publish(
                             &mut storage,
