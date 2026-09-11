@@ -7,9 +7,12 @@ use serde_json::Value;
 
 use tracedecay_mcp::JsonRpcResponse;
 
+use crate::test_support::git::GIT_FIXTURE_CONFIG;
+
 pub(super) fn git(project: &Path, arguments: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .current_dir(project)
+        .args(GIT_FIXTURE_CONFIG)
         .args(arguments)
         .output()
         .expect("run git");
