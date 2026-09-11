@@ -13927,54 +13927,118 @@ fn reparse_matches_full_parse_chunks() {
 // is served generation-bound and read-only, bypassing freshness entirely.
 // ---------------------------------------------------------------------------
 
+/// Failure ceiling for a positive serving wait. This is not a scheduling
+/// budget: the waiter still blocks on the seating signal, and a seat that
+/// arrives at any time before the ceiling succeeds. The bound exists only so
+/// a worktree that can never seat fails with a diagnostic instead of hanging.
+const SERVING_SEAT_FAILURE_CEILING: Duration = Duration::from_secs(120);
+
+async fn serving_seat_wait_diagnostic(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+    last_serving: Option<&CodeGenerationId>,
+    last_generation: Option<&CodeGenerationId>,
+) -> String {
+    let current_serving = registry
+        .latest_complete_serving_for_test(path)
+        .await
+        .map(|latest| latest.generation.manifest().generation_id.clone());
+    let current_generation = registry.latest_generation_id(path).await;
+    let mounted = match registry.mounted_code_scope(path).await {
+        Some(scope) => format!(
+            "mounted repo={} worktree={} shutting_down={}",
+            scope.repository_id,
+            scope.worktree_id,
+            scope
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Acquire)
+        ),
+        None => "unmounted".to_owned(),
+    };
+    format!(
+        "serving seat never arrived for worktree {}; last observed serving={:?} generation={:?}; registry serving={:?} generation={:?} {mounted}",
+        path.display(),
+        last_serving.map(CodeGenerationId::as_str),
+        last_generation.map(CodeGenerationId::as_str),
+        current_serving.as_ref().map(CodeGenerationId::as_str),
+        current_generation.as_ref().map(CodeGenerationId::as_str),
+    )
+}
+
 /// Wait until `probe` observes a serving seat for `path`.
 ///
 /// Checks the current slot before subscribing so a seat that arrived before
 /// this waiter exists is not missed, then waits on
 /// [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`]. A seat can also
 /// land between that first probe and subscribe; the loop re-reads the slot
-/// before blocking on the next wake. Positive waits have no wall-clock bound.
+/// before blocking on the next wake.
 ///
 /// [`CodeIndexSchedulerRegistryV1::subscribe_serving_generation_changes`]
 /// admits complete-generation demand and wakes on per-worktree seating,
 /// including restored mounts that emit no new registry-wide seat count.
 /// Subscribe after the worktree is mounted; a waiter that starts before
 /// mount still observes [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
+///
+/// `ceiling` is a failure bound only. The wait is still signal-driven; a
+/// test must not pass because the ceiling elapsed.
 async fn wait_until_serving_seat<T, F, Fut>(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
+    ceiling: Duration,
     mut probe: F,
 ) -> T
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Option<T>>,
 {
-    if let Some(value) = probe().await {
-        return value;
-    }
-    let mut seats = registry.subscribe_serving_seats();
-    let mut per_worktree = registry.subscribe_serving_generation_changes(path).await;
-    loop {
+    let wait = async {
         if let Some(value) = probe().await {
             return value;
         }
-        match per_worktree.as_mut() {
-            Some(changes) => {
-                tokio::select! {
-                    result = seats.changed() => {
-                        result.expect("the seating channel stays open while the registry lives");
-                    }
-                    result = changes.changed() => {
-                        result.expect("the per-worktree serving channel stays open while the owner lives");
+        let mut seats = registry.subscribe_serving_seats();
+        let mut per_worktree = registry.subscribe_serving_generation_changes(path).await;
+        loop {
+            if let Some(value) = probe().await {
+                return value;
+            }
+            match per_worktree.as_mut() {
+                Some(changes) => {
+                    tokio::select! {
+                        result = seats.changed() => {
+                            result.expect("the seating channel stays open while the registry lives");
+                        }
+                        result = changes.changed() => {
+                            result.expect("the per-worktree serving channel stays open while the owner lives");
+                        }
                     }
                 }
+                None => {
+                    seats
+                        .changed()
+                        .await
+                        .expect("the seating channel stays open while the registry lives");
+                }
             }
-            None => {
-                seats
-                    .changed()
-                    .await
-                    .expect("the seating channel stays open while the registry lives");
-            }
+        }
+    };
+    match tokio::time::timeout(ceiling, wait).await {
+        Ok(value) => value,
+        Err(_) => {
+            let last_serving = registry
+                .latest_complete_serving_for_test(path)
+                .await
+                .map(|latest| latest.generation.manifest().generation_id.clone());
+            let last_generation = registry.latest_generation_id(path).await;
+            panic!(
+                "{}",
+                serving_seat_wait_diagnostic(
+                    registry,
+                    path,
+                    last_serving.as_ref(),
+                    last_generation.as_ref(),
+                )
+                .await
+            )
         }
     }
 }
@@ -14014,7 +14078,7 @@ async fn wait_for_live_complete_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCompleteCodeIndexV1 {
-    wait_until_serving_seat(registry, path, || {
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || {
         registry.latest_complete_serving_for_test(path)
     })
     .await
@@ -14126,6 +14190,20 @@ async fn serving_seat_signal_observes_a_seat_that_misses_the_poll_deadline() {
             .generation_id
     );
     registry.shutdown().await;
+}
+
+/// A worktree that never seats must fail with the serving-seat diagnostic
+/// instead of hanging on the signal. The short ceiling is local to this
+/// assertion; production waits keep [`SERVING_SEAT_FAILURE_CEILING`].
+#[tokio::test]
+#[should_panic(expected = "serving seat never arrived")]
+async fn serving_seat_signal_fails_when_a_seat_never_arrives() {
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let path = Path::new("/no-such-tracedecay-worktree-for-seat-ceiling");
+    let _ = wait_until_serving_seat(&registry, path, Duration::from_millis(250), || {
+        registry.latest_complete_serving_for_test(path)
+    })
+    .await;
 }
 
 async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
@@ -14269,12 +14347,17 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
     wait_for_generation_change(&registry, fixture.path(), &initial).await;
     // Publication is not the sealed serving seat. Abstention reports the
     // seated generation, so wait for that seat to advance.
-    wait_until_serving_seat(&registry, fixture.path(), || async {
-        registry
-            .latest_complete_serving_for_test(fixture.path())
-            .await
-            .filter(|latest| latest.generation.manifest().generation_id != initial)
-    })
+    wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        || async {
+            registry
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+                .filter(|latest| latest.generation.manifest().generation_id != initial)
+        },
+    )
     .await;
     let refreshed = registry.semantic_mcp_abstention(fixture.path()).await;
     assert_ne!(refreshed.code_generation.as_deref(), Some(initial.as_str()));
