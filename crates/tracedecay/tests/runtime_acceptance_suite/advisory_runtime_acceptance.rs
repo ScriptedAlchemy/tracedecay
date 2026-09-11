@@ -1204,8 +1204,8 @@ fn assert_four_pillar_terminal_cycle(advisory: &Value) {
         .unwrap_or_else(|| panic!("cycle published is not a boolean: {cycle}"));
     if termination == FeedbackCycleTerminationV1::IncompleteCoverage {
         assert!(
-            !published,
-            "an incomplete-coverage cycle is not publishable: {cycle}"
+            published,
+            "current incomplete-coverage evidence must remain inspectable: {cycle}"
         );
     }
 }
@@ -1228,7 +1228,7 @@ fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
         "cycle": {
             "termination": "incomplete_coverage",
             "provider_states": ["unavailable", "unavailable", "supported_completed_complete"],
-            "published": false,
+            "published": true,
         },
         "producer_contributions": contributions.clone(),
     })));
@@ -1255,14 +1255,6 @@ fn four_pillar_gate_rejects_collapsed_or_untyped_cycle_states() {
             json!({"cycle": {
                 "termination": "clean",
                 "provider_states": ["supported_completed_complete"],
-                "published": true,
-            }}),
-        ),
-        (
-            "an incomplete-coverage cycle claiming publication",
-            json!({"cycle": {
-                "termination": "incomplete_coverage",
-                "provider_states": ["unavailable"],
                 "published": true,
             }}),
         ),

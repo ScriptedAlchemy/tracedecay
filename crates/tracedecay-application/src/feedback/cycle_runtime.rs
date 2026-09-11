@@ -112,7 +112,7 @@ pub struct FeedbackFindingHandlesV1 {
     pub expansion_handle: Option<String>,
 }
 
-/// Short-lived handles for reads over the completed cycle publication.
+/// Short-lived handles for reads over the committed cycle publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeedbackCycleReadHandlesV1 {
     pub diagnostics_handle: String,
@@ -352,7 +352,7 @@ impl FeedbackCycleRuntime {
         Arc::clone(&self.feedback)
     }
 
-    /// The same durable store used by the completed-publication dedupe port.
+    /// The same durable store used by the publication and completed-dedupe port.
     pub fn publication_store(&self) -> ProjectFeedbackStore {
         self.publications.clone()
     }

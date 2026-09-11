@@ -10,7 +10,7 @@
 
 use tracedecay_domain::CodeGenerationId;
 
-use crate::feedback::FeedbackCompletedPublicationV1;
+use crate::feedback::FeedbackPublicationV1;
 
 use super::sources::{
     AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1, AdvisoryFeedbackSummaryReadV1,
@@ -91,7 +91,7 @@ pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealt
 /// distinct advisory port. Host conformance remains a separate source.
 #[must_use]
 pub fn advisory_feedback_read_from_publication(
-    publication: Option<&FeedbackCompletedPublicationV1>,
+    publication: Option<&FeedbackPublicationV1>,
     current_generation: Option<&CodeGenerationId>,
 ) -> AdvisoryFeedbackReadV1 {
     let Some(publication) = publication else {

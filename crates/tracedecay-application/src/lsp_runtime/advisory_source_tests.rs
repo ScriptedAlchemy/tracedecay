@@ -8,15 +8,17 @@ use tracedecay_contracts::diagnostics::{
     ProviderFreshness, ProviderOrigin, ProviderProvenance, ProviderSourceIdentity, RevisionDigest,
 };
 use tracedecay_contracts::feedback::{
-    FeedbackBudgetUsage, FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest,
-    FeedbackCycleService, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
+    FeedbackBudgetUsage, FeedbackCycleAdvisoryV1, FeedbackCycleDedupePort,
+    FeedbackCycleDedupeState, FeedbackCycleExecutionRequest, FeedbackCycleService,
+    FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
     FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture,
-    FeedbackRuntimeStatePort, FeedbackRuntimeStateV1, feedback_surface_operation,
+    FeedbackPublicationRecordState, FeedbackPublicationV1, FeedbackRuntimeStatePort,
+    FeedbackRuntimeStateV1, feedback_surface_operation,
 };
 use tracedecay_contracts::{
-    ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-    Deadline, DisclosureClass, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
-    now_micros,
+    ApplicationOperation, ApplicationOutcome, CancellationContext, CapabilityGrantId,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, PolicyDecisionRef, RequestContext,
+    RequestId, ResolvedScope, now_micros,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
@@ -55,6 +57,8 @@ use crate::diagnostics_publication::{
     DiagnosticContributionV1, DiagnosticPillarV1,
 };
 use crate::feedback::concrete::open_feedback_runtime;
+use crate::feedback::cycle_runtime::compose_canonical_result;
+use crate::feedback::owner::{FeedbackReadInvocationResultV1, FeedbackReadOperationV1};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 
 const SOURCE: &str = "fn reviewed() {}\n";
@@ -760,4 +764,229 @@ async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_fin
     };
     assert!(cleared.items.is_empty());
     assert_eq!(cleared.coverage, ContextCoverage::Complete);
+}
+
+#[tokio::test]
+async fn incomplete_publication_remains_readable_without_consuming_completed_dedupe() {
+    let root = tempfile::tempdir().expect("root");
+    std::fs::create_dir_all(root.path().join("src")).expect("source directory");
+    std::fs::write(root.path().join("src/lib.rs"), SOURCE).expect("source");
+    let database = database(root.path()).await;
+    let observed_at = now_micros();
+    seed_github_diagnostic(&database, observed_at).await;
+
+    let resolved = scope();
+    let operation = operation();
+    let context = context(&resolved, &operation, observed_at);
+    let mut access = source_access(&resolved, &operation, observed_at);
+    for surface in ["feedback_get", "feedback_list"] {
+        access.effective_capabilities.insert(
+            feedback_surface_operation(surface)
+                .expect("feedback operation catalog")
+                .expect("feedback read operation")
+                .capability_id()
+                .clone(),
+        );
+    }
+    let runtime = Arc::new(
+        open_feedback_runtime(database, root.path(), resolved, access)
+            .await
+            .expect("feedback runtime"),
+    );
+    let request = cycle_request(digest('a'), observed_at);
+    let service = feedback_service(runtime.clone(), &request);
+    let mut providers = complete_advisory_providers();
+    providers[1].state = ProviderEvaluationStateV1::Unavailable;
+    let execution = service
+        .execute_with_advisory(
+            &context,
+            request,
+            FeedbackCycleAdvisoryV1 {
+                providers,
+                findings: vec![github_finding()],
+            },
+        )
+        .await
+        .expect("incomplete cycle");
+    assert_eq!(
+        execution.cycle.termination,
+        tracedecay_domain::feedback::FeedbackCycleTerminationV1::IncompleteCoverage
+    );
+    let publication = execution
+        .publication
+        .clone()
+        .expect("current incomplete result must publish");
+    let canonical = compose_canonical_result(
+        &runtime,
+        execution,
+        tracedecay_domain::feedback::FeedbackDurabilityV1::Durable,
+    )
+    .expect("published result handles");
+    let read_handles = canonical.read_handles.as_ref().expect("cycle read handles");
+    let finding_handles = canonical
+        .finding_handles
+        .first()
+        .expect("finding read handles");
+    let read_at = UtcMicros(observed_at.0.saturating_add(2));
+
+    let FeedbackReadInvocationResultV1::Diagnostics(Ok(diagnostics)) = runtime
+        .owner()
+        .invoke(
+            FeedbackReadOperationV1::Diagnostics,
+            &read_handles.diagnostics_handle,
+            read_at,
+        )
+        .await
+        .expect("diagnostics read")
+    else {
+        panic!("diagnostics result");
+    };
+    let ApplicationOutcome::Evidence(diagnostics) = diagnostics.outcome else {
+        panic!("diagnostics evidence");
+    };
+    assert_eq!(
+        diagnostics.payload.expect("diagnostics payload").cycle,
+        publication.result.clone()
+    );
+
+    for (operation, handle) in [
+        (FeedbackReadOperationV1::Get, &finding_handles.get_handle),
+        (
+            FeedbackReadOperationV1::Expand,
+            finding_handles
+                .expansion_handle
+                .as_ref()
+                .expect("expansion handle"),
+        ),
+        (FeedbackReadOperationV1::List, &read_handles.list_handle),
+    ] {
+        let result = runtime
+            .owner()
+            .invoke(operation, handle, read_at)
+            .await
+            .expect("published partial read");
+        assert!(matches!(
+            result,
+            FeedbackReadInvocationResultV1::Get(Ok(_))
+                | FeedbackReadInvocationResultV1::Expand(Ok(_))
+                | FeedbackReadInvocationResultV1::List(Ok(_))
+        ));
+    }
+    assert!(
+        runtime
+            .owner()
+            .invoke(
+                FeedbackReadOperationV1::Get,
+                &read_handles.list_handle,
+                read_at,
+            )
+            .await
+            .is_err(),
+        "cross-operation handle use must stay denied"
+    );
+
+    let store = runtime.publication_store();
+    assert_eq!(
+        store
+            .lookup_completed(&context, &publication.dedupe_key)
+            .await,
+        FeedbackCycleDedupeState::Unique,
+        "incomplete publication must not consume completed dedupe"
+    );
+    let mut repeated_input = publication.input.clone();
+    repeated_input.request.cycle_id =
+        FeedbackCycleId::new("cycle.lsp-advisory-source.repeated").expect("cycle");
+    let mut repeated_runtime = publication.runtime.clone();
+    repeated_runtime.authoritative.snapshot =
+        FeedbackCycleRuntimeSnapshotV1::from_request(&repeated_input.request);
+    let repeated_result =
+        tracedecay_domain::feedback::FeedbackCycleResultV1::new_with_advisory_provider_states(
+            &repeated_input.request,
+            tracedecay_domain::feedback::FeedbackCycleTerminationV1::IncompleteCoverage,
+            publication.result.provider_states.clone(),
+            publication.result.advisory_provider_states.clone(),
+            publication.result.baseline_states.clone(),
+            publication.result.impact.clone(),
+            publication.result.impact_state,
+            publication.result.affected_tests_state,
+            publication.result.findings.clone(),
+            publication.result.total_findings,
+            publication.result.returned_findings,
+            publication.result.omitted_findings,
+        )
+        .expect("repeated incomplete result");
+    let repeated = FeedbackPublicationV1::new(
+        repeated_input.clone(),
+        publication.dedupe_key.clone(),
+        repeated_result,
+        repeated_runtime.clone(),
+        publication.authorized_scope.clone(),
+        publication.authority.clone(),
+    )
+    .expect("repeated incomplete publication");
+    assert_eq!(
+        store.record_publication(&context, &repeated).await,
+        FeedbackPublicationRecordState::Recorded
+    );
+    assert_eq!(
+        store
+            .lookup_completed(&context, &publication.dedupe_key)
+            .await,
+        FeedbackCycleDedupeState::Unique,
+        "repeated incomplete publications must not consume completed dedupe"
+    );
+    let complete_result =
+        tracedecay_domain::feedback::FeedbackCycleResultV1::new_with_advisory_provider_states(
+            &repeated_input.request,
+            tracedecay_domain::feedback::FeedbackCycleTerminationV1::Blocked,
+            publication.result.provider_states.clone(),
+            complete_advisory_providers(),
+            publication.result.baseline_states.clone(),
+            publication.result.impact.clone(),
+            publication.result.impact_state,
+            publication.result.affected_tests_state,
+            publication.result.findings.clone(),
+            publication.result.total_findings,
+            publication.result.returned_findings,
+            publication.result.omitted_findings,
+        )
+        .expect("complete retry result");
+    let complete = FeedbackPublicationV1::new(
+        repeated_input,
+        publication.dedupe_key.clone(),
+        complete_result,
+        repeated_runtime,
+        publication.authorized_scope.clone(),
+        publication.authority.clone(),
+    )
+    .expect("complete retry publication");
+    assert_eq!(
+        store.record_publication(&context, &complete).await,
+        FeedbackPublicationRecordState::Recorded,
+        "same-key complete retry must publish"
+    );
+    assert_eq!(
+        store
+            .lookup_completed(&context, &publication.dedupe_key)
+            .await,
+        FeedbackCycleDedupeState::Duplicate
+    );
+
+    let mut stale = complete;
+    stale.result.scope.head_commit_id =
+        CommitId::new("1111111111111111111111111111111111111111").expect("stale head");
+    assert_eq!(
+        store.record_publication(&context, &stale).await,
+        FeedbackPublicationRecordState::Unavailable,
+        "stale publication must fail closed"
+    );
+    let cancelled = context.clone().with_cancellation(
+        CancellationContext::cancelled("cancel.lsp-advisory-source", observed_at)
+            .expect("cancelled context"),
+    );
+    assert_eq!(
+        store.record_publication(&cancelled, &publication).await,
+        FeedbackPublicationRecordState::Cancelled,
+        "cancelled publication must not persist"
+    );
 }
