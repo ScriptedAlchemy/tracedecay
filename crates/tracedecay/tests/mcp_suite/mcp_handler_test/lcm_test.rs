@@ -10,6 +10,7 @@ use tracedecay::test_support::host_admission::LcmLineageFaultForTest;
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
+#[cfg(feature = "test-transport")]
 use tracedecay_domain::sha256_hex_suffix;
 #[cfg(feature = "test-transport")]
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
