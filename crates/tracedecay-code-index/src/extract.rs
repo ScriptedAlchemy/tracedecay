@@ -12,7 +12,10 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_code_extraction::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
+use tracedecay_code_extraction::{
+    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1,
+    SchemaEvidenceIssueV1,
+};
 use tracedecay_domain::{
     CodeGenerationId, ComplexityAnalysisV1, ContentDigest, Edge, ExtractorRevision,
     FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageDescriptorV1,
@@ -459,6 +462,8 @@ fn rows_digest(
         grammar_revision: &'a str,
         extractor_revision: &'a str,
         imports: Vec<ExtractedImportEvidenceV1>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema_evidence: Option<&'a ExtractedSchemaEvidenceV1>,
         nodes: Vec<CanonicalNodeRow<'a>>,
         edges: Vec<CanonicalEdgeRow<'a>>,
         unresolved_refs: Vec<CanonicalUnresolvedRefRow<'a>>,
@@ -474,6 +479,7 @@ fn rows_digest(
             grammar_revision: descriptor.grammar_revision.as_str(),
             extractor_revision: descriptor.extractor_revision.as_str(),
             imports,
+            schema_evidence: artifact.schema_evidence.as_ref(),
             nodes,
             edges,
             unresolved_refs: unresolved,
@@ -578,6 +584,9 @@ fn finish_extraction(
     source_was_capped: bool,
     cancellation: &dyn ExtractionCancellation,
 ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
+    if source_was_capped && let Some(evidence) = &mut artifact.schema_evidence {
+        evidence.mark_partial(SchemaEvidenceIssueV1::SourceTruncated);
+    }
     artifact.result.sanitize();
     if cancellation.is_cancelled() {
         return Err(ExtractionFailureV1::Cancelled);
@@ -793,7 +802,7 @@ mod tests {
 
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:62eaaf3e43a4f9773e43c7f2385213ca6aa59bb5a0ee6c07ff44fa7e37beede3"
+            "sha256:5143ed246c9900a5de85721fb98d0aeb93b8565bd8714f55341693889be0ab86"
         );
     }
 

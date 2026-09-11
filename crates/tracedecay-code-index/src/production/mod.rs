@@ -8,6 +8,7 @@ use std::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_code_extraction::ExtractedSchemaEvidenceV1;
 use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
@@ -30,8 +31,8 @@ use super::{
     },
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionV1,
-        CodeIndexImportEvidenceV1, DeterministicCodeChunker, ExactExtractionAuthorityV1,
-        ExtractionAdmittedCodeSearchChunkV1, content_digest,
+        CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, DeterministicCodeChunker,
+        ExactExtractionAuthorityV1, ExtractionAdmittedCodeSearchChunkV1, content_digest,
     },
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1},
@@ -187,6 +188,33 @@ pub struct CodeIndexGenerationCompatibilityV1 {
 }
 
 impl CodeIndexGenerationCompatibilityV1 {
+    fn for_metadata(
+        manifest: &CodeGenerationManifestV1,
+        snapshot: &SanitizedCodeSnapshotV1,
+        config: &CodeIndexProductionConfigV1,
+    ) -> Self {
+        let mut incompatibilities = BTreeSet::new();
+        if manifest.project_id != config.project_id {
+            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::Project);
+        }
+        if !generation_language_revisions_are_current(manifest, snapshot) {
+            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::LanguageRevisions);
+        }
+        if manifest.sanitizer_revision != config.sanitizer_revision {
+            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::SanitizerRevision);
+        }
+        if manifest.chunker_revision != config.chunker_revision {
+            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::ChunkerRevision);
+        }
+        if manifest.privacy_domain != config.privacy_domain {
+            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::PrivacyDomain);
+        }
+        if manifest.privacy_key_epoch != config.privacy_key_epoch {
+            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::PrivacyKeyEpoch);
+        }
+        Self { incompatibilities }
+    }
+
     pub fn incompatibilities(&self) -> &BTreeSet<CodeIndexGenerationIncompatibilityV1> {
         &self.incompatibilities
     }
@@ -724,6 +752,29 @@ impl CodeIndexPublishedGenerationV1 {
         &self.imports
     }
 
+    pub fn schema_evidence(&self) -> impl Iterator<Item = &ExtractedSchemaEvidenceV1> {
+        self.files
+            .iter()
+            .filter_map(|file| file.artifacts.schema_evidence.as_ref())
+    }
+
+    pub fn unresolved_references(
+        &self,
+    ) -> impl Iterator<Item = (&str, &CodeIndexUnresolvedReferenceV1)> {
+        self.files.iter().flat_map(|file| {
+            file.artifacts
+                .unresolved_references
+                .iter()
+                .map(|reference| (file.authority.logical_path.as_str(), reference))
+        })
+    }
+
+    pub fn analysis_coverage(&self) -> impl Iterator<Item = (&str, &ExtractionBatchV1)> {
+        self.files
+            .iter()
+            .map(|file| (file.authority.logical_path.as_str(), &file.extraction))
+    }
+
     pub fn edges(&self) -> &[CanonicalRelationEdgeV1] {
         &self.edges
     }
@@ -801,39 +852,28 @@ impl CodeIndexPublishedGenerationV1 {
         &self,
         config: &CodeIndexProductionConfigV1,
     ) -> CodeIndexGenerationCompatibilityV1 {
-        let mut incompatibilities = BTreeSet::new();
-        if self.manifest.project_id != config.project_id {
-            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::Project);
-        }
-        if !generation_language_revisions_are_current(&self.manifest, &self.snapshot) {
-            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::LanguageRevisions);
-        }
-        if self.manifest.sanitizer_revision != config.sanitizer_revision {
-            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::SanitizerRevision);
-        }
+        let mut compatibility = CodeIndexGenerationCompatibilityV1::for_metadata(
+            &self.manifest,
+            &self.snapshot,
+            config,
+        );
         match self.chunk_policy_summary() {
             ChunkPolicyRevisionSummaryV1::Empty => {}
             ChunkPolicyRevisionSummaryV1::Uniform(revision)
                 if *revision != config.policy_revision =>
             {
-                incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::PolicyRevision);
+                compatibility
+                    .incompatibilities
+                    .insert(CodeIndexGenerationIncompatibilityV1::PolicyRevision);
             }
             ChunkPolicyRevisionSummaryV1::Mixed => {
-                incompatibilities
+                compatibility
+                    .incompatibilities
                     .insert(CodeIndexGenerationIncompatibilityV1::MixedPolicyRevisions);
             }
             ChunkPolicyRevisionSummaryV1::Uniform(_) => {}
         }
-        if self.manifest.chunker_revision != config.chunker_revision {
-            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::ChunkerRevision);
-        }
-        if self.manifest.privacy_domain != config.privacy_domain {
-            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::PrivacyDomain);
-        }
-        if self.manifest.privacy_key_epoch != config.privacy_key_epoch {
-            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::PrivacyKeyEpoch);
-        }
-        CodeIndexGenerationCompatibilityV1 { incompatibilities }
+        compatibility
     }
 
     /// Build the production generation-bound affected-test authority.
@@ -1241,6 +1281,13 @@ impl CodeIndexPublishedGenerationV1 {
                         occurrence.logical_path != file.authority.logical_path
                             || occurrence.content_digest != file.authority.content_digest
                     })
+                    || file
+                        .artifacts
+                        .schema_evidence
+                        .as_ref()
+                        .is_some_and(|evidence| {
+                            evidence.logical_path != file.authority.logical_path
+                        })
                     || file.extraction.content_digest != file.authority.content_digest
                     || file.extraction.generation_id != self.manifest.generation_id
                     || file.extraction.file_occurrence_id

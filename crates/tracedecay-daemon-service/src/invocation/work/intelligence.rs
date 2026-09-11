@@ -60,21 +60,18 @@ pub(super) fn execution_history(
     context: &RequestContext,
     canonical_request_id: RequestId,
     operation_key: &str,
-    capability: &str,
     use_case: UseCaseId,
     input_digest: ManifestDigest,
     observed_at: UtcMicros,
     deadline: Deadline,
     request: WorkAttemptListRequestV1,
 ) -> DaemonInvocationResponse {
-    let attempts = services.attempts().list(context, &request, |_authority| {
-        preparation::current_work_product_attempt_topology(
-            registered,
-            context,
-            capability,
-            &use_case,
-            observed_at,
-        )
+    // Execution history projects the same attempt page `list_attempts` reads,
+    // under the same topology generation the cursor names, so both operations
+    // must bind the executor topology or a cursor minted by one would be
+    // judged against the other's generation.
+    let attempts = services.attempts().list(context, &request, |authority| {
+        preparation::current_executor_attempt_topology(services, authority)
     });
     let history = attempts.and_then(|attempts| {
         let storage = registered.database.work_storage().map_err(|_| {

@@ -97,33 +97,18 @@ try {
 
   await visit({ data: "fixture", state: "03" });
   await page.setViewportSize({width:1263,height:931});
-  const umbrella = page.locator(".dl-field svg");
-  const overview = await umbrella.getAttribute("viewBox");
-  assert.equal(await page.getByRole("button", {name:/^Inspect fixture PR /}).count(),15);
-  assert.equal(await page.getByRole("button", {name:/^Inspect fixture PR /}).locator("text").count(),15,"Every overview marker must visibly identify its PR");
-  assert.equal(await page.getByRole("button",{name:"Inspect umbrella outcome",exact:true}).evaluate(root=>{
-    const ring=root.querySelector("ellipse");const cx=Number(ring.getAttribute("cx")),cy=Number(ring.getAttribute("cy")),r=Number(ring.getAttribute("rx"));
-    return [...root.querySelectorAll("text")].every(text=>{const q=text.getBBox();return [[q.x,q.y],[q.x+q.width,q.y],[q.x,q.y+q.height],[q.x+q.width,q.y+q.height]].every(([x,y])=>(x-cx)**2+(y-cy)**2<r*r);});
-  }),true,"Outcome text must fit inside its actual ring");
-  await page.getByRole("button", {name:"Inspect Rspack",exact:true}).locator("text").first().click();
-  assert.notEqual(await umbrella.getAttribute("viewBox"), overview);
-  await page.getByRole("button", {name:"Inspect fixture PR Rspack #18337",exact:true}).click();
-  await page.locator(".dl-umbrella-detail h2").filter({hasText:"#18337"}).waitFor();
-  assert.match(await page.locator(".dl-umbrella-breadcrumb").innerText(),/Example outcome \/ Rspack \/ #18337/);
-  await page.getByRole("button", {name:"Back",exact:true}).click();
-  await page.getByRole("button", {name:"Back",exact:true}).click();
-  assert.equal(await umbrella.getAttribute("viewBox"),overview);
-  await page.getByRole("button", {name:"Focus repository Rspack",exact:true}).focus();
-  await page.keyboard.press("Enter");
-  assert.notEqual(await umbrella.getAttribute("viewBox"),overview);
-  await page.getByRole("button", {name:"Fit all",exact:true}).click();
-  assert.equal(await umbrella.getAttribute("viewBox"),overview);
-  await page.getByRole("button", {name:"Pan example right",exact:true}).click();
-  assert.notEqual(await umbrella.getAttribute("viewBox"),overview);
-  await page.getByRole("button", {name:"Back",exact:true}).click();
-  assert.equal(await umbrella.getAttribute("viewBox"),overview);
-  await page.getByRole("button", {name:"Inspect inferred membership Rspack",exact:true}).locator("circle").click();
-  await page.locator(".dl-umbrella-detail h2").filter({hasText:"Inferred membership"}).waitFor();
+  const graph = page.getByLabel("Delivery time axis graph. Scroll to zoom and drag to pan.");
+  await graph.waitFor();
+  assert.match(await page.locator(".dl-pane h3").nth(1).innerText(), /3 ADMITTED · 1 UNADMITTED · 3 REPOSITORIES · 1 EVIDENCE EDGE/);
+  assert.equal(await graph.getByRole("button").count(), 4, "The graph exposes every fixture PR as keyboard-selectable nodes");
+  assert.ok(await graph.locator(".dl-delivery-edge-path").count(), "Evidence relationships are drawn paths, not text inside cards");
+  assert.equal(await graph.locator(".dl-unadmitted-band").count(), 1, "Unjoined PRs remain outside repository lanes");
+  await graph.locator('[aria-label^="Select #707"]').click();
+  assert.match(await page.locator(".dl-delivery-inspector h2").innerText(), /ingest retry backoff/);
+  await page.getByRole("button", { name: "+" }).click();
+  assert.match(await page.locator(".dl-graph-controls span").innerText(), /120%/);
+  await page.getByRole("button", { name: "Fit" }).click();
+  assert.match(await page.locator(".dl-graph-controls span").innerText(), /100%/);
   await page.setViewportSize({width:1586,height:992});
 
   await visit({ data: "fixture", state: "04" });
