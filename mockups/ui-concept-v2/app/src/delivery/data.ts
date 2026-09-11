@@ -264,6 +264,9 @@ export type DeliveryFixturePr = {
   id: string;
   repository: string;
   trackedHead: string | null;
+  /** Recorded fixture activity time in UTC hours; drives shared graph axis placement. */
+  lastActivity: number;
+  changedFiles: number | null;
   title: string;
   agent: string;
   code: string | null;
@@ -282,6 +285,8 @@ export const DELIVERY_FIXTURE_PRS: DeliveryFixturePr[] = [
     id: "#12977",
     repository: "web-infra-dev/rspack",
     trackedHead: "ecd6feb8cec8",
+    lastActivity: 10.4,
+    changedFiles: 57,
     title: "feat(mf): add layer-aware shared module core",
     agent: "agent session / explicit",
     code: "57 changed files / indexed head",
@@ -296,6 +301,8 @@ export const DELIVERY_FIXTURE_PRS: DeliveryFixturePr[] = [
     id: "#707",
     repository: "ScriptedAlchemy/tracedecay",
     trackedHead: "d4e56a7f2c91",
+    lastActivity: 14.2,
+    changedFiles: 12,
     title: "feat: add ingest retry backoff",
     agent: "agent session / exact",
     code: "12 changed files / indexed head",
@@ -309,6 +316,8 @@ export const DELIVERY_FIXTURE_PRS: DeliveryFixturePr[] = [
     id: "#2314",
     repository: "module-federation/core",
     trackedHead: "a6c18d2f7510",
+    lastActivity: 18.1,
+    changedFiles: 187,
     title: "feat: remote retry policy",
     agent: "session unavailable",
     code: "187 changed files / indexed head",
@@ -322,6 +331,8 @@ export const DELIVERY_FIXTURE_PRS: DeliveryFixturePr[] = [
     id: "#8187",
     repository: "rslib/rslib",
     trackedHead: null,
+    lastActivity: 19.3,
+    changedFiles: null,
     title: "fix: tree-shake side effects",
     agent: "not joined",
     code: null,
