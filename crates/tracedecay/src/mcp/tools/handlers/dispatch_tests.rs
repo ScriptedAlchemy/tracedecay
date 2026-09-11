@@ -1818,7 +1818,7 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
         "a rebuild-in-flight serve must state the seat age and the rebuild: {rendered}",
     );
 
-    let wedged = handle_tool_call_with_registry_options(
+    let unverified = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_files",
         json!({}),
@@ -1827,15 +1827,15 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
         verified_graph_wedged_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await
-    .expect("a wedged stale serve still answers");
-    let rendered = serde_json::to_string(&wedged.value).unwrap();
+    .expect("an unverified stale serve still answers");
+    let rendered = serde_json::to_string(&unverified.value).unwrap();
     assert!(
-        rendered.contains("no rebuild pass in flight"),
-        "a wedged route must not claim a rebuild is in flight: {rendered}",
+        rendered.contains("source freshness remains unverified"),
+        "an unverified route must state what remains unknown: {rendered}",
     );
     assert!(
         !rendered.contains("while the code index rebuilds"),
-        "a wedged route must not present itself as a routine rebuild: {rendered}",
+        "an unverified route must not present itself as a rebuild: {rendered}",
     );
 
     let current = handle_tool_call_with_registry_options(

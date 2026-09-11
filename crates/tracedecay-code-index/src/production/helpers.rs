@@ -92,6 +92,16 @@ pub(crate) fn registry_for_snapshot(
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
 }
 
+/// Whether a generation's language pins match the currently compiled
+/// descriptors for every present file in its authenticated snapshot.
+pub fn generation_language_revisions_are_current(
+    manifest: &CodeGenerationManifestV1,
+    snapshot: &SanitizedCodeSnapshotV1,
+) -> bool {
+    registry_for_snapshot(snapshot)
+        .is_ok_and(|registry| generation_language_revisions_match(manifest, &registry))
+}
+
 pub(crate) fn captured_files(
     snapshot: &SanitizedCodeSnapshotV1,
     captured: Vec<CodeIndexCapturedFileV1>,

@@ -18,6 +18,7 @@ use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, ResolvedScope, test_project_id,
     wait_for_generation_change, wait_for_initial_generation, wait_for_live_complete_generation,
 };
+use crate::code_index_scheduler::CodeGraphActivationPolicyV1;
 
 async fn published_generation_for_root(
     publications: &mut tokio::sync::broadcast::Receiver<CodeIndexGenerationPublishedV1>,
@@ -295,6 +296,101 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
     );
     assert!(Arc::ptr_eq(&scheduled_generation, &serving_generation));
     registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_partitioned_generation_reaches_semantics_without_a_decoded_seat_or_edit() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn retained_semantic_alpha() -> u32 { 1 }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let seeded_registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        seeded_registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("seed scheduler")
+    );
+    let retained_generation = wait_for_initial_generation(&seeded_registry, fixture.path()).await;
+    seeded_registry.shutdown().await;
+
+    let deliveries: SemanticDeliveryLogV1 = Arc::new(Mutex::new(Vec::new()));
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        registry
+            .mount_worktree_with_graph_policy(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                Some(recording_semantic_hook(&deliveries)),
+                CodeGraphActivationPolicyV1::RefusedByConfiguration,
+            )
+            .await
+            .expect("reopen retained scheduler")
+    );
+
+    wait_for_semantic_delivery(&deliveries, &retained_generation).await;
+    assert_eq!(
+        delivered_generations(&deliveries),
+        vec![retained_generation.clone()],
+        "the current retained generation is handed off without a source edit"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .is_none(),
+        "semantic demand must not fabricate or install a decoded graph seat"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(retained_generation.clone()),
+        "the partitioned text owner remains the serving identity"
+    );
+    registry.shutdown().await;
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn retained_semantic_beta() -> u32 { 2 }\n",
+    );
+    let refreshed_deliveries: SemanticDeliveryLogV1 = Arc::new(Mutex::new(Vec::new()));
+    let refreshed_registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        refreshed_registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                Some(recording_semantic_hook(&refreshed_deliveries)),
+            )
+            .await
+            .expect("reopen stale retained scheduler")
+    );
+    let refreshed_generation =
+        wait_for_generation_change(&refreshed_registry, fixture.path(), &retained_generation).await;
+    wait_for_semantic_delivery(&refreshed_deliveries, &refreshed_generation).await;
+    assert!(
+        !delivered_generations(&refreshed_deliveries).contains(&retained_generation),
+        "the superseded retained generation must not cross semantic admission"
+    );
+    let wrong_generation_witness = super::super::ServingSourceWitnessV1 {
+        generation_id: refreshed_generation,
+    };
+    assert!(
+        !super::super::registry::semantic_handoff_has_exact_witness(
+            true,
+            Some(&wrong_generation_witness),
+            &retained_generation,
+        ),
+        "an incumbent witness cannot authorize a discarded superseded generation"
+    );
+    refreshed_registry.shutdown().await;
 }
 
 struct BlockingSemanticScheduleProbeV1 {

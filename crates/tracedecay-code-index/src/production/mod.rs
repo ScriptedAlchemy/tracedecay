@@ -26,7 +26,7 @@ use tracedecay_graph_db::{
 use super::{
     capabilities::{
         BaseCapabilityEmitter, CapabilityEmissionErrorV1, CodeIndexCapabilityEmitter,
-        expected_seal_digest,
+        expected_seal_digest, generation_language_revisions_match,
     },
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionV1,
@@ -59,6 +59,7 @@ use super::{
 
 mod canonical_json;
 mod helpers;
+pub use helpers::generation_language_revisions_are_current;
 use helpers::*;
 mod ignored_sources;
 use ignored_sources::IgnoredSourceRosterV1;
@@ -144,6 +145,7 @@ impl CodeIndexProductionConfigV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CodeIndexGenerationIncompatibilityV1 {
     Project,
+    LanguageRevisions,
     SanitizerRevision,
     PolicyRevision,
     MixedPolicyRevisions,
@@ -157,6 +159,7 @@ impl CodeIndexGenerationIncompatibilityV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Project => "project",
+            Self::LanguageRevisions => "language_revisions",
             Self::SanitizerRevision => "sanitizer_revision",
             Self::PolicyRevision => "policy_revision",
             Self::MixedPolicyRevisions => "mixed_policy_revisions",
@@ -798,6 +801,9 @@ impl CodeIndexPublishedGenerationV1 {
         let mut incompatibilities = BTreeSet::new();
         if self.manifest.project_id != config.project_id {
             incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::Project);
+        }
+        if !generation_language_revisions_are_current(&self.manifest, &self.snapshot) {
+            incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::LanguageRevisions);
         }
         if self.manifest.sanitizer_revision != config.sanitizer_revision {
             incompatibilities.insert(CodeIndexGenerationIncompatibilityV1::SanitizerRevision);
