@@ -3336,6 +3336,7 @@ impl Target {
         target_value + other_value
     }
 }
+
 pub fn read_both(target: &Target, other: &Other) -> u32 {
     let target_value = target.value;
     let other_value = other.value;
@@ -3432,4 +3433,42 @@ pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 
             "shadowed receiver must not be attributed to the parameter owner: {error}"
         );
     }
+}
+
+#[tokio::test]
+async fn field_sites_ignores_field_text_in_real_rust_literals() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/lib.rs"),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tracedecay-session-memory/src/monitor_ring.rs"
+        )),
+    )
+    .unwrap();
+    let (host, _env) = init_test_project(&project_root).await;
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_field_sites",
+        json!({"field": "MmapReader::mmap", "limit": 100, "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let output: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+
+    assert_eq!(output["qualifier_applied"], true, "payload: {output}");
+    assert_eq!(output["read_count"], 9, "payload: {output}");
+    assert_eq!(output["write_count"], 1, "payload: {output}");
+    assert!(
+        output["read_sites"]
+            .as_array()
+            .is_some_and(|sites| sites.iter().all(|site| site["line"] != 38)),
+        "string literal was reported as a field site: {output}"
+    );
+    assert_eq!(output["write_sites"][0]["line"], 256, "payload: {output}");
 }
