@@ -21,17 +21,26 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use tracedecay_mcp::JsonRpcResponse;
 
-use super::journey_test_support::{git, tool_answer};
+use super::journey_test_support::{git, resolved, tool_answer};
 use super::*;
 
 const PROBE_SYMBOL: &str = "lcm_preserved_profile_probe";
-const OLDEST_CLAUDE_SESSION: &str = "lcm-preserved-claude-000";
 const NATIVE_BOUNDARY_UUID: &str = "ffffffff-0000-1111-2222-333333333333";
 const NATIVE_SUMMARY_UUID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-// 40 sessions × (4 Claude + 2 Codex + 1 Cursor) = 280 native records.
-// Claude ingest stores the compact pair plus prior/assistant; Cursor adds
-// one raw row. Target is ≥ 200 raw rows after ordinary ingest.
 const SESSION_REPLAYS: usize = 40;
+/// Corpus and window arithmetic, shared by the seed and every window
+/// assertion so the two cannot drift: replay `index` is stamped at
+/// `origin + index * SESSION_STRIDE_SECS` with
+/// `origin = now - CORPUS_SPAN_SECS`, and the searches ask for the trailing
+/// `SEARCH_WINDOW_SECS`.
+const CORPUS_SPAN_SECS: i64 = 13 * 3_600;
+const SESSION_STRIDE_SECS: i64 = 20 * 60;
+const SEARCH_WINDOW_SECS: i64 = 12 * 3_600;
+/// 40 sessions × (4 Claude + 2 Codex + 1 Cursor) = 280 native records.
+/// Claude ingest stores the compact pair plus prior/assistant; Cursor adds
+/// one raw row. Ordinary ingest must land at least this many raw rows, so the
+/// window assertions cannot pass over a thin corpus.
+const RAW_MESSAGE_FLOOR: i64 = 200;
 const SEARCH_BUDGET: Duration = Duration::from_secs(5);
 const ADMISSION_BUDGET: Duration = Duration::from_secs(30);
 const CONVERGENCE_WAIT: Duration = Duration::from_mins(2);
@@ -85,6 +94,18 @@ fn retained_payload(envelope: &Value) -> Value {
         return retained_payload(&inner);
     }
     envelope.clone()
+}
+
+/// One tool answer, resolved through the retrieve handle when the payload
+/// exceeded a response frame, then unwrapped to the retained payload.
+async fn answered(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    tool: &str,
+    arguments: Value,
+) -> Value {
+    let payload = called(harness, project, tool, arguments).await;
+    retained_payload(&resolved(harness, project, tool, payload).await)
 }
 
 fn timed_call<'a>(
@@ -219,7 +240,9 @@ fn write_jsonl(path: &Path, records: &[Value]) {
     std::fs::write(path, format!("{body}\n")).expect("write native transcript");
 }
 
-fn seed_preserved_profile_corpus(isolation_root: &Path, project: &Path) {
+/// Seeds the replay corpus and returns its origin, so the searches derive
+/// their window boundary from the same arithmetic the rows were stamped with.
+fn seed_preserved_profile_corpus(isolation_root: &Path, project: &Path) -> i64 {
     let home = ProductionProjectCompositionHarnessV1::transcript_source_home(isolation_root)
         .expect("composed transcript source home");
     let cwd = std::fs::canonicalize(project)
@@ -227,10 +250,10 @@ fn seed_preserved_profile_corpus(isolation_root: &Path, project: &Path) {
         .to_string_lossy()
         .into_owned();
     let cursor_dir = cursor_slug(Path::new(&cwd));
-    let origin = now_unix() - 13 * 3_600;
+    let origin = now_unix() - CORPUS_SPAN_SECS;
 
     for index in 0..SESSION_REPLAYS {
-        let session_offset = (index as i64) * 20 * 60;
+        let session_offset = (index as i64) * SESSION_STRIDE_SECS;
         let stamp = |offset: i64| utc_rfc3339(origin + session_offset + offset);
 
         let claude_session = format!("lcm-preserved-claude-{index:03}");
@@ -311,6 +334,8 @@ fn seed_preserved_profile_corpus(isolation_root: &Path, project: &Path) {
             &[cursor_assistant],
         );
     }
+
+    origin
 }
 
 fn seed_project(project: &Path) {
@@ -414,20 +439,33 @@ fn git_generation_nonzero(payload: &Value) -> bool {
         && payload["index"]["projection_available"] == json!(true)
 }
 
-fn evidence_blob(envelope: &Value) -> String {
-    envelope["preview"]
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| retained_payload(envelope).to_string())
+fn claude_replay_session(index: usize) -> String {
+    format!("lcm-preserved-claude-{index:03}")
 }
 
-fn blob_has_session(blob: &str, session_id: &str) -> bool {
-    blob.contains(&format!("\"{session_id}\""))
+/// The window predicate the searches are asserted against, derived from the
+/// same arithmetic that stamps the corpus: replay `index` sits inside the
+/// trailing search window exactly when its stamp is at or after the `since`
+/// boundary.
+fn replay_in_search_window(index: usize) -> bool {
+    CORPUS_SPAN_SECS - (index as i64) * SESSION_STRIDE_SECS <= SEARCH_WINDOW_SECS
 }
 
-fn blob_has_in_window_claude(blob: &str) -> bool {
-    (1..SESSION_REPLAYS)
-        .any(|index| blob_has_session(blob, &format!("lcm-preserved-claude-{index:03}")))
+fn claude_replays(in_window: bool) -> Vec<String> {
+    (0..SESSION_REPLAYS)
+        .filter(|index| replay_in_search_window(*index) == in_window)
+        .map(claude_replay_session)
+        .collect()
+}
+
+/// Every seeded session id ends in its replay index, so a returned identity
+/// resolves back to the side of the window it was stamped on.
+fn replay_index(session_id: &str) -> usize {
+    session_id
+        .rsplit('-')
+        .next()
+        .and_then(|suffix| suffix.parse().ok())
+        .unwrap_or_else(|| panic!("seeded session id must end in its replay index: {session_id}"))
 }
 
 fn session_ids(payload: &Value) -> Vec<String> {
@@ -444,8 +482,89 @@ fn session_ids(payload: &Value) -> Vec<String> {
         .collect()
 }
 
+/// `message_search` hits carry their identity on the matched message, not on
+/// the hit envelope.
+fn message_hit_session_ids(payload: &Value) -> Vec<String> {
+    payload["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|hit| {
+            hit["message"]["session_id"]
+                .as_str()
+                .or_else(|| hit["session"]["session_id"].as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 fn grep_hits(payload: &Value) -> &[Value] {
     payload["hits"].as_array().map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn grep_session_ids(payload: &Value) -> Vec<String> {
+    grep_hits(payload)
+        .iter()
+        .filter_map(|hit| hit["session_id"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Asserts a search returned identities from one side of the window only.
+///
+/// The identities are parsed `session_id` fields: a substring scan of the
+/// serialized evidence would pass on a truncated page that never named a
+/// session at all.
+fn assert_window_side(label: &str, returned: &[String], in_window: bool, payload: &Value) {
+    assert!(
+        !returned.is_empty(),
+        "{label} must return parsed session identities: {payload}"
+    );
+    for session_id in returned {
+        assert_eq!(
+            replay_in_search_window(replay_index(session_id)),
+            in_window,
+            "{label} returned {session_id} from the wrong side of the window: {payload}"
+        );
+    }
+}
+
+/// The complement of the 12-hour window, once temporal convergence can serve
+/// it.
+///
+/// A `stale` outcome is the projection reporting it has not caught up to those
+/// generations yet; reading absence out of it would let the window assertions
+/// pass on lag instead of on a window decision.
+async fn wait_for_pre_window_search(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    origin: i64,
+    since: i64,
+) -> Value {
+    let deadline = Instant::now() + CONVERGENCE_WAIT;
+    loop {
+        let payload = answered(
+            harness,
+            project,
+            "tracedecay_message_search",
+            json!({
+                "query": DIRECT_USER_QUERY,
+                "message_type": "direct_user",
+                "since": origin,
+                "until": since - 1,
+                "limit": SESSION_REPLAYS,
+                "format": "json",
+            }),
+        )
+        .await;
+        if payload["outcome"] != json!("stale") {
+            return payload;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pre-window search never left typed staleness: {payload}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn wait_for_preserved_discovery(
@@ -460,14 +579,14 @@ async fn wait_for_preserved_discovery(
     let mut last_grep = json!(null);
     tokio::time::timeout(CONVERGENCE_WAIT, async {
         loop {
-            let status = retained_payload(&called(
+            let status = answered(
                 harness,
                 project,
                 "tracedecay_lcm_status",
                 json!({"format": "json"}),
             )
-            .await);
-            let sessions = retained_payload(&called(
+            .await;
+            let sessions = answered(
                 harness,
                 project,
                 "tracedecay_sessions_for",
@@ -478,8 +597,8 @@ async fn wait_for_preserved_discovery(
                     "format": "json",
                 }),
             )
-            .await);
-            let grep = retained_payload(&called(
+            .await;
+            let grep = answered(
                 harness,
                 project,
                 "tracedecay_lcm_grep",
@@ -491,7 +610,7 @@ async fn wait_for_preserved_discovery(
                     "format": "json",
                 }),
             )
-            .await);
+            .await;
             last_status = status.clone();
             last_sessions = sessions.clone();
             last_grep = grep.clone();
@@ -523,7 +642,7 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
     let isolation = tempfile::TempDir::new().expect("isolated home/profile");
     let project = isolation.path().join("project");
     seed_project(&project);
-    seed_preserved_profile_corpus(isolation.path(), &project);
+    let origin = seed_preserved_profile_corpus(isolation.path(), &project);
     let worktree = std::fs::canonicalize(&project)
         .expect("canonical worktree")
         .to_string_lossy()
@@ -533,19 +652,19 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         .await
         .expect("production composition");
 
-    let since = now_unix() - 12 * 3_600;
+    let since = origin + CORPUS_SPAN_SECS - SEARCH_WINDOW_SECS;
     let discovery = wait_for_preserved_discovery(&harness, &project, &worktree, since);
     let admissions = async {
         let read_progress = || async {
-            ConvergenceProgress::read(&retained_payload(
-                &called(
+            ConvergenceProgress::read(
+                &answered(
                     &harness,
                     &project,
                     "tracedecay_lcm_status",
                     json!({"format": "json"}),
                 )
                 .await,
-            ))
+            )
         };
         // Positive in-flight evidence: repeat the admission batch until the
         // status shows background convergence advanced across one batch.
@@ -634,21 +753,45 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         search_elapsed,
         SEARCH_BUDGET,
     );
-    let search_payload = retained_payload(&search);
+    let search_payload =
+        retained_payload(&resolved(&harness, &project, "tracedecay_message_search", search).await);
     assert_ne!(
         search_payload["status"],
         json!("error"),
         "direct-user search must stay typed, not a transport failure: {search_payload}"
     );
-    let search_blob = evidence_blob(&search);
-    assert!(
-        !blob_has_session(&search_blob, OLDEST_CLAUDE_SESSION),
-        "12-hour search must exclude the oldest rows: {search}"
+    let searched_sessions = message_hit_session_ids(&search_payload);
+    assert_window_side(
+        "12-hour direct-user search",
+        &searched_sessions,
+        true,
+        &search_payload,
     );
     assert!(
-        blob_has_in_window_claude(&search_blob),
-        "12-hour search must keep rows inside the window: {search}"
+        searched_sessions
+            .iter()
+            .any(|id| claude_replays(true).contains(id)),
+        "12-hour search must keep the in-window Claude replays: {search_payload}"
     );
+
+    // The exclusion above must be a window decision, not an empty corpus: the
+    // complementary query over the same span returns exactly the replays the
+    // 12-hour window drops, every one of them.
+    let excluded_search = wait_for_pre_window_search(&harness, &project, origin, since).await;
+    let excluded_sessions = message_hit_session_ids(&excluded_search);
+    assert_window_side(
+        "pre-window direct-user search",
+        &excluded_sessions,
+        false,
+        &excluded_search,
+    );
+    for dropped in claude_replays(false) {
+        assert!(
+            excluded_sessions.contains(&dropped),
+            "the rows the 12-hour window drops must exist and be findable: \
+             {dropped} missing from {excluded_search}"
+        );
+    }
 
     let (grep_elapsed, grep) = timed_call(
         &harness,
@@ -664,36 +807,34 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
     )
     .await;
     assert_under_budget("direct-user 12-hour lcm_grep", grep_elapsed, SEARCH_BUDGET);
-    let grep_payload = retained_payload(&grep);
-    let grep_blob = evidence_blob(&grep);
-    if let Some(hits) = grep_payload["hits"].as_array() {
+    let grep_payload =
+        retained_payload(&resolved(&harness, &project, "tracedecay_lcm_grep", grep).await);
+    for hit in grep_hits(&grep_payload) {
+        let snippet = hit["snippet"].as_str().unwrap_or_default();
         assert!(
-            !hits.is_empty(),
-            "12-hour lcm_grep must return hits: {grep_payload}"
-        );
-        for hit in hits {
-            let snippet = hit["snippet"].as_str().unwrap_or_default();
-            assert!(
-                snippet.chars().count() <= 8_192,
-                "canonical redaction/content authority leaked an unbounded snippet: {hit}"
-            );
-        }
-    } else {
-        assert_eq!(
-            grep["truncated"],
-            json!(true),
-            "lcm_grep without hits must be a truncated evidence page: {grep}"
+            snippet.chars().count() <= 8_192,
+            "canonical redaction/content authority leaked an unbounded snippet: {hit}"
         );
     }
-    assert!(
-        !blob_has_session(&grep_blob, OLDEST_CLAUDE_SESSION),
-        "12-hour grep must exclude the oldest rows: {grep}"
+    let grepped_sessions = grep_session_ids(&grep_payload);
+    assert_window_side(
+        "12-hour direct-user lcm_grep",
+        &grepped_sessions,
+        true,
+        &grep_payload,
     );
     assert!(
-        blob_has_in_window_claude(&grep_blob),
-        "12-hour grep must keep rows inside the window: {grep}"
+        grepped_sessions
+            .iter()
+            .any(|id| claude_replays(true).contains(id)),
+        "12-hour grep must keep the in-window Claude replays: {grep_payload}"
     );
 
+    assert!(
+        raw_message_count(&status) >= RAW_MESSAGE_FLOOR,
+        "ordinary ingest must land at least {RAW_MESSAGE_FLOOR} raw rows \
+         before the window assertions mean anything: {status}"
+    );
     assert!(
         lcm_status_body(&status)["redaction"].is_object(),
         "LCM status must preserve the redaction authority block: {status}"
