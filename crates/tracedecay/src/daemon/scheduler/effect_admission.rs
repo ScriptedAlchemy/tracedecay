@@ -299,6 +299,10 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
 /// Body of [`run_automation_scheduler_tick`], boxed at definition so the
 /// instrumented wrapper does not inline every fixed automation effect of a
 /// tick into one scheduler poll frame.
+#[expect(
+    clippy::too_many_lines,
+    reason = "An automation tick is one ordered admission of every enabled retained effect."
+)]
 fn run_automation_scheduler_tick_inner<'a>(
     project_path: &'a Path,
     cg: &'a TraceDecay,

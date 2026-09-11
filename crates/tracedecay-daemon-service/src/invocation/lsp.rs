@@ -911,15 +911,13 @@ impl DaemonInvocationService {
         let session_id = access.session_id().clone();
         let sessions = Arc::clone(&self.lsp_sessions);
         let registry = Arc::clone(lsp_registry);
-        let (activate_expiry, expiry_activated) = tokio::sync::oneshot::channel::<u64>();
+        let (activate_expiry, expiry_activated) =
+            tokio::sync::oneshot::channel::<(u64, tokio::time::Sleep)>();
         let expiry = async move {
-            let Ok(expires_at_ms) = expiry_activated.await else {
+            let Ok((expires_at_ms, expiry_sleep)) = expiry_activated.await else {
                 return;
             };
-            tokio::time::sleep(std::time::Duration::from_millis(
-                expires_at_ms.saturating_sub(now_millis()),
-            ))
-            .await;
+            expiry_sleep.await;
             registry.lock().await.expire_at(expires_at_ms);
             sessions
                 .lock()
@@ -988,7 +986,14 @@ impl DaemonInvocationService {
                 return;
             }
         };
-        if activate_expiry.send(expires_at_ms).is_err()
+        // The Sleep's Instant deadline must be captured before the caller can
+        // advance virtual time. Tokio registers the timer on first poll, not
+        // construction; remaining TTL is read here so disconnect work does not
+        // stretch the lease.
+        let expiry_sleep = tokio::time::sleep(std::time::Duration::from_millis(
+            expires_at_ms.saturating_sub(now_millis()),
+        ));
+        if activate_expiry.send((expires_at_ms, expiry_sleep)).is_err()
             && let Err(problem) = self.lsp_lease_tasks.cancel(access.session_id()).await
         {
             tracing::error!(

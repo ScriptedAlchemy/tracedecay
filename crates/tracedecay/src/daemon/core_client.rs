@@ -286,6 +286,10 @@ async fn connect_with_restart_grace_resolving(
 }
 
 #[hotpath::measure(label = "daemon.core.call_tool", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "A tool call and its liveness poll share one client deadline and must complete as one RPC."
+)]
 pub(crate) async fn call_tool_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,

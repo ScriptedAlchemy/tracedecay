@@ -21,6 +21,10 @@ use tracedecay_daemon_service::DaemonInvocationService;
 const MEMORY_CURATOR_REQUEST_TIMEOUT_SECS: u64 = 80;
 
 #[hotpath::measure(label = "daemon.dashboard.automation.curate", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Curation pins the live configuration digest and admits one effect before the curator backend runs; a failed pin never starts a run."
+)]
 pub(crate) async fn execute_retained_memory_curator(
     cg: &TraceDecay,
     invocation_service: &DaemonInvocationService,

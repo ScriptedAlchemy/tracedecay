@@ -658,13 +658,13 @@ async fn lsp_disconnect_expiry_settles_unacknowledged_outbound_as_dropped() {
     // drain below awaits the SQLite writer thread's acknowledgement, which a
     // paused clock does not see as pending work: the runtime would auto-advance
     // straight through the recorder's shutdown deadline while the write is
-    // still in flight.
+    // still in flight. Disconnect captures the Sleep's Instant deadline
+    // before returning; tokio registers that timer on first poll.
     service.disconnect_lsp_session(&registry, session).await;
-    tokio::task::yield_now().await;
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
     tokio::time::resume();
-    tokio::task::yield_now().await;
+    service.lsp_lease_tasks.wait_until_idle().await;
 
     assert!(service.lsp_sessions.lock().await.is_empty());
     assert_eq!(registry.lock().await.active_sessions(), 0);

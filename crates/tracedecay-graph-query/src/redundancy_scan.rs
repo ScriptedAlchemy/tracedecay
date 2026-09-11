@@ -477,7 +477,7 @@ pub async fn redundancy_for_symbols(
                 pairs.push(pair);
             }
             compared += 1;
-            if compared % REDUNDANCY_PAIR_SLICE == 0 {
+            if compared.is_multiple_of(REDUNDANCY_PAIR_SLICE) {
                 tokio::task::yield_now().await;
             }
         }

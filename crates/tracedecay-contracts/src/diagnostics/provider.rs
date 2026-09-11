@@ -440,8 +440,8 @@ impl AnalyzerAdmittedDiagnosticProviderV1 {
 /// runtime budget merely to enter the read path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeedbackDiagnosticProviderAdmissionV1 {
-    Analyzer(AnalyzerAdmittedDiagnosticProviderV1),
-    StoredPublication(DiagnosticProviderIdentity),
+    Analyzer(Box<AnalyzerAdmittedDiagnosticProviderV1>),
+    StoredPublication(Box<DiagnosticProviderIdentity>),
 }
 
 impl FeedbackDiagnosticProviderAdmissionV1 {
@@ -454,7 +454,7 @@ impl FeedbackDiagnosticProviderAdmissionV1 {
                 field: "stored diagnostic publication admission",
             });
         }
-        Ok(Self::StoredPublication(identity))
+        Ok(Self::StoredPublication(Box::new(identity)))
     }
 
     pub fn identity(&self) -> &DiagnosticProviderIdentity {
@@ -491,7 +491,7 @@ impl FeedbackDiagnosticProviderAdmissionV1 {
 
 impl From<AnalyzerAdmittedDiagnosticProviderV1> for FeedbackDiagnosticProviderAdmissionV1 {
     fn from(value: AnalyzerAdmittedDiagnosticProviderV1) -> Self {
-        Self::Analyzer(value)
+        Self::Analyzer(Box::new(value))
     }
 }
 
