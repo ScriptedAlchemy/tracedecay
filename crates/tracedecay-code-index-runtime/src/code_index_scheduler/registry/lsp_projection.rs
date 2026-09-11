@@ -29,13 +29,23 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     .await
                     .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-task-failed"))?
                     .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-unavailable"))?;
-            // Resolve HEAD first, then cross the current-generation fence. A
-            // concurrent checkout or commit changes Git metadata, so the
-            // fence refuses instead of attaching the new HEAD to the old seat.
+            // Bracket the current-generation fence with the cheap Git identity
+            // read. A concurrent checkout, commit, or publication then refuses
+            // instead of pairing one generation with another HEAD.
             let current = registry
                 .latest_complete_ready(&root)
                 .await
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
+            let confirmation_root = root.clone();
+            let confirmed_identity = tokio::task::spawn_blocking(move || {
+                IndexingIdentityV1::resolve(&confirmation_root)
+            })
+            .await
+            .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-task-failed"))?
+            .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-unavailable"))?;
+            if confirmed_identity != live_identity {
+                return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
+            }
             let generation = &current.generation;
             let snapshot = generation.snapshot();
             if live_identity.repository_id() != &snapshot.repository
@@ -69,7 +79,7 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     repository: snapshot.repository.clone(),
                     worktree: snapshot.worktree.clone(),
                     reference: snapshot.reference.clone(),
-                    head_commit_id: live_identity.head_commit().cloned(),
+                    head_commit_id: confirmed_identity.head_commit().cloned(),
                     source_revision: snapshot.source_revision.clone(),
                     code_generation_id: generation.manifest().generation_id.clone(),
                     snapshot_digest: generation.manifest().snapshot_digest.clone(),
