@@ -213,7 +213,11 @@ pub(super) fn sliced_message(
     }
 }
 
-pub(super) fn grep_hit(result: SessionMessageSearchResult, max_chars: usize) -> LcmGrepHitV1 {
+pub(super) fn grep_hit(
+    result: SessionMessageSearchResult,
+    store_id: Option<i64>,
+    max_chars: usize,
+) -> LcmGrepHitV1 {
     let snippet = result.message.text.chars().take(max_chars).collect();
     let summary = result.message.kind.as_deref() == Some("summary");
     let message_id = result.message.message_id;
@@ -228,7 +232,7 @@ pub(super) fn grep_hit(result: SessionMessageSearchResult, max_chars: usize) -> 
         session_id: result.message.session_id,
         message_id: (!summary).then(|| message_id.clone()),
         node_id: summary.then_some(message_id),
-        store_id: None,
+        store_id: store_id.filter(|_| !summary),
         role: (!summary).then_some(result.message.role),
         snippet,
         score: result.score,
