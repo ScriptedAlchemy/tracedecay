@@ -6898,7 +6898,10 @@ impl CodeIndexSchedulerRegistryV1 {
         // `QueryAdmission` over it is exactly the fabricated cadence arrival
         // the pending-wake suppression exists to prevent. The remedy above is
         // already recorded; leave the claim unsettled so its drop releases
-        // this admission's owner without erasing the foreign marker.
+        // this admission's owner without erasing the foreign marker. The
+        // claim is also lost when the worker consumed the marker through
+        // `take_pending_arrival` (owner reset to zero); that only happens
+        // inside a reconcile pass, which is itself the remedy.
         if !wake_claim.still_owns() {
             return false;
         }
