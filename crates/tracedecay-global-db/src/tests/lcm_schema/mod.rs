@@ -35,7 +35,7 @@ async fn open_read_only_global_db(
     // Publishing a runtime materialises a profile-scoped sidecar shard, which
     // the kernel initialises through its fail-closed registered-schema port.
     // Idempotent — the port keeps the first registration.
-    crate::register_test_schema_installer();
+    crate::register_registered_schema_installer();
     let authority = DatabaseAuthority::acquire_test(db_path, "LCM schema read-only fixture")?;
     let (database, _) = Database::publish_registered_test_runtime(
         db_path,

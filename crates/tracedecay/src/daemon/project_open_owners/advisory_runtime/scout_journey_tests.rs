@@ -204,7 +204,7 @@ fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
 async fn test_scout_owner(
     temporary: &tempfile::TempDir,
 ) -> Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1> {
-    tracedecay_store_runtime::register_registered_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let database_path = temporary.path().join("edit-stop-feedback.db");
     let database_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &database_path,

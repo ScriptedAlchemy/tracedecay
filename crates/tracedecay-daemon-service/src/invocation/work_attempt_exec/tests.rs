@@ -2056,7 +2056,7 @@ async fn provider_artifact_store() -> (
     use tracedecay_runtime_core::db::{
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
     };
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("artifacts.db");
     let authority = DatabaseAuthority::acquire_test(&path, "provider artifacts").unwrap();

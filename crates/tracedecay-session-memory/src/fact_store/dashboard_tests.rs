@@ -25,7 +25,7 @@ async fn database(label: &str) -> (TempDir, Database) {
     let path = directory.path().join(format!("{label}.db"));
     let authority = DatabaseAuthority::acquire_test(&path, "dashboard read-control authority")
         .expect("acquire dashboard read-control authority");
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let (database, _) =
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await
