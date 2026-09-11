@@ -82,11 +82,11 @@ use tracedecay_query::retrieval::lexical::{
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, LexicalLaneRequest,
     LexicalRouteKindV1, LexicalRoutingV1,
 };
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::rerank::{
     AdmittedNativeRerankExecutorV1, BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1,
     LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1,
 };
-use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::semantic::apply_bounded_rerank_outcome;
 use tracedecay_query::retrieval::semantic::{SemanticAbstentionV1, SemanticQueryModeV1};
 use tracedecay_runtime_core::resident_memory::{
