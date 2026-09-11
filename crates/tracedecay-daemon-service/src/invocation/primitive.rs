@@ -16,6 +16,7 @@ use tracedecay_contracts::context_scout::{
     ContextScoutEvidenceProjectionV1, ContextScoutSuggestionProjectionV1,
     ContextScoutSurfaceRequestV1,
 };
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 mod context_scout_registry;
@@ -864,9 +865,7 @@ async fn execute_context_scout_mutation(
         committed_state: Some(settlement.committed_state.clone()),
         external_proof: None,
     };
-    let effect_id = match effect_identity
-        .as_str()
-        .strip_prefix("sha256:")
+    let effect_id = match sha256_hex_suffix(effect_identity.as_str())
         .map(|suffix| format!("effect.context-scout.{suffix}"))
         .and_then(|identity| EffectId::new(identity).ok())
     {
@@ -906,7 +905,7 @@ fn context_scout_effect_receipt_id(
         envelope_id,
     ))
     .ok()?;
-    let encoded = digest.as_str().strip_prefix("sha256:")?.get(..32)?;
+    let encoded = sha256_hex_suffix(digest.as_str())?.get(..32)?;
     let mut receipt_id = [0; 16];
     hex::decode_to_slice(encoded, &mut receipt_id).ok()?;
     Some(receipt_id)
