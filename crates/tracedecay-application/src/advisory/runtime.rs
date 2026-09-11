@@ -30,12 +30,12 @@ use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::cycle_runtime::{CanonicalFeedbackResultV1, FeedbackCycleRuntime};
 use crate::feedback::observations::FeedbackObservationEmitterV1;
 use crate::operation_stream::OperationEmitter;
-use tracedecay_configuration::ConfigurationControlStore;
 use tracedecay_contracts::feedback::observations::{
     FeedbackAdvisoryProviderV1, FeedbackCiProviderV1, FeedbackCoverageV1,
     FeedbackGitHubLifecycleV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackProximityRiskV1,
     FeedbackProximityTransitionV1, FeedbackSourceEventV1,
 };
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationControlStore;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_session_memory::context::MonotonicDeadline;
 

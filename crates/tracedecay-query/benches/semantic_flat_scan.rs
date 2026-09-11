@@ -31,7 +31,7 @@ use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
 };
 use tracedecay_query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, SemanticCodeRetriever, SemanticExecutionControl,
+    EphemeralQueryEmbeddingV1, SemanticCodeRetriever, RetrievalExecutionControl,
     SemanticLaneRetriever, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
     SemanticRetrievalRequestV1, SemanticVectorReadPort, SemanticVectorReadRequestV1,
     SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
@@ -286,7 +286,7 @@ impl SemanticVectorReadPort for ResidentRowsPort {
 
 struct NeverInterrupted;
 
-impl SemanticExecutionControl for NeverInterrupted {
+impl RetrievalExecutionControl for NeverInterrupted {
     fn is_cancelled(&self) -> bool {
         false
     }

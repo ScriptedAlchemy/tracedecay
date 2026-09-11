@@ -62,6 +62,7 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1;
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
     HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, hook_configuration_path,
@@ -590,7 +591,7 @@ async fn selected_feedback_generation(
 )]
 async fn refresh_feedback_cycle(
     producer: &ProjectOpenScoutProducerV1,
-    current: tracedecay_configuration::ConfigurationCurrentStateV1,
+    current: ConfigurationCurrentStateV1,
 ) -> std::result::Result<(), LspRuntimeFailure> {
     {
         let pinned = producer.feedback_cycle.read().await;
@@ -719,7 +720,7 @@ struct ProjectOpenFeedbackConfigurationRefreshV1 {
 impl ConfigurationRuntimeRefreshPort for ProjectOpenFeedbackConfigurationRefreshV1 {
     fn refresh(
         &self,
-        current: tracedecay_configuration::ConfigurationCurrentStateV1,
+        current: ConfigurationCurrentStateV1,
     ) -> ConfigurationRuntimeRefreshFuture {
         let cycle = self.cycle.upgrade();
         Box::pin(async move {
@@ -817,7 +818,7 @@ async fn run_production_hook_cycle(
     else {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
-    let current_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
+    let current_configuration = ConfigurationCurrentStateV1 {
         revision_id: pinned_configuration.revision_id().clone(),
         snapshot: pinned_configuration.snapshot().clone(),
     };
@@ -1090,7 +1091,7 @@ async fn refresh_project_open_feedback_configuration(
     .map_err(|error| TraceDecayError::Config {
         message: format!("project-open feedback source access is unavailable: {error}"),
     })?;
-    state.scout_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
+    state.scout_configuration = ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id().clone(),
         snapshot: configuration.snapshot().clone(),
     };
@@ -1377,7 +1378,7 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open automation configuration is unavailable: {error}"),
         })?;
-    let current_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
+    let current_configuration = ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id().clone(),
         snapshot: configuration.snapshot().clone(),
     };
@@ -1609,7 +1610,7 @@ async fn register_production_advisory_owner(
         })?;
     refresh_feedback_cycle(
         &advisory_cycle.producer,
-        tracedecay_configuration::ConfigurationCurrentStateV1 {
+        ConfigurationCurrentStateV1 {
             revision_id: catch_up.revision_id().clone(),
             snapshot: catch_up.snapshot().clone(),
         },

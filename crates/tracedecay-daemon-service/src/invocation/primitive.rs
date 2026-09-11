@@ -970,7 +970,7 @@ async fn execute_context_scout_state_transition(
     registry: Arc<ProjectContextScoutAddressRegistryV1>,
     control: &ContextScoutControlRequestV1,
     target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
-    current: tracedecay_configuration::ConfigurationCurrentStateV1,
+    current: tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,

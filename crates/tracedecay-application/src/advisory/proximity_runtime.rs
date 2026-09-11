@@ -28,7 +28,9 @@ use tracedecay_domain::{
     sha256_hex_suffix,
 };
 
-use tracedecay_configuration::{ConfigurationControlStore, ConfigurationCurrentStateV1};
+use tracedecay_global_db::configuration::contracts::ports::{
+    ConfigurationControlStore, ConfigurationCurrentStateV1,
+};
 
 use super::context_allows_feedback_operation;
 

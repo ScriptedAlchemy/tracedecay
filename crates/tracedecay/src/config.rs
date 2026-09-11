@@ -10,7 +10,6 @@ use tracedecay_domain::configuration::{
     UserProfileId,
 };
 
-use tracedecay_configuration::ConfigurationControlStore;
 use tracedecay_configuration::{
     SyncConfig, TelemetryConfig, TraceDecayConfig, get_config_path, is_in_gitignore,
     load_config_from_path,
@@ -20,6 +19,8 @@ use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
     ProfileCodeIndexWorkerConfigurationV1,
 };
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 pub use tracedecay_application::config::retrieval;
@@ -531,7 +532,7 @@ async fn open_runtime_configuration_from_store(
         .await
     {
         Ok(state) => state,
-        Err(tracedecay_configuration::ConfigurationError::RevisionConflict) => {
+        Err(ConfigurationError::RevisionConflict) => {
             store.current().await.map_err(map_configuration_error)?
         }
         Err(error) => return Err(map_configuration_error(error)),
@@ -595,7 +596,7 @@ async fn open_runtime_configuration_from_store(
                     Ok(state) => state,
                     // A concurrent open won the swap; adopt what it
                     // published and re-verify it exactly.
-                    Err(tracedecay_configuration::ConfigurationError::RevisionConflict) => {
+                    Err(ConfigurationError::RevisionConflict) => {
                         store.current().await.map_err(map_configuration_error)?
                     }
                     Err(error) => return Err(map_configuration_error(error)),
@@ -687,9 +688,9 @@ fn validate_registered_configuration_database(
     }
 }
 
-fn map_configuration_error(error: tracedecay_configuration::ConfigurationError) -> TraceDecayError {
+fn map_configuration_error(error: ConfigurationError) -> TraceDecayError {
     match error {
-        tracedecay_configuration::ConfigurationError::ResetRequired { reason } => {
+        ConfigurationError::ResetRequired { reason } => {
             TraceDecayError::reset_required("configuration", reason)
         }
         error => config_error(format!("configuration authority unavailable: {error}")),

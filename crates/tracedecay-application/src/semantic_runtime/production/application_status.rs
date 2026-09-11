@@ -308,7 +308,7 @@ mod tests {
 
     use super::*;
     use crate::semantic_runtime::SemanticRuntimeRouteV1;
-    use tracedecay_configuration::ConfigurationCurrentStateV1;
+    use tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1;
 
     fn pin() -> SemanticConfigurationPinV1 {
         SemanticConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {

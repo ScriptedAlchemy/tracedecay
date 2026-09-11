@@ -82,11 +82,11 @@ use tracedecay_query::retrieval::lexical::{
 };
 use tracedecay_query::retrieval::rerank::{
     AdmittedNativeRerankExecutorV1, BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1,
-    LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
+    LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RetrievalExecutionControl,
 };
 use tracedecay_query::retrieval::semantic::apply_bounded_rerank_outcome;
 use tracedecay_query::retrieval::semantic::{
-    SemanticAbstentionV1, SemanticExecutionControl, SemanticQueryModeV1,
+    SemanticAbstentionV1, RetrievalExecutionControl, SemanticQueryModeV1,
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryPressureV1,
@@ -2716,7 +2716,7 @@ impl DeterministicLocalRerankExecutorV1 for MixedAnchorReverseRerankExecutorV1 {
 
 struct ReadyRerankControlV1;
 
-impl RerankExecutionControlV1 for ReadyRerankControlV1 {
+impl RetrievalExecutionControl for ReadyRerankControlV1 {
     fn elapsed_micros(&self) -> u64 {
         0
     }
@@ -2728,7 +2728,7 @@ impl RerankExecutionControlV1 for ReadyRerankControlV1 {
 
 struct CancelledRerankControlV1;
 
-impl RerankExecutionControlV1 for CancelledRerankControlV1 {
+impl RetrievalExecutionControl for CancelledRerankControlV1 {
     fn elapsed_micros(&self) -> u64 {
         0
     }
@@ -2740,7 +2740,7 @@ impl RerankExecutionControlV1 for CancelledRerankControlV1 {
 
 struct ReadySemanticControlV1;
 
-impl SemanticExecutionControl for ReadySemanticControlV1 {
+impl RetrievalExecutionControl for ReadySemanticControlV1 {
     fn is_cancelled(&self) -> bool {
         false
     }

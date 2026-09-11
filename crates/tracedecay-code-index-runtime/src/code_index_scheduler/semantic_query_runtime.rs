@@ -33,10 +33,10 @@ use tracedecay_application::semantic_runtime::{
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::QueryAuthorityV1;
 use tracedecay_query::retrieval::fusion::{CompositionOutputV1, digest_candidate_set};
-use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::semantic::{
     SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCompositionExecutionAuthorityV1,
-    SemanticCompositionExecutionOutcomeV1, SemanticExecutionControl, SemanticQueryModeV1,
+    SemanticCompositionExecutionOutcomeV1, RetrievalExecutionControl, SemanticQueryModeV1,
     SemanticQueryServiceError, SemanticRetrievalRequestV1, apply_bounded_rerank_outcome,
 };
 
@@ -390,7 +390,7 @@ impl CodeIndexSchedulerRegistryV1 {
         mode: SemanticQueryModeV1,
     ) -> Result<ExecutedQuerySemanticSearchV1, QuerySemanticSearchExecutionErrorV1>
     where
-        C: SemanticExecutionControl + Send + Sync + 'static,
+        C: RetrievalExecutionControl + 'static,
     {
         // The request is already admitted at this boundary. Start the
         // single-flight model worker before canonical generation resolution so
@@ -482,7 +482,7 @@ impl CodeIndexSchedulerRegistryV1 {
         mode: SemanticQueryModeV1,
     ) -> Result<SemanticAugmentationOutcomeV1, SemanticQueryServiceError>
     where
-        C: SemanticExecutionControl + Sync,
+        C: RetrievalExecutionControl + Sync,
     {
         let Some(authority) = hotpath::future!(
             self.semantic_query_authority_for_scope(scope),
@@ -678,9 +678,9 @@ fn semantic_cursor_matches_activation(
 
 struct SemanticRerankControlV1<'a, C: ?Sized>(&'a C);
 
-impl<C> RerankExecutionControlV1 for SemanticRerankControlV1<'_, C>
+impl<C> RetrievalExecutionControl for SemanticRerankControlV1<'_, C>
 where
-    C: SemanticExecutionControl + ?Sized,
+    C: RetrievalExecutionControl + ?Sized,
 {
     fn elapsed_micros(&self) -> u64 {
         self.0.elapsed_micros()
@@ -711,7 +711,7 @@ fn apply_configured_semantic_rerank<C>(
     control: &C,
 ) -> OptionalStagePublicStatus
 where
-    C: SemanticExecutionControl + ?Sized,
+    C: RetrievalExecutionControl + ?Sized,
 {
     let Some(policy) = authority.execution.rerank_policy() else {
         return OptionalStagePublicStatus::NotRequested;

@@ -24,7 +24,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    GraphExecutionControl, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
+    RetrievalExecutionControl, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
     GraphPathSegmentV1,
 };
 use crate::retrieval::ports::{
@@ -38,12 +38,12 @@ mod scale;
 mod storage;
 
 #[derive(Debug)]
-struct TestGraphExecutionControl {
+struct TestRetrievalExecutionControl {
     cancelled: bool,
     elapsed_micros: u64,
 }
 
-impl GraphExecutionControl for TestGraphExecutionControl {
+impl RetrievalExecutionControl for TestRetrievalExecutionControl {
     fn is_cancelled(&self) -> bool {
         self.cancelled
     }
@@ -53,8 +53,8 @@ impl GraphExecutionControl for TestGraphExecutionControl {
     }
 }
 
-fn graph_control() -> Arc<dyn GraphExecutionControl> {
-    Arc::new(TestGraphExecutionControl {
+fn graph_control() -> Arc<dyn RetrievalExecutionControl> {
+    Arc::new(TestRetrievalExecutionControl {
         cancelled: false,
         elapsed_micros: 0,
     })
@@ -359,7 +359,7 @@ impl GraphEvidenceReadPort for FakeGraphPort {
     fn read_graph_evidence(
         &self,
         _request: &GraphLaneRequest,
-        _control: Arc<dyn super::GraphExecutionControl>,
+        _control: Arc<dyn super::RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         match &self.reply {
             PortReply::Outcome(outcome) => Ok(outcome.clone()),
