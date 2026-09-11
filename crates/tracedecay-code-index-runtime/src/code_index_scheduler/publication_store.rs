@@ -434,6 +434,14 @@ struct UndecodedActivePublicationExpectationV1 {
 }
 
 impl UndecodedActivePublicationExpectationV1 {
+    fn from_pointer(pointer: &DurablePublicationPointerV1) -> Self {
+        Self {
+            generation_id: pointer.generation_id.clone(),
+            generation_file: pointer.generation_file.clone(),
+            state_digest: pointer.state_digest.clone(),
+        }
+    }
+
     fn matches(&self, pointer: &DurablePublicationPointerV1) -> bool {
         self.generation_id == pointer.generation_id
             && self.generation_file == pointer.generation_file
@@ -770,11 +778,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         pointer: &DurablePublicationPointerV1,
     ) -> Self {
         let mut publication = self.clone();
-        publication.undecoded_active_expectation = Some(UndecodedActivePublicationExpectationV1 {
-            generation_id: pointer.generation_id.clone(),
-            generation_file: pointer.generation_file.clone(),
-            state_digest: pointer.state_digest.clone(),
-        });
+        publication.undecoded_active_expectation = Some(
+            UndecodedActivePublicationExpectationV1::from_pointer(pointer),
+        );
         publication
     }
 
@@ -2066,13 +2072,10 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     // rechecked under the writer lock below; without it a
                     // store holding an undecodable generation could never be
                     // replaced by the rebuild that supersedes it.
-                    None => self.read_publication_pointer()?.map(|pointer| {
-                        UndecodedActivePublicationExpectationV1 {
-                            generation_id: pointer.generation_id,
-                            generation_file: pointer.generation_file,
-                            state_digest: pointer.state_digest,
-                        }
-                    }),
+                    None => self
+                        .read_publication_pointer()?
+                        .as_ref()
+                        .map(UndecodedActivePublicationExpectationV1::from_pointer),
                 }
             }
         };
