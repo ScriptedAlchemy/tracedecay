@@ -17,8 +17,8 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, p
 use tracedecay_store::SessionMessageRecord;
 
 use super::{
-    LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind, payload,
-    security,
+    LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind,
+    LcmSummarySourceRange, payload, security,
 };
 
 pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
@@ -463,6 +463,95 @@ static PREDECESSOR_RANGE_UPSERT_BY_IDENTITY: LazyLock<String> = LazyLock::new(||
 static PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE: LazyLock<String> = LazyLock::new(|| {
     predecessor_range_upsert_sql("current.store_id > ?1 AND current.store_id <= ?2")
 });
+
+/// Typed state of one raw message's conversational predecessor interval.
+///
+/// An absent row in `lcm_raw_predecessor_ranges` is ambiguous on its own, so
+/// this resolves it against the same policy-anchor authority the interval is
+/// derived from: a message with no earlier conversational row genuinely has
+/// no interval, while a message that is owed one and has none is unavailable
+/// (the background rewrite has not reached it, or the range was lost).
+/// Neither may be published as summary provenance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LcmPredecessorRangeState {
+    Interval(LcmSummarySourceRange),
+    NoPredecessor,
+    Unavailable,
+}
+
+impl LcmPredecessorRangeState {
+    pub fn interval(&self) -> Option<&LcmSummarySourceRange> {
+        match self {
+            Self::Interval(interval) => Some(interval),
+            Self::NoPredecessor | Self::Unavailable => None,
+        }
+    }
+
+    /// Stable reason label for the states that carry no interval.
+    pub fn absent_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Interval(_) => None,
+            Self::NoPredecessor => Some("no_predecessor_interval"),
+            Self::Unavailable => Some("predecessor_interval_unavailable"),
+        }
+    }
+}
+
+static PREDECESSOR_RANGE_STATE_SQL: LazyLock<String> = LazyLock::new(|| {
+    let role_list = crate::compression_policy::policy_anchor_role_sql_in_list();
+    format!(
+        "SELECT range.from_store_id, range.to_store_id,
+                EXISTS (
+                    SELECT 1
+                    FROM lcm_raw_messages AS earlier
+                    WHERE earlier.provider = ?1
+                      AND earlier.session_id = ?2
+                      AND earlier.store_id < ?3
+                      AND earlier.role NOT IN ({role_list})
+                )
+         FROM lcm_raw_messages AS owner
+         LEFT JOIN lcm_raw_predecessor_ranges AS range
+           ON range.provider = owner.provider
+          AND range.message_id = owner.message_id
+          AND range.session_id = owner.session_id
+         WHERE owner.provider = ?1 AND owner.session_id = ?2
+           AND owner.store_id = ?3
+         LIMIT 1"
+    )
+});
+
+/// Resolves the persisted predecessor interval of one raw message.
+pub async fn predecessor_range_state(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    store_id: i64,
+) -> Result<LcmPredecessorRangeState, LcmError> {
+    let mut rows = conn
+        .query(
+            PREDECESSOR_RANGE_STATE_SQL.as_str(),
+            params![provider, session_id, store_id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        // The store id names no row in the raw authority, so no interval can
+        // be derived for it at all.
+        return Ok(LcmPredecessorRangeState::Unavailable);
+    };
+    let from_store_id = row.get::<Option<i64>>(0)?;
+    let to_store_id = row.get::<Option<i64>>(1)?;
+    let owes_interval = row.get::<i64>(2)? != 0;
+    Ok(match (from_store_id, to_store_id) {
+        (Some(from_store_id), Some(to_store_id)) => {
+            LcmPredecessorRangeState::Interval(LcmSummarySourceRange {
+                from_store_id,
+                to_store_id,
+            })
+        }
+        _ if owes_interval => LcmPredecessorRangeState::Unavailable,
+        _ => LcmPredecessorRangeState::NoPredecessor,
+    })
+}
 
 pub(crate) async fn persist_raw_predecessor_range_for_identity(
     conn: &(impl Executor + ?Sized),
