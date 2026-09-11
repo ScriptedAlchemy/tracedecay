@@ -464,6 +464,10 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
         .subscribe_serving_generation_changes(fixture.path())
         .await
         .expect("subscribe to advisory serving changes");
+    assert!(
+        registry.request_complete_generation(fixture.path()).await,
+        "mounted worktree admits complete-generation demand"
+    );
 
     let first_scheduled = probe.entered_generation().await;
     let first_scheduled_id = first_scheduled.manifest().generation_id.clone();

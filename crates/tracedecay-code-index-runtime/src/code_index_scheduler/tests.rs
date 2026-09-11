@@ -16131,6 +16131,10 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         .subscribe_serving_generation_changes(fixture.path())
         .await
         .expect("subscribe to retained serving changes");
+    assert!(
+        registry.request_complete_generation(fixture.path()).await,
+        "mounted worktree admits complete-generation demand"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let current = loop {
