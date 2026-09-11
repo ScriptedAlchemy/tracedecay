@@ -198,6 +198,9 @@ impl StaticLanguageRegistry {
             for alias in extra_aliases(&language) {
                 aliases.insert(alias.to_owned());
             }
+            // Rust v3 adds parser-backed grouped and relative import evidence.
+            // Pinning that behavior forces older file artifacts to be re-extracted.
+            let extractor_revision = if language == "rust" { 3 } else { 2 };
             let descriptor = LanguageDescriptorV1 {
                 language: LanguageId::new(language.clone())
                     .expect("canonical language identity is valid"),
@@ -209,8 +212,10 @@ impl StaticLanguageRegistry {
                     "grammar.tree-sitter.{language}.v1"
                 ))
                 .expect("grammar revision is canonical"),
-                extractor_revision: ExtractorRevision::new(format!("extractor.{language}.v2"))
-                    .expect("extractor revision is canonical"),
+                extractor_revision: ExtractorRevision::new(format!(
+                    "extractor.{language}.v{extractor_revision}"
+                ))
+                .expect("extractor revision is canonical"),
                 aliases: aliases.into_iter().collect(),
                 extensions: extensions.into_iter().collect(),
                 root_markers: root_markers(&language),
@@ -418,6 +423,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v3");
 
         assert_eq!(
             registry

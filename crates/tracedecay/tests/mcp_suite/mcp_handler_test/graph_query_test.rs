@@ -165,6 +165,84 @@ async fn graph_node_id(fixture: &GraphQueryFixture, name: &str) -> String {
         .to_owned()
 }
 
+#[tokio::test]
+async fn rust_wrapper_callees_follow_declared_sibling_module_imports() {
+    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("src/lib.rs"),
+            "mod execute;\n\
+             mod unrelated;\n\
+             use execute::{execute_source_edit_inner, resolve_source_edit_preview};\n\
+             pub async fn execute_source_edit<A>(authorization: &A)\n\
+             where\n\
+                 A: Send,\n\
+             {\n\
+                 execute_source_edit_inner(authorization).await;\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/execute.rs"),
+            "pub(super) async fn execute_source_edit_inner<A>(_authorization: &A) {}\n\
+             pub(super) fn resolve_source_edit_preview() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("src/unrelated.rs"),
+            "pub fn execute_source_edit_inner() {}\n",
+        )
+        .unwrap();
+    })
+    .await;
+    let wrapper = graph_node_id(&fixture, "execute_source_edit").await;
+    let result = call_production_tool(
+        &fixture,
+        "tracedecay_code_callees",
+        json!({
+            "node_id": wrapper,
+            "maximum_depth": 1,
+            "resolve_trait_dispatch": false,
+            "scope": {
+                "generation": tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL,
+                "path_prefix": Value::Null,
+            },
+            "meta": {
+                "projection": "evidence",
+                "order": "source_position",
+                "cursor": Value::Null,
+            },
+            "format": "json",
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("code callees request");
+    let payload: Value =
+        serde_json::from_str(extract_text(&result.value)).expect("code callees response JSON");
+    let items = payload
+        .pointer("/outcome/value/payload/items")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("code callees response should contain items: {payload:#}"));
+    assert_eq!(
+        items.len(),
+        1,
+        "the declared module must disambiguate the imported callee: {payload:#}"
+    );
+    assert_eq!(
+        items[0].pointer("/symbol/file").and_then(Value::as_str),
+        Some("src/execute.rs"),
+        "wrapper should call the sibling module function: {payload:#}"
+    );
+    assert_eq!(
+        items[0].pointer("/symbol/name").and_then(Value::as_str),
+        Some("execute_source_edit_inner"),
+        "wrapper should call the imported symbol: {payload:#}"
+    );
+    shutdown_graph_fixture(fixture).await;
+}
+
 /// A `limit` above the accepted retrieval budget must serve a budget-bounded
 /// page (any fused remainder rides the `next_cursor` continuation), not fail
 /// closed. The tool contract accepts `limit` up to 500 as an upper bound, but
