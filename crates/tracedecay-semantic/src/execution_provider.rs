@@ -6,10 +6,11 @@
 //! on Linux. `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu` opts out; `coreml` or
 //! `cuda` explicitly requests that provider.
 //!
-//! An unavailable automatic provider is normal and quietly falls back to
-//! ONNX Runtime's CPU provider. An unavailable explicitly requested provider
-//! also falls back, but warns the operator. This module only narrows to CPU;
-//! it never fails a session open.
+//! On a supported platform the compiled provider is always offered to ORT.
+//! ORT itself falls back to CPU if registration fails. A failed
+//! `GetAvailableProviders` probe is logged but no longer blocks registration
+//! (that probe is not a reliable usability signal for statically linked
+//! CoreML). This module only narrows to CPU; it never fails a session open.
 
 use fastembed::ExecutionProviderDispatch;
 
@@ -48,12 +49,16 @@ fn requested_execution_provider() -> RequestedExecutionProviderV1 {
 /// preferred first. An empty vector means ONNX Runtime's own default CPU EP,
 /// which is what a build without a usable automatic provider produces.
 pub(crate) fn requested_execution_providers() -> Vec<ExecutionProviderDispatch> {
-    match requested_execution_provider() {
+    let providers = match requested_execution_provider() {
         RequestedExecutionProviderV1::Auto => automatic_dispatch(),
         RequestedExecutionProviderV1::Cpu => Vec::new(),
         RequestedExecutionProviderV1::CoreMl => coreml_dispatch(true),
         RequestedExecutionProviderV1::Cuda => cuda_dispatch(true),
+    };
+    if providers.is_empty() {
+        crate::hotpath_observe::record_embed_execution_provider("cpu");
     }
+    providers
 }
 
 fn automatic_dispatch() -> Vec<ExecutionProviderDispatch> {
@@ -84,36 +89,40 @@ fn coreml_dispatch(explicit: bool) -> Vec<ExecutionProviderDispatch> {
         }
         return Vec::new();
     }
+    // `is_available` only checks GetAvailableProviders. ort's own docs say that is
+    // not the right gate for usability — register the EP and let ORT fall back if
+    // registration fails. Pyke's aarch64-apple-darwin "none" dfbin ships CoreML
+    // inside libonnxruntime.a; gating on the probe previously skipped a working EP
+    // whenever the probe disagreed with the linked provider table.
     match provider.is_available() {
-        Ok(true) => {
-            tracing::info!("using CoreML execution provider for embeddings");
-            vec![provider.build()]
-        }
+        Ok(true) => tracing::info!("using CoreML execution provider for embeddings"),
         Ok(false) => {
             if explicit {
                 tracing::warn!(
-                    "the CoreML execution provider is unavailable in this ONNX Runtime build; using cpu"
+                    "CoreML GetAvailableProviders probe returned false; still registering CoreML (ORT will fall back to CPU if registration fails)"
                 );
             } else {
-                tracing::info!("CoreML execution provider is unavailable; using cpu");
+                tracing::info!(
+                    "CoreML GetAvailableProviders probe returned false; still registering CoreML"
+                );
             }
-            Vec::new()
         }
         Err(error) => {
             if explicit {
                 tracing::warn!(
                     %error,
-                    "failed to probe CoreML execution provider availability; using cpu"
+                    "CoreML availability probe failed; still registering CoreML"
                 );
             } else {
                 tracing::info!(
                     %error,
-                    "failed to probe CoreML execution provider availability; using cpu"
+                    "CoreML availability probe failed; still registering CoreML"
                 );
             }
-            Vec::new()
         }
     }
+    crate::hotpath_observe::record_embed_execution_provider("coreml");
+    vec![provider.build()]
 }
 
 #[cfg(not(feature = "semantic-gpu-coreml"))]
@@ -142,6 +151,7 @@ fn cuda_dispatch(explicit: bool) -> Vec<ExecutionProviderDispatch> {
     match provider.is_available() {
         Ok(true) => {
             tracing::info!("using CUDA execution provider for embeddings");
+            crate::hotpath_observe::record_embed_execution_provider("cuda");
             vec![provider.build()]
         }
         Ok(false) => {
@@ -256,6 +266,22 @@ mod tests {
                 requested_execution_provider(),
                 RequestedExecutionProviderV1::Cpu
             );
+        });
+    }
+
+    #[test]
+    fn auto_on_apple_with_coreml_feature_registers_coreml() {
+        with_env(None, || {
+            if cfg!(all(
+                feature = "semantic-gpu-coreml",
+                target_vendor = "apple"
+            )) {
+                assert_eq!(
+                    requested_execution_providers().len(),
+                    1,
+                    "Apple + semantic-gpu-coreml must offer CoreML to ORT"
+                );
+            }
         });
     }
 
