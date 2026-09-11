@@ -22,9 +22,9 @@ use tracedecay_store::{
 };
 
 use super::{
-    NativeApplyEffectV1, NativeIntegrationAuthorizationOutcomeV1,
-    NativeIntegrationAuthorizationPort, NativeIntegrationMechanics, NativeIntegrationProbeV1,
-    NativeIntegrationTransactionCoordinator,
+    NativeApplyEffectV1, NativeIntegrationAnalysisRevalidationV1,
+    NativeIntegrationAuthorizationOutcomeV1, NativeIntegrationAuthorizationPort,
+    NativeIntegrationMechanics, NativeIntegrationProbeV1, NativeIntegrationTransactionCoordinator,
 };
 
 #[derive(Default)]
@@ -118,6 +118,14 @@ impl NativeIntegrationStore for StatusStore {
         Ok(Vec::new())
     }
 
+    fn live_candidate_generation_bindings(
+        &self,
+        _repository_id: &RepositoryId,
+        _observed_at: UtcMicros,
+    ) -> NativeIntegrationStoreResult<Vec<tracedecay_domain::CodeGenerationId>> {
+        Ok(Vec::new())
+    }
+
     fn approval_consumed(
         &self,
         _approval_id: &NativeIntegrationApprovalId,
@@ -194,6 +202,7 @@ impl NativeIntegrationMechanics for UnusedMechanics {
         &self,
         _selection: &NativeIntegrationSelectionV1,
         _request: &NativeIntegrationPreflightRequestV1,
+        _cancellation_signal: &CancellationSignal,
         _cancellation: &CancellationToken,
     ) -> Result<tracedecay_domain::NativeIntegrationPreviewV1, NativeIntegrationPortError> {
         Err(NativeIntegrationPortError::Unavailable)
@@ -205,6 +214,15 @@ impl NativeIntegrationMechanics for UnusedMechanics {
         _cancellation: &CancellationToken,
     ) -> Result<NativeApplyEffectV1, NativeIntegrationPortError> {
         Err(NativeIntegrationPortError::Unavailable)
+    }
+
+    fn revalidate_analysis(
+        &self,
+        _preview: &tracedecay_domain::NativeIntegrationPreviewV1,
+        _deadline: &tracedecay_contracts::Deadline,
+        _cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationAnalysisRevalidationV1, NativeIntegrationPortError> {
+        Ok(NativeIntegrationAnalysisRevalidationV1::Current)
     }
 
     fn probe(

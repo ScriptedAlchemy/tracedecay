@@ -29,6 +29,14 @@ pub enum NativeIntegrationAuthorizationOutcomeV1 {
     Unavailable,
 }
 
+/// Result of reloading every immutable generation bound into a preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeIntegrationAnalysisRevalidationV1 {
+    Current,
+    Stale,
+    Unavailable,
+}
+
 pub trait NativeIntegrationAuthorizationPort: Send + Sync {
     fn authorize_preflight(
         &self,
@@ -93,6 +101,7 @@ pub trait NativeIntegrationMechanics: Send + Sync {
         &self,
         selection: &NativeIntegrationSelectionV1,
         request: &NativeIntegrationPreflightRequestV1,
+        cancellation_signal: &CancellationSignal,
         cancellation: &CancellationToken,
     ) -> Result<NativeIntegrationPreviewV1, NativeIntegrationPortError>;
 
@@ -101,6 +110,13 @@ pub trait NativeIntegrationMechanics: Send + Sync {
         preview: &NativeIntegrationPreviewV1,
         cancellation: &CancellationToken,
     ) -> Result<NativeApplyEffectV1, NativeIntegrationPortError>;
+
+    fn revalidate_analysis(
+        &self,
+        preview: &NativeIntegrationPreviewV1,
+        deadline: &tracedecay_contracts::Deadline,
+        cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationAnalysisRevalidationV1, NativeIntegrationPortError>;
 
     fn probe(
         &self,
@@ -191,9 +207,9 @@ where
         if cancellation.is_cancelled() {
             native_cancellation.cancel();
         }
-        let preview = self
-            .native
-            .preflight(&selection, request, &native_cancellation)?;
+        let preview =
+            self.native
+                .preflight(&selection, request, cancellation, &native_cancellation)?;
         self.store
             .save_preview(preview.clone())
             .map_err(map_store_error)?;
@@ -227,6 +243,19 @@ where
             != NativeIntegrationAuthorizationOutcomeV1::Authorized
         {
             return Err(NativeIntegrationPortError::Denied);
+        }
+        match self.native.revalidate_analysis(
+            &request.preview,
+            request.context.deadline(),
+            external_cancellation,
+        )? {
+            NativeIntegrationAnalysisRevalidationV1::Current => {}
+            NativeIntegrationAnalysisRevalidationV1::Stale => {
+                return Err(NativeIntegrationPortError::Stale);
+            }
+            NativeIntegrationAnalysisRevalidationV1::Unavailable => {
+                return Err(NativeIntegrationPortError::Unavailable);
+            }
         }
         let cancellation =
             CancellationToken::for_application_request(request.context.request_id().as_str());
@@ -328,6 +357,45 @@ where
                 },
                 request.observed_at,
             );
+            self.clear_cancellation(&request.transaction_id)?;
+            return receipt;
+        }
+        let analysis_current = matches!(
+            self.native.revalidate_analysis(
+                &record.preview,
+                request.context.deadline(),
+                external_cancellation,
+            ),
+            Ok(NativeIntegrationAnalysisRevalidationV1::Current)
+        );
+        if !analysis_current {
+            let receipt = match self.native.probe(&record) {
+                Ok(
+                    NativeIntegrationProbeV1::OldState {
+                        tip,
+                        tree,
+                        index_digest,
+                        worktree_digest,
+                    }
+                    | NativeIntegrationProbeV1::Diverged {
+                        tip,
+                        tree,
+                        index_digest,
+                        worktree_digest,
+                    },
+                ) => self.write_terminal(
+                    &record,
+                    NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
+                    tip,
+                    tree,
+                    index_digest,
+                    worktree_digest,
+                    request.observed_at,
+                ),
+                Ok(NativeIntegrationProbeV1::CommittedState { .. })
+                | Ok(NativeIntegrationProbeV1::Unavailable)
+                | Err(_) => self.needs_inspection(&record, request.observed_at),
+            };
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }

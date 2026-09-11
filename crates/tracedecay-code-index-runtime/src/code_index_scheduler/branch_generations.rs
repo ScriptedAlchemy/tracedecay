@@ -266,6 +266,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             }
         };
+        control.termination().map_or(Ok(()), Err)?;
         let mut scheduler = match scheduler.try_lock() {
             Ok(scheduler) => scheduler,
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -275,6 +276,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 return Err(CodeIndexSearchUnavailableReasonV1::Internal);
             }
         };
+        control.termination().map_or(Ok(()), Err)?;
         produce(&mut scheduler, &control)
     }
 
