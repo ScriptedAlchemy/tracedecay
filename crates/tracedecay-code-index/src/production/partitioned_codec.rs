@@ -215,7 +215,15 @@ struct PartitionedPublishedGenerationV1 {
     format_revision: u32,
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
-    statistics: CodeIndexGenerationStatisticsV1,
+    /// The sealed census, absent in manifests written before this revision
+    /// carried one. Readers surface that gap as an unavailable census rather
+    /// than a zeroed one: a census is an aggregate *of* the generation, so
+    /// reporting absence costs nothing a caller could mistake for evidence,
+    /// while a default would claim a repository of no bytes and no symbols.
+    /// Row evidence takes the opposite route — see the segment decoder, which
+    /// refuses historical rows instead of defaulting their fields.
+    #[serde(default)]
+    statistics: Option<CodeIndexGenerationStatisticsV1>,
     repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     ignored_source_admissions_digest: ManifestDigest,
@@ -2625,7 +2633,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             reader,
             generation.manifest,
             generation.snapshot,
-            Some(generation.statistics),
+            generation.statistics,
             source,
             source_state_digest,
             maximum_page_chunks,
@@ -2930,7 +2938,7 @@ impl CodeIndexPublishedGenerationV1 {
         VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
             generation.manifest,
             generation.snapshot,
-            Some(generation.statistics),
+            generation.statistics,
         )
         .map(Some)
     }

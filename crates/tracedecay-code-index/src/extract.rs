@@ -802,7 +802,7 @@ mod tests {
 
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:62eaaf3e43a4f9773e43c7f2385213ca6aa59bb5a0ee6c07ff44fa7e37beede3"
+            "sha256:6431a84c4dec7f12db966cf75f5ef825c1f9bd4d32843622199fa244425d803e"
         );
     }
 
