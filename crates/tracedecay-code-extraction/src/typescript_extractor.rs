@@ -418,10 +418,16 @@ impl TypeScriptExtractor {
         Self::suppress_shadowed_calls(state, node, &id);
     }
 
-    /// Extract a lexical declaration (const/let/var) looking for arrow functions
-    /// and constant declarations.
+    /// Extract a lexical declaration (const/let) looking for arrow functions
+    /// and variable declarations.
     fn visit_lexical_declaration(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
-        let is_const = Self::has_child_kind(node, "const");
+        let variable_kind = if Self::has_child_kind(node, "const") {
+            Some(NodeKind::Const)
+        } else if Self::has_child_kind(node, "let") {
+            Some(NodeKind::VarField)
+        } else {
+            None
+        };
 
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -430,9 +436,8 @@ impl TypeScriptExtractor {
                 if child.kind() == "variable_declarator" {
                     if let Some(arrow) = find_direct_child_by_kind(child, "arrow_function") {
                         Self::visit_arrow_function(state, child, arrow);
-                    } else if is_const {
-                        // It's a const variable (not an arrow function).
-                        Self::visit_const_variable(state, child);
+                    } else if let Some(kind) = variable_kind.clone() {
+                        Self::visit_variable(state, child, kind);
                     }
                 }
                 if !cursor.goto_next_sibling() {
@@ -529,8 +534,8 @@ impl TypeScriptExtractor {
         Self::suppress_shadowed_calls(state, arrow_node, &id);
     }
 
-    /// Extract a const variable declaration (not an arrow function).
-    fn visit_const_variable(state: &mut ExtractionState<'_>, declarator: TsNode<'_>) {
+    /// Extract a typed or untyped variable declaration (not an arrow function).
+    fn visit_variable(state: &mut ExtractionState<'_>, declarator: TsNode<'_>, kind: NodeKind) {
         let name = Self::child_name(state, find_direct_child_by_kind(declarator, "identifier"));
         let visibility = if state.in_export {
             Visibility::Pub
@@ -543,17 +548,11 @@ impl TypeScriptExtractor {
         let start_column = declarator.start_position().column as u32;
         let end_column = declarator.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Const,
-            &name,
-            declarator,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, declarator);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Const,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),
@@ -582,10 +581,14 @@ impl TypeScriptExtractor {
         if let Some(parent_id) = state.parent_node_id() {
             state.edges.push(Edge {
                 source: parent_id.to_string(),
-                target: id,
+                target: id.clone(),
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
             });
+        }
+
+        if let Some(annotation) = find_direct_child_by_kind(declarator, "type_annotation") {
+            Self::collect_type_identifiers(state, annotation, &id, EdgeKind::TypeOf);
         }
     }
 
@@ -1511,7 +1514,7 @@ impl TypeScriptExtractor {
                 // Parameter nodes contain type_annotation children; also the return type annotation
                 "required_parameter" | "optional_parameter" | "rest_parameter"
                 | "type_annotation" => {
-                    Self::collect_type_identifiers(state, child, fn_node_id);
+                    Self::collect_type_identifiers(state, child, fn_node_id, EdgeKind::Uses);
                 }
                 // Formal parameters container
                 "formal_parameters" => {
@@ -1525,11 +1528,12 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Recursively collect `type_identifier` nodes and emit "uses" refs.
+    /// Recursively collect `type_identifier` nodes and emit unresolved refs.
     fn collect_type_identifiers(
         state: &mut ExtractionState<'_>,
         node: TsNode<'_>,
-        fn_node_id: &str,
+        from_node_id: &str,
+        reference_kind: EdgeKind,
     ) {
         let mut cursor = node.walk();
         if !cursor.goto_first_child() {
@@ -1556,16 +1560,16 @@ impl TypeScriptExtractor {
                         | "bigint"
                 ) {
                     state.unresolved_refs.push(UnresolvedRef {
-                        from_node_id: fn_node_id.to_string(),
+                        from_node_id: from_node_id.to_string(),
                         reference_name: type_name.to_string(),
-                        reference_kind: EdgeKind::Uses,
+                        reference_kind,
                         line: child.start_position().row as u32,
                         column: child.start_position().column as u32,
                         file_path: state.file_path.clone(),
                     });
                 }
             } else {
-                Self::collect_type_identifiers(state, child, fn_node_id);
+                Self::collect_type_identifiers(state, child, from_node_id, reference_kind);
             }
             if !cursor.goto_next_sibling() {
                 break;
