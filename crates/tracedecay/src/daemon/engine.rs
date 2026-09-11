@@ -684,8 +684,10 @@ impl DaemonEngine {
             loop {
                 let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
                 let result = match claim {
-                    ProjectOpenTaskClaim::InFlight(mut state) => {
+                    ProjectOpenTaskClaim::InFlight(state) => {
+                        let recorded = state.clone();
                         let publication = async {
+                            let mut state = state;
                             loop {
                                 // The claim proves an open for this exact route is
                                 // in flight, so each iteration only needs to see
@@ -742,12 +744,15 @@ impl DaemonEngine {
                         // released for the wait's duration so a tool that needs no project
                         // owner is never shed by a queue of warming clients. The wait stays
                         // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
-                        park_admission(wait_for_project_open_publication(
-                            &project_path,
-                            publication_deadline,
-                            publication,
-                        ))
-                        .await
+                        prefer_recorded_open_failure(
+                            park_admission(wait_for_project_open_publication(
+                                &project_path,
+                                publication_deadline,
+                                publication,
+                            ))
+                            .await,
+                            &recorded,
+                        )
                     }
                     ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
                     ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
