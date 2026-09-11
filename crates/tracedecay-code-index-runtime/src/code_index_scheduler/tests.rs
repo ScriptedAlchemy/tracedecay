@@ -13974,10 +13974,15 @@ async fn serving_seat_wait_diagnostic(
 /// before blocking on the next wake.
 ///
 /// [`CodeIndexSchedulerRegistryV1::subscribe_serving_generation_changes`]
-/// admits complete-generation demand and wakes on per-worktree seating,
-/// including restored mounts that emit no new registry-wide seat count.
-/// Subscribe after the worktree is mounted; a waiter that starts before
-/// mount still observes [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
+/// wakes on per-worktree seating, including restored mounts that emit no new
+/// registry-wide seat count. That subscribe returns `None` until the worktree
+/// is mounted, so the loop re-attempts it each iteration until it returns
+/// `Some`. A waiter that starts before mount still observes
+/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
+///
+/// `watch::Sender::subscribe()` marks the current value seen, so a seat that
+/// lands between subscribe and the first `changed()` is invisible unless we
+/// re-probe after subscribe and before `changed()`.
 ///
 /// `ceiling` is a failure bound only. The wait is still signal-driven; a
 /// test must not pass because the ceiling elapsed.
@@ -13996,8 +14001,14 @@ where
             return value;
         }
         let mut seats = registry.subscribe_serving_seats();
-        let mut per_worktree = registry.subscribe_serving_generation_changes(path).await;
+        let mut per_worktree = None;
         loop {
+            if per_worktree.is_none() {
+                per_worktree = registry.subscribe_serving_generation_changes(path).await;
+            }
+            // watch::Sender::subscribe() marks the current value seen, so a
+            // seat that landed between this subscribe and the wait below is
+            // missed unless we re-probe before changed().
             if let Some(value) = probe().await {
                 return value;
             }
