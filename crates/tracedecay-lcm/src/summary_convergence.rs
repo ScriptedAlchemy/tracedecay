@@ -455,6 +455,16 @@ pub async fn predecessor_range_rewrite_has_work(
 /// background convergence worker instead of blocking store open, and journals
 /// its cursor in `lcm_gc_meta` per page. A restart mid-rewrite resumes from
 /// the journaled cursor; the completion marker retires the pass for good.
+///
+/// A row above the journaled cursor keeps serving its pre-fix interval as a
+/// valid [`LcmPredecessorRangeState::Interval`](crate::raw::LcmPredecessorRangeState)
+/// until its page runs. That is deliberate: the typed absent states cover an
+/// interval that is missing, not one that is stale, and a row that already
+/// carries provenance must not be downgraded to unavailable while its repair
+/// is pending. The pre-fix interval fails over-inclusive — it starts at or
+/// before the conversational predecessor, never after — so a caller sees a
+/// widened window rather than a gap, and each page narrows the remaining rows
+/// monotonically toward the filtered interval.
 pub async fn predecessor_range_rewrite_page(
     conn: &(impl Executor + ?Sized),
     page_limit: usize,
