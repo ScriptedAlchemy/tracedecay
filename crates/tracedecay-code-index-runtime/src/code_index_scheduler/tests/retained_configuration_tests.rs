@@ -129,6 +129,11 @@ async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
         .expect("scheduler lock")
         .latest_complete()
         .expect("replacement generation");
+    assert_eq!(
+        latest.code_graph_serving_readiness(),
+        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
+        "the replacement must pass through graph activation before it seats"
+    );
     assert!(
         latest
             .generation
