@@ -13,13 +13,21 @@ hashes. Only segments referenced by this successor manifest are included here;
 the archival export retains the unreferenced parent segments. No current
 manifest was modified to impersonate the historical format.
 
-The export predates sealed semantic source commitments and the required
-per-symbol evidence fields (`docstring`, `is_async`, `derives`). Current
-descriptor readers may inventory its referenced segments, but text metadata
-returns typed rebuild-required unavailability rather than fabricating
-commitments, and complete generation restore refuses the first file segment
-with a contract failure naming the missing `docstring` field rather than
-defaulting older rows.
+These bytes are sealed at manifest revision 7, which this build has retired,
+so the carrier is the retired-revision witness: every reader that
+authenticates or decodes a manifest refuses it with the typed superseded
+refusal naming revision 7, before reading a single segment. Only retention's
+descriptor projection abstains, so a store still holding a retired generation
+stays plannable. Nothing here may be re-sealed at the current revision — the
+export predates the required generation census, so a current-revision wrapper
+around it could only fabricate one.
+
+The segments it addresses also predate the required per-symbol evidence fields
+(`docstring`, `is_async`, `derives`), and its manifest predates sealed
+semantic source commitments. Those older shapes are exercised at the segment
+level instead, by reading this manifest's descriptors through a test-local
+projection and decoding the segments directly: the refusals name the first
+missing evidence field rather than defaulting older rows.
 
 Reproduce in a fresh owned worktree at the exact writer commit, using the
 current checkout's maintained worktree script. Save the absolute path to this
