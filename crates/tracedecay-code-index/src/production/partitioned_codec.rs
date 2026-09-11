@@ -1022,9 +1022,10 @@ enum FileSegmentPlanV1 {
 }
 
 /// One file segment's encode buffers: the serde staging payload and the
-/// canonical segment. Files encode on the indexing pool, so each file owns a
-/// fresh pair and hands its `segment` to the publish phase instead of
-/// borrowing one generation-wide buffer.
+/// canonical segment. Files encode on the indexing pool, taking a cleared
+/// pair from `SealedEncodeBufferPoolV1` and handing the `segment` to the
+/// publish phase, which returns it once the bytes are durable; the pool is
+/// bounded by the encode window, not by file count.
 #[derive(Default)]
 struct PartitionedSegmentEncoderV1 {
     payload: Vec<u8>,
