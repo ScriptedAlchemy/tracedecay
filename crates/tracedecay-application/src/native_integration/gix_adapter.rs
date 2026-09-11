@@ -249,7 +249,7 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
                     }
                 }
                 GitNativePreflightDisposition::Eligible => match analysis.as_ref() {
-                    Some(report) if report.authorizes_mechanical_integration() => {
+                    Some(report) if report.is_complete() && report.conflicts.is_empty() => {
                         NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(mode)
                     }
                     Some(report) => NativeIntegrationPreviewDispositionV1::SemanticReviewRequired {
