@@ -23,11 +23,11 @@ use tracedecay_domain::{
 
 use super::adapters::feedback_baseline_identity;
 use super::ports::{
-    FeedbackCompletedPublicationV1, FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState,
-    FeedbackCycleDedupeState, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest,
-    FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
-    FeedbackRuntimeStateV1,
+    FeedbackCycleDedupePort, FeedbackCycleDedupeState, FeedbackDiagnosticsPort,
+    FeedbackDiagnosticsRequest, FeedbackImpactPort, FeedbackImpactPortOutcome,
+    FeedbackImpactRequest, FeedbackObservationPort, FeedbackPublicationRecordState,
+    FeedbackPublicationV1, FeedbackRouteAdmission, FeedbackRouteAuthorizationPort,
+    FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
 };
 use super::problem_terminal::terminal_for_problem;
 
@@ -305,9 +305,9 @@ pub struct FeedbackCycleExecutionResult {
     pub authority: Option<AuthorityReceipt>,
     pub usage: FeedbackBudgetUsage,
     /// Present only after the shared durable store atomically records this
-    /// exact completed publication. Duplicate, failed, cancelled, timed-out,
-    /// and non-durable outcomes never expose a delivery handoff.
-    pub publication: Option<FeedbackCompletedPublicationV1>,
+    /// exact inspectable publication. Duplicate, stale, cancelled, timed-out,
+    /// unavailable, and non-durable outcomes never expose a delivery handoff.
+    pub publication: Option<FeedbackPublicationV1>,
 }
 
 /// One-shot application service for post-edit feedback. Every external dependency
@@ -1229,7 +1229,7 @@ where
             authority.clone(),
         )?;
         let result = self
-            .record_completed_publication(context, request, initial_runtime, result, authority)
+            .record_publication(context, request, initial_runtime, result, authority)
             .await?;
 
         if result.cycle.termination == FeedbackCycleTerminationV1::DuplicateNoop
@@ -1242,7 +1242,7 @@ where
     }
 
     #[hotpath::measure(label = "application.feedback.record_publication", future = true)]
-    async fn record_completed_publication(
+    async fn record_publication(
         &self,
         context: &RequestContext,
         request: &FeedbackCycleExecutionRequest,
@@ -1253,13 +1253,13 @@ where
         let Some(dedupe_key) = result.dedupe_key.clone() else {
             return Ok(result);
         };
-        if !is_recordable_completed_publication(result.cycle.termination) {
+        if !is_recordable_publication(result.cycle.termination) {
             return Ok(result);
         }
         let Some(runtime) = initial_runtime else {
             return Ok(result);
         };
-        let publication = FeedbackCompletedPublicationV1::new(
+        let publication = FeedbackPublicationV1::new(
             request.input.clone(),
             dedupe_key.clone(),
             result.cycle.clone(),
@@ -1268,15 +1268,15 @@ where
             authority
                 .clone()
                 .ok_or(ApplicationContractError::Inconsistent {
-                    field: "feedback completed publication authority",
+                    field: "feedback publication authority",
                 })?,
         )?;
-        match self.dedupe.record_completed(context, &publication).await {
-            FeedbackCycleDedupePublicationState::Recorded => Ok(FeedbackCycleExecutionResult {
+        match self.dedupe.record_publication(context, &publication).await {
+            FeedbackPublicationRecordState::Recorded => Ok(FeedbackCycleExecutionResult {
                 publication: Some(publication),
                 ..result
             }),
-            FeedbackCycleDedupePublicationState::Duplicate => self.assemble(
+            FeedbackPublicationRecordState::Duplicate => self.assemble(
                 request,
                 Some(dedupe_key),
                 FeedbackCycleTerminationV1::DuplicateNoop,
@@ -1288,7 +1288,7 @@ where
                 Vec::new(),
                 authority,
             ),
-            FeedbackCycleDedupePublicationState::Cancelled => self.assemble(
+            FeedbackPublicationRecordState::Cancelled => self.assemble(
                 request,
                 None,
                 FeedbackCycleTerminationV1::Cancelled,
@@ -1300,7 +1300,7 @@ where
                 Vec::new(),
                 authority,
             ),
-            FeedbackCycleDedupePublicationState::TimedOut => self.assemble(
+            FeedbackPublicationRecordState::TimedOut => self.assemble(
                 request,
                 None,
                 FeedbackCycleTerminationV1::BudgetExceeded,
@@ -1312,7 +1312,7 @@ where
                 Vec::new(),
                 authority,
             ),
-            FeedbackCycleDedupePublicationState::Unavailable => self.assemble(
+            FeedbackPublicationRecordState::Unavailable => self.assemble(
                 request,
                 Some(dedupe_key),
                 FeedbackCycleTerminationV1::DaemonUnavailable,
@@ -1494,10 +1494,12 @@ fn request_interruption(
     }
 }
 
-fn is_recordable_completed_publication(termination: FeedbackCycleTerminationV1) -> bool {
+fn is_recordable_publication(termination: FeedbackCycleTerminationV1) -> bool {
     matches!(
         termination,
-        FeedbackCycleTerminationV1::Clean | FeedbackCycleTerminationV1::Blocked
+        FeedbackCycleTerminationV1::Clean
+            | FeedbackCycleTerminationV1::Blocked
+            | FeedbackCycleTerminationV1::IncompleteCoverage
     )
 }
 

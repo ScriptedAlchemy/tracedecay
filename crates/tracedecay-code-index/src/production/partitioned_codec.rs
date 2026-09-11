@@ -38,6 +38,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{Read, Seek, Write as IoWrite};
+use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
@@ -214,7 +215,15 @@ struct PartitionedPublishedGenerationV1 {
     format_revision: u32,
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
-    statistics: CodeIndexGenerationStatisticsV1,
+    /// The sealed census, absent in manifests written before this revision
+    /// carried one. Readers surface that gap as an unavailable census rather
+    /// than a zeroed one: a census is an aggregate *of* the generation, so
+    /// reporting absence costs nothing a caller could mistake for evidence,
+    /// while a default would claim a repository of no bytes and no symbols.
+    /// Row evidence takes the opposite route — see the segment decoder, which
+    /// refuses historical rows instead of defaulting their fields.
+    #[serde(default)]
+    statistics: Option<CodeIndexGenerationStatisticsV1>,
     repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
     ignored_source_admissions_digest: ManifestDigest,
@@ -270,6 +279,7 @@ struct PartitionedSegmentIdentitySnapshotV1 {
 #[derive(Deserialize)]
 struct PartitionedSnapshotFileIdentityV1 {
     file_occurrence_id: FileOccurrenceId,
+    disposition: SnapshotFileDispositionV1,
 }
 
 #[derive(Deserialize)]
@@ -1021,13 +1031,44 @@ enum FileSegmentPlanV1 {
 }
 
 /// One file segment's encode buffers: the serde staging payload and the
-/// canonical segment. Files encode on the indexing pool, so each file owns a
-/// fresh pair and hands its `segment` to the publish phase instead of
-/// borrowing one generation-wide buffer.
+/// canonical segment. Files encode on the indexing pool, taking a cleared
+/// pair from `SealedEncodeBufferPoolV1` and handing the `segment` to the
+/// publish phase, which returns it once the bytes are durable; the pool is
+/// bounded by the encode window, not by file count.
 #[derive(Default)]
 struct PartitionedSegmentEncoderV1 {
     payload: Vec<u8>,
     segment: Vec<u8>,
+}
+
+/// Cleared encode buffers returned by the phase that finished with them.
+///
+/// A file's staging payload and canonical segment each grow to segment size
+/// from empty, so a fresh pair per file allocates a repository-sized stream of
+/// transient buffers. The pool holds only what encoding already keeps live —
+/// one window of segments plus one payload per worker — and hands the same
+/// capacities back, so the growth is paid for the largest file rather than for
+/// every file. Buffers are cleared before reuse, so segment bytes and digests
+/// are the ones a fresh pair produced.
+#[derive(Default)]
+struct SealedEncodeBufferPoolV1(Mutex<Vec<Vec<u8>>>);
+
+impl SealedEncodeBufferPoolV1 {
+    fn take(&self) -> Vec<u8> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+            .unwrap_or_default()
+    }
+
+    fn give(&self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(buffer);
+    }
 }
 
 impl PartitionedSegmentEncoderV1 {
@@ -2245,23 +2286,24 @@ fn validate_partitioned_generation_layout<'a, I, J, K>(
 ) -> Result<(), CodeIndexProductionErrorV1>
 where
     I: ExactSizeIterator<Item = (u32, &'a FileOccurrenceId)>,
-    J: ExactSizeIterator<Item = &'a FileOccurrenceId>,
+    J: Iterator<Item = (usize, &'a FileOccurrenceId)>,
     K: ExactSizeIterator<Item = (u32, u64)>,
 {
+    let snapshot_files = snapshot_files.collect::<Vec<_>>();
     if file_segments.len() != snapshot_files.len() {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation segment count does not match its snapshot".to_owned(),
         ));
     }
-    for (expected_key, ((file_key, segment_file), snapshot_file)) in
-        file_segments.zip(snapshot_files).enumerate()
+    for ((file_key, segment_file), (snapshot_key, snapshot_file)) in
+        file_segments.zip(snapshot_files)
     {
-        let expected_key = u32::try_from(expected_key).map_err(|_| {
+        let snapshot_key = u32::try_from(snapshot_key).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed generation file key exceeds u32".to_owned(),
             )
         })?;
-        if file_key != expected_key || segment_file != snapshot_file {
+        if file_key != snapshot_key || segment_file != snapshot_file {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation file segments are not canonically keyed".to_owned(),
             ));
@@ -2354,7 +2396,9 @@ fn parse_partitioned_manifest(
             .snapshot
             .files
             .iter()
-            .map(|file| &file.file_occurrence_id),
+            .enumerate()
+            .filter(|(_, file)| file.disposition == SnapshotFileDispositionV1::Present)
+            .map(|(key, file)| (key, &file.file_occurrence_id)),
         generation.generation_evidence.segment_size_bytes,
         (!generation.generation_evidence.legacy_unpaged).then(|| {
             generation
@@ -2589,7 +2633,7 @@ impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
             reader,
             generation.manifest,
             generation.snapshot,
-            Some(generation.statistics),
+            generation.statistics,
             source,
             source_state_digest,
             maximum_page_chunks,
@@ -2632,11 +2676,15 @@ impl CodeIndexPublishedGenerationV1 {
             .as_ref()
             .map(|parent| {
                 parent
-                    .snapshot
-                    .files
+                    .file_segments
                     .iter()
-                    .zip(&parent.file_segments)
-                    .map(|(file, descriptor)| (&file.file_occurrence_id, (file, descriptor)))
+                    .filter_map(|descriptor| {
+                        parent
+                            .snapshot
+                            .files
+                            .get(descriptor.file_key as usize)
+                            .map(|file| (&file.file_occurrence_id, (file, descriptor)))
+                    })
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
@@ -2647,6 +2695,7 @@ impl CodeIndexPublishedGenerationV1 {
                 .map(|file| &file.file_occurrence_id),
         )?;
         let mut file_segments = Vec::with_capacity(self.files.len());
+        let buffers = SealedEncodeBufferPoolV1::default();
         let plan_file = |file: &FileGenerationArtifactsV1| -> Result<
             FileSegmentPlanV1,
             CodeIndexProductionErrorV1,
@@ -2714,8 +2763,12 @@ impl CodeIndexPublishedGenerationV1 {
             if let Some(descriptor) = reused {
                 return Ok(FileSegmentPlanV1::Reused(descriptor));
             }
-            let mut encoder = PartitionedSegmentEncoderV1::default();
+            let mut encoder = PartitionedSegmentEncoderV1 {
+                payload: buffers.take(),
+                segment: buffers.take(),
+            };
             let descriptor = encoder.encode_file_segment(&self.manifest.generation_id, file, key)?;
+            buffers.give(std::mem::take(&mut encoder.payload));
             Ok(FileSegmentPlanV1::Encoded(descriptor, encoder.segment))
         };
         // Files are independent, so each window is one ordered fan-out on the
@@ -2743,6 +2796,7 @@ impl CodeIndexPublishedGenerationV1 {
                             digest: &descriptor.segment_digest,
                             bytes: &bytes,
                         })?;
+                        buffers.give(bytes);
                         descriptor
                     }
                 };
@@ -2884,7 +2938,7 @@ impl CodeIndexPublishedGenerationV1 {
         VerifiedSealedTextGenerationMetadataV1::from_partitioned_manifest(
             generation.manifest,
             generation.snapshot,
-            Some(generation.statistics),
+            generation.statistics,
         )
         .map(Some)
     }
@@ -2938,7 +2992,9 @@ impl CodeIndexPublishedGenerationV1 {
                 .snapshot
                 .files
                 .iter()
-                .map(|file| &file.file_occurrence_id),
+                .enumerate()
+                .filter(|(_, file)| file.disposition == SnapshotFileDispositionV1::Present)
+                .map(|(key, file)| (key, &file.file_occurrence_id)),
             generation.generation_evidence.segment_size_bytes,
             generation.generation_evidence.pages.as_ref().map(|pages| {
                 pages
@@ -3104,14 +3160,14 @@ mod tests {
         let valid_pages = [(0, 4_u64), (1, 5_u64)];
         validate_partitioned_generation_layout(
             [(0, &first), (1, &second)].into_iter(),
-            files.into_iter(),
+            files.into_iter().enumerate(),
             9,
             Some(valid_pages.into_iter()),
         )
         .expect("current paged descriptor is canonical");
         validate_partitioned_generation_layout(
             [(0, &first), (1, &second)].into_iter(),
-            files.into_iter(),
+            files.into_iter().enumerate(),
             9,
             None::<std::iter::Empty<(u32, u64)>>,
         )
@@ -3180,7 +3236,7 @@ mod tests {
         ] {
             let error = validate_partitioned_generation_layout(
                 segments.into_iter(),
-                snapshot.into_iter(),
+                snapshot.into_iter().enumerate(),
                 size,
                 pages.map(Vec::into_iter),
             )

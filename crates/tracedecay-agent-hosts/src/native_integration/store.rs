@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracedecay_domain::{
-    ManifestDigest, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    CodeGenerationId, ManifestDigest, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptV1,
     NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1,
-    NativeWorktreeCleanupReceiptV1, NativeWorktreeCleanupTransactionV1, RepositoryId,
+    NativeWorktreeCleanupReceiptV1, NativeWorktreeCleanupTransactionV1, RepositoryId, UtcMicros,
 };
 use tracedecay_store::{
     NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStore,
@@ -77,6 +77,7 @@ enum StoreCommand {
         Reply<NativeIntegrationReceiptV1>,
     ),
     PendingTransactions(Option<RepositoryId>, Reply<Vec<NativeIntegrationRecordV1>>),
+    LiveCandidateGenerationBindings(RepositoryId, UtcMicros, Reply<Vec<CodeGenerationId>>),
     ApprovalConsumed(NativeIntegrationApprovalId, Reply<bool>),
     QuarantineRepository(RepositoryId, NativeIntegrationTransactionId, Reply<()>),
     BeginWorktreeCleanup(
@@ -384,6 +385,20 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         Self::await_reply(&receiver)
     }
 
+    fn live_candidate_generation_bindings(
+        &self,
+        repository_id: &RepositoryId,
+        observed_at: UtcMicros,
+    ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::LiveCandidateGenerationBindings(
+            repository_id.clone(),
+            observed_at,
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
     #[hotpath::measure(label = "agent_hosts.native_store.approval_consumed")]
     fn approval_consumed(
         &self,
@@ -551,6 +566,11 @@ fn run_store_actor(
                 let _ = reply
                     .send(runtime.block_on(store.pending_transactions(repository_id.as_ref())));
             }
+            StoreCommand::LiveCandidateGenerationBindings(repository_id, observed_at, reply) => {
+                let _ = reply.send(runtime.block_on(
+                    store.live_candidate_generation_bindings(&repository_id, observed_at),
+                ));
+            }
             StoreCommand::ApprovalConsumed(approval_id, reply) => {
                 let _ = reply.send(runtime.block_on(store.approval_consumed(&approval_id)));
             }
@@ -712,6 +732,15 @@ impl NativeIntegrationStore for SharedDaemonNativeIntegrationStore {
         repository_id: Option<&RepositoryId>,
     ) -> NativeIntegrationStoreResult<Vec<NativeIntegrationRecordV1>> {
         self.inner.pending_transactions(repository_id)
+    }
+
+    fn live_candidate_generation_bindings(
+        &self,
+        repository_id: &RepositoryId,
+        observed_at: UtcMicros,
+    ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>> {
+        self.inner
+            .live_candidate_generation_bindings(repository_id, observed_at)
     }
 
     fn approval_consumed(

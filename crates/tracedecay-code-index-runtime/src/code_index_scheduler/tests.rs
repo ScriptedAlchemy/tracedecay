@@ -25,11 +25,12 @@ use tracedecay_domain::{
     CommitId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
     ExactAdmissionRuleRevision, ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile,
     LogicalEvidenceId, ManifestDigest, OptionalStagePublicStatus, PolicyRevisionId, PrincipalId,
-    PrivacyDomainId, ProjectId, PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate,
-    RefId, RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
-    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
-    SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
+    PrivacyDomainId, ProjectId, ProviderEvaluationStateV1, PublicRetrieverStatus,
+    QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId,
+    RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1,
+    UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
@@ -67,6 +68,7 @@ use crate::code_index::production::{
     DAEMON_CODE_INDEX_CHUNKER_REVISION, UninterruptibleCodeIndexControlV1,
     VerifiedSealedLexicalPageReadV1,
 };
+use crate::code_index::provider::GenerationTestAttributionJoinReadPort;
 use crate::semantic_code::rerank_adapter::{
     GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
 };
@@ -5734,6 +5736,65 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
     );
 }
 
+/// A projection whose final source page fills exactly on its last file's last
+/// record is convergeable, and the durable text lane must converge it.
+///
+/// A completed source mints one terminal read that emits no record and only
+/// normalizes the exhausted file position, so its live cursor sits one file
+/// rollover past the last durably accepted page exactly when that page filled
+/// on a file boundary. Holding the builder's durable progress against that
+/// normalized cursor — instead of against the completion receipt — reports a
+/// deterministic contract violation, which parks the text projection as
+/// unconvergeable and leaves the complete serving seat permanently empty.
+#[test]
+fn page_aligned_final_source_page_converges_the_text_projection() {
+    // A whole-page multiple of symbols in one file keeps the last page filling
+    // on the file's last record for any per-symbol chunk count.
+    let source =
+        (0..super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 * 2).fold(String::new(), |mut source, index| {
+            writeln!(
+                &mut source,
+                "pub fn aligned_{index}() -> usize {{ {index} }}"
+            )
+            .expect("write page-aligned source fixture");
+            source
+        });
+    let fixture = GitFixture::new(&[("src/lib.rs", source.as_str())]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let mut passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("a page-aligned projection converges")
+    {
+        passes += 1;
+        assert!(
+            passes < 10_000,
+            "page-aligned text projection did not converge"
+        );
+    }
+    assert!(latest.query_owners_are_warm());
+    let progress = build_progress_snapshot(&scheduler);
+    // Every committed page must be chunk-full: an early commit from the page
+    // byte bound or an import record would leave the final page partial, which
+    // is exactly the shape that does not trip this invariant.
+    assert_eq!(
+        progress.committed_chunks,
+        progress.committed_pages * super::TEXT_ARTIFACT_PAGE_CHUNKS_V1 as u64,
+        "the fixture must keep every page chunk-full so the final page ends on the last record"
+    );
+    assert_eq!(
+        progress.committed_imports, 0,
+        "an import record would commit a partial page and break the alignment"
+    );
+}
+
 #[test]
 fn incompatible_partial_text_artifact_is_discarded_and_rebuilt() {
     let source = (0..256).fold(String::new(), |mut source, index| {
@@ -8378,8 +8439,10 @@ async fn selected_generation_mints_feedback_identity_after_registry_lookup_close
 /// Fail-closed half of the busy-read witness: a seated generation whose
 /// currency was never proven (a boot-restored seat, a stale seat, or a
 /// withdrawn proof) must stay a typed abstention while the scheduler mutex is
-/// busy, exactly as before. Only the exact-source probe's own verdict may arm
-/// busy serving.
+/// busy, exactly as before. Only a reconcile pass may arm busy serving: it is
+/// the only thing that compares the checkout against the sealed digests, so it
+/// is the only thing whose verdict can bind a seat to proven source. Reads no
+/// longer walk the tree and so can never arm the witness themselves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_witness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
@@ -8684,14 +8747,19 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     registry.shutdown().await;
 }
 
-/// Busy-read stat proof reuse is explicitly bounded: an out-of-band write with
-/// no Git or scheduler hint may reuse the prior proof inside the memo window,
-/// but the first probe after that window must sweep and withdraw the witness.
+/// Busy-read proof reuse is explicitly bounded, but the bound belongs to the
+/// freshness fence, not to a per-read worktree sweep: an ordinary read never
+/// walks the checkout. An out-of-band write that moves no Git metadata and
+/// reaches no hint authority is therefore served from the live proof until
+/// that proof expires. The first read after it does declines the seat and
+/// hands the exact stat-plus-sealed-digest comparison to the retained worker,
+/// whose pass is the only authority that may withdraw the witness from the
+/// disproved generation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
 
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -8712,8 +8780,14 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
         .serving_source_witness_for_root(fixture.path())
         .await
         .expect("mounted worktree witness");
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree source fence");
+    // Hold the worker at its dequeue point so every observation below is the
+    // read path's own answer and never a pass that raced it.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
 
-    // Drift the worktree; the stat-signature fence disproves the seat.
     std::fs::write(
         fixture.path().join("src/main.rs"),
         "fn main() { drifted(); }\n",
@@ -8725,28 +8799,61 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_some(),
-        "a raw unhinted write may reuse the proof only inside the explicit bounded interval"
+        "an unhinted raw write reuses the live proof; a read never walks the checkout"
     );
-    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Expire that proof exactly as its own bound does, without waiting it out.
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the source proof past its own bound");
+    }
+    registry.clear_pending_wake_for_scope(&scope).await;
     assert!(
         registry
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_none(),
-        "a drifted worktree disproves the seated generation's currency"
+        "an expired proof disproves the seated generation's currency"
     );
-    // The probe posts a reconcile wake, so the worker may already be sealing a
-    // successor; what must hold is that the witness never keeps naming the
-    // disproved generation.
-    assert_ne!(
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "the declining read hands the exact source proof to the retained worker"
+    );
+    assert_eq!(
         witness
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|witness| witness.generation_id.clone()),
-        Some(disproved_generation_id),
-        "the disproving probe withdraws the busy-read witness"
+        Some(disproved_generation_id.clone()),
+        "a read that cannot verify source may not fabricate the disproof itself"
     );
+
+    // Release the worker: its pass re-derives the sealed digests, observes the
+    // drift, and the witness stops naming the disproved generation.
+    drop(admission);
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while witness
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|witness| witness.generation_id.clone())
+        == Some(disproved_generation_id.clone())
+    {
+        assert!(
+            Instant::now() <= deadline,
+            "the disproving reconcile pass never withdrew the busy-read witness"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     registry.shutdown().await;
 }
@@ -9877,6 +9984,10 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
+    // The seat is published mid-pass, so the mount's own reconcile receipt can
+    // still be outstanding. Sample the baseline only once that pass is done,
+    // or its receipt is charged to the probe below.
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
     {
         let mounted = registry.mounted.lock().await;
@@ -10091,15 +10202,18 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
     registry.shutdown().await;
 }
 
-/// The projection and the retrieval lanes must report one serving truth. An
-/// in-flight pass over a proof that still admits the seat is a renewal, so the
-/// projection may claim `verifying` with complete coverage — and a query in that
-/// same window must not answer stale. Once the proof ages past its bounded
-/// window the lanes serve the retained generation stale, so the projection must
-/// fall out of `complete` with them instead of claiming a currency no lane
-/// honours.
+/// A running source-verification pass is not itself a reason to decline query
+/// admission. What declines here is the freshness gate: the seat is servable
+/// and its proof is unexpired, so the query already has its answer and there is
+/// no remedy to schedule. The pass is held to put the worktree in the verifying
+/// state whose dashboard projection this also pins, and the projection and the
+/// retrieval lanes must report one serving truth: while the proof still admits
+/// the seat the projection may claim `verifying` with complete coverage and a
+/// query in that window must not answer stale; once the proof ages past its
+/// bounded window the lanes serve the retained generation stale, so the
+/// projection must fall out of `complete` with them.
 #[tokio::test]
-async fn active_source_verification_does_not_queue_a_second_query_pass() {
+async fn a_fresh_seat_declines_query_admission_during_source_verification() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
@@ -10112,12 +10226,12 @@ async fn active_source_verification_does_not_queue_a_second_query_pass() {
         .expect("mounted reconcile owner");
     assert!(
         !registry.request_query_background_reconcile(&scope).await,
-        "the active source proof already supplies the query's remedy"
+        "a servable seat under an unexpired proof is already the query's answer"
     );
     assert_eq!(
         registry.pending_wake_micros_for_scope(&scope).await,
         Some(0),
-        "query admission must not queue a duplicate pass after worker dequeue"
+        "a declined admission must leave the pending wake unclaimed"
     );
 
     let projected = registry
@@ -11855,16 +11969,58 @@ async fn distinct_cold_mounts_respect_capacity_before_opening() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
-    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
-    let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+/// Wait until no owner pass is running for `project_root`.
+///
+/// A serving seat is published from inside a pass, so every seat wait returns
+/// while the worker still owns `reconcile_in_progress` and has post-seat work
+/// left — semantic scheduling, receipts, graph steps. A test that samples one
+/// of those effects immediately after a seat wait races the pass that produces
+/// it. This is the barrier for "the pass that seated is finished", and it is a
+/// failure bound only: a worker that never finishes panics with a diagnostic.
+async fn wait_for_quiescent_owner_pass(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while registry.reconcile_in_progress_for_test(project_root).await {
+        assert!(
+            Instant::now() <= deadline,
+            "the owner pass for {} never finished",
+            project_root.display()
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Hold the background worker out of a new pass, then wait for the in-flight
+/// pass to finish, and keep the admission permit.
+///
+/// Winning the permit only proves no *new* pass can start. The worker releases
+/// it after source reconciliation but keeps its `reconcile_in_progress` guard
+/// through text seating, so the permit is routinely free while a pass runs and
+/// that pass still moves the serving seat, its witness, and the pending wake
+/// under a test that already believes the worker is parked. With the permit
+/// held the pass counter is monotone to zero, so this settles once and stays
+/// settled for the rest of the test.
+async fn quiesced_background_reconcile_admission(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) -> tokio::sync::OwnedSemaphorePermit {
     let admission = registry
         .background_reconcile_admission()
         .acquire_owned()
         .await
         .expect("hold background worker at its dequeue point");
+    wait_for_quiescent_owner_pass(registry, project_root).await;
+    admission
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
     registry.install_query_claim_gate(&scope);
 
@@ -11883,7 +12039,8 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
     registry.release_query_claim(&scope);
     assert!(
         !request.await.expect("query admission task joins"),
-        "the fresh query declines its own reconcile after the foreign wake arrives"
+        "a query whose claim lost its owner to a foreign wake must not restamp \
+         QueryAdmission over that arrival"
     );
     let stamped = registry
         .pending_wake_micros_for_scope(&scope)
@@ -11904,11 +12061,7 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
-    let admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
-        .await
-        .expect("hold background worker at its dequeue point");
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
     registry.install_query_claim_gate(&scope);
     registry.install_pending_wake_drop_gate(&scope).await;
@@ -13149,28 +13302,6 @@ fn callers_page_meta(page_size: u32, cursor: Option<OpaqueCursor>) -> RetrievalR
     )
 }
 
-async fn wait_for_live_complete_generation_deadline(
-    registry: &CodeIndexSchedulerRegistryV1,
-    path: &Path,
-    budget: Duration,
-) -> super::LatestCompleteCodeIndexV1 {
-    let deadline = Instant::now() + budget;
-    let mut publications = registry.subscribe_generation_publications();
-    loop {
-        if let Some(latest) = registry.latest_complete_serving_for_test(path).await {
-            return latest;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "large callers fixture did not seat a complete generation"
-        );
-        tokio::select! {
-            _ = publications.recv() => {}
-            () = tokio::time::sleep(Duration::from_millis(50)) => {}
-        }
-    }
-}
-
 #[tokio::test]
 async fn callers_page_hydrates_only_the_requested_slice() {
     let sources = caller_star_sources();
@@ -13190,12 +13321,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         )
         .await
         .expect("mount daemon-owned scheduler");
-    let latest = wait_for_live_complete_generation_deadline(
-        &registry,
-        fixture.path(),
-        Duration::from_mins(2),
-    )
-    .await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let generation = latest.generation.manifest().generation_id.clone();
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
@@ -14017,36 +14143,157 @@ fn reparse_matches_full_parse_chunks() {
 // is served generation-bound and read-only, bypassing freshness entirely.
 // ---------------------------------------------------------------------------
 
+/// Failure ceiling for a positive serving wait. This is not a scheduling
+/// budget: the waiter still blocks on the seating signal, and a seat that
+/// arrives at any time before the ceiling succeeds. The bound exists only so
+/// a worktree that can never seat fails with a diagnostic instead of hanging.
+const SERVING_SEAT_FAILURE_CEILING: Duration = Duration::from_mins(2);
+
+async fn serving_seat_wait_diagnostic(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+    last_serving: Option<&CodeGenerationId>,
+    last_generation: Option<&CodeGenerationId>,
+) -> String {
+    let current_serving = registry
+        .latest_complete_serving_for_test(path)
+        .await
+        .map(|latest| latest.generation.manifest().generation_id.clone());
+    let current_generation = registry.latest_generation_id(path).await;
+    let mounted = match registry.mounted_code_scope(path).await {
+        Some(scope) => format!(
+            "mounted repo={} worktree={} shutting_down={}",
+            scope.repository_id,
+            scope.worktree_id,
+            scope
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Acquire)
+        ),
+        None => "unmounted".to_owned(),
+    };
+    format!(
+        "serving seat never arrived for worktree {}; last observed serving={:?} generation={:?}; registry serving={:?} generation={:?} {mounted}",
+        path.display(),
+        last_serving.map(CodeGenerationId::as_str),
+        last_generation.map(CodeGenerationId::as_str),
+        current_serving.as_ref().map(CodeGenerationId::as_str),
+        current_generation.as_ref().map(CodeGenerationId::as_str),
+    )
+}
+
+/// Wait until `probe` observes a serving seat for `path`.
+///
+/// Checks the current slot before subscribing so a seat that arrived before
+/// this waiter exists is not missed, then waits on
+/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`]. A seat can also
+/// land between that first probe and subscribe; the loop re-reads the slot
+/// before blocking on the next wake.
+///
+/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_generation_changes`]
+/// wakes on per-worktree seating, including restored mounts that emit no new
+/// registry-wide seat count. That subscribe returns `None` until the worktree
+/// is mounted, so the loop re-attempts it each iteration until it returns
+/// `Some`. A waiter that starts before mount still observes
+/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
+///
+/// `watch::Sender::subscribe()` marks the current value seen, so a seat that
+/// lands between subscribe and the first `changed()` is invisible unless we
+/// re-probe after subscribe and before `changed()`.
+///
+/// `ceiling` is a failure bound only. The wait is still signal-driven; a
+/// test must not pass because the ceiling elapsed.
+async fn wait_until_serving_seat<T, F, Fut>(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+    ceiling: Duration,
+    mut probe: F,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let wait = async {
+        if let Some(value) = probe().await {
+            return value;
+        }
+        let mut seats = registry.subscribe_serving_seats();
+        let mut per_worktree = None;
+        loop {
+            if per_worktree.is_none() {
+                per_worktree = registry.subscribe_serving_generation_changes(path).await;
+            }
+            // watch::Sender::subscribe() marks the current value seen, so a
+            // seat that landed between this subscribe and the wait below is
+            // missed unless we re-probe before changed().
+            if let Some(value) = probe().await {
+                return value;
+            }
+            match per_worktree.as_mut() {
+                Some(changes) => {
+                    tokio::select! {
+                        result = seats.changed() => {
+                            result.expect("the seating channel stays open while the registry lives");
+                        }
+                        result = changes.changed() => {
+                            result.expect("the per-worktree serving channel stays open while the owner lives");
+                        }
+                    }
+                }
+                None => {
+                    seats
+                        .changed()
+                        .await
+                        .expect("the seating channel stays open while the registry lives");
+                }
+            }
+        }
+    };
+    match tokio::time::timeout(ceiling, wait).await {
+        Ok(value) => value,
+        Err(_) => {
+            let last_serving = registry
+                .latest_complete_serving_for_test(path)
+                .await
+                .map(|latest| latest.generation.manifest().generation_id.clone());
+            let last_generation = registry.latest_generation_id(path).await;
+            panic!(
+                "{}",
+                serving_seat_wait_diagnostic(
+                    registry,
+                    path,
+                    last_serving.as_ref(),
+                    last_generation.as_ref(),
+                )
+                .await
+            )
+        }
+    }
+}
+
 /// Wait until the registry-mounted worktree seats its first generation.
 ///
-/// This must not join the generation-publication broadcast. Publication is an
-/// edge the background worker emits the moment reconcile seals, while
-/// [`CodeIndexSchedulerRegistryV1::latest_generation_id`] — the value returned
-/// here — answers only from a serving or text seat installed strictly later.
-/// A waiter that subscribes after that edge has already fired never hears it
-/// again, and no second publication follows a quiet mount, so the guard-then-
-/// subscribe pattern deadlocked for the whole timeout. Poll the seat itself.
+/// [`CodeIndexSchedulerRegistryV1::latest_generation_id`] answers from a
+/// serving or text seat. The text lane publishes
+/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_generation_changes`];
+/// the earlier note that text can seat without a wake applied only to the
+/// registry-wide [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`]
+/// counter. Callers that need the complete serving generation must use
+/// [`wait_for_live_complete_generation`].
 async fn wait_for_initial_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> tracedecay_domain::CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(path).await {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || {
+        registry.latest_generation_id(path)
     })
     .await
-    .expect("initial generation seated")
 }
 
 /// Publication now broadcasts as soon as reconcile publishes, before graph
 /// seating. Callers that need the complete serving generation must wait for
 /// that seat, not only the publication event.
 ///
-/// Poll the serving slot only. `latest_complete_fresh` opens git (advancing
+/// Probe the serving slot only. `latest_complete_fresh` opens git (advancing
 /// `.git/index` mtime) and may post a freshness wake, which is exactly the
 /// false-stale / extra-receipt failure the post-reconcile witness exists to
 /// prevent.
@@ -14054,7 +14301,18 @@ async fn wait_for_live_complete_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCompleteCodeIndexV1 {
-    wait_for_initial_generation(registry, path).await;
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || {
+        registry.latest_complete_serving_for_test(path)
+    })
+    .await
+}
+
+/// Historical 10 ms / 5 s poll of the serving slot. Kept only so the
+/// regression can prove it misses a seat that arrives after the deadline.
+async fn wait_for_live_complete_generation_by_polling(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> super::LatestCompleteCodeIndexV1 {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(latest) = registry.latest_complete_serving_for_test(path).await {
@@ -14099,6 +14357,78 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
     registry.shutdown().await;
 }
 
+/// A seat that lands after the historical 5s / 10ms poll deadline must still
+/// be observed. The old helper (`wait_for_live_complete_generation` before
+/// #1206) asserted `"live generation"` once `Instant` passed that bound;
+/// the registry seating signal has no such wall-clock cut-off.
+#[tokio::test(flavor = "multi_thread")]
+async fn serving_seat_signal_observes_a_seat_that_misses_the_poll_deadline() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let path = fixture.path().to_path_buf();
+
+    let poll_registry = registry.clone();
+    let poll_path = path.clone();
+    let poll = tokio::spawn(async move {
+        wait_for_live_complete_generation_by_polling(&poll_registry, &poll_path).await
+    });
+
+    let signal_registry = registry.clone();
+    let signal_path = path.clone();
+    let signal = tokio::spawn(async move {
+        wait_for_live_complete_generation(&signal_registry, &signal_path).await
+    });
+
+    // Publish after the old poller's 5s deadline so the poll is already dead.
+    tokio::time::sleep(Duration::from_secs(5) + Duration::from_millis(50)).await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount scheduler");
+
+    let poll_result = poll.await;
+    assert!(
+        poll_result
+            .as_ref()
+            .err()
+            .is_some_and(tokio::task::JoinError::is_panic),
+        "polling helper must miss a seat that arrives after its 5s deadline"
+    );
+
+    let latest = signal.await.expect("signal waiter joined");
+    assert_eq!(
+        latest.generation.manifest().generation_id,
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .expect("mounted seat")
+            .generation
+            .manifest()
+            .generation_id
+    );
+    registry.shutdown().await;
+}
+
+/// A worktree that never seats must fail with the serving-seat diagnostic
+/// instead of hanging on the signal. The short ceiling is local to this
+/// assertion; production waits keep [`SERVING_SEAT_FAILURE_CEILING`].
+#[tokio::test]
+#[should_panic(expected = "serving seat never arrived")]
+async fn serving_seat_signal_fails_when_a_seat_never_arrives() {
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let path = Path::new("/no-such-tracedecay-worktree-for-seat-ceiling");
+    let _ = wait_until_serving_seat(&registry, path, Duration::from_millis(250), || {
+        registry.latest_complete_serving_for_test(path)
+    })
+    .await;
+}
+
 async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -14124,20 +14454,16 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
 /// Publication broadcast and [`CodeIndexSchedulerRegistryV1::latest_generation_id`]
 /// stay behind optional graph seating. Unpinned exact/lexical queries resolve
 /// through the text owner, so that slot is the typed receipt this wait joins.
+/// The text lane publishes the per-worktree serving-generation watch, so
+/// [`wait_until_serving_seat`] blocks on that signal rather than sampling.
 async fn wait_for_queryable_text_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCodeTextGenerationV1 {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(text) = registry.latest_text_serving_for_root(path).await {
-                break text;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry.latest_text_serving_for_root(path).await
     })
     .await
-    .expect("queryable text generation seated")
 }
 
 /// The generation id of the text-current seat.
@@ -14162,48 +14488,41 @@ async fn wait_for_queryable_text_generation_id(
 }
 
 /// Wait until the text owner seats a generation distinct from `previous`.
+///
+/// Same signal as [`wait_for_queryable_text_generation`], narrowed to a
+/// successor: the seat that replaces `previous` is itself a per-worktree
+/// serving-generation change.
 async fn wait_for_queryable_text_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
     previous: &tracedecay_domain::CodeGenerationId,
 ) -> super::LatestCodeTextGenerationV1 {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(text) = registry.latest_text_serving_for_root(path).await {
-                let generation_id = text.metadata().manifest().generation_id.clone();
-                if &generation_id != previous {
-                    break text;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry
+            .latest_text_serving_for_root(path)
+            .await
+            .filter(|text| &text.metadata().manifest().generation_id != previous)
     })
     .await
-    .expect("changed queryable text generation seated")
 }
 
 /// Wait until the mounted worktree seats a generation distinct from `previous`.
 ///
-/// Same seat-not-edge rule as [`wait_for_initial_generation`]: the successor's
-/// publication can land before this wait subscribes, and a caller that then
-/// read the serving slot would still be handed `previous`.
+/// Same signal as [`wait_for_initial_generation`]: the successor may appear as
+/// a text seat, and the text lane publishes the per-worktree serving-generation
+/// watch.
 async fn wait_for_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
     previous: &tracedecay_domain::CodeGenerationId,
 ) -> tracedecay_domain::CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(path).await
-                && &generation != previous
-            {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    wait_until_serving_seat(registry, path, SERVING_SEAT_FAILURE_CEILING, || async {
+        registry
+            .latest_generation_id(path)
+            .await
+            .filter(|generation| generation != previous)
     })
     .await
-    .expect("changed generation seated")
 }
 
 #[tokio::test]
@@ -14241,21 +14560,18 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
     wait_for_generation_change(&registry, fixture.path(), &initial).await;
     // Publication is not the sealed serving seat. Abstention reports the
     // seated generation, so wait for that seat to advance.
-    let serving_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry
-            .latest_complete_serving_for_test(fixture.path())
-            .await
-            .is_some_and(|latest| latest.generation.manifest().generation_id != initial)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= serving_deadline,
-            "edited generation never seated for semantic abstention"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        || async {
+            registry
+                .latest_complete_serving_for_test(fixture.path())
+                .await
+                .filter(|latest| latest.generation.manifest().generation_id != initial)
+        },
+    )
+    .await;
     let refreshed = registry.semantic_mcp_abstention(fixture.path()).await;
     assert_ne!(refreshed.code_generation.as_deref(), Some(initial.as_str()));
     assert_eq!(
@@ -15974,6 +16290,104 @@ async fn witness_verified_mount_activates_without_rebuild() {
     registry.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn generation_read_callers_install_exact_affected_test_attribution() {
+    let fixture = GitFixture::new(&[(
+        "tests/production.rs",
+        "fn helper() {}\n#[test]\nfn verifies_helper() { helper(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount fixture");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let snapshot = latest.generation().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let occurrence = |name: &str| {
+        latest
+            .generation()
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.simple_name == name)
+            .unwrap_or_else(|| panic!("fixture symbol {name}"))
+            .occurrence
+            .clone()
+    };
+    let helper = occurrence("helper");
+    let test = occurrence("verifies_helper");
+
+    let assert_attribution = || {
+        let read = registry.read_test_attribution(&generation_id);
+        assert_eq!(
+            read.provider_state,
+            ProviderEvaluationStateV1::Partial,
+            "the real graph reports its honest partial attribution coverage"
+        );
+        let join = read.evidence.expect("generation attribution evidence");
+        let record = join
+            .records
+            .iter()
+            .find(|record| record.attribution.test_occurrence == test)
+            .expect("exact test attribution");
+        assert!(record.attribution.covered_occurrences.contains(&helper));
+        assert_eq!(
+            record
+                .test_occurrence
+                .as_ref()
+                .map(|occurrence| &occurrence.occurrence_id),
+            Some(&test)
+        );
+    };
+
+    registry.remove_test_attribution_authority(fixture.path());
+    assert_eq!(
+        registry
+            .read_test_attribution(&generation_id)
+            .provider_state,
+        ProviderEvaluationStateV1::Unavailable,
+        "an uninstalled generation stays typed unavailable"
+    );
+    let fresh = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("fresh caller resolves generation");
+    assert_eq!(fresh.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
+    registry.remove_test_attribution_authority(fixture.path());
+    let ready = registry
+        .latest_complete_ready_for_scope(&scope)
+        .await
+        .expect("ready caller resolves generation");
+    assert_eq!(ready.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
+    registry.remove_test_attribution_authority(fixture.path());
+    let decoded = registry
+        .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        .await
+        .expect("ready-decoded caller resolves generation");
+    assert_eq!(decoded.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
+    registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reopened_current_text_generation_resolves_publication_identity_without_graph_seat() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
@@ -16017,6 +16431,10 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         .subscribe_serving_generation_changes(fixture.path())
         .await
         .expect("subscribe to retained serving changes");
+    assert!(
+        registry.request_complete_generation(fixture.path()).await,
+        "mounted worktree admits complete-generation demand"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let current = loop {
@@ -17594,18 +18012,30 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         .await
         .expect("mount scheduler under configured graph policy");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let latest = loop {
-        if let Some((latest, _)) = registry
+    // The identity port answers only for a text owner the fence still proves
+    // current, so it must be resolved in the same wait that admits the owner:
+    // the fence's bounded proof expires on its own clock, and a pass renewing
+    // it republishes the owner. Sampling the owner once and resolving its
+    // identity afterwards turned either boundary into a red.
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let (latest, identity) = loop {
+        if let Some((latest, current)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await
             && latest.query_owners_are_warm()
+            && current
+            && let Some(identity) = <CodeIndexSchedulerRegistryV1 as tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1>::resolve_current_for_scope(
+                &registry,
+                fixture.path().to_path_buf(),
+                scope.clone(),
+            )
+            .await
         {
-            break latest;
+            break (latest, identity);
         }
         assert!(
-            std::time::Instant::now() <= deadline,
-            "configured graph refusal withheld the text-serving generation"
+            Instant::now() <= deadline,
+            "configured graph refusal withheld the ready text owner's publication identity"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
@@ -17622,13 +18052,6 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         .files
         .first()
         .expect("indexed file");
-    let identity = <CodeIndexSchedulerRegistryV1 as tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1>::resolve_current_for_scope(
-        &registry,
-        fixture.path().to_path_buf(),
-        scope.clone(),
-    )
-    .await
-    .expect("ready text owner retains file identity without a graph seat");
     assert_eq!(
         identity.generation_id(),
         &latest.metadata().manifest().generation_id

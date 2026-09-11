@@ -271,6 +271,13 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
         .subscribe_serving_generation_changes(fixture.root())
         .await
         .expect("mounted serving owner");
+    assert!(
+        fixture
+            .registry
+            .request_complete_generation(fixture.root())
+            .await,
+        "mounted worktree admits complete-generation demand"
+    );
 
     let admitted = fixture
         .port(true)

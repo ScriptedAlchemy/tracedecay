@@ -9,12 +9,12 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use tracedecay_contracts::feedback::{
-    FeedbackBudgetUsage, FeedbackCompletedPublicationV1, FeedbackCycleControl,
-    FeedbackCycleDedupePort, FeedbackCycleDedupePublicationState, FeedbackCycleDedupeState,
+    FeedbackBudgetUsage, FeedbackCycleControl, FeedbackCycleDedupePort, FeedbackCycleDedupeState,
     FeedbackCycleExecutionRequest, FeedbackCycleExecutionResult, FeedbackCycleService,
     FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
     FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackRuntimeStatePort, FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
+    FeedbackPublicationRecordState, FeedbackPublicationV1, FeedbackRuntimeStatePort,
+    FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
 };
 use tracedecay_contracts::{
     AnalyzerAdmittedDiagnosticProviderV1, AuthorizationService, CancellationContext,
@@ -214,13 +214,13 @@ impl FeedbackCycleDedupePort for DedupeFixture {
         Box::pin(async move { state })
     }
 
-    fn record_completed<'a>(
+    fn record_publication<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _publication: &'a FeedbackCompletedPublicationV1,
-    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState>
+        _publication: &'a FeedbackPublicationV1,
+    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackPublicationRecordState>
     {
-        Box::pin(async { FeedbackCycleDedupePublicationState::Recorded })
+        Box::pin(async { FeedbackPublicationRecordState::Recorded })
     }
 }
 
@@ -241,13 +241,13 @@ impl FeedbackCycleDedupePort for RecordingDedupeFixture {
         Box::pin(async move { state })
     }
 
-    fn record_completed<'a>(
+    fn record_publication<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _publication: &'a FeedbackCompletedPublicationV1,
-    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState>
+        _publication: &'a FeedbackPublicationV1,
+    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackPublicationRecordState>
     {
-        Box::pin(async { FeedbackCycleDedupePublicationState::Recorded })
+        Box::pin(async { FeedbackPublicationRecordState::Recorded })
     }
 }
 
@@ -267,11 +267,11 @@ impl FeedbackCycleDedupePort for SerializedRaceDedupeFixture {
         Box::pin(async { FeedbackCycleDedupeState::Unique })
     }
 
-    fn record_completed<'a>(
+    fn record_publication<'a>(
         &'a self,
         _context: &'a RequestContext,
-        publication: &'a FeedbackCompletedPublicationV1,
-    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackCycleDedupePublicationState>
+        publication: &'a FeedbackPublicationV1,
+    ) -> tracedecay_contracts::feedback::FeedbackPortFuture<'a, FeedbackPublicationRecordState>
     {
         let key = publication.dedupe_key.as_str().to_owned();
         let barrier = self.barrier.clone();
@@ -285,9 +285,9 @@ impl FeedbackCycleDedupePort for SerializedRaceDedupeFixture {
                 .expect("serialized dedupe fixture lock is not poisoned")
                 .insert(key)
             {
-                FeedbackCycleDedupePublicationState::Recorded
+                FeedbackPublicationRecordState::Recorded
             } else {
-                FeedbackCycleDedupePublicationState::Duplicate
+                FeedbackPublicationRecordState::Duplicate
             }
         })
     }
@@ -1966,6 +1966,14 @@ fn partial_and_unavailable_impact_truth_never_becomes_clean() {
         assert_eq!(result.cycle.impact_state, Some(expected_state));
         assert_eq!(result.cycle.affected_tests_state, Some(expected_state));
         assert_eq!(result.cycle.impact.is_some(), has_impact);
+        assert_eq!(
+            result
+                .publication
+                .as_ref()
+                .map(|publication| publication.result.clone()),
+            Some(result.cycle.clone()),
+            "authorized current incomplete evidence must remain inspectable"
+        );
     }
 }
 
@@ -2012,6 +2020,14 @@ fn partial_affected_test_coverage_never_becomes_clean() {
     assert_eq!(
         result.cycle.affected_tests_state,
         Some(FeedbackImpactStateV1::Partial)
+    );
+    assert_eq!(
+        result
+            .publication
+            .as_ref()
+            .map(|publication| publication.result.clone()),
+        Some(result.cycle),
+        "partial affected-test state must survive durable publication"
     );
 }
 
