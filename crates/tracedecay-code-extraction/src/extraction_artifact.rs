@@ -29,7 +29,7 @@ pub fn import_module_kind(language: &str, module_specifier: &str) -> Option<Impo
         "typescript" | "tsx" | "javascript" | "astro" | "svelte" => {
             Some(typescript_import_module_kind(module_specifier))
         }
-        _ => return None,
+        _ => None,
     }
 }
 
