@@ -1227,6 +1227,9 @@ fn application_problem_makes_the_tool_command_fail() {
 fn documented_json_invocations() -> Vec<(&'static str, Value)> {
     vec![
         ("tracedecay_storage_status", json!({})),
+        // `health_read` takes no parameters at all, so the documented
+        // invocation is the empty object on every transport.
+        ("tracedecay_health_read", json!({})),
         ("tracedecay_git_status", json!({})),
         ("tracedecay_git_diff", json!({})),
         ("tracedecay_git_history", json!({"count": 3})),
