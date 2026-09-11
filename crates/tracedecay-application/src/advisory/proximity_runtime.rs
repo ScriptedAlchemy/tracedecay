@@ -25,6 +25,7 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ManifestDigest, RetrievalAnchorId, UtcMicros, canonical_sha256,
+    sha256_hex_suffix,
 };
 
 use tracedecay_configuration::{ConfigurationControlStore, ConfigurationCurrentStateV1};
@@ -532,10 +533,7 @@ fn build_proximity_contribution(
         )),
     ))
     .ok()?;
-    let suffix = identity
-        .as_str()
-        .strip_prefix("sha256:")
-        .unwrap_or(identity.as_str());
+    let suffix = sha256_hex_suffix(identity.as_str()).unwrap_or(identity.as_str());
     let threshold_revision = if tier == ProximityTierV1::Configured {
         Some(
             canonical_sha256(&(

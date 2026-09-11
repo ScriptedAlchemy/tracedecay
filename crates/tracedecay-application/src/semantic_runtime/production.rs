@@ -18,7 +18,7 @@ use tracedecay_domain::{
     ProjectionOperationV1, ProjectionReplayReasonV1, QueryFallbackSubpayload, RetrievalAnchorId,
     RetrievalCursorKeyId, RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainId,
     SemanticSearchIndexKeyV1, SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1,
-    SourceOccurrenceId, VectorGenerationIdV1, WorktreeId, canonical_sha256,
+    SourceOccurrenceId, VectorGenerationIdV1, WorktreeId, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_policy::retrieval_selection::{
     RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
@@ -2760,7 +2760,7 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
             let artifact_digest = state.artifact_digest();
             let expected_artifact = required.artifact_manifest_digest.as_str();
             if artifact_digest != expected_artifact
-                && expected_artifact.strip_prefix("sha256:") != Some(artifact_digest)
+                && sha256_hex_suffix(expected_artifact) != Some(artifact_digest)
             {
                 return Err(SemanticRuntimeBackendErrorV1::RejectedAt(
                     SemanticRuntimeRefusalV1::at("inspect_generation.artifact_digest"),
@@ -2995,7 +2995,7 @@ fn lifecycle_artifact_matches(
 ) -> bool {
     let observed = lifecycle_state.artifact_digest();
     observed == expected_artifact.as_str()
-        || expected_artifact.as_str().strip_prefix("sha256:") == Some(observed)
+        || sha256_hex_suffix(expected_artifact.as_str()) == Some(observed)
 }
 
 fn check_evaluation_cancellation(
