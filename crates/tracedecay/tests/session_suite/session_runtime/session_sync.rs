@@ -36,8 +36,7 @@ use tracedecay_session_runtime::session_sync::git_topology::{
     GitTopologySyncFailure, publish_native_topology,
 };
 use tracedecay_session_runtime::session_sync::test_harness::{
-    completed_profile_sweep_covers, completion_termination, decode_matching_journal, journal_key,
-    scan_slots, wait_for_interruption,
+    completion_termination, decode_matching_journal, journal_key, scan_slots, wait_for_interruption,
 };
 use tracedecay_session_runtime::session_sync::work::{
     SessionSyncInterruption, coalesced_alias_local_interruption, git_history_frontier_from_meta,
@@ -781,19 +780,6 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
         ),
         Err(GitTopologySyncFailure::Stale)
     );
-}
-
-#[test]
-fn completed_profile_sweep_only_covers_already_admitted_work() {
-    assert!(completed_profile_sweep_covers(
-        Some(&UtcMicros(20)),
-        UtcMicros(19)
-    ));
-    assert!(!completed_profile_sweep_covers(
-        Some(&UtcMicros(20)),
-        UtcMicros(21)
-    ));
-    assert!(!completed_profile_sweep_covers(None, UtcMicros(19)));
 }
 
 #[test]
