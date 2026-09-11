@@ -115,7 +115,7 @@ fn attach_compact_branch_summary(
 }
 
 fn attach_full_branch_status(
-    branch_diagnostics: BranchDiagnostics,
+    branch_diagnostics: &BranchDiagnostics,
     output: &mut Value,
     retrieval_serving: &CodeIndexRetrievalServingV1,
 ) {
@@ -324,7 +324,7 @@ pub async fn handle_status(
     }
 
     if include_branch_diagnostics {
-        attach_full_branch_status(branch_diagnostics, &mut output, &retrieval_serving);
+        attach_full_branch_status(&branch_diagnostics, &mut output, &retrieval_serving);
     } else {
         attach_compact_branch_summary(&branch_diagnostics, &mut output, &retrieval_serving);
     }
