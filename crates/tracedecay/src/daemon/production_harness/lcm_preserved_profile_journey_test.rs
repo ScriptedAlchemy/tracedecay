@@ -8,6 +8,12 @@
 //! on this corpus (the >30s filter-pushdown regression lives on
 //! `codex/lcm-search-filter-pushdown`), and lexical / graph / ordinary
 //! retrieval stay admitted while convergence is still in progress.
+//!
+//! The issue's acceptance names graph retrieval, so the composition opens
+//! through the ordinary [`ProductionProjectCompositionHarnessV1::open`] and
+//! every admission claim is asserted as a populated payload. A typed
+//! `code-graph-unavailable` is not accepted as admission here: it would make
+//! "graph retrieval stays admitted" satisfiable with no code graph at all.
 
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -110,37 +116,50 @@ fn timed_raw<'a>(
     }
 }
 
-fn assert_code_graph_unavailable(tool: &str, response: &JsonRpcResponse) {
-    let error = response.error.as_ref().unwrap_or_else(|| {
-        panic!("{tool} must stay a typed code-graph unavailable, not a payload: {response:?}")
-    });
-    let data = error
-        .data
-        .as_ref()
-        .unwrap_or_else(|| panic!("{tool} unavailable error must carry data: {response:?}"));
-    assert_eq!(
-        data["reason_code"],
-        json!("code-graph-unavailable"),
-        "{tool} must name the skipped code-index wait: {response:?}"
+/// Strict admission: the tool answered with a populated payload array.
+///
+/// Accepting a typed unavailable here would satisfy the retrieval-admission
+/// claim without any index behind it, so an error response fails.
+fn assert_admitted_with_results(tool: &str, response: &JsonRpcResponse, payload_key: &str) {
+    assert!(
+        response.error.is_none(),
+        "{tool} must stay admitted with a payload, not a typed unavailable: {response:?}"
     );
-    assert_eq!(
-        data["retryable"],
-        json!(true),
-        "{tool} unavailable state must stay retryable: {response:?}"
-    );
-}
-
-fn assert_admitted_without_code_index(tool: &str, response: &JsonRpcResponse, payload_key: &str) {
-    if response.error.is_some() {
-        assert_code_graph_unavailable(tool, response);
-        return;
-    }
     let (refused, payload) = tool_answer(response);
     assert!(!refused, "{tool} refused instead of answering: {payload}");
     let payload = retained_payload(&payload);
+    let entries = payload[payload_key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{tool} must answer as a {payload_key} array: {payload}"));
     assert!(
-        payload[payload_key].is_array(),
-        "{tool} must stay admitted as a {payload_key} array: {payload}"
+        !entries.is_empty(),
+        "{tool} must resolve {PROBE_SYMBOL} while LCM is still converging: {payload}"
+    );
+}
+
+/// One admission round while LCM converges: lexical, graph, and ordinary
+/// session retrieval all answer inside the unchanged admission budget.
+type AdmissionRound = (
+    (Duration, JsonRpcResponse),
+    (Duration, JsonRpcResponse),
+    (Duration, Value),
+);
+
+fn assert_admission_round(round: &AdmissionRound) {
+    let ((lexical_elapsed, lexical), (graph_elapsed, graph), (session_elapsed, session)) = round;
+    assert_under_budget("lexical admission", *lexical_elapsed, ADMISSION_BUDGET);
+    assert_admitted_with_results("tracedecay_grep", lexical, "results");
+    assert_under_budget("graph admission", *graph_elapsed, ADMISSION_BUDGET);
+    assert_admitted_with_results("tracedecay_body", graph, "matches");
+    assert_under_budget(
+        "ordinary session admission",
+        *session_elapsed,
+        ADMISSION_BUDGET,
+    );
+    assert_eq!(
+        session["outcome"]["outcome"],
+        json!("evidence"),
+        "ordinary session retrieval must stay admitted as evidence: {session}"
     );
 }
 
@@ -333,6 +352,45 @@ fn lcm_status_body(status: &Value) -> &Value {
     }
 }
 
+fn raw_message_count(status: &Value) -> i64 {
+    lcm_status_body(status)["raw_message_count"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("lcm_status must report raw_message_count: {status}"))
+}
+
+/// Monotone background-convergence progress read from `lcm_status`.
+///
+/// Ingest and summary convergence only ever add raw rows, current sessions,
+/// and DAG nodes. A strictly greater reading across the admission batch is
+/// positive evidence that convergence was running while retrieval was being
+/// served, and unlike asserting convergence has *not* finished it does not
+/// race the background worker.
+#[derive(Debug, PartialEq, Eq)]
+struct ConvergenceProgress {
+    raw_messages: i64,
+    current_sessions: i64,
+    dag_nodes: i64,
+}
+
+impl ConvergenceProgress {
+    fn read(status: &Value) -> Self {
+        let body = lcm_status_body(status);
+        Self {
+            raw_messages: raw_message_count(status),
+            current_sessions: body["summary_convergence"]["current_session_count"]
+                .as_i64()
+                .unwrap_or_default(),
+            dag_nodes: body["dag"]["total_nodes"].as_i64().unwrap_or_default(),
+        }
+    }
+
+    fn advanced_from(&self, earlier: &Self) -> bool {
+        self.raw_messages > earlier.raw_messages
+            || self.current_sessions > earlier.current_sessions
+            || self.dag_nodes > earlier.dag_nodes
+    }
+}
+
 fn summary_generation_nonzero(status: &Value) -> bool {
     let status = lcm_status_body(status);
     if status["summary_node_count"]
@@ -471,72 +529,72 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         .to_string_lossy()
         .into_owned();
 
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
-        isolation.path(),
-        [project.clone()],
-    )
-    .await
-    .expect("production composition");
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("production composition");
 
     let since = now_unix() - 12 * 3_600;
     let discovery = wait_for_preserved_discovery(&harness, &project, &worktree, since);
     let admissions = async {
-        let status_at_admission = retained_payload(
-            &called(
-                &harness,
-                &project,
-                "tracedecay_lcm_status",
-                json!({"format": "json"}),
-            )
-            .await,
-        );
-        let lexical = timed_raw(
-            &harness,
-            &project,
-            "tracedecay_grep",
-            json!({"pattern": PROBE_SYMBOL, "format": "json"}),
-        );
-        let graph = timed_raw(
-            &harness,
-            &project,
-            "tracedecay_body",
-            json!({"symbol": PROBE_SYMBOL, "format": "json"}),
-        );
-        let session = timed_call(
-            &harness,
-            &project,
-            "tracedecay_message_search",
-            json!({"query": "billing pipeline", "limit": 5, "format": "json"}),
-        );
-        let (lexical, graph, session) = tokio::join!(lexical, graph, session);
-        (status_at_admission, lexical, graph, session)
+        let read_progress = || async {
+            ConvergenceProgress::read(&retained_payload(
+                &called(
+                    &harness,
+                    &project,
+                    "tracedecay_lcm_status",
+                    json!({"format": "json"}),
+                )
+                .await,
+            ))
+        };
+        // Positive in-flight evidence: repeat the admission batch until the
+        // status shows background convergence advanced across one batch.
+        // Every round is asserted admitted, so the round that observes the
+        // advance proves retrieval was served while convergence was running —
+        // without asserting convergence had *not* finished, which races the
+        // background worker.
+        let deadline = Instant::now() + CONVERGENCE_WAIT;
+        loop {
+            let progress_before = read_progress().await;
+            let round = tokio::join!(
+                timed_raw(
+                    &harness,
+                    &project,
+                    "tracedecay_grep",
+                    json!({"pattern": PROBE_SYMBOL, "format": "json"}),
+                ),
+                timed_raw(
+                    &harness,
+                    &project,
+                    "tracedecay_body",
+                    json!({"symbol": PROBE_SYMBOL, "format": "json"}),
+                ),
+                timed_call(
+                    &harness,
+                    &project,
+                    "tracedecay_message_search",
+                    json!({"query": "billing pipeline", "limit": 5, "format": "json"}),
+                ),
+            );
+            assert_admission_round(&round);
+            let progress_after = read_progress().await;
+            if progress_after.advanced_from(&progress_before) {
+                return (progress_before, progress_after);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background convergence never advanced while retrieval stayed admitted: \
+                 {progress_after:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     };
-    let (
-        (status, sessions_for, convergence_elapsed),
-        (
-            status_at_admission,
-            (lexical_elapsed, lexical),
-            (graph_elapsed, graph),
-            (session_elapsed, session),
-        ),
-    ) = tokio::join!(discovery, admissions);
+    let ((status, sessions_for, convergence_elapsed), (progress_before, progress_after)) =
+        tokio::join!(discovery, admissions);
     assert!(
-        !summary_generation_nonzero(&status_at_admission),
-        "admission must observe LCM still converging: {status_at_admission}"
-    );
-    assert_under_budget("lexical admission", lexical_elapsed, ADMISSION_BUDGET);
-    assert_admitted_without_code_index("tracedecay_grep", &lexical, "results");
-    assert_under_budget("graph admission", graph_elapsed, ADMISSION_BUDGET);
-    assert_admitted_without_code_index("tracedecay_body", &graph, "matches");
-    assert_under_budget(
-        "ordinary session admission",
-        session_elapsed,
-        ADMISSION_BUDGET,
-    );
-    assert_eq!(
-        session["outcome"]["outcome"],
-        json!("evidence"),
-        "ordinary session retrieval must stay admitted as evidence: {session}"
+        progress_after.advanced_from(&progress_before),
+        "background convergence must be in flight across an admission batch: \
+         {progress_before:?} -> {progress_after:?}"
     );
     assert_under_budget(
         "background discovery wait",
