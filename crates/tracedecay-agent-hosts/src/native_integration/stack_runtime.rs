@@ -1132,7 +1132,9 @@ impl DaemonGitHubStackRuntimeV1 {
             .store
             .host_acknowledge(&signal.signal_id, request.context().actor())
             .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?;
-        Ok(GitHubStackSignalExpandSurfaceResultV1::Expanded { evidence })
+        Ok(GitHubStackSignalExpandSurfaceResultV1::Expanded {
+            evidence: Box::new(evidence),
+        })
     }
 }
 
