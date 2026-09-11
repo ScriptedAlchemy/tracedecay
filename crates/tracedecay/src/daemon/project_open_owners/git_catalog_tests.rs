@@ -1,4 +1,5 @@
 use crate::runtime_ports::compose_application_catalog_snapshot;
+use crate::test_support::git::GIT_FIXTURE_CONFIG;
 use tracedecay_application::git_intelligence::NativeGitIntelligence;
 use tracedecay_code_index_runtime::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use tracedecay_contracts::git::GitIndexTransactionPortError;
@@ -269,14 +270,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
 
 fn git(root: &std::path::Path, arguments: &[&str]) -> Vec<u8> {
     let output = std::process::Command::new("git")
-        .args([
-            "-c",
-            "core.hooksPath=.git/no-hooks",
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.com",
-        ])
+        .args(GIT_FIXTURE_CONFIG)
         .args(arguments)
         .current_dir(root)
         .output()

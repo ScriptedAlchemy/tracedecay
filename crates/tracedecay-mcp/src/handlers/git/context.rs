@@ -563,15 +563,14 @@ pub async fn handle_diff_context(
     ))
 }
 
+/// Changelog is git-first: the tree diff is the answer, and symbol enrichment
+/// comes from [`exact_semantic_symbol_diff`], which reports its own typed
+/// coverage when the code index is unavailable. The handler therefore takes no
+/// verified graph query at all — a repository that git itself refuses must
+/// report its typed git error rather than whatever state the graph projection
+/// mount is in.
 #[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
-pub async fn handle_changelog<F>(
-    ctx: &McpToolContext<'_>,
-    _graph: F,
-    args: Value,
-) -> Result<ToolResult>
-where
-    F: Future<Output = Result<VerifiedGraphQuery>>,
-{
+pub async fn handle_changelog(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_changelog")?;
     let from_ref = args
         .get("from_ref")
@@ -587,10 +586,7 @@ where
                 message: "missing required parameter: to_ref".to_string(),
             })?;
 
-    // Use gix to diff the two trees, off the request runtime's workers. The
-    // graph admission stays unawaited until the diff succeeds: a repository
-    // that git itself refuses must report its typed git error rather than
-    // whatever state the graph projection mount is in.
+    // Use gix to diff the two trees, off the request runtime's workers.
     let changes = {
         let project_root = ctx.project_root().to_path_buf();
         let from_ref = from_ref.to_owned();

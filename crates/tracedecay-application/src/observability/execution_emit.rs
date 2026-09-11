@@ -547,7 +547,7 @@ mod tests {
     }
 
     fn preview() -> NativeIntegrationSurfaceResultV1 {
-        NativeIntegrationSurfaceResultV1::Preview(NativeIntegrationPreviewProjectionV1 {
+        NativeIntegrationSurfaceResultV1::Preview(Box::new(NativeIntegrationPreviewProjectionV1 {
             preview_id: NativeIntegrationPreviewId::new("preview.native.fixture").unwrap(),
             preview_digest: digest('a'),
             selection: tracedecay_contracts::NativeIntegrationSnapshotProjectionV1 {
@@ -566,7 +566,7 @@ mod tests {
             ordered_commit_count: 2,
             created_at: UtcMicros(20),
             expires_at: UtcMicros(30),
-        })
+        }))
     }
 
     fn committed_receipt() -> NativeIntegrationSurfaceResultV1 {

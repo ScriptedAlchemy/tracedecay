@@ -891,14 +891,7 @@ fn dispatch_git_tools_inner<'a>(
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
                     git::handle_diff_context(&ctx, &graph, args).await
                 }
-                "tracedecay_changelog" => {
-                    git::handle_changelog(
-                        &ctx,
-                        admitted_graph_query(cg, &options, "file_dependents"),
-                        args,
-                    )
-                    .await
-                }
+                "tracedecay_changelog" => git::handle_changelog(&ctx, args).await,
                 "tracedecay_commit_context" => {
                     let graph = admitted_graph_query(cg, &options, "file_dependents").await?;
                     git::handle_commit_context(&ctx, &graph, args).await
