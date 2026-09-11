@@ -426,6 +426,7 @@ macro_rules! predecessor_range_upsert_sql {
                     WHERE candidate.provider = current.provider
                       AND candidate.session_id = current.session_id
                       AND candidate.store_id < current.store_id
+                      AND candidate.role NOT IN ('system', 'developer')
                     ORDER BY candidate.store_id
                     LIMIT 1
                )
@@ -436,6 +437,7 @@ macro_rules! predecessor_range_upsert_sql {
                     WHERE candidate.provider = current.provider
                       AND candidate.session_id = current.session_id
                       AND candidate.store_id < current.store_id
+                      AND candidate.role NOT IN ('system', 'developer')
                     ORDER BY candidate.store_id DESC
                     LIMIT 1
                )
