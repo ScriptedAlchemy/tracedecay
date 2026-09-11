@@ -25,11 +25,12 @@ use tracedecay_domain::{
     CommitId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
     ExactAdmissionRuleRevision, ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile,
     LogicalEvidenceId, ManifestDigest, OptionalStagePublicStatus, PolicyRevisionId, PrincipalId,
-    PrivacyDomainId, ProjectId, PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate,
-    RefId, RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
-    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
-    RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
-    SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
+    PrivacyDomainId, ProjectId, ProviderEvaluationStateV1, PublicRetrieverStatus,
+    QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId,
+    RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainCalibrationV1, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1,
+    UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
@@ -66,6 +67,7 @@ use crate::code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
     UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
+use crate::code_index::provider::GenerationTestAttributionJoinReadPort;
 use crate::semantic_code::rerank_adapter::{
     GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
 };
@@ -15908,6 +15910,104 @@ async fn witness_verified_mount_activates_without_rebuild() {
         Some(seeded),
         "the witness-verified mount serves the sealed generation without rebuilding"
     );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generation_read_callers_install_exact_affected_test_attribution() {
+    let fixture = GitFixture::new(&[(
+        "tests/production.rs",
+        "fn helper() {}\n#[test]\nfn verifies_helper() { helper(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount fixture");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let generation_id = latest.generation().manifest().generation_id.clone();
+    let snapshot = latest.generation().snapshot();
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let occurrence = |name: &str| {
+        latest
+            .generation()
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.simple_name == name)
+            .unwrap_or_else(|| panic!("fixture symbol {name}"))
+            .occurrence
+            .clone()
+    };
+    let helper = occurrence("helper");
+    let test = occurrence("verifies_helper");
+
+    let assert_attribution = || {
+        let read = registry.read_test_attribution(&generation_id);
+        assert_eq!(
+            read.provider_state,
+            ProviderEvaluationStateV1::Partial,
+            "the real graph reports its honest partial attribution coverage"
+        );
+        let join = read.evidence.expect("generation attribution evidence");
+        let record = join
+            .records
+            .iter()
+            .find(|record| record.attribution.test_occurrence == test)
+            .expect("exact test attribution");
+        assert!(record.attribution.covered_occurrences.contains(&helper));
+        assert_eq!(
+            record
+                .test_occurrence
+                .as_ref()
+                .map(|occurrence| &occurrence.occurrence_id),
+            Some(&test)
+        );
+    };
+
+    registry.remove_test_attribution_authority(fixture.path());
+    assert_eq!(
+        registry
+            .read_test_attribution(&generation_id)
+            .provider_state,
+        ProviderEvaluationStateV1::Unavailable,
+        "an uninstalled generation stays typed unavailable"
+    );
+    let fresh = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("fresh caller resolves generation");
+    assert_eq!(fresh.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
+    registry.remove_test_attribution_authority(fixture.path());
+    let ready = registry
+        .latest_complete_ready_for_scope(&scope)
+        .await
+        .expect("ready caller resolves generation");
+    assert_eq!(ready.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
+    registry.remove_test_attribution_authority(fixture.path());
+    let decoded = registry
+        .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+        .await
+        .expect("ready-decoded caller resolves generation");
+    assert_eq!(decoded.generation().manifest().generation_id, generation_id);
+    assert_attribution();
+
     registry.shutdown().await;
 }
 
