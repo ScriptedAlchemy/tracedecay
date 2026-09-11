@@ -8,7 +8,6 @@ use tracedecay_session_memory::provider_usage::{
 pub(crate) async fn handle_cost(
     range: String,
     by_model: bool,
-    by_task: bool,
     export: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
     let payload = call_cost_admin(&range).await?;
@@ -28,7 +27,6 @@ pub(crate) async fn handle_cost(
             &today.provider_usage,
             &range,
             by_model,
-            by_task,
             export.as_deref(),
             &summary,
         )
@@ -40,16 +38,13 @@ fn print_cost_summary(
     today: &ProviderUsageCostSummaryV1,
     range: &str,
     by_model: bool,
-    by_task: bool,
     export: Option<&str>,
     summary: &CostSummaryPayload,
 ) -> tracedecay_domain::errors::Result<()> {
     if let Some(fmt) = export {
-        print_cost_export(fmt, range, by_model, by_task, summary)?;
+        print_cost_export(fmt, range, by_model, summary)?;
     } else if by_model {
         print_model_table(summary);
-    } else if by_task {
-        print_task_table(summary);
     } else {
         print_default_summary(today, range, summary);
     }
@@ -60,7 +55,6 @@ fn print_cost_export(
     fmt: &str,
     range: &str,
     by_model: bool,
-    by_task: bool,
     summary: &CostSummaryPayload,
 ) -> tracedecay_domain::errors::Result<()> {
     let usage = &summary.provider_usage;
@@ -79,13 +73,13 @@ fn print_cost_export(
             });
             println!("{}", serde_json::to_string_pretty(&obj)?);
         }
-        "csv" => print_cost_csv(summary, by_model, by_task),
+        "csv" => print_cost_csv(summary, by_model),
         _ => eprintln!("Unknown export format '{fmt}'. Use 'json' or 'csv'."),
     }
     Ok(())
 }
 
-fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool, by_task: bool) {
+fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool) {
     let usage = &summary.provider_usage;
     if by_model {
         println!("provider,model,cost_usd,tokens");
@@ -100,9 +94,6 @@ fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool, by_task: bool) {
                 .unwrap_or_else(|| "unavailable".to_owned());
             println!("{},{},{cost},{tokens}", model.provider, model.model);
         }
-    } else if by_task {
-        println!("status");
-        println!("task_attribution_unavailable");
     } else {
         println!("total_cost_usd,input_tokens,output_tokens,tokens_saved,efficiency");
         let total_cost = usage
@@ -154,10 +145,6 @@ fn print_model_table(summary: &CostSummaryPayload) {
             model.provider, model.model, cost, token_count, share
         );
     }
-}
-
-fn print_task_table(_summary: &CostSummaryPayload) {
-    println!("Task cost attribution is unavailable from canonical provider usage.");
 }
 
 fn print_default_summary(
