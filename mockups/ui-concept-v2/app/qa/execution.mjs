@@ -64,6 +64,7 @@ try {
   );
   assert.match(await page.locator(".sn-transcript-fallback").innerText(), /EXACT EVENT FALLBACK[\s\S]*not ingested/);
   await page.getByLabel("Search session index (not transcript FTS)").fill("");
+  await page.locator(".sn-table tbody tr").nth(1).waitFor();
   await page.locator(".sn-table tbody tr").first().focus();
   await page.keyboard.press("ArrowDown");
   assert.equal(
