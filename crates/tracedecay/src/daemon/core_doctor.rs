@@ -217,7 +217,7 @@ async fn doctor_runtime_value(
 #[hotpath::measure(label = "daemon.engine.doctor.runtime", future = true)]
 #[expect(
     clippy::too_many_lines,
-    reason = "Doctor runtime assembly is one snapshot of live owners; the structural-lint lane owns further extraction."
+    reason = "A missing graph, session, or observation authority is a named unavailable reason in one snapshot; Doctor never fabricates a healthy runtime."
 )]
 async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
