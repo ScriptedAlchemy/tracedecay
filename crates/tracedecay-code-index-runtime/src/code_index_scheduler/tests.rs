@@ -17952,18 +17952,30 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         .await
         .expect("mount scheduler under configured graph policy");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let latest = loop {
-        if let Some((latest, _)) = registry
+    // The identity port answers only for a text owner the fence still proves
+    // current, so it must be resolved in the same wait that admits the owner:
+    // the fence's bounded proof expires on its own clock, and a pass renewing
+    // it republishes the owner. Sampling the owner once and resolving its
+    // identity afterwards turned either boundary into a red.
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    let (latest, identity) = loop {
+        if let Some((latest, current)) = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await
             && latest.query_owners_are_warm()
+            && current
+            && let Some(identity) = <CodeIndexSchedulerRegistryV1 as tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1>::resolve_current_for_scope(
+                &registry,
+                fixture.path().to_path_buf(),
+                scope.clone(),
+            )
+            .await
         {
-            break latest;
+            break (latest, identity);
         }
         assert!(
-            std::time::Instant::now() <= deadline,
-            "configured graph refusal withheld the text-serving generation"
+            Instant::now() <= deadline,
+            "configured graph refusal withheld the ready text owner's publication identity"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
@@ -17980,13 +17992,6 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         .files
         .first()
         .expect("indexed file");
-    let identity = <CodeIndexSchedulerRegistryV1 as tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1>::resolve_current_for_scope(
-        &registry,
-        fixture.path().to_path_buf(),
-        scope.clone(),
-    )
-    .await
-    .expect("ready text owner retains file identity without a graph seat");
     assert_eq!(
         identity.generation_id(),
         &latest.metadata().manifest().generation_id
