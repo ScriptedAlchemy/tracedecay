@@ -922,10 +922,7 @@ impl ProjectContextScoutOwnerV1 {
             control.configuration_revision,
         ))
         .ok()?;
-        let encoded = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .and_then(|encoded| encoded.get(..32))?;
+        let encoded = digest.hex_suffix().and_then(|encoded| encoded.get(..32))?;
         let mut lease_id = [0; 16];
         if hex::decode_to_slice(encoded, &mut lease_id).is_err() {
             return None;
@@ -1400,7 +1397,7 @@ mod tests {
         let envelope = decode_bound_native_hook_event(
             HookHostV1::ClaudeCode,
             include_bytes!(
-                "../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+                "../../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
             ),
             &binding,
             NativeEnvelopeMaterialV1 {
