@@ -168,7 +168,7 @@ pub(super) async fn native_summary_evidence(
             text: &text,
             kind: kind.as_deref(),
             metadata: &metadata,
-            envelope: envelope.as_ref(),
+            envelope: envelope.as_deref(),
         };
         let mut route = None;
         for recognizer in &recognizers {
@@ -280,7 +280,7 @@ async fn native_store_is_recognized(
         text: &text,
         kind: kind.as_deref(),
         metadata: &metadata,
-        envelope: envelope.as_ref(),
+        envelope: envelope.as_deref(),
     };
     for recognizer in native_summary_recognizers(provider) {
         if recognizer.recognizes(snapshot, &candidate).await? {
@@ -292,7 +292,7 @@ async fn native_store_is_recognized(
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum CanonicalObservationMetadata {
-    Envelope(CanonicalObservationEnvelopeV1),
+    Envelope(Box<CanonicalObservationEnvelopeV1>),
     Unrecognized,
 }
 
@@ -312,11 +312,11 @@ pub(super) fn decode_canonical_observation_metadata(
     object.remove("ingest_protection");
     if let Some(envelope) = object.remove("canonical_envelope") {
         return serde_json::from_value(envelope)
-            .map(CanonicalObservationMetadata::Envelope)
+            .map(|envelope| CanonicalObservationMetadata::Envelope(Box::new(envelope)))
             .map_err(|error| LcmError::Db(format!("canonical_envelope decode failed: {error}")));
     }
     Ok(serde_json::from_value(metadata)
-        .map(CanonicalObservationMetadata::Envelope)
+        .map(|envelope| CanonicalObservationMetadata::Envelope(Box::new(envelope)))
         .unwrap_or(CanonicalObservationMetadata::Unrecognized))
 }
 
