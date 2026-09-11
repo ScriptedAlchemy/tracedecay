@@ -211,7 +211,10 @@ impl CatalogSnapshotBuilderV1 {
         self
     }
 
-    #[hotpath::measure(label = "tool_catalog.snapshot.build")]
+    #[cfg_attr(
+        feature = "hotpath",
+        hotpath::measure(label = "tool_catalog.snapshot.build")
+    )]
     pub fn build(self) -> Result<CatalogSnapshotV1, CatalogValidationError> {
         // Duplicate and reference validation runs over the borrowed input
         // first, so no map insertion below can silently overwrite a record.
@@ -357,7 +360,10 @@ impl CatalogSnapshotV1 {
 
     /// Resolves metadata only. `None` deliberately covers unknown, unavailable,
     /// feature-incompatible, profile-hidden, and protocol-incompatible entries.
-    #[hotpath::measure(label = "tool_catalog.snapshot.resolve_binding")]
+    #[cfg_attr(
+        feature = "hotpath",
+        hotpath::measure(label = "tool_catalog.snapshot.resolve_binding")
+    )]
     pub fn resolve_binding(
         &self,
         profile_id: &ProfileId,
@@ -432,7 +438,10 @@ impl CatalogSnapshotV1 {
     /// The caller supplies its already-resolved scope and authorization
     /// intersection. This keeps transport adapters from publishing a static
     /// superset and preserves indistinguishable omission for hidden entries.
-    #[hotpath::measure(label = "tool_catalog.snapshot.visible_bindings")]
+    #[cfg_attr(
+        feature = "hotpath",
+        hotpath::measure(label = "tool_catalog.snapshot.visible_bindings")
+    )]
     #[allow(clippy::too_many_arguments)]
     pub fn visible_bindings<'a>(
         &'a self,

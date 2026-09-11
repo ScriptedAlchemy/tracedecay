@@ -232,7 +232,10 @@ pub struct McpDispatchCatalogV1 {
 }
 
 impl McpDispatchCatalogV1 {
-    #[hotpath::measure(label = "tool_catalog.mcp.load")]
+    #[cfg_attr(
+        feature = "hotpath",
+        hotpath::measure(label = "tool_catalog.mcp.load")
+    )]
     pub fn new(
         contracts: impl IntoIterator<Item = McpDispatchContractV1>,
     ) -> Result<Self, McpDispatchCatalogError> {
