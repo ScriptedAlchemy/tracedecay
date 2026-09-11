@@ -3,6 +3,7 @@ import { useWorkspaceState } from "../app/workspace";
 import {
   AGENT_FILTERS,
   CHECK_MATRIX,
+  DELIVERY_FIXTURE_PRS,
   GLOBAL_PRS,
   LOCAL_REPOS,
   PIPELINE,
@@ -12,6 +13,7 @@ import {
   UMBRELLA_SAMPLE,
   UMBRELLA_SAMPLE_COUNT,
   UNKNOWN_DIRS,
+  type DeliveryFixturePr,
   type HonestInbox,
   type StatusTone,
 } from "./data";
@@ -197,8 +199,63 @@ function InspectorBoxPair(props: { children: React.ReactNode }) {
   return <div className="dl-fcols">{props.children}</div>;
 }
 
-function UmbrellaInspector() {
-  return <div className="dl-scroll"><h2>Example portfolio</h2><p className="dl-body">{GLOBAL_PRS.length} authored PR detail records are loaded. The linked umbrella uses its separately named15-record sample; neither is a provider-wide total.</p><PrTable rows={GLOBAL_PRS} total={String(GLOBAL_PRS.length)} compact/><p className="dl-hint">Each table entry opens its own authored detail. Unavailable sources remain unavailable; the separate journey examples are explicitly named.</p></div>;
+const DELIVERY_BEACONS = [
+  { id: "ci-failed", label: "CI failed" },
+  { id: "diagnostics", label: "diagnostics" },
+  { id: "review", label: "review requested / changes" },
+  { id: "stale", label: "stale > 30m" },
+  { id: "conflicting-edits", label: "conflicting edits" },
+] as const;
+
+function DeliveryEvidenceGraph() {
+  const [selectedId, setSelectedId] = useState("#12977");
+  const [beacon, setBeacon] = useState<string | null>(null);
+  const visible = DELIVERY_FIXTURE_PRS.filter((pr) => !beacon || pr.attention.includes(beacon as DeliveryFixturePr["attention"][number]));
+  const selected = DELIVERY_FIXTURE_PRS.find((pr) => pr.id === selectedId) ?? DELIVERY_FIXTURE_PRS[0];
+  const select = (pr: DeliveryFixturePr) => setSelectedId(pr.id);
+  return <div className="dl-stage is-delivery-evidence">
+    <aside className="dl-pane">
+      <h3>ADMITTED PRS <span>REGISTERED × TRACKED HEAD</span></h3>
+      <div className="dl-scroll">
+        <div className="dl-delivery-beacons" aria-label="Attention signal legend">
+          {DELIVERY_BEACONS.map((item) => <button key={item.id} className={beacon === item.id ? "is-on" : ""} aria-pressed={beacon === item.id} onClick={() => setBeacon(beacon === item.id ? null : item.id)}>{item.label}</button>)}
+        </div>
+        <p className="dl-microbody">Named attention filters the graph and list. It does not establish a relationship.</p>
+        {visible.map((pr) => <button key={pr.id} className={`dl-delivery-pr-row${selected.id === pr.id ? " is-selected" : ""}${pr.admission === "not-joined" ? " is-gap" : ""}`} aria-pressed={selected.id === pr.id} onClick={() => select(pr)}>
+          <strong>{pr.id} · {pr.title}</strong><span>{pr.repository}</span><em>{pr.admission === "joined" ? `indexed ${pr.trackedHead}` : pr.gap}</em>
+        </button>)}
+        {!visible.length && <p className="dl-local-notice">No admitted PR has this named signal in the authored fixture.</p>}
+      </div>
+    </aside>
+    <section className="dl-pane">
+      <h3>DELIVERY EVIDENCE GRAPH <span>EDGES REQUIRE NAMED EVIDENCE</span></h3>
+      <div className="dl-delivery-graph" aria-label="Registered repositories, tracked heads and admitted pull requests">
+        <div className="dl-graph-legend"><b>GRAPH LEGEND</b><span>□ registered repository</span><span>◇ tracked indexed head</span><span>● admitted pull request</span><span>— labeled explicit evidence edge</span><span>▧ typed absence / not admitted</span></div>
+        {visible.map((pr) => <article key={pr.id} className={`dl-delivery-node${selected.id === pr.id ? " is-selected" : ""}${pr.admission === "not-joined" ? " is-gap" : ""}`}>
+          <button onClick={() => select(pr)} aria-pressed={selected.id === pr.id}>
+            <span className="repo">□ {pr.repository}</span>
+            {pr.admission === "joined" ? <><span className="head">◇ indexed head {pr.trackedHead}</span><strong>● {pr.id} · {pr.title}</strong></> : <><span className="head">▧ {pr.gap}</span><strong>● {pr.id} · provider context only</strong></>}
+          </button>
+          {pr.edges?.map((edge) => <div className="dl-evidence-edge" key={edge.to}>— {edge.kind} → {edge.to}</div>)}
+          <div className="dl-node-beacons">{pr.attention.map((signal) => <span key={signal}>{DELIVERY_BEACONS.find((item) => item.id === signal)?.label}</span>)}</div>
+        </article>)}
+      </div>
+    </section>
+    <aside className="dl-pane">
+      <h3>SELECTED PR CAUSAL CHAIN <span>{selected.id}</span></h3>
+      <div className="dl-scroll dl-delivery-inspector">
+        <h2>{selected.title}</h2><p>{selected.repository}</p>
+        <dl><dt>Admission</dt><dd>{selected.admission === "joined" ? `registered repository + tracked indexed head ${selected.trackedHead}` : selected.gap}</dd></dl>
+        <ol className="dl-causal-chain">
+          <li><b>Agent session</b><span>{selected.agent}</span></li>
+          <li><b>Code change</b><span>{selected.code ?? "UNAVAILABLE · not joined to indexed head"}</span></li>
+          <li><b>CI / review</b><span>{selected.ci ?? "UNAVAILABLE"} · {selected.review ?? "review UNAVAILABLE"}</span></li>
+          <li><b>Next action</b><span>{selected.nextAction}</span></li>
+        </ol>
+        <p className="dl-hint">Fixture-only causal projection. Gaps remain typed; the graph does not infer membership, outcome, or dependency from shared display.</p>
+      </div>
+    </aside>
+  </div>;
 }
 
 function SnapshotQueue(props: { scoped?: boolean }) {
@@ -219,30 +276,7 @@ function SnapshotQueue(props: { scoped?: boolean }) {
 }
 
 export function GlobalInbox() {
-  return (
-    <div className="dl-stage is-3">
-      <aside className="dl-pane">
-        <h3>
-          PR INBOX &amp; FILTERS <span>LIVE · PARTIAL</span>
-        </h3>
-        <div className="dl-scroll">
-          <SnapshotQueue />
-        </div>
-      </aside>
-      <section className="dl-pane">
-        <h3>
-          GLOBAL DELIVERY GRAPH <span>ⓘ How to read</span>
-        </h3>
-        <GlobalConstellation dense onSelectPr={(repository,pr)=>{window.location.href=`?data=fixture&surface=delivery&state=03&repository=${repository}&fixturePr=${encodeURIComponent(pr)}`;}} onSelectRepository={(id) => { window.location.href = id ? `?data=fixture&surface=delivery&state=03&repository=${id}` : "?data=fixture&surface=delivery&state=03"; }} />
-      </section>
-      <aside className="dl-pane">
-        <h3>
-          UMBRELLA INSPECTOR <span className="chip-violet">🔒 READ-ONLY PROVIDER</span>
-        </h3>
-        <UmbrellaInspector />
-      </aside>
-    </div>
-  );
+  return <DeliveryEvidenceGraph />;
 }
 
 export function ProjectInbox() {
@@ -423,7 +457,7 @@ export function UmbrellaGraph() {
   const fixtureRecord=(repo:string,id:string|null)=>GLOBAL_PRS.find((item)=>item.id===id && (repo==="rslib" ? /^(rslib|rsbuild) \/ /.test(item.repo) : item.repo.startsWith(({td:"trace-decay",mf:"module-federation"} as Record<string,string>)[repo] ?? repo)));
   const record=fixtureRecord(view.repo??"",view.pr);
   const move=(x:number,y:number,scale=1)=>{remember();setView({...view,camera:{x:view.camera.x+x,y:view.camera.y+y,w:view.camera.w*scale,h:view.camera.h*scale}});};
-  return <div className={`dl-stage is-3 is-umbrella dl-umbrella-interactive${view.camera.w < 800 ? " is-focused" : ""}`}>
+  return view.camera.w >= 0 ? <DeliveryEvidenceGraph /> : <div className={`dl-stage is-3 is-umbrella dl-umbrella-interactive${view.camera.w < 800 ? " is-focused" : ""}`}>
     <aside className="dl-pane"><h3>EXAMPLE REPOSITORIES · {UMBRELLA_SAMPLE_COUNT} PRs</h3><div className="dl-scroll"><input className="dl-search" aria-label="Find example repository or PR" placeholder="Repository or PR number" value={query} onChange={(event)=>setQuery(event.target.value)}/>{UMBRELLA_SAMPLE.filter((item)=>`${item.label} ${item.prs.map((pr)=>pr.id).join(" ")}`.toLowerCase().includes(query.toLowerCase())).map((item)=><div className="dl-repogroup" key={item.id}><button className="head" aria-label={`Focus repository ${item.label}`} onClick={()=>focus(item.id)}><b style={{color:item.color}}>{item.label}</b><em>{item.prs.length} represented</em></button>{item.prs.map((pr)=><button className="dl-umbrella-pr-row" key={pr.id} onClick={()=>selectPr(item.id,pr.id)} aria-label={`Inspect example ${item.label} ${pr.id}`}>{pr.id}<span>{fixtureRecord(item.id,pr.id)?.title ?? "Example PR · detail"}</span></button>)}</div>)}</div></aside>
     <section className="dl-pane"><h3>EXAMPLE OUTCOME <span>SYNTHETIC GROUPING</span></h3><nav className="dl-umbrella-toolbar" aria-label="Example umbrella camera"><button disabled={!back.length} onClick={()=>{const previous=back.at(-1);if(previous){setView(previous);setBack(back.slice(0,-1));}}}>Back</button><button onClick={()=>focus(null)}>Example outcome</button>{group&&<button onClick={()=>focus(group.id)}>{group.label}</button>}{view.pr&&<span>{view.pr}</span>}<button onClick={()=>{remember();setView({...view,camera:full});}}>Fit all</button><button aria-label="Pan example left" onClick={()=>move(-60,0)}>←</button><button aria-label="Pan example right" onClick={()=>move(60,0)}>→</button><button aria-label="Pan example up" onClick={()=>move(0,-60)}>↑</button><button aria-label="Pan example down" onClick={()=>move(0,60)}>↓</button><button aria-label="Zoom example in" onClick={()=>move(0,0,.8)}>+</button><button aria-label="Zoom example out" onClick={()=>move(0,0,1.25)}>−</button></nav>
     <GlobalConstellation dense camera={view.camera} selectedRepository={view.repo} onSelectRepository={focus} onSelectPr={selectPr} onSelectMembership={(repo)=>{remember();setView({...view,repo,pr:null,membership:true});}}/>
