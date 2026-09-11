@@ -10,7 +10,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::cursor_dispatch::cursor_model_string;
 
-use crate::ObservationRecordParseErrorV1;
+use crate::{
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64,
+};
 
 const PROVIDER: &str = "cursor";
 
@@ -191,9 +193,9 @@ fn normalize_composer_bubble_record(
     }
 
     if let Some(token_count) = native.get("tokenCount") {
-        let input_tokens = composer_canonical_u64(token_count.get("inputTokens"));
-        let output_tokens = composer_canonical_u64(token_count.get("outputTokens"));
-        let total_tokens = composer_canonical_u64(
+        let input_tokens = canonical_u64_i64(token_count.get("inputTokens"));
+        let output_tokens = canonical_u64_i64(token_count.get("outputTokens"));
+        let total_tokens = canonical_u64_i64(
             token_count
                 .get("totalTokens")
                 .or_else(|| token_count.get("total_tokens")),
@@ -486,14 +488,6 @@ fn composer_observation_id(native_id: Option<&str>, fallback: &ObservationId) ->
     native_id
         .and_then(|native_id| ObservationId::new(native_id).ok())
         .unwrap_or_else(|| fallback.clone())
-}
-
-fn composer_canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
 }
 
 /// Exact allowlist for `toolFormerData.status` → `ToolResult.success`.

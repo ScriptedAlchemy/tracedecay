@@ -366,6 +366,22 @@ fn record_digest(record: &[u8]) -> [u8; 32] {
     hotpath::measure_block!("capture.parse.record_digest", Sha256::digest(record).into())
 }
 
+pub(crate) fn canonical_u64_i64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+    })
+}
+
+pub(crate) fn canonical_u64_string(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+    })
+}
+
 fn validate_record_frame(
     record: &[u8],
     source_range: ClaudeByteRangeV1,

@@ -9,7 +9,7 @@ use tracedecay_domain::{
     SessionId,
 };
 
-use crate::ObservationRecordParseErrorV1;
+use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_string as canonical_u64};
 use crate::timestamp::timestamp_secs as shared_timestamp_secs;
 
 const PROVIDER: &str = "opencode";
@@ -210,14 +210,6 @@ fn append_usage(
             ]),
         });
     }
-}
-
-fn canonical_u64(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-    })
 }
 
 fn append_tool_fact(
