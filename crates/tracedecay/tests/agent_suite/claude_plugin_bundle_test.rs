@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::plugin_validation_support::{body_after_frontmatter, read_json_file};
-use tracedecay_automation_runtime::automation::skill_frontmatter::parse_skill_frontmatter;
+use tracedecay_automation::skill_frontmatter::parse_skill_frontmatter;
 
 /// The shared plugin tree root (holds Claude's manifest, skills, commands, and
 /// agents; Claude's host-specific files are `README-claude.md`, `.mcp.json`,

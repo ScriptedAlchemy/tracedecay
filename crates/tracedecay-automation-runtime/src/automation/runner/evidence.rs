@@ -13,8 +13,8 @@ use crate::automation::skill_usage::{
 use crate::automation::skill_writer::{
     skill_improvement_recommendations, support_file_evidence as skill_writer_support_file_evidence,
 };
-use crate::automation::text::truncate_chars_for_prompt;
 use crate::ports::session_store::AutomationSessionStore;
+use tracedecay_automation::text::truncate_chars_for_prompt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracedecay_automation::analytics::{ToolUsageObservation, underused_tool_family_signals};
