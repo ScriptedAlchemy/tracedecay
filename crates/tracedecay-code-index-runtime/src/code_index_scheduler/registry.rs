@@ -6818,9 +6818,12 @@ impl CodeIndexSchedulerRegistryV1 {
         if let Some(test_control) = test_control.as_ref()
             && test_control.pauses_after_claim.load(Ordering::Acquire)
         {
+            let released = test_control.claim_release.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
             test_control.claim_reached.store(true, Ordering::Release);
             test_control.claim_entered.notify_waiters();
-            test_control.claim_release.notified().await;
+            released.await;
         }
         let nothing_servable = serving_generation
             .read()
