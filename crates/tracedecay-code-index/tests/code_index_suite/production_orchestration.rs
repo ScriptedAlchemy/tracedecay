@@ -41,6 +41,7 @@ use tracedecay_domain::{
     RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
     SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, StackNodeId,
     SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
+    sha256_hex_suffix,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -3448,10 +3449,7 @@ fn historical_writer_bytes_read_through_both_partitioned_readers() {
                 ..
             } => (digest, offset, length),
         };
-        let name = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .expect("sha256 segment digest");
+        let name = sha256_hex_suffix(digest.as_str()).expect("sha256 segment digest");
         let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
             .expect("historical segment bytes");
         let start = usize::try_from(offset).expect("segment offset");

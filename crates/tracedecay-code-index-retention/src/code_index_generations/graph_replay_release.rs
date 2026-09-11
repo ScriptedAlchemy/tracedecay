@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_sha256;
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
 use super::{
@@ -44,10 +45,7 @@ fn release_path(
         .join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY)
         .join(format!(
             "release-{}.json",
-            digest
-                .as_str()
-                .strip_prefix("sha256:")
-                .unwrap_or(digest.as_str())
+            sha256_hex_suffix(digest.as_str()).unwrap_or(digest.as_str())
         )))
 }
 
@@ -261,7 +259,7 @@ fn validate_receipt(
     let digest = canonical_sha256(&material)
         .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
     if receipt.schema != RECEIPT_SCHEMA
-        || digest.as_str().strip_prefix("sha256:") != Some(receipt.receipt_digest.as_str())
+        || sha256_hex_suffix(digest.as_str()) != Some(receipt.receipt_digest.as_str())
         || receipt.receipt_digest != release.receipt_digest
         || !receipt.deleted_generations.contains(&release.generation)
     {

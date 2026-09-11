@@ -9,6 +9,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use tracedecay_domain::sha256_hex_suffix;
 
 use serde::Serialize;
 
@@ -113,7 +114,7 @@ pub(super) fn receipt_digest_file_component(
     spec: &ReceiptStoreSpec,
     digest: &str,
 ) -> Result<String, CodeGenerationRetentionErrorV1> {
-    match digest.strip_prefix("sha256:") {
+    match sha256_hex_suffix(digest) {
         Some(value) => Ok(value.to_owned()),
         None => Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "{} digest lacks its SHA-256 prefix",
