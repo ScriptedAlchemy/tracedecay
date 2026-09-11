@@ -1893,6 +1893,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latest_current_test_run_selects_failed_replacement_generation() {
+        let authority = OperationEventAuthority::default();
+        let root = "file:///workspace";
+        let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
+        let first_generation =
+            CodeGenerationId::new("generation.test.first").expect("first generation");
+        let first = authority
+            .begin_managed_test_run(
+                root.to_owned(),
+                RequestId::new("request.test-run.first").expect("first request"),
+                Some(head.clone()),
+                Some(first_generation),
+                BTreeMap::new(),
+                Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            )
+            .await
+            .expect("first managed test run");
+        first
+            .test_result("suite::replacement".to_owned(), true)
+            .await
+            .expect("first result");
+        first.progress(1, Some(1)).await.expect("first progress");
+        first
+            .terminal(
+                OperationReceipt::completed(
+                    UtcMicros(1),
+                    UtcMicros(2),
+                    Deadline::new(UtcMicros(10_000)).expect("deadline"),
+                    OperationBudgetUsage {
+                        units_consumed: 1,
+                        bytes_consumed: 20,
+                        elapsed_micros: 1,
+                    },
+                )
+                .expect("first receipt"),
+            )
+            .await
+            .expect("first terminal");
+
+        let current_generation =
+            CodeGenerationId::new("generation.test.replacement").expect("replacement generation");
+        let replacement = authority
+            .begin_managed_test_run(
+                root.to_owned(),
+                RequestId::new("request.test-run.replacement").expect("replacement request"),
+                Some(head.clone()),
+                Some(current_generation.clone()),
+                BTreeMap::new(),
+                Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            )
+            .await
+            .expect("replacement managed test run");
+        let replacement_operation = replacement.binding().operation_id().clone();
+        replacement
+            .test_result("suite::replacement".to_owned(), false)
+            .await
+            .expect("failed result");
+        replacement
+            .progress(1, Some(1))
+            .await
+            .expect("replacement progress");
+        let replacement_receipt = OperationReceipt::completed(
+            UtcMicros(3),
+            UtcMicros(4),
+            Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            OperationBudgetUsage {
+                units_consumed: 1,
+                bytes_consumed: 40,
+                elapsed_micros: 1,
+            },
+        )
+        .expect("replacement receipt");
+        replacement
+            .terminal(replacement_receipt.clone())
+            .await
+            .expect("replacement terminal");
+
+        let current = ManagedTestRunCurrentScope {
+            root_uri: root.to_owned(),
+            head_commit_id: Some(head),
+            code_generation_id: Some(current_generation),
+            document_uri: None,
+            document_content_digest: None,
+        };
+        let ManagedTestRunReadOutcome::Current(snapshot) =
+            CanonicalManagedTestRunReader::new(authority)
+                .latest_current_page(&current, &PageRequest::first(10).expect("page"))
+                .await
+        else {
+            panic!("replacement run must be current");
+        };
+        assert_eq!(snapshot.operation_id, replacement_operation);
+        assert_eq!(
+            snapshot.results,
+            vec![super::ManagedTestRunResult {
+                test: "suite::replacement".to_owned(),
+                passed: false,
+            }]
+        );
+        assert_eq!(snapshot.receipt, Some(replacement_receipt));
+    }
+
+    #[tokio::test]
     async fn managed_test_authority_cancellation_reaches_the_emitter() {
         let authority = OperationEventAuthority::default();
         let request_id = RequestId::new("request.test-run.cancel").expect("request id");
