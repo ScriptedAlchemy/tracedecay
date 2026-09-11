@@ -8439,8 +8439,10 @@ async fn selected_generation_mints_feedback_identity_after_registry_lookup_close
 /// Fail-closed half of the busy-read witness: a seated generation whose
 /// currency was never proven (a boot-restored seat, a stale seat, or a
 /// withdrawn proof) must stay a typed abstention while the scheduler mutex is
-/// busy, exactly as before. Only the exact-source probe's own verdict may arm
-/// busy serving.
+/// busy, exactly as before. Only a reconcile pass may arm busy serving: it is
+/// the only thing that compares the checkout against the sealed digests, so it
+/// is the only thing whose verdict can bind a seat to proven source. Reads no
+/// longer walk the tree and so can never arm the witness themselves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_witness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
@@ -10200,8 +10202,13 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
     registry.shutdown().await;
 }
 
+/// A running source-verification pass is not itself a reason to decline query
+/// admission. What declines here is the freshness gate: the seat is servable
+/// and its proof is unexpired, so the query already has its answer and there is
+/// no remedy to schedule. The pass is held only to put the worktree in the
+/// verifying state whose dashboard projection this also pins.
 #[tokio::test]
-async fn active_source_verification_does_not_queue_a_second_query_pass() {
+async fn a_fresh_seat_declines_query_admission_during_source_verification() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
@@ -10214,12 +10221,12 @@ async fn active_source_verification_does_not_queue_a_second_query_pass() {
         .expect("mounted reconcile owner");
     assert!(
         !registry.request_query_background_reconcile(&scope).await,
-        "the active source proof already supplies the query's remedy"
+        "a servable seat under an unexpired proof is already the query's answer"
     );
     assert_eq!(
         registry.pending_wake_micros_for_scope(&scope).await,
         Some(0),
-        "query admission must not queue a duplicate pass after worker dequeue"
+        "a declined admission must leave the pending wake unclaimed"
     );
 
     let projected = registry
