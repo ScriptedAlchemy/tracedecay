@@ -62,8 +62,8 @@ use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::db::{Database, DatabaseWriteTransaction};
 use tracedecay_session_memory::response_handles::{
-    ResponseHandleLookup, is_valid_response_handle, micros_to_seconds, retrieve_response_handle,
-    store_response_handle,
+    RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, is_valid_response_handle, micros_to_seconds,
+    retrieve_response_handle, store_response_handle,
 };
 
 const PUBLICATION_LEDGER_METADATA_KEY: &str = "feedback.publications.v1";
@@ -71,7 +71,7 @@ const OBSERVATION_LEDGER_METADATA_KEY: &str = "feedback.observations.v1";
 const PUBLICATION_LEDGER_SCHEMA_VERSION: u16 = 1;
 const OBSERVATION_LEDGER_SCHEMA_VERSION: u16 = 3;
 const REQUEST_HANDLE_SCHEMA_VERSION: u16 = 1;
-const REQUEST_HANDLE_TTL_MICROS: i64 = 15_000_000;
+const REQUEST_HANDLE_TTL_MICROS: i64 = RESPONSE_HANDLE_TTL_SECS * 1_000_000;
 const DEFAULT_EXPANSION_PAGE_SIZE: u32 = 100;
 const MAX_STORED_PUBLICATIONS: usize = 4_096;
 const MAX_PUBLICATION_LEDGER_BYTES: usize = 8 * 1_024 * 1_024;
@@ -681,20 +681,33 @@ impl ProjectFeedbackRequestAuthority {
             handle,
             observed_at,
         )?;
-        if record.schema_version != REQUEST_HANDLE_SCHEMA_VERSION
-            || record.operation != operation
-            || record.request.operation() != operation
-            || record.scope_digest != self.scope.scope_digest
-            || record.issued_at >= record.expires_at
-            || observed_at >= record.expires_at
-            || record.expires_at > self.maximum_expiry
-            || (operation != FeedbackReadOperationV1::List && record.after_finding_id.is_some())
-        {
+        let refusal_reason = if record.schema_version != REQUEST_HANDLE_SCHEMA_VERSION {
+            Some("schema_version_mismatch")
+        } else if record.operation != operation {
+            Some("operation_mismatch")
+        } else if record.request.operation() != operation {
+            Some("request_operation_mismatch")
+        } else if record.scope_digest != self.scope.scope_digest {
+            Some("scope_digest_mismatch")
+        } else if record.issued_at >= record.expires_at {
+            Some("invalid_record_expiry")
+        } else if observed_at >= record.expires_at {
+            Some("expired")
+        } else if record.expires_at > self.maximum_expiry {
+            Some("expiry_exceeds_authority")
+        } else if operation != FeedbackReadOperationV1::List && record.after_finding_id.is_some() {
+            Some("unexpected_list_cursor")
+        } else {
+            None
+        };
+        if let Some(reason) = refusal_reason {
+            log_handle_refusal(reason, Some(operation));
             return Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized);
         }
         if validate_request(&record.request).is_err()
             || RequestId::new(record.request_id.clone()).is_err()
         {
+            log_handle_refusal("invalid_request_record", Some(operation));
             return Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized);
         }
         let (capability, use_case) = operation_ids(operation);
@@ -1622,17 +1635,36 @@ where
     T: for<'de> Deserialize<'de>,
 {
     if !is_valid_response_handle(handle) {
+        log_handle_refusal("invalid_handle", None);
         return Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized);
     }
     match retrieve_response_handle(project_root, handle, micros_to_seconds(observed_at))
         .map_err(|_| FeedbackReadRequestResolutionV1::Unavailable)?
     {
-        ResponseHandleLookup::Found(record) => serde_json::from_str(&record.content)
-            .map_err(|_| FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized),
-        ResponseHandleLookup::Missing | ResponseHandleLookup::Expired { .. } => {
+        ResponseHandleLookup::Found(record) => {
+            serde_json::from_str(&record.content).map_err(|_| {
+                log_handle_refusal("invalid_record", None);
+                FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized
+            })
+        }
+        ResponseHandleLookup::Missing => {
+            log_handle_refusal("missing", None);
+            Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized)
+        }
+        ResponseHandleLookup::Expired { .. } => {
+            log_handle_refusal("storage_expired", None);
             Err(FeedbackReadRequestResolutionV1::NotFoundOrNotAuthorized)
         }
     }
+}
+
+fn log_handle_refusal(reason: &'static str, operation: Option<FeedbackReadOperationV1>) {
+    tracing::info!(
+        event = "feedback_read_handle_refused",
+        reason,
+        ?operation,
+        "feedback read handle was refused"
+    );
 }
 
 fn decode_ledger(encoded: &str) -> Result<Vec<FeedbackPublicationV1>, FeedbackRuntimeError> {

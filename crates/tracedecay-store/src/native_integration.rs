@@ -7,10 +7,11 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    DomainError, ManifestDigest, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
-    NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptV1,
-    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1,
-    NativeWorktreeCleanupReceiptV1, NativeWorktreeCleanupTransactionV1, RepositoryId,
+    CodeGenerationId, DomainError, ManifestDigest, NativeIntegrationApprovalId,
+    NativeIntegrationApprovalV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
+    NativeIntegrationReceiptV1, NativeIntegrationTransactionId,
+    NativeIntegrationTransactionStatusV1, NativeWorktreeCleanupReceiptV1,
+    NativeWorktreeCleanupTransactionV1, RepositoryId, UtcMicros,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -167,6 +168,15 @@ pub trait NativeIntegrationStore: Send + Sync {
         &self,
         repository_id: Option<&RepositoryId>,
     ) -> NativeIntegrationStoreResult<Vec<NativeIntegrationRecordV1>>;
+
+    /// Candidate generations protected by an unexpired preview or unfinished
+    /// transaction. Retention consumes this exact durable census; generation
+    /// index membership alone is not liveness.
+    fn live_candidate_generation_bindings(
+        &self,
+        repository_id: &RepositoryId,
+        observed_at: UtcMicros,
+    ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>>;
 
     fn approval_consumed(
         &self,

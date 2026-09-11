@@ -5,6 +5,7 @@
 //! `tracedecay-store` contract onto the async registered session database
 //! through one bounded actor per database.
 
+mod analysis;
 mod registry;
 mod stack_hook_wakeup;
 mod stack_runtime;
@@ -16,6 +17,7 @@ mod worktree_cleanup;
 #[cfg(test)]
 mod journey_tests;
 
+pub use analysis::DaemonNativeIntegrationAnalysisV1;
 pub use registry::{DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry};
 pub use stack_hook_wakeup::{github_stack_hook_available, register_github_stack_hook_runtime};
 pub use worktree::{WorktreeHolderAdmissionFenceV1, daemon_worktree_holder_admission_fence};

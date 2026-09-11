@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use tracedecay_application::native_integration::{
     DaemonNativeIntegrationAuthorization, ExactPairNativeIntegrationTopology,
-    GixNativeIntegrationAdapter, NativeIntegrationGraphRuntimeProviderV1,
-    NativeIntegrationTransactionCoordinator,
+    GixNativeIntegrationAdapter, NativeIntegrationAnalysisPort,
+    NativeIntegrationGraphRuntimeProviderV1, NativeIntegrationTransactionCoordinator,
 };
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
@@ -370,6 +370,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         repository_id: RepositoryId,
         policy_digest: ManifestDigest,
         observed_at: UtcMicros,
+        analysis: Arc<dyn NativeIntegrationAnalysisPort>,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
         let owner = self
             .ensure_registered(
@@ -379,6 +380,7 @@ impl DaemonNativeIntegrationServiceRegistry {
                 repository_id,
                 policy_digest,
                 observed_at,
+                analysis,
             )
             .await;
         if owner.is_err() {
@@ -395,6 +397,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         repository_id: RepositoryId,
         policy_digest: ManifestDigest,
         observed_at: UtcMicros,
+        analysis: Arc<dyn NativeIntegrationAnalysisPort>,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
         let database_path = database.db_path().to_path_buf();
         let scope_sets = database
@@ -431,6 +434,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             Some(scope_sets),
             Some(expected_graph_shard),
             Some(graph_runtime),
+            analysis,
             || self.stores.ensure(database),
         )
         .await
@@ -448,6 +452,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         scope_sets: Option<AuthorizedScopeSetSqliteStorage>,
         expected_graph_shard: Option<StoreShardIdV1>,
         graph_runtime: Option<NativeIntegrationGraphRuntimeProviderV1>,
+        analysis: Arc<dyn NativeIntegrationAnalysisPort>,
         open_store: F,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError>
     where
@@ -512,6 +517,7 @@ impl DaemonNativeIntegrationServiceRegistry {
                     owner_project_id.clone(),
                     owner_repository_id.clone(),
                     &native_root,
+                    analysis,
                 )?;
                 let authorization = DaemonNativeIntegrationAuthorization::new(policy_digest)
                     .map_err(|_| NativeIntegrationPortError::Unavailable)?;
@@ -684,6 +690,39 @@ mod tests {
     use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
     use tracedecay_runtime_core::git::try_git_program;
     use tracedecay_sessions::admission::HostAdmissionScope;
+
+    struct UnexpectedAnalysis;
+
+    impl tracedecay_application::native_integration::NativeIntegrationAnalysisPort
+        for UnexpectedAnalysis
+    {
+        fn analyze(
+            &self,
+            _selection: &tracedecay_domain::NativeIntegrationSelectionV1,
+            _native: &tracedecay_runtime_core::git_repository::GitNativePreflight,
+            _candidate: &tracedecay_runtime_core::git_repository::GitNativeCandidateTreeV1<'_>,
+            _deadline: &Deadline,
+            _cancellation_signal: &CancellationSignal,
+            _cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+        ) -> Result<
+            tracedecay_domain::NativeIntegrationAnalysisReportV1,
+            tracedecay_contracts::NativeIntegrationPortError,
+        > {
+            panic!("snapshot-only registry tests must not run semantic analysis")
+        }
+
+        fn revalidate(
+            &self,
+            _report: &tracedecay_domain::NativeIntegrationAnalysisReportV1,
+            _deadline: &Deadline,
+            _cancellation: &CancellationSignal,
+        ) -> Result<
+            tracedecay_application::native_integration::NativeIntegrationAnalysisRevalidationV1,
+            tracedecay_contracts::NativeIntegrationPortError,
+        > {
+            panic!("snapshot-only registry tests must not revalidate semantic analysis")
+        }
+    }
 
     fn init_repository(root: &Path) {
         for arguments in [
@@ -869,6 +908,7 @@ mod tests {
                 repository_id.clone(),
                 policy_digest(),
                 UtcMicros(100),
+                Arc::new(UnexpectedAnalysis),
             )
             .await
             .expect("mount native integration owner");
@@ -979,6 +1019,7 @@ mod tests {
                 RepositoryId::new("repository.native-owner.fixture").expect("repository id"),
                 policy_digest(),
                 UtcMicros(1),
+                Arc::new(UnexpectedAnalysis),
             )
             .await
             .expect("owner mounts with an empty store");
@@ -1046,6 +1087,7 @@ mod tests {
                 RepositoryId::new("repository.native-owner.fixture").expect("repository id"),
                 policy_digest(),
                 UtcMicros(3),
+                Arc::new(UnexpectedAnalysis),
             )
             .await
             .expect("second ensure");
