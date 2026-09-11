@@ -80,7 +80,10 @@ fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create(true)
         .follow(FollowSymlinks::No);
-    let file = directory.open_with(name, &options)?;
+    // Concurrent writers race the first creation of this lock; the shared
+    // helper absorbs the spurious Darwin `ENOENT` the losers are handed.
+    let file =
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -133,7 +136,12 @@ pub(super) fn open_run_ledger_nofollow(
         .append(append)
         .create(create)
         .follow(FollowSymlinks::No);
-    match directory.open_with(name, &options) {
+    let opened = if create {
+        tracedecay_private_fs::capability_dir::open_or_create_with(&directory, name, &options)
+    } else {
+        directory.open_with(name, &options)
+    };
+    match opened {
         Ok(file) => {
             let metadata = file.metadata()?;
             if !metadata.is_file() {

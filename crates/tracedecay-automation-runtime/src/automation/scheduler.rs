@@ -1240,7 +1240,12 @@ fn acquire_task_lock_coordination(path: &Path) -> std::io::Result<std::fs::File>
             .follow(FollowSymlinks::No);
         #[cfg(unix)]
         options.mode(0o600);
-        let file = parent.open_with(file_name, &options)?.into_std();
+        // Concurrent acquirers race the first creation of this coordination
+        // file; the shared helper absorbs the spurious Darwin `ENOENT`.
+        let file = tracedecay_private_fs::capability_dir::open_or_create_with(
+            &parent, file_name, &options,
+        )?
+        .into_std();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
