@@ -5,6 +5,123 @@ use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{ExtractionResult, SourceSpan};
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaEvidenceLanguageV1 {
+    Protobuf,
+    Sql,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaEvidenceStatusV1 {
+    Complete,
+    Partial,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaEvidenceIssueV1 {
+    DynamicIdentity,
+    MigrationOrderUnknown,
+    ParseError,
+    SourceTruncated,
+    UnsupportedSyntax,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlSchemaActionV1 {
+    Alter,
+    Create,
+    Drop,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlSchemaObjectKindV1 {
+    Function,
+    Procedure,
+    Table,
+    View,
+}
+
+/// One parser-observed schema identity or ordered migration operation.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtractedSchemaFactV1 {
+    ProtobufMessage {
+        qualified_name: String,
+        span: SourceSpan,
+    },
+    ProtobufField {
+        message_qualified_name: String,
+        name: String,
+        type_name: String,
+        tag: u32,
+        span: SourceSpan,
+    },
+    ProtobufService {
+        qualified_name: String,
+        span: SourceSpan,
+    },
+    ProtobufRpc {
+        service_qualified_name: String,
+        name: String,
+        request_type: String,
+        response_type: String,
+        span: SourceSpan,
+    },
+    SqlObjectChange {
+        statement_order: u32,
+        action: SqlSchemaActionV1,
+        object_kind: SqlSchemaObjectKindV1,
+        qualified_name: String,
+        span: SourceSpan,
+    },
+}
+
+impl ExtractedSchemaFactV1 {
+    pub fn span(&self) -> SourceSpan {
+        match self {
+            Self::ProtobufMessage { span, .. }
+            | Self::ProtobufField { span, .. }
+            | Self::ProtobufService { span, .. }
+            | Self::ProtobufRpc { span, .. }
+            | Self::SqlObjectChange { span, .. } => *span,
+        }
+    }
+}
+
+/// File-scoped schema evidence from the same parser traversal as graph extraction.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractedSchemaEvidenceV1 {
+    pub logical_path: String,
+    pub language: SchemaEvidenceLanguageV1,
+    pub status: SchemaEvidenceStatusV1,
+    pub issues: Vec<SchemaEvidenceIssueV1>,
+    pub facts: Vec<ExtractedSchemaFactV1>,
+}
+
+impl ExtractedSchemaEvidenceV1 {
+    pub(crate) fn canonicalize_order(&mut self) {
+        self.issues.sort();
+        self.issues.dedup();
+        self.facts.sort();
+        self.facts.dedup();
+    }
+
+    pub fn mark_partial(&mut self, issue: SchemaEvidenceIssueV1) {
+        if self.status == SchemaEvidenceStatusV1::Complete {
+            self.status = SchemaEvidenceStatusV1::Partial;
+        }
+        self.issues.push(issue);
+        self.canonicalize_order();
+    }
+}
+
 /// Semantic namespace occupied by one imported binding.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +215,8 @@ impl PartialOrd for ExtractedImportEvidenceV1 {
 pub struct ExtractionArtifactV1 {
     pub result: ExtractionResult,
     pub imports: Vec<ExtractedImportEvidenceV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_evidence: Option<ExtractedSchemaEvidenceV1>,
 }
 
 impl ExtractionArtifactV1 {
@@ -105,12 +224,16 @@ impl ExtractionArtifactV1 {
         Self {
             result,
             imports: Vec::new(),
+            schema_evidence: None,
         }
     }
 
     pub(crate) fn canonicalize_order(&mut self) {
         self.result.canonicalize_order();
         self.imports.sort();
+        if let Some(evidence) = &mut self.schema_evidence {
+            evidence.canonicalize_order();
+        }
     }
 }
 
