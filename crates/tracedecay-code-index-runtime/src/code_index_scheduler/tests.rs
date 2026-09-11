@@ -12714,28 +12714,6 @@ fn callers_page_meta(page_size: u32, cursor: Option<OpaqueCursor>) -> RetrievalR
     )
 }
 
-async fn wait_for_live_complete_generation_deadline(
-    registry: &CodeIndexSchedulerRegistryV1,
-    path: &Path,
-    budget: Duration,
-) -> super::LatestCompleteCodeIndexV1 {
-    let deadline = Instant::now() + budget;
-    let mut publications = registry.subscribe_generation_publications();
-    loop {
-        if let Some(latest) = registry.latest_complete_serving_for_test(path).await {
-            return latest;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "large callers fixture did not seat a complete generation"
-        );
-        tokio::select! {
-            _ = publications.recv() => {}
-            () = tokio::time::sleep(Duration::from_millis(50)) => {}
-        }
-    }
-}
-
 #[tokio::test]
 async fn callers_page_hydrates_only_the_requested_slice() {
     let sources = caller_star_sources();
@@ -12755,12 +12733,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         )
         .await
         .expect("mount daemon-owned scheduler");
-    let latest = wait_for_live_complete_generation_deadline(
-        &registry,
-        fixture.path(),
-        Duration::from_mins(2),
-    )
-    .await;
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let generation = latest.generation.manifest().generation_id.clone();
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
@@ -13582,15 +13555,65 @@ fn reparse_matches_full_parse_chunks() {
 // is served generation-bound and read-only, bypassing freshness entirely.
 // ---------------------------------------------------------------------------
 
+/// Wait until `probe` observes a serving seat for `path`.
+///
+/// Checks the current slot before subscribing so a seat that arrived before
+/// this waiter exists is not missed, then waits on
+/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`]. A seat can also
+/// land between that first probe and subscribe; the loop re-reads the slot
+/// before blocking on the next wake. Positive waits have no wall-clock bound.
+///
+/// [`CodeIndexSchedulerRegistryV1::subscribe_serving_generation_changes`]
+/// admits complete-generation demand and wakes on per-worktree seating,
+/// including restored mounts that emit no new registry-wide seat count.
+/// Subscribe after the worktree is mounted; a waiter that starts before
+/// mount still observes [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
+async fn wait_until_serving_seat<T, F, Fut>(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+    mut probe: F,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    if let Some(value) = probe().await {
+        return value;
+    }
+    let mut seats = registry.subscribe_serving_seats();
+    let mut per_worktree = registry.subscribe_serving_generation_changes(path).await;
+    loop {
+        if let Some(value) = probe().await {
+            return value;
+        }
+        match per_worktree.as_mut() {
+            Some(changes) => {
+                tokio::select! {
+                    result = seats.changed() => {
+                        result.expect("the seating channel stays open while the registry lives");
+                    }
+                    result = changes.changed() => {
+                        result.expect("the per-worktree serving channel stays open while the owner lives");
+                    }
+                }
+            }
+            None => {
+                seats
+                    .changed()
+                    .await
+                    .expect("the seating channel stays open while the registry lives");
+            }
+        }
+    }
+}
+
 /// Wait until the registry-mounted worktree seats its first generation.
 ///
-/// This must not join the generation-publication broadcast. Publication is an
-/// edge the background worker emits the moment reconcile seals, while
-/// [`CodeIndexSchedulerRegistryV1::latest_generation_id`] — the value returned
-/// here — answers only from a serving or text seat installed strictly later.
-/// A waiter that subscribes after that edge has already fired never hears it
-/// again, and no second publication follows a quiet mount, so the guard-then-
-/// subscribe pattern deadlocked for the whole timeout. Poll the seat itself.
+/// This must not join only [`CodeIndexSchedulerRegistryV1::subscribe_serving_seats`].
+/// [`CodeIndexSchedulerRegistryV1::latest_generation_id`] answers from a
+/// serving or text seat, and text can seat without a serving-seat wake.
+/// Callers that need the complete serving generation must use
+/// [`wait_for_live_complete_generation`].
 async fn wait_for_initial_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
@@ -13611,7 +13634,7 @@ async fn wait_for_initial_generation(
 /// seating. Callers that need the complete serving generation must wait for
 /// that seat, not only the publication event.
 ///
-/// Poll the serving slot only. `latest_complete_fresh` opens git (advancing
+/// Probe the serving slot only. `latest_complete_fresh` opens git (advancing
 /// `.git/index` mtime) and may post a freshness wake, which is exactly the
 /// false-stale / extra-receipt failure the post-reconcile witness exists to
 /// prevent.
@@ -13619,7 +13642,18 @@ async fn wait_for_live_complete_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
 ) -> super::LatestCompleteCodeIndexV1 {
-    wait_for_initial_generation(registry, path).await;
+    wait_until_serving_seat(registry, path, || {
+        registry.latest_complete_serving_for_test(path)
+    })
+    .await
+}
+
+/// Historical 10 ms / 5 s poll of the serving slot. Kept only so the
+/// regression can prove it misses a seat that arrives after the deadline.
+async fn wait_for_live_complete_generation_by_polling(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> super::LatestCompleteCodeIndexV1 {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(latest) = registry.latest_complete_serving_for_test(path).await {
@@ -13660,6 +13694,64 @@ async fn serving_seat_wake_arrives_only_after_the_slot_is_seated() {
             .await
             .is_some(),
         "a seat wake must not fire before the serving slot holds the generation"
+    );
+    registry.shutdown().await;
+}
+
+/// A seat that lands after the historical 5s / 10ms poll deadline must still
+/// be observed. The old helper (`wait_for_live_complete_generation` before
+/// #1206) asserted `"live generation"` once `Instant` passed that bound;
+/// the registry seating signal has no such wall-clock cut-off.
+#[tokio::test(flavor = "multi_thread")]
+async fn serving_seat_signal_observes_a_seat_that_misses_the_poll_deadline() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let path = fixture.path().to_path_buf();
+
+    let poll_registry = registry.clone();
+    let poll_path = path.clone();
+    let poll = tokio::spawn(async move {
+        wait_for_live_complete_generation_by_polling(&poll_registry, &poll_path).await
+    });
+
+    let signal_registry = registry.clone();
+    let signal_path = path.clone();
+    let signal = tokio::spawn(async move {
+        wait_for_live_complete_generation(&signal_registry, &signal_path).await
+    });
+
+    // Publish after the old poller's 5s deadline so the poll is already dead.
+    tokio::time::sleep(Duration::from_secs(5) + Duration::from_millis(50)).await;
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount scheduler");
+
+    let poll_result = poll.await;
+    assert!(
+        poll_result
+            .as_ref()
+            .err()
+            .is_some_and(tokio::task::JoinError::is_panic),
+        "polling helper must miss a seat that arrives after its 5s deadline"
+    );
+
+    let latest = signal.await.expect("signal waiter joined");
+    assert_eq!(
+        latest.generation.manifest().generation_id,
+        registry
+            .latest_complete_serving_for_test(fixture.path())
+            .await
+            .expect("mounted seat")
+            .generation
+            .manifest()
+            .generation_id
     );
     registry.shutdown().await;
 }
@@ -13749,9 +13841,8 @@ async fn wait_for_queryable_text_generation_change(
 
 /// Wait until the mounted worktree seats a generation distinct from `previous`.
 ///
-/// Same seat-not-edge rule as [`wait_for_initial_generation`]: the successor's
-/// publication can land before this wait subscribes, and a caller that then
-/// read the serving slot would still be handed `previous`.
+/// Same seat-not-edge rule as [`wait_for_initial_generation`]: the successor
+/// may appear as a text seat without a serving-seat wake.
 async fn wait_for_generation_change(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
@@ -13806,21 +13897,13 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
     wait_for_generation_change(&registry, fixture.path(), &initial).await;
     // Publication is not the sealed serving seat. Abstention reports the
     // seated generation, so wait for that seat to advance.
-    let serving_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry
+    wait_until_serving_seat(&registry, fixture.path(), || async {
+        registry
             .latest_complete_serving_for_test(fixture.path())
             .await
-            .is_some_and(|latest| latest.generation.manifest().generation_id != initial)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() <= serving_deadline,
-            "edited generation never seated for semantic abstention"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+            .filter(|latest| latest.generation.manifest().generation_id != initial)
+    })
+    .await;
     let refreshed = registry.semantic_mcp_abstention(fixture.path()).await;
     assert_ne!(refreshed.code_generation.as_deref(), Some(initial.as_str()));
     assert_eq!(
