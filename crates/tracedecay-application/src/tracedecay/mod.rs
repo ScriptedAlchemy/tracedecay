@@ -140,12 +140,10 @@ pub fn build_branch_diagnostics(
     serving_branch: Option<String>,
     fallback_warning: Option<String>,
     serving_db_path: PathBuf,
-    serving_source_reference: Option<&str>,
-    serving_source_revision: Option<&str>,
+    serving_source: Option<(&str, &str)>,
 ) -> BranchDiagnostics {
     let meta = branch_meta::load_branch_meta(data_root);
-    let observed_serving_branch = serving_source_reference
-        .zip(serving_source_revision)
+    let observed_serving_branch = serving_source
         .and_then(|(reference, revision)| {
             meta.as_ref().and_then(|meta| {
                 meta.branches.iter().find_map(|(name, entry)| {
