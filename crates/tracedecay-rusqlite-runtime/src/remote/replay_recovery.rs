@@ -34,8 +34,7 @@ impl RemoteSqliteStorageV1 {
                 recovered_at,
             ))
             .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?
-            .as_str()
-            .strip_prefix("sha256:")
+            .hex_suffix()
             .ok_or(RemoteSqliteStorageErrorV1::Corruption)?
         );
         let transaction = self.handle().begin_immediate()?;
