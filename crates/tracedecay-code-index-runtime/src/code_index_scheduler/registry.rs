@@ -2185,18 +2185,6 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
-    /// The shared source-freshness fence for one mounted root, so tests can
-    /// drive its bounded proof window instead of waiting on wall time.
-    #[cfg(test)]
-    pub(crate) async fn source_freshness_for_root(
-        &self,
-        project_root: &Path,
-    ) -> Option<super::SourceFreshnessFenceV1> {
-        let project_root = project_root.canonicalize().ok()?;
-        let mounted = self.mounted.lock().await;
-        Some(mounted.get(&project_root)?.source_freshness.clone())
-    }
-
     /// The exact-source currency witness for one mounted root, so tests can
     /// stage the unproven-seat state a restart restore leaves behind.
     #[cfg(test)]
