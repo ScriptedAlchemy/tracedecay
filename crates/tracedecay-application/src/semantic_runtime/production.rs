@@ -55,19 +55,18 @@ use tracedecay_graph_db::GraphCancellation;
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::graph::production_code_index_freshness;
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
 };
-use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
     SemanticAbstentionDispositionV1, SemanticAnnCandidateWindowV1, SemanticAnnCandidatesV1,
     SemanticAnnIndexStateV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
-    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
-    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
-    SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
-    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
-    SemanticVectorScanSummaryV1,
+    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever, SemanticQueryDecisionV1,
+    SemanticQueryModeV1, SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
+    SemanticRetrievalRequestV1, SemanticSearchKindV1, SemanticVectorReadPort,
+    SemanticVectorReadRequestV1, SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
 };
 use tracedecay_query::search_quality::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
 use tracedecay_query::search_quality::semantic_native::{
@@ -2665,16 +2664,6 @@ impl RetrievalExecutionControl for SemanticEvaluationExecutionControlV1 {
 
     fn elapsed_micros(&self) -> u64 {
         self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
-    }
-}
-
-impl RetrievalExecutionControl for SemanticEvaluationExecutionControlV1 {
-    fn elapsed_micros(&self) -> u64 {
-        self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancellation.interruption().is_some()
     }
 }
 
