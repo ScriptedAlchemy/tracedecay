@@ -42,7 +42,8 @@ use tracedecay_domain::{
     ActorId, AuthorityRef, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1,
     BranchStackRevisionId, BranchStackRevisionV1, BranchStackSourceV1, CapabilityId, CommitId,
     ConfigurationRevisionId, FrozenBranchStackSnapshotV1, LocatorDigest, ManifestDigest,
-    MechanicalIntegrationModeV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    MechanicalIntegrationModeV1, NativeIntegrationAnalysisCoverageV1,
+    NativeIntegrationAnalysisGapV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationDirectionV1, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewId, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
     NativeIntegrationTransactionId, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
@@ -158,6 +159,26 @@ fn prepare_pair(root: &Path, mode: MechanicalIntegrationModeV1) {
     }
     // Neither selected branch is checked out, so the production adapter can
     // prove that this journey does not materialize a selected worktree.
+    git(root, &["checkout", "main"]);
+}
+
+fn prepare_generated_only_pair(root: &Path) {
+    initialized_repository(root);
+    std::fs::create_dir_all(root.join("dist")).expect("generated fixture directory");
+    write_and_commit(
+        root,
+        "dist/generated.js",
+        "export const generated = 1;\n",
+        "generated base",
+    );
+    git(root, &["branch", "destination"]);
+    git(root, &["checkout", "-b", "source"]);
+    write_and_commit(
+        root,
+        "dist/generated.js",
+        "export const generated = 2;\n",
+        "generated source",
+    );
     git(root, &["checkout", "main"]);
 }
 
@@ -1274,6 +1295,50 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
             .await
             .expect("shutdown restarted owner registry");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_only_change_requires_semantic_review() {
+    let directory = tempfile::tempdir().expect("temporary project directory");
+    let repository_root = directory.path().join("repo");
+    std::fs::create_dir_all(&repository_root).expect("repository root");
+    prepare_generated_only_pair(&repository_root);
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        directory.path().join("profile"),
+        &repository_root,
+        ProjectId::new("project.native.journey").expect("project id"),
+    )
+    .await
+    .expect("canonical project test runtime");
+    let database = runtime
+        .registered_database_lease(HostAdmissionScope::Project)
+        .expect("registered project database");
+    let (registry, owner, _analysis) = mount(database, repository_root.clone()).await;
+
+    let preview = preflight(
+        owner,
+        preflight_request(
+            &repository_root,
+            MechanicalIntegrationModeV1::FastForward,
+            "request.native.journey.generated-only",
+        ),
+    )
+    .await;
+
+    assert!(matches!(
+        preview.disposition,
+        NativeIntegrationPreviewDispositionV1::SemanticReviewRequired { .. }
+    ));
+    let analysis = preview.analysis.expect("semantic analysis");
+    assert_eq!(
+        analysis.graph.coverage,
+        NativeIntegrationAnalysisCoverageV1::Partial
+    );
+    assert_eq!(
+        analysis.graph.gaps,
+        vec![NativeIntegrationAnalysisGapV1::WithheldSource]
+    );
+    registry.shutdown().await.expect("shutdown owner registry");
 }
 
 #[tokio::test(flavor = "multi_thread")]

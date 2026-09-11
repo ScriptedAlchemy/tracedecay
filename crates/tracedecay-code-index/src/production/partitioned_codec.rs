@@ -270,6 +270,7 @@ struct PartitionedSegmentIdentitySnapshotV1 {
 #[derive(Deserialize)]
 struct PartitionedSnapshotFileIdentityV1 {
     file_occurrence_id: FileOccurrenceId,
+    disposition: SnapshotFileDispositionV1,
 }
 
 #[derive(Deserialize)]
@@ -2245,23 +2246,24 @@ fn validate_partitioned_generation_layout<'a, I, J, K>(
 ) -> Result<(), CodeIndexProductionErrorV1>
 where
     I: ExactSizeIterator<Item = (u32, &'a FileOccurrenceId)>,
-    J: ExactSizeIterator<Item = &'a FileOccurrenceId>,
+    J: Iterator<Item = (usize, &'a FileOccurrenceId)>,
     K: ExactSizeIterator<Item = (u32, u64)>,
 {
+    let snapshot_files = snapshot_files.collect::<Vec<_>>();
     if file_segments.len() != snapshot_files.len() {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation segment count does not match its snapshot".to_owned(),
         ));
     }
-    for (expected_key, ((file_key, segment_file), snapshot_file)) in
-        file_segments.zip(snapshot_files).enumerate()
+    for ((file_key, segment_file), (snapshot_key, snapshot_file)) in
+        file_segments.zip(snapshot_files)
     {
-        let expected_key = u32::try_from(expected_key).map_err(|_| {
+        let snapshot_key = u32::try_from(snapshot_key).map_err(|_| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed generation file key exceeds u32".to_owned(),
             )
         })?;
-        if file_key != expected_key || segment_file != snapshot_file {
+        if file_key != snapshot_key || segment_file != snapshot_file {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation file segments are not canonically keyed".to_owned(),
             ));
@@ -2354,7 +2356,9 @@ fn parse_partitioned_manifest(
             .snapshot
             .files
             .iter()
-            .map(|file| &file.file_occurrence_id),
+            .enumerate()
+            .filter(|(_, file)| file.disposition == SnapshotFileDispositionV1::Present)
+            .map(|(key, file)| (key, &file.file_occurrence_id)),
         generation.generation_evidence.segment_size_bytes,
         (!generation.generation_evidence.legacy_unpaged).then(|| {
             generation
@@ -2632,11 +2636,15 @@ impl CodeIndexPublishedGenerationV1 {
             .as_ref()
             .map(|parent| {
                 parent
-                    .snapshot
-                    .files
+                    .file_segments
                     .iter()
-                    .zip(&parent.file_segments)
-                    .map(|(file, descriptor)| (&file.file_occurrence_id, (file, descriptor)))
+                    .filter_map(|descriptor| {
+                        parent
+                            .snapshot
+                            .files
+                            .get(descriptor.file_key as usize)
+                            .map(|file| (&file.file_occurrence_id, (file, descriptor)))
+                    })
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
@@ -2938,7 +2946,9 @@ impl CodeIndexPublishedGenerationV1 {
                 .snapshot
                 .files
                 .iter()
-                .map(|file| &file.file_occurrence_id),
+                .enumerate()
+                .filter(|(_, file)| file.disposition == SnapshotFileDispositionV1::Present)
+                .map(|(key, file)| (key, &file.file_occurrence_id)),
             generation.generation_evidence.segment_size_bytes,
             generation.generation_evidence.pages.as_ref().map(|pages| {
                 pages
@@ -3104,14 +3114,14 @@ mod tests {
         let valid_pages = [(0, 4_u64), (1, 5_u64)];
         validate_partitioned_generation_layout(
             [(0, &first), (1, &second)].into_iter(),
-            files.into_iter(),
+            files.into_iter().enumerate(),
             9,
             Some(valid_pages.into_iter()),
         )
         .expect("current paged descriptor is canonical");
         validate_partitioned_generation_layout(
             [(0, &first), (1, &second)].into_iter(),
-            files.into_iter(),
+            files.into_iter().enumerate(),
             9,
             None::<std::iter::Empty<(u32, u64)>>,
         )
@@ -3180,7 +3190,7 @@ mod tests {
         ] {
             let error = validate_partitioned_generation_layout(
                 segments.into_iter(),
-                snapshot.into_iter(),
+                snapshot.into_iter().enumerate(),
                 size,
                 pages.map(Vec::into_iter),
             )
