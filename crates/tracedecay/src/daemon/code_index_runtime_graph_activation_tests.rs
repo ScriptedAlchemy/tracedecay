@@ -718,7 +718,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .await
         .expect("settled restart graph read");
     assert_eq!(settled_read.freshness(), CodeGraphReadFreshnessV1::Current);
-    if corrupt_graph || dirty_before_restart {
+    let seated_census = if corrupt_graph || dirty_before_restart {
         // A decoded census is a strictly later state than the text-serving
         // head this case already settled on: `latest_complete_ready_decoded_*`
         // abstains — returning no decoded owner at all — while a reconcile
@@ -729,19 +729,32 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         let census_deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let settled_census = census().await;
-            if matches!(
-                settled_census,
+            // Freshness alone would anchor the later lock-held comparison to
+            // whatever generation happened to decode first. The seated head is
+            // already pinned above: repairing a corrupt retained graph keeps
+            // the seeded identity, while a dirty checkout rebuilds into a
+            // successor, so the census must carry that same identity.
+            let seats_the_settled_generation = match &settled_census {
                 GenerationCensusSnapshot::Observed {
+                    generation_id,
                     freshness: GenerationCensusServingFreshness::Current,
                     ..
-                }
-            ) {
-                break;
+                } if corrupt_graph => generation_id.as_str() == seeded_generation_id.as_str(),
+                GenerationCensusSnapshot::Observed {
+                    generation_id,
+                    freshness: GenerationCensusServingFreshness::Current,
+                    ..
+                } => generation_id.as_str() != seeded_generation_id.as_str(),
+                _ => false,
+            };
+            if seats_the_settled_generation {
+                break settled_census;
             }
             assert!(
                 std::time::Instant::now() <= census_deadline,
-                "the rebuilt successor never published a current decoded census: \
-                 {settled_census:?}"
+                "no current decoded census for the settled generation \
+                 (corrupt_graph={corrupt_graph}, dirty_before_restart={dirty_before_restart}, \
+                 seeded={seeded_generation_id:?}): {settled_census:?}"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -761,7 +774,8 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             },
             "clean restart must retain the exact authenticated generation census"
         );
-    }
+        settled_census
+    };
 
     let scheduler = registry
         .scheduler_handle(fixture.path())
@@ -858,17 +872,26 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         graph_read.freshness(),
         CodeGraphReadFreshnessV1::LastCompleteStale { .. }
     ));
-    assert!(matches!(
-        census_snapshot,
-        GenerationCensusSnapshot::Observed {
-            generation_id,
-            freshness: GenerationCensusServingFreshness::LastCompleteStale { .. },
-            statistics,
-        } if generation_id == seeded_generation_id.as_str()
-            && statistics.source_total_bytes == seeded_statistics.source_total_bytes
-            && statistics.symbol_count == seeded_statistics.symbol_count
-            && statistics.edge_count == seeded_statistics.edge_count
-    ));
+    // After a dirty restart the seated head is the rebuilt successor, not
+    // the recovered seed. A lock-held tip move must keep serving that seated
+    // generation as LastCompleteStale with the same decoded statistics.
+    match (&census_snapshot, &seated_census) {
+        (
+            GenerationCensusSnapshot::Observed {
+                generation_id,
+                freshness: GenerationCensusServingFreshness::LastCompleteStale { .. },
+                statistics,
+            },
+            GenerationCensusSnapshot::Observed {
+                generation_id: seated_id,
+                statistics: seated_statistics,
+                ..
+            },
+        ) if generation_id == seated_id && statistics == seated_statistics => {}
+        (other, seated) => panic!(
+            "seated-graph census while the scheduler lock is held: {other:?}; seated={seated:?}"
+        ),
+    }
 }
 
 fn graph_request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {
