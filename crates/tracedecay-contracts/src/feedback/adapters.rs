@@ -14,8 +14,8 @@ use tracedecay_domain::{GenerationDiagnosticV1, RetrievalAnchorId};
 use super::ports::{FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackRuntimeStateV1};
 use crate::context::{RequestAdmission, RequestContext};
 use crate::diagnostics::{
-    AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderIdentity,
-    DiagnosticProviderPort, DiagnosticProviderResult, DiagnosticProviderState,
+    CurrentDiagnosticsRequest, DiagnosticProviderIdentity, DiagnosticProviderPort,
+    DiagnosticProviderResult, DiagnosticProviderState, FeedbackDiagnosticProviderAdmissionV1,
     GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest,
 };
 use crate::error::ApplicationContractError;
@@ -60,16 +60,17 @@ pub(crate) fn feedback_baseline_identity(
 /// identity and gates reads before the source port is called.
 pub struct GenerationBoundFeedbackDiagnosticsAdapter<P> {
     source: P,
-    providers: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
+    providers: Vec<FeedbackDiagnosticProviderAdmissionV1>,
 }
 
 impl<P> GenerationBoundFeedbackDiagnosticsAdapter<P> {
-    pub fn new(
-        source: P,
-        providers: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
-    ) -> Result<Self, ApplicationContractError> {
+    pub fn new<A>(source: P, providers: Vec<A>) -> Result<Self, ApplicationContractError>
+    where
+        A: Into<FeedbackDiagnosticProviderAdmissionV1>,
+    {
+        let providers = providers.into_iter().map(Into::into).collect::<Vec<_>>();
         for provider in &providers {
-            provider.validate()?;
+            provider.identity().validate()?;
         }
         if providers.iter().enumerate().any(|(index, provider)| {
             providers[index.saturating_add(1)..]
@@ -86,7 +87,7 @@ impl<P> GenerationBoundFeedbackDiagnosticsAdapter<P> {
     fn admission_for(
         &self,
         identity: &DiagnosticProviderIdentity,
-    ) -> Option<&AnalyzerAdmittedDiagnosticProviderV1> {
+    ) -> Option<&FeedbackDiagnosticProviderAdmissionV1> {
         self.providers
             .iter()
             .find(|provider| provider.admits_identity(identity))

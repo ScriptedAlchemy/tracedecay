@@ -1101,6 +1101,8 @@ fn execute_before_provider_work(
 fn cycle_runs_diagnostics_impact_and_tests_once_with_anchored_new_findings() {
     let input = saved_input();
     let provider = provider_identity(&input);
+    let mut compiler_diagnostic = diagnostic(&input, "anchor.diagnostic.feedback.fixture");
+    compiler_diagnostic.source_revision = None;
     let diagnostics_calls = Rc::new(Cell::new(0));
     let impact_calls = Rc::new(Cell::new(0));
     let observations = ObservationFixture::default();
@@ -1108,10 +1110,7 @@ fn cycle_runs_diagnostics_impact_and_tests_once_with_anchored_new_findings() {
         runtime_port(&input),
         DiagnosticsFixture {
             calls: diagnostics_calls.clone(),
-            results: vec![complete_result(
-                provider.clone(),
-                vec![diagnostic(&input, "anchor.diagnostic.feedback.fixture")],
-            )],
+            results: vec![complete_result(provider.clone(), vec![compiler_diagnostic])],
         },
         ImpactFixture {
             calls: impact_calls.clone(),
@@ -1613,7 +1612,7 @@ fn mismatched_diagnostic_address_is_failed_not_current_truth() {
     let input = saved_input();
     let provider = provider_identity(&input);
     let mut mismatched = diagnostic(&input, "anchor.diagnostic.mismatched");
-    mismatched.content_digest = common::id::<ContentDigest>(common::SHA256_B);
+    mismatched.source_revision = Some(common::id::<CommitId>("commit.feedback.mismatched"));
     let service = FeedbackCycleService::new(
         runtime_port(&input),
         DiagnosticsFixture {

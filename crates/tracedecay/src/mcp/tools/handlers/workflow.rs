@@ -398,19 +398,15 @@ async fn publish_parsed_compiler_diagnostics(
     parsed: &[tracedecay_application::diagnose::Diagnostic],
     observed_at: UtcMicros,
 ) -> Value {
-    use tracedecay_domain::ComponentVersion;
+    use tracedecay_application::diagnostics_publication::{
+        compiler_diagnostic_analyzer_revision_v1, compiler_diagnostic_configuration_revision_v1,
+    };
 
     let root = cg.project_root().to_path_buf();
-    let Some(analyzer_revision) = ComponentVersion::new(format!(
-        "analyzer.tracedecay-diagnose.{}",
-        env!("CARGO_PKG_VERSION")
-    ))
-    .ok() else {
+    let Some(analyzer_revision) = compiler_diagnostic_analyzer_revision_v1().ok() else {
         return json!({ "status": "skipped", "reason": "analyzer-identity-unavailable" });
     };
-    let Some(configuration_revision) =
-        ComponentVersion::new("configuration.tracedecay-diagnose.v1".to_owned()).ok()
-    else {
+    let Some(configuration_revision) = compiler_diagnostic_configuration_revision_v1().ok() else {
         return json!({ "status": "skipped", "reason": "configuration-identity-unavailable" });
     };
     let database = cg.dashboard_database_guard();

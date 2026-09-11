@@ -432,6 +432,69 @@ impl AnalyzerAdmittedDiagnosticProviderV1 {
     }
 }
 
+/// One provider capability admitted into a feedback runtime.
+///
+/// Analyzer-backed providers retain their configuration/policy admission.
+/// Stored clean-generation publications carry their own immutable source and
+/// producer provenance and therefore do not invent an analyzer executable or
+/// runtime budget merely to enter the read path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FeedbackDiagnosticProviderAdmissionV1 {
+    Analyzer(AnalyzerAdmittedDiagnosticProviderV1),
+    StoredPublication(DiagnosticProviderIdentity),
+}
+
+impl FeedbackDiagnosticProviderAdmissionV1 {
+    pub fn from_stored_publication(
+        identity: DiagnosticProviderIdentity,
+    ) -> Result<Self, ApplicationContractError> {
+        identity.validate()?;
+        if identity.is_overlay() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "stored diagnostic publication admission",
+            });
+        }
+        Ok(Self::StoredPublication(identity))
+    }
+
+    pub fn identity(&self) -> &DiagnosticProviderIdentity {
+        match self {
+            Self::Analyzer(admission) => admission.identity(),
+            Self::StoredPublication(identity) => identity,
+        }
+    }
+
+    pub fn admits_identity(&self, identity: &DiagnosticProviderIdentity) -> bool {
+        match self {
+            Self::Analyzer(admission) => admission.admits_identity(identity),
+            Self::StoredPublication(admitted) => {
+                identity.validate().is_ok()
+                    && identity.scope == admitted.scope
+                    && !identity.source.is_overlay()
+                    && identity.producer == admitted.producer
+                    && identity.requested_capability == admitted.requested_capability
+                    && identity.provenance == admitted.provenance
+                    && identity.configuration == admitted.configuration
+                    && identity.policy == admitted.policy
+                    && identity.freshness.state == admitted.freshness.state
+            }
+        }
+    }
+
+    pub fn state(&self) -> DiagnosticProviderState {
+        match self {
+            Self::Analyzer(admission) => admission.state(),
+            Self::StoredPublication(_) => DiagnosticProviderState::SupportedComplete,
+        }
+    }
+}
+
+impl From<AnalyzerAdmittedDiagnosticProviderV1> for FeedbackDiagnosticProviderAdmissionV1 {
+    fn from(value: AnalyzerAdmittedDiagnosticProviderV1) -> Self {
+        Self::Analyzer(value)
+    }
+}
+
 /// Explicit provider completion state. Unsupported, absent, stale, and
 /// partial values cannot collapse into a clean empty diagnostic result.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

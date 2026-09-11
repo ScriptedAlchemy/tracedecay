@@ -14842,9 +14842,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1, FeedbackImpactV1,
         FeedbackResultId, FeedbackScopeV1, FeedbackTargetV1, ProviderEvaluationStateV1,
     };
-    use tracedecay_domain::{
-        ComponentVersion, ContentDigest, DiagnosticSeverityV1, SourceSpan, UtcMicros,
-    };
+    use tracedecay_domain::{ContentDigest, DiagnosticSeverityV1, SourceSpan, UtcMicros};
     use tracedecay_lsp::{AdmittedRoot, DiagnosticSource, LspRuntimeFailure, LspRuntimeFuture};
 
     struct FixedDocument(String);
@@ -14869,7 +14867,8 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     }
 
     let source = "pub fn alpha() -> u32 {\n    let value: u32 = \"nope\";\n    value\n}\n";
-    let fixture = GitFixture::new(&[("src/lib.rs", source)]);
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    fixture.edit("src/lib.rs", source);
     let store_root = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     assert!(
@@ -14932,9 +14931,9 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
             Some(&registry as &dyn CodeIndexPublicationIdentityPortV1),
             &store,
             &parsed,
-            ComponentVersion::new("analyzer.tracedecay-diagnose.test".to_owned())
+            tracedecay_application::diagnostics_publication::compiler_diagnostic_analyzer_revision_v1()
                 .expect("analyzer revision"),
-            ComponentVersion::new("configuration.tracedecay-diagnose.v1".to_owned())
+            tracedecay_application::diagnostics_publication::compiler_diagnostic_configuration_revision_v1()
                 .expect("configuration revision"),
             UtcMicros(1_700_000_000_000_000),
         )
@@ -14967,6 +14966,10 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     };
     assert_eq!(record.file_occurrence_id, indexed_file);
     assert_eq!(record.content_digest, indexed_digest);
+    assert_eq!(
+        record.source_revision, None,
+        "a dirty-worktree generation must not be mislabeled as HEAD"
+    );
 
     // The saved-edit cycle's impact target is minted by the same authority, so
     // the projection's identity comparison can succeed.
