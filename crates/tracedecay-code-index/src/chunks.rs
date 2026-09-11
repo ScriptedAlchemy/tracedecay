@@ -1694,6 +1694,7 @@ impl DeterministicCodeChunker {
             if cursor < len {
                 emit_windows(source, cursor, len, gap_ordinal, &mut pending);
             }
+            attribute_whitespace_only_windows(source, &mut pending);
             Ok::<_, ChunkingFailureV1>((pending, emissions))
         })?;
 
@@ -2353,6 +2354,112 @@ fn emit_windows(
     }
 }
 
+fn span_is_whitespace_only(source: &str, span: SourceSpan) -> bool {
+    if span.is_empty() {
+        return false;
+    }
+    let text = &source[span.start_byte as usize..span.end_byte as usize];
+    !text.is_empty() && text.chars().all(char::is_whitespace)
+}
+
+/// Fold whitespace-only `FileWindow` pieces into an adjacent retrievable
+/// grain so those bytes stay covered without minting an unreachable row.
+///
+/// Prefer the preceding retrievable piece; a leading window folds forward.
+/// Overlapping fallback windows in one whitespace gap are attributed as
+/// one contiguous range. A window is left in place only when no retrievable
+/// neighbor exists or folding it would exceed [`MAX_CHUNK_TEXT_BYTES`].
+fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChunk>) {
+    let whitespace_windows: Vec<usize> = pending
+        .iter()
+        .enumerate()
+        .filter(|(_, piece)| {
+            piece.grain == CodeSearchChunkGrainV1::FileWindow
+                && span_is_whitespace_only(source, piece.span)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if whitespace_windows.is_empty() {
+        return;
+    }
+
+    let mut ordered = whitespace_windows;
+    ordered.sort_by_key(|&index| (pending[index].span.start_byte, pending[index].span.end_byte));
+
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    for index in ordered {
+        if let Some(run) = runs.last_mut() {
+            let run_end = run
+                .iter()
+                .map(|&member| pending[member].span.end_byte)
+                .max()
+                .unwrap_or(0);
+            if pending[index].span.start_byte <= run_end {
+                run.push(index);
+                continue;
+            }
+        }
+        runs.push(vec![index]);
+    }
+
+    let mut drop = vec![false; pending.len()];
+    for run in runs {
+        let start = run
+            .iter()
+            .map(|&index| pending[index].span.start_byte)
+            .min()
+            .unwrap_or(0);
+        let end = run
+            .iter()
+            .map(|&index| pending[index].span.end_byte)
+            .max()
+            .unwrap_or(0);
+        let in_run = |index: usize| run.contains(&index);
+        let retrievable = |index: usize, piece: &PendingChunk| {
+            !in_run(index)
+                && !drop[index]
+                && !piece.span.is_empty()
+                && !span_is_whitespace_only(source, piece.span)
+        };
+        // Adjacent or overlapping: oversized fallback windows share an
+        // overlap band, so a retrievable window may start inside a
+        // whitespace-only run rather than exactly at its end.
+        let preceding = pending.iter().enumerate().find_map(|(index, piece)| {
+            (retrievable(index, piece)
+                && (piece.span.end_byte == start
+                    || (piece.span.end_byte > start && piece.span.start_byte < start)))
+                .then_some(index)
+        });
+        let following = pending.iter().enumerate().find_map(|(index, piece)| {
+            (retrievable(index, piece)
+                && (piece.span.start_byte == end
+                    || (piece.span.start_byte < end && piece.span.end_byte > end)))
+                .then_some(index)
+        });
+        let Some(target) = preceding.or(following) else {
+            continue;
+        };
+        let new_start = pending[target].span.start_byte.min(start);
+        let new_end = pending[target].span.end_byte.max(end);
+        if new_end.saturating_sub(new_start) > MAX_CHUNK_TEXT_BYTES as u64 {
+            continue;
+        }
+        pending[target].span.start_byte = new_start;
+        pending[target].span.end_byte = new_end;
+        for index in run {
+            drop[index] = true;
+        }
+    }
+
+    let mut kept = Vec::with_capacity(pending.len());
+    for (index, piece) in std::mem::take(pending).into_iter().enumerate() {
+        if !drop[index] {
+            kept.push(piece);
+        }
+    }
+    *pending = kept;
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
@@ -2669,9 +2776,12 @@ mod tests {
 
     fn chunk_source(source: &str) -> CodeFileChunksV1 {
         let file = validated_file("src/lib.rs", source.as_bytes());
-        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let descriptor = rust_descriptor();
+        let extracted = TreeSitterExtractor::new()
+            .extract(&file, &descriptor, &NeverCancelled)
+            .expect("extract source");
         chunker()
-            .chunk_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .chunk_file(&file, extracted.batch(), &descriptor, &NeverCancelled)
             .expect("chunking succeeds")
     }
 
@@ -2937,6 +3047,127 @@ mod tests {
             chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolSignature
                 && chunk.sanitized_text.as_str().contains("fn ")
         }));
+    }
+
+    fn whitespace_heavy_functions(count: usize) -> String {
+        (0..count)
+            .map(|index| format!("pub fn symbol_{index}() {{}}\n\n"))
+            .collect()
+    }
+
+    fn assert_byte_exact_coverage(source: &str, chunks: &CodeFileChunksV1) {
+        let mut covered = vec![false; source.len()];
+        for chunk in &chunks.chunks {
+            for covered_byte in &mut covered[chunk.anchor.source_span.start_byte as usize
+                ..chunk.anchor.source_span.end_byte as usize]
+            {
+                *covered_byte = true;
+            }
+        }
+        assert!(covered.iter().all(|covered| *covered), "full byte coverage");
+    }
+
+    #[test]
+    fn whitespace_only_windows_are_attributed_to_neighboring_grains() {
+        let source = whitespace_heavy_functions(8);
+        let result = chunk_source(&source);
+        result.validate().expect("valid chunk set");
+        assert_byte_exact_coverage(&source, &result);
+
+        assert!(
+            result.chunks.iter().all(|chunk| {
+                chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                    || !span_is_whitespace_only(source.as_str(), chunk.anchor.source_span)
+            }),
+            "whitespace-only FileWindow chunks must not be emitted"
+        );
+
+        let alpha_source = "pub fn alpha() {}\n\npub fn beta() {}\n";
+        let alpha = chunk_source(alpha_source);
+        alpha.validate().expect("valid adjacent-literal fixture");
+        assert_byte_exact_coverage(alpha_source, &alpha);
+        assert!(alpha.chunks.iter().all(|chunk| {
+            chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                || !span_is_whitespace_only(alpha_source, chunk.anchor.source_span)
+        }));
+
+        let literal = b"alpha";
+        let literal_start = alpha_source.find("alpha").expect("alpha literal") as u64;
+        let literal_end = literal_start + literal.len() as u64;
+        let folded_start = alpha_source.find("\n\n").expect("folded gap") as u64;
+        let folded_end = folded_start + 2;
+        let term = alpha
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.exact_terms.iter())
+            .find(|term| term.original_bytes() == literal)
+            .expect("exact term for alpha");
+        assert_eq!(
+            term.span(),
+            SourceSpan {
+                start_byte: literal_start,
+                end_byte: literal_end,
+            }
+        );
+        assert!(
+            term.span().end_byte <= folded_start || term.span().start_byte >= folded_end,
+            "exact occurrence must not cross the folded whitespace range"
+        );
+        for term in alpha
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.exact_terms.iter())
+        {
+            let start = term.span().start_byte as usize;
+            let end = term.span().end_byte as usize;
+            assert_eq!(
+                &alpha_source.as_bytes()[start..end],
+                term.original_bytes(),
+                "exact term bytes stay on the literal"
+            );
+            assert!(
+                !alpha_source[start..end].chars().all(char::is_whitespace),
+                "exact occurrence must not land in a folded whitespace region"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_whitespace_window_folds_forward_into_the_next_retrievable_grain() {
+        let source = "   hello";
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![1],
+                span: SourceSpan {
+                    start_byte: 3,
+                    end_byte: 8,
+                },
+                parent: None,
+            },
+        ];
+        attribute_whitespace_only_windows(source, &mut pending);
+        assert_eq!(pending.len(), 1, "the leading whitespace window folds away");
+        assert_eq!(
+            pending[0].span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: 8,
+            }
+        );
+        assert_eq!(&source[0..8], "   hello");
+        assert_eq!(pending[0].split_path, vec![1]);
     }
 
     #[test]

@@ -34,13 +34,13 @@ use tracedecay_code_index::{
     retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool},
 };
 use tracedecay_domain::{
-    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, EdgeAuthorityV1,
-    FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RelationEdgeKindV1,
-    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, StackNodeId,
-    SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
+    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CodeSearchChunkGrainV1, CommitId,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageId, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId,
+    RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    StackNodeId, SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -1204,6 +1204,53 @@ fn active_generation_loads_share_the_published_allocation() {
         second.chunks().chunks().as_ptr(),
         "active reads must share the immutable generation instead of cloning its complete indices"
     );
+}
+
+#[test]
+fn sealed_store_drops_whitespace_only_window_chunks() {
+    const FUNCTIONS: usize = 32;
+    let source: String = (0..FUNCTIONS)
+        .map(|index| format!("pub fn symbol_{index}() {{}}\n\n"))
+        .collect();
+    let mut owner = CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.whitespace-window-attribution",
+                1_260_000,
+                "commit.whitespace-window-attribution",
+                "tree.whitespace-window-attribution",
+                &source,
+            ),
+            &ActiveControl,
+        )
+        .expect("whitespace-heavy fixture publishes");
+    let chunks = generation.chunks().chunks();
+    assert!(
+        chunks.iter().all(|chunk| {
+            chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                || !chunk
+                    .sanitized_text
+                    .as_str()
+                    .chars()
+                    .all(char::is_whitespace)
+        }),
+        "sealed rows must not include whitespace-only FileWindow chunks"
+    );
+    // One-line functions previously minted signature + body + whitespace window
+    // (3N). Attribution keeps signature + body only.
+    assert_eq!(chunks.len(), FUNCTIONS * 2);
+    assert!(
+        chunks.len() < FUNCTIONS * 3,
+        "sealed chunk count must drop below the three-per-function baseline"
+    );
+    let sealed = generation.encode_sealed().expect("generation seals");
+    assert!(!sealed.is_empty(), "sealed store must carry bytes");
 }
 
 #[test]
