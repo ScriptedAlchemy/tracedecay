@@ -7,7 +7,7 @@ use clap::{CommandFactory, FromArgMatches};
 use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 #[cfg(feature = "hotpath")]
 use std::sync::{Arc, Mutex};
 
@@ -1300,6 +1300,19 @@ async fn dispatch_memory_command(action: MemoryAction) -> tracedecay_domain::err
     Ok(())
 }
 
+fn open_dashboard_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open").arg(url).status()?;
+    #[cfg(target_os = "windows")]
+    let status = Command::new("cmd").args(["/C", "start", "", url]).status()?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = Command::new("xdg-open").arg(url).status()?;
+    #[cfg(not(any(unix, target_os = "windows")))]
+    return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no platform opener"));
+    #[cfg(any(unix, target_os = "windows"))]
+    if status.success() { Ok(()) } else { Err(std::io::Error::other(format!("opener exited {status}"))) }
+}
+
 async fn dispatch_runtime_command(command: Commands) -> tracedecay_domain::errors::Result<()> {
     match command {
         Commands::Tool {
@@ -1387,7 +1400,7 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay_domain::error
                 }
             }
             if open {
-                match open::that(url) {
+                match open_dashboard_url(url) {
                     Ok(()) => eprintln!("Opened dashboard in default browser: {url}"),
                     Err(error) => {
                         eprintln!("Warning: could not open browser for {url}: {error}")
@@ -1888,10 +1901,9 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay_domain::e
         Commands::Cost {
             range,
             by_model,
-            by_task,
             export,
         } => {
-            cost_cmd::handle_cost(range, by_model, by_task, export).await?;
+            cost_cmd::handle_cost(range, by_model, export).await?;
         }
         Commands::Bench {
             queries,
