@@ -109,7 +109,7 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForURL((url) => url.searchParams.get("view") === "overview");
   console.log("PASS caption keyboard inspection, scope and Escape");
-  assert.match(await page.locator(".status").innerText(), /DATA\s+authored example/);
+  assert.match(await page.locator(".status").innerText(), /DATA\s+design fixture/);
   await page.goto(`${base}/?data=fixture&view=overview&dim=2d`, { waitUntil: "networkidle" });
   for (const [width, height] of [[1586, 992], [1280, 800]]) {
     await page.setViewportSize({ width, height });
@@ -137,7 +137,7 @@ try {
     console.log(`PASS caption bounds and HUD isolation ${width}x${height}`);
   }
   await page.goto(`${base}/?surface=delivery&data=fixture&state=03`);
-  assert.match(await page.locator(".status").innerText(), /DATA\s+design fixture/);
+  assert.match(await page.locator(".status").innerText(), /DATA\s+authored example/);
   const rspack = page.getByRole("button", { name: "Inspect Rspack", exact: true });
   await rspack.click();
   assert.equal(await rspack.getAttribute("aria-pressed"), "true");
