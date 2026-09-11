@@ -214,3 +214,113 @@ async fn predecessor_range_skips_policy_anchor_roles() {
     assert_eq!(row.get::<i64>(0).expect("from"), 1);
     assert_eq!(row.get::<i64>(1).expect("to"), 1);
 }
+
+#[tokio::test]
+async fn predecessor_range_role_filter_recompute_is_journaled_once() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let conn = TestConnection::open(&temp.path().join("sessions.db"));
+    conn.execute_batch(
+        "CREATE TABLE lcm_raw_messages (
+            store_id INTEGER PRIMARY KEY,
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            timestamp INTEGER,
+            content TEXT,
+            content_hash TEXT NOT NULL,
+            storage_kind TEXT NOT NULL,
+            payload_ref TEXT,
+            snippet_text TEXT NOT NULL,
+            index_text TEXT NOT NULL,
+            legacy_source INTEGER NOT NULL,
+            legacy_truncated INTEGER NOT NULL,
+            metadata_json TEXT,
+            UNIQUE(provider, message_id)
+        );
+        CREATE TABLE lcm_raw_predecessor_ranges (
+            provider TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            from_store_id INTEGER NOT NULL,
+            to_store_id INTEGER NOT NULL,
+            PRIMARY KEY(provider, message_id)
+        );
+        CREATE TABLE lcm_gc_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );",
+    )
+    .await
+    .expect("predecessor recompute schema");
+    conn.execute(
+        "INSERT INTO lcm_raw_messages (
+             store_id, provider, message_id, session_id, role, ordinal,
+             timestamp, content, content_hash, storage_kind, payload_ref,
+             snippet_text, index_text, legacy_source, legacy_truncated, metadata_json
+         ) VALUES
+             (1, 'claude', 'prior-user', 'session-1', 'user', 1, 1, 'keep', 'h1', 'inline', NULL, 'keep', 'keep', 0, 0, NULL),
+             (2, 'claude', 'compact_boundary:marker', 'session-1', 'system', 2, 2, 'boundary', 'h2', 'inline', NULL, 'boundary', 'boundary', 0, 0, NULL),
+             (3, 'claude', 'compact-summary', 'session-1', 'user', 3, 3, 'summary', 'h3', 'inline', NULL, 'summary', 'summary', 0, 0, NULL)",
+        (),
+    )
+    .await
+    .expect("stale conversational rows");
+    conn.execute(
+        "INSERT INTO lcm_raw_predecessor_ranges (
+             provider, message_id, session_id, from_store_id, to_store_id
+         ) VALUES ('claude', 'compact-summary', 'session-1', 1, 2)",
+        (),
+    )
+    .await
+    .expect("unfiltered predecessor range");
+
+    crate::summary_convergence::recompute_predecessor_ranges_for_role_filter(&*conn)
+        .await
+        .expect("first role-filter recompute");
+    let mut rows = conn
+        .query(
+            "SELECT from_store_id, to_store_id
+             FROM lcm_raw_predecessor_ranges
+             WHERE provider = 'claude' AND message_id = 'compact-summary'",
+            (),
+        )
+        .await
+        .expect("read recomputed range");
+    let row = rows
+        .next()
+        .await
+        .expect("advance recomputed range")
+        .expect("recompute must restore the conversational interval");
+    assert_eq!(row.get::<i64>(0).expect("from"), 1);
+    assert_eq!(row.get::<i64>(1).expect("to"), 1);
+
+    conn.execute(
+        "UPDATE lcm_raw_predecessor_ranges
+         SET from_store_id = 1, to_store_id = 2
+         WHERE provider = 'claude' AND message_id = 'compact-summary'",
+        (),
+    )
+    .await
+    .expect("stale the range after the journal");
+    crate::summary_convergence::recompute_predecessor_ranges_for_role_filter(&*conn)
+        .await
+        .expect("journaled recompute is a no-op");
+    let mut rows = conn
+        .query(
+            "SELECT from_store_id, to_store_id
+             FROM lcm_raw_predecessor_ranges
+             WHERE provider = 'claude' AND message_id = 'compact-summary'",
+            (),
+        )
+        .await
+        .expect("read journaled range");
+    let row = rows
+        .next()
+        .await
+        .expect("advance journaled range")
+        .expect("journaled store keeps the post-journal row");
+    assert_eq!(row.get::<i64>(0).expect("from"), 1);
+    assert_eq!(row.get::<i64>(1).expect("to"), 2);
+}
