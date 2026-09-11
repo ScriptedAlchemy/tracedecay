@@ -84,6 +84,40 @@ where
     Ok(completed)
 }
 
+/// A terminal host receipt is never reviewed until its exact completed-turn
+/// watermark is durable in LCM; an unreadable snapshot defers, it never passes.
+async fn transcript_watermark_is_durable(
+    session_database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    watermark: &str,
+) -> Result<bool> {
+    let snapshot =
+        session_database
+            .read_snapshot()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("host receipt session snapshot unavailable: {error}"),
+            })?;
+    let mut rows = snapshot
+        .query(
+            "SELECT 1
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2
+                 LIMIT 1",
+            tracedecay_runtime_core::db::engine::params!["hermes", watermark],
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt transcript watermark query failed: {error}"),
+        })?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("host receipt transcript watermark read failed: {error}"),
+        })?
+        .is_some())
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Host-receipt review is one load-review-settle pass for a single receipt."
@@ -128,34 +162,8 @@ async fn run_one_host_receipt_review(
         .registered_project_session_database(automation_context.project_root(), cg.store_layout())
         .await?;
     let watermark_durable =
-        {
-            let snapshot = session_database.read_snapshot().await.map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("host receipt session snapshot unavailable: {error}"),
-                }
-            })?;
-            let mut rows = snapshot
-                .query(
-                    "SELECT 1
-                 FROM lcm_raw_messages
-                 WHERE provider = ?1 AND message_id = ?2
-                 LIMIT 1",
-                    tracedecay_runtime_core::db::engine::params![
-                        "hermes",
-                        ready.transcript_watermark.as_str()
-                    ],
-                )
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("host receipt transcript watermark query failed: {error}"),
-                })?;
-            rows.next()
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("host receipt transcript watermark read failed: {error}"),
-                })?
-                .is_some()
-        };
+        transcript_watermark_is_durable(&session_database, ready.transcript_watermark.as_str())
+            .await?;
     if !watermark_durable {
         // Never review a terminal receipt until the exact completed-turn
         // watermark is durable in LCM.
