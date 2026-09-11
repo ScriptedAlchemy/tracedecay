@@ -11887,12 +11887,11 @@ async fn wait_for_quiescent_owner_pass(
 ///
 /// Winning the permit only proves no *new* pass can start. The worker releases
 /// it after source reconciliation but keeps its `reconcile_in_progress` guard
-/// through text seating, so the permit is routinely free while a pass runs. A
-/// query that claims the pending wake in that window is suppressed as already
-/// covered by the running source proof and returns before it reaches the claim
-/// gate — so a test that then waits for the claim would wait on a rendezvous
-/// nothing will ever reach. With the permit held the counter is monotone to
-/// zero, so this settles once and stays settled for the rest of the test.
+/// through text seating, so the permit is routinely free while a pass runs and
+/// that pass still moves the serving seat, its witness, and the pending wake
+/// under a test that already believes the worker is parked. With the permit
+/// held the pass counter is monotone to zero, so this settles once and stays
+/// settled for the rest of the test.
 async fn quiesced_background_reconcile_admission(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,

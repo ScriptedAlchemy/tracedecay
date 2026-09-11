@@ -6857,6 +6857,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// ready, the shared source fence suppresses a wake while its proof is
     /// current. Authenticated metadata without those owners is still warming
     /// and always needs the worker's next bounded slice.
+    ///
+    /// An in-flight pass is deliberately *not* a third suppression. That pass
+    /// observed the checkout when it started, which may predate the state this
+    /// admission found unservable, so declining here strands the remedy until
+    /// an unrelated hint arrives. The claim above already coalesces the only
+    /// duplicate worth suppressing — a wake nobody has dequeued yet.
     pub async fn request_query_background_reconcile(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -6878,7 +6884,6 @@ impl CodeIndexSchedulerRegistryV1 {
             hints,
             wake,
             pending_wake,
-            reconcile_in_progress,
         ) = {
             let mounted = self.mounted.lock().await;
             let Some((root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
@@ -6893,7 +6898,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
-                Arc::clone(&worktree.reconcile_in_progress),
             )
         };
         #[cfg(test)]
@@ -6908,13 +6912,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let Some(wake_claim) = PendingWakeClaimV1::claim(Arc::clone(&pending_wake)) else {
             return false;
         };
-        // The pending marker covers admission until the worker dequeues it;
-        // the pass counter covers the interval after dequeue. A query arriving
-        // in that second interval is already covered by the running source
-        // proof and must not queue an identical follow-up pass.
-        if reconcile_in_progress.load(Ordering::Acquire) != 0 {
-            return false;
-        }
         #[cfg(test)]
         if let Some(test_control) = test_control.as_ref()
             && test_control.pauses_after_claim.load(Ordering::Acquire)
