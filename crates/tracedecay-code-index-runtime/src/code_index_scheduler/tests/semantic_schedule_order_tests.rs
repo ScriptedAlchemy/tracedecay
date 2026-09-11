@@ -17,6 +17,7 @@ use super::super::CodeIndexGenerationPublishedV1;
 use super::{
     CodeIndexSchedulerRegistryV1, GitFixture, ResolvedScope, test_project_id,
     wait_for_generation_change, wait_for_initial_generation, wait_for_live_complete_generation,
+    wait_for_quiescent_owner_pass,
 };
 use crate::code_index_scheduler::CodeGraphActivationPolicyV1;
 
@@ -259,6 +260,10 @@ async fn semantic_schedule_can_retry_the_serving_generation_after_lifecycle_sele
             .expect("mount scheduler")
     );
     wait_for_live_complete_generation(&registry, fixture.path()).await;
+    // The serving seat is published from inside the pass that also runs the
+    // semantic schedule hook, so the seat alone does not prove the hook was
+    // reached. Let that pass finish before reading its attempt count.
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
     let attempts_before_selection = attempts.load(Ordering::Acquire);
     assert!(
         attempts_before_selection > 0,

@@ -9875,6 +9875,10 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
+    // The seat is published mid-pass, so the mount's own reconcile receipt can
+    // still be outstanding. Sample the baseline only once that pass is done,
+    // or its receipt is charged to the probe below.
+    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
     {
         let mounted = registry.mounted.lock().await;
@@ -11792,18 +11796,40 @@ async fn distinct_cold_mounts_respect_capacity_before_opening() {
     );
 }
 
+/// Wait until no owner pass is running for `project_root`.
+///
+/// A serving seat is published from inside a pass, so every seat wait returns
+/// while the worker still owns `reconcile_in_progress` and has post-seat work
+/// left — semantic scheduling, receipts, graph steps. A test that samples one
+/// of those effects immediately after a seat wait races the pass that produces
+/// it. This is the barrier for "the pass that seated is finished", and it is a
+/// failure bound only: a worker that never finishes panics with a diagnostic.
+async fn wait_for_quiescent_owner_pass(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+) {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while registry.reconcile_in_progress_for_test(project_root).await {
+        assert!(
+            Instant::now() <= deadline,
+            "the owner pass for {} never finished",
+            project_root.display()
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 /// Hold the background worker out of a new pass, then wait for the in-flight
 /// pass to finish, and keep the admission permit.
 ///
 /// Winning the permit only proves no *new* pass can start. The worker releases
 /// it after source reconciliation but keeps its `reconcile_in_progress` guard
-/// through text seating, and re-enters that guard around each graph step, so
-/// the counter is routinely non-zero while the permit is free. A query that
-/// claims the pending wake in that window is suppressed as already covered by
-/// the running source proof and returns before it reaches the claim gate — so
-/// a test that then waits for the claim would wait on a rendezvous nothing
-/// will ever reach. With the permit held the counter is monotone to zero, so
-/// this settles once and stays settled for the rest of the test.
+/// through text seating, so the permit is routinely free while a pass runs. A
+/// query that claims the pending wake in that window is suppressed as already
+/// covered by the running source proof and returns before it reaches the claim
+/// gate — so a test that then waits for the claim would wait on a rendezvous
+/// nothing will ever reach. With the permit held the counter is monotone to
+/// zero, so this settles once and stays settled for the rest of the test.
 async fn quiesced_background_reconcile_admission(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
@@ -11813,16 +11839,7 @@ async fn quiesced_background_reconcile_admission(
         .acquire_owned()
         .await
         .expect("hold background worker at its dequeue point");
-    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
-    while registry.reconcile_in_progress_for_test(project_root).await {
-        assert!(
-            Instant::now() <= deadline,
-            "holding the background admission permit never drained the in-flight \
-             reconcile pass for {}",
-            project_root.display()
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    wait_for_quiescent_owner_pass(registry, project_root).await;
     admission
 }
 
