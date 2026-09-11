@@ -8745,14 +8745,19 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     registry.shutdown().await;
 }
 
-/// Busy-read stat proof reuse is explicitly bounded: an out-of-band write with
-/// no Git or scheduler hint may reuse the prior proof inside the memo window,
-/// but the first probe after that window must sweep and withdraw the witness.
+/// Busy-read proof reuse is explicitly bounded, but the bound belongs to the
+/// freshness fence, not to a per-read worktree sweep: an ordinary read never
+/// walks the checkout. An out-of-band write that moves no Git metadata and
+/// reaches no hint authority is therefore served from the live proof until
+/// that proof expires. The first read after it does declines the seat and
+/// hands the exact stat-plus-sealed-digest comparison to the retained worker,
+/// whose pass is the only authority that may withdraw the witness from the
+/// disproved generation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
 
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -8773,8 +8778,14 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
         .serving_source_witness_for_root(fixture.path())
         .await
         .expect("mounted worktree witness");
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree source fence");
+    // Hold the worker at its dequeue point so every observation below is the
+    // read path's own answer and never a pass that raced it.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
 
-    // Drift the worktree; the stat-signature fence disproves the seat.
     std::fs::write(
         fixture.path().join("src/main.rs"),
         "fn main() { drifted(); }\n",
@@ -8786,28 +8797,61 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_some(),
-        "a raw unhinted write may reuse the proof only inside the explicit bounded interval"
+        "an unhinted raw write reuses the live proof; a read never walks the checkout"
     );
-    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Expire that proof exactly as its own bound does, without waiting it out.
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the source proof past its own bound");
+    }
+    registry.clear_pending_wake_for_scope(&scope).await;
     assert!(
         registry
             .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
             .await
             .is_none(),
-        "a drifted worktree disproves the seated generation's currency"
+        "an expired proof disproves the seated generation's currency"
     );
-    // The probe posts a reconcile wake, so the worker may already be sealing a
-    // successor; what must hold is that the witness never keeps naming the
-    // disproved generation.
-    assert_ne!(
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0),
+        "the declining read hands the exact source proof to the retained worker"
+    );
+    assert_eq!(
         witness
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|witness| witness.generation_id.clone()),
-        Some(disproved_generation_id),
-        "the disproving probe withdraws the busy-read witness"
+        Some(disproved_generation_id.clone()),
+        "a read that cannot verify source may not fabricate the disproof itself"
     );
+
+    // Release the worker: its pass re-derives the sealed digests, observes the
+    // drift, and the witness stops naming the disproved generation.
+    drop(admission);
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while witness
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|witness| witness.generation_id.clone())
+        == Some(disproved_generation_id.clone())
+    {
+        assert!(
+            Instant::now() <= deadline,
+            "the disproving reconcile pass never withdrew the busy-read witness"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     registry.shutdown().await;
 }
