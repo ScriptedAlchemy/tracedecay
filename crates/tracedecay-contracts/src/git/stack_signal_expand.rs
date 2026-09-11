@@ -208,7 +208,11 @@ pub enum GitHubStackSignalExpandUnavailableV1 {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum GitHubStackSignalExpandSurfaceResultV1 {
     Expanded {
-        evidence: GitHubStackSignalEvidenceRefV1,
+        // Boxed so the expanded arm does not set the size of every refusal:
+        // the evidence reference carries six digests and identifiers, the
+        // unavailable arm one enum. `Box` is transparent to serde and to the
+        // generated schema, so the wire shape is unchanged.
+        evidence: Box<GitHubStackSignalEvidenceRefV1>,
     },
     Unavailable {
         reason: GitHubStackSignalExpandUnavailableV1,

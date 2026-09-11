@@ -1446,6 +1446,14 @@ async fn shared_jsonl_page_with_cancellation(
     .await
 }
 
+// The two limits, the resume state and the speculative flag are independent
+// admission controls, and the caller chooses each one; folding them into a
+// struct would let a caller build a half-specified admission and discover it
+// at the await rather than at the call.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent admission control chosen per call"
+)]
 async fn shared_jsonl_page_with_frame_limit_and_cancellation(
     path: &Path,
     previous: StoredCursor,
