@@ -6683,12 +6683,21 @@ impl CodeIndexSchedulerRegistryV1 {
     /// sealed source. Once that proof expires, the immutable owner remains
     /// available as stale while one coalesced wake asks the retained worker to
     /// run the exact stat/content proof. The read never performs that work or
-    /// waits for the scheduler mutex.
+    /// waits for the scheduler mutex — the pass counter is read only to
+    /// attribute the wake, never to decide currency.
     pub async fn latest_text_serving_freshness_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<(LatestCodeTextGenerationV1, bool)> {
-        let (root, source_freshness, text_generation, wake, pending_wake, shutting_down) = {
+        let (
+            root,
+            source_freshness,
+            text_generation,
+            wake,
+            pending_wake,
+            reconcile_in_progress,
+            shutting_down,
+        ) = {
             let mounted = self.mounted.lock().await;
             let (root, worktree) = unique_mounted_for_scope(&mounted, scope).unique()?;
             (
@@ -6697,6 +6706,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.text_generation),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.reconcile_in_progress),
                 Arc::clone(&worktree.shutting_down),
             )
         };
@@ -6714,11 +6724,18 @@ impl CodeIndexSchedulerRegistryV1 {
             &shutting_down,
         );
         if !current {
-            Self::note_wake_if_idle(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
+            // Attribution, not admission. A read that cannot verify the owner
+            // while a pass already owns the worktree is a follow-up to that
+            // pass: its wake is served after the in-flight pass ends, so its
+            // event-to-ready latency measures the busy window, not the query
+            // ladder's. Reporting both as `QueryAdmission` buried an unrelated
+            // pass inside the query-admission cadence sample.
+            let trigger = if reconcile_in_progress.load(Ordering::Acquire) == 0 {
+                CodeIndexCadenceTriggerV1::QueryAdmission
+            } else {
+                CodeIndexCadenceTriggerV1::BusyFollowUp
+            };
+            Self::note_wake_if_idle(&pending_wake, &wake, trigger);
         }
         Some((latest, current))
     }
