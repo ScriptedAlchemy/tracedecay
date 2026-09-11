@@ -53,11 +53,13 @@ const HOTPATH_PORT_VARIABLES: [&str; 2] = ["HOTPATH_METRICS_PORT", "HOTPATH_META
 /// Two loopback ports nothing else is using, claimed by binding and released
 /// immediately so Hotpath can bind them if it wrongly starts a server.
 fn unused_loopback_ports() -> [u16; 2] {
-    let claim = |()| {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral port");
-        listener.local_addr().expect("bound address").port()
-    };
-    [claim(()), claim(())]
+    std::array::from_fn(|_| {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("ephemeral port")
+            .local_addr()
+            .expect("bound address")
+            .port()
+    })
 }
 
 /// Every static `#[hotpath::measure]` label on the `GitRepositoryAuthority`

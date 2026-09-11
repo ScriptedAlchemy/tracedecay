@@ -24,7 +24,7 @@ struct ReleasedProfileFixture {
 /// mode (Unix) or protected single-ACE DACL (Windows) profile backup admits.
 /// A plain write under a temporary directory inherits that directory's ACEs
 /// and is refused at admission, before the rehearsal contract is reached.
-fn write_profile_identity(profile: &Path, brain_id: &str, profile_id: &str) {
+pub(crate) fn write_profile_identity(profile: &Path, brain_id: &str, profile_id: &str) {
     let path = profile.join("profile-identity.json");
     DatabaseAuthority::publish_record_atomically(
         &path.with_extension("json.tmp"),

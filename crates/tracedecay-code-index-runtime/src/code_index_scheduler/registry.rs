@@ -5668,6 +5668,7 @@ impl CodeIndexSchedulerRegistryV1 {
             build_progress,
             hints,
             pending_wake,
+            source_freshness,
             graph_activation_enabled,
         ) = {
             let mounted = self.mounted.lock().await;
@@ -5683,6 +5684,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.pending_wake),
+                worktree.source_freshness.clone(),
                 worktree.graph_activation.policy().is_enabled(),
             )
         };
@@ -5704,14 +5706,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 progress
             });
-            let refreshing = reconcile_in_progress.load(Ordering::Acquire) != 0;
-            let rebuild_in_flight = refreshing
+            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0
                 || pending_wake
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .micros
                     != 0;
+            let source_change_pending = source_freshness.source_change_pending();
             let parked = convergence_park
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5755,6 +5757,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         graph_activation_enabled,
                         &code_graph_serving,
                     );
+                    let verifying = ready && refresh_in_flight && !source_change_pending;
+                    let refreshing = refresh_in_flight && !verifying;
+                    let rebuild_in_flight = refreshing;
                     let stale = hook_hint_count != Some(0);
                     let last_reconcile_micros = match last_reconciled_at_micros
                         .load(Ordering::Acquire)
@@ -5770,6 +5775,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         staleness_state: Some(
                             if parked.is_some() && !ready {
                                 "parked"
+                            } else if verifying {
+                                "verifying"
                             } else if refreshing {
                                 if ready {
                                     "refreshing"
@@ -5788,6 +5795,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         hook_hint_count,
                         coverage: if refreshing {
                             "partial_refresh_in_progress"
+                        } else if verifying {
+                            "partial_source_verification"
                         } else if hook_hint_count.is_some() {
                             "complete"
                         } else {
@@ -5826,8 +5835,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 graph_activation_enabled,
                 &code_graph_serving,
             );
+            let verifying = ready && refresh_in_flight && !source_change_pending;
+            let refreshing = refresh_in_flight && !verifying;
+            let rebuild_in_flight = refreshing;
             let staleness_state = if parked.is_some() && !ready {
                 "parked"
+            } else if verifying {
+                "verifying"
             } else if refreshing {
                 if ready {
                     "refreshing"
@@ -5859,6 +5873,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 hook_hint_count,
                 coverage: if refreshing {
                     "partial_refresh_in_progress"
+                } else if verifying {
+                    "partial_source_verification"
                 } else if !verified {
                     "partial_unverified_restore"
                 } else if hook_hint_count.is_some() {
@@ -6637,11 +6653,10 @@ impl CodeIndexSchedulerRegistryV1 {
         latest_matches_scope_identity(&latest, scope).then_some(latest)
     }
 
-    /// Whether a rebuild remedy is actually in motion for the exact mounted
-    /// root: a reconcile pass owns the worktree right now, or a wake is
-    /// pending for the background worker. A caller serving the stale seat
-    /// quotes this so a wedged route — days-old seat, nothing progressing —
-    /// is distinguishable from a routine rebuild window.
+    /// Whether a source-moving rebuild remedy is actually in motion for the
+    /// exact mounted root. An expired source proof can own the same worker
+    /// without any evidence that the checkout moved; that is verification,
+    /// not a replacement build.
     #[hotpath::measure(
         label = "daemon.code_index.query.rebuild_pass_in_flight",
         future = true
@@ -6663,14 +6678,15 @@ impl CodeIndexSchedulerRegistryV1 {
         {
             return false;
         }
-        worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
+        let refresh_in_flight = worktree.reconcile_in_progress.load(Ordering::Acquire) != 0
             || worktree
                 .pending_wake
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .micros
-                != 0
+                != 0;
+        refresh_in_flight && worktree.source_freshness.source_change_pending()
     }
 
     /// Whether an exact mounted route has no admissible generation because its
@@ -6738,6 +6754,7 @@ impl CodeIndexSchedulerRegistryV1 {
             hints,
             wake,
             pending_wake,
+            reconcile_in_progress,
         ) = {
             let mounted = self.mounted.lock().await;
             let Some((root, worktree)) = unique_mounted_for_scope(&mounted, scope).unique() else {
@@ -6752,6 +6769,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.wake),
                 Arc::clone(&worktree.pending_wake),
+                Arc::clone(&worktree.reconcile_in_progress),
             )
         };
         #[cfg(test)]
@@ -6766,6 +6784,13 @@ impl CodeIndexSchedulerRegistryV1 {
         let Some(wake_claim) = PendingWakeClaimV1::claim(Arc::clone(&pending_wake)) else {
             return false;
         };
+        // The pending marker covers admission until the worker dequeues it;
+        // the pass counter covers the interval after dequeue. A query arriving
+        // in that second interval is already covered by the running source
+        // proof and must not queue an identical follow-up pass.
+        if reconcile_in_progress.load(Ordering::Acquire) != 0 {
+            return false;
+        }
         #[cfg(test)]
         if let Some(test_control) = test_control.as_ref()
             && test_control.pauses_after_claim.load(Ordering::Acquire)

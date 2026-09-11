@@ -55,14 +55,11 @@ pub(super) async fn cleanup_connection_lsp_sessions(
 }
 
 pub(super) fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<AdmittedRoot> {
-    // Document containment compares decoded path segments against this root,
-    // so it has to carry the root's identity rather than the alias spelling
-    // the request arrived with.
-    let identity = tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
-    url::Url::from_file_path(&identity)
-        .or_else(|()| url::Url::from_file_path(project_path))
+    // The root published to clients and the root document containment strips
+    // against have to be the same string, so both come from one authority.
+    tracedecay_application::primitives::admitted_root_uri_for_project(project_path)
         .ok()
-        .map(|uri| AdmittedRoot::new(uri.to_string()))
+        .map(AdmittedRoot::new)
 }
 
 pub(super) async fn admitted_lsp_workspace_for_request(

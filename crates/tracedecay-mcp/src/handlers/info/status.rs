@@ -236,6 +236,7 @@ pub async fn handle_status(
                     let (serving_freshness, condition) = match freshness.staleness_state.as_deref()
                     {
                         Some("fresh") => ("current", None),
+                        Some("verifying") => ("last_complete_stale", Some("source_verification")),
                         Some(_) if freshness.rebuild_in_flight => {
                             ("last_complete_stale", Some("rebuilding"))
                         }
@@ -438,6 +439,14 @@ fn code_index_freshness_projection(
     }
     if authoritative {
         ("current", None)
+    } else if freshness.staleness_state.as_deref() == Some("verifying") {
+        (
+            "stale",
+            Some(
+                "the last complete code index remains available while the scheduler verifies source freshness"
+                    .to_owned(),
+            ),
+        )
     } else {
         (
             "warming",
@@ -795,6 +804,27 @@ mod tests {
             warning
                 .expect("warming names itself")
                 .contains("not authoritative")
+        );
+    }
+
+    #[test]
+    fn a_ready_generation_under_source_verification_is_stale_not_warming() {
+        let freshness =
+            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: "/project".to_owned(),
+                latest_generation_id: Some("generation.fixture".to_owned()),
+                staleness_state: Some("verifying".to_owned()),
+                coverage: "partial_source_verification".to_owned(),
+                ..Default::default()
+            };
+
+        let (status, warning) = code_index_freshness_projection(&freshness);
+
+        assert_eq!(status, "stale");
+        assert!(
+            warning
+                .expect("verification is named")
+                .contains("verifies source freshness")
         );
     }
 

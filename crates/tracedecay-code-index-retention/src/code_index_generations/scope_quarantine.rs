@@ -390,7 +390,12 @@ impl ScopeQuarantineAuthority {
                 "scope reconciliation quarantine contains unexpected entries",
             ));
         }
-        stage.remove_open_dir().map_err(storage)?;
+        // The stage is the one directory a peer daemon is most likely to be
+        // holding open on Windows, and that refusal reads identically to a
+        // corrupt store unless it names itself.
+        stage
+            .remove_open_dir()
+            .map_err(|error| mutation_failed("scope stage unlink", &self.receipt_digest, &error))?;
         if let Some(quarantine) = self.quarantine.as_ref() {
             sync_directory(quarantine).map_err(storage)?;
         }
