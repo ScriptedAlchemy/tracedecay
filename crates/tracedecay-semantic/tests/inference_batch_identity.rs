@@ -1,6 +1,5 @@
-//! Evidence harness for the one optimisation `canonical_encoder_groups`
-//! refuses: merging several canonical encoder groups into one FastEmbed
-//! forward pass.
+//! Byte-identity evidence for the cataloged Jina model when token-length
+//! bucketing changes which texts share a FastEmbed forward pass.
 //!
 //! Groups under-fill badly on real corpora — every multi-chunk file flushes
 //! its own partial group — so merging them is the obvious throughput win. It
@@ -8,14 +7,10 @@
 //!
 //! FastEmbed's `TextEmbedding::transform` splits its input with
 //! `texts.chunks(batch_size)` and runs one `ort::Session::run` per chunk. The
-//! tokenizer pads with `PaddingStrategy::BatchLongest`, so a chunk's ONNX
-//! input shape is `[chunk_len, longest_encoding_in_that_chunk]`. Merging two
-//! groups of different token lengths into one call therefore re-pads the
-//! shorter group's rows, and whether that perturbs the emitted floats is a
-//! property of the specific ONNX graph, not a guarantee anything provides.
-//! Vector bytes feed `vector_output_digest` and thence the generation manifest
-//! digest, so a merge that is safe only for today's single catalog entry would
-//! turn any future catalog addition into an unannounced full re-embed.
+//! tokenizer pads with `PaddingStrategy::BatchLongest`, so regrouping changes
+//! the padded input shape. Vector bytes feed `vector_output_digest`; this gate
+//! therefore requires the only production FastEmbed model to remain exactly
+//! byte-identical under the new grouping.
 //!
 //! Gated like every other model-dependent test in this crate: `#[ignore]` by
 //! default, and a hard failure — never a silent skip — when it is run without
@@ -37,9 +32,9 @@ use fastembed::{
 
 const FIXTURE_ENV: &str = "TRACEDECAY_FASTEMBED_FIXTURE_DIR";
 
-/// `SemanticResourceCeilings::default()`: 32 texts, 512 tokens.
+/// `SemanticResourceCeilings::default()`: 32 texts, 4096 tokens.
 const PRODUCTION_BATCH_SIZE: usize = 32;
-const PRODUCTION_SEQUENCE_LENGTH: usize = 512;
+const PRODUCTION_SEQUENCE_LENGTH: usize = 4096;
 /// `embedding_parallelism::DEFAULT_INTRA_THREADS`.
 const PRODUCTION_INTRA_THREADS: usize = 4;
 
@@ -145,18 +140,9 @@ fn assert_equal_size_merge_is_byte_identical(embedding: &mut TextEmbedding, labe
     );
 }
 
-/// Merge two groups the projector would dispatch separately into a single
-/// forward pass and report whether the emitted floats survived.
-///
-/// The float outcome is deliberately not asserted either way: it is a property
-/// of the ONNX graph, not of anything this repository controls. On
-/// `jinaai/jina-embeddings-v2-base-code` it happens to be byte-identical; on
-/// `Xenova/all-MiniLM-L6-v2` every lane of every row moves by up to 2.4e-2. An
-/// identity-critical path cannot be built on a property that varies per
-/// cataloged model, which is exactly the finding. What *is* asserted is the
-/// shape contract the reported delta is only meaningful against: one row per
-/// input text, and equal dimensionality between the two dispatch strategies.
-fn report_cross_group_merge(embedding: &mut TextEmbedding, label: &str) {
+/// Regroup short and long chunks into one forward pass and require the
+/// cataloged Jina graph to preserve every emitted float bit.
+fn assert_cross_group_merge_is_byte_identical(embedding: &mut TextEmbedding, label: &str) {
     // A five-chunk remainder from a multi-chunk file, then a 27-chunk group:
     // together exactly one admitted 32-wide batch.
     let remainder: Vec<String> = (0..5).map(short_chunk).collect();
@@ -199,12 +185,17 @@ fn report_cross_group_merge(embedding: &mut TextEmbedding, label: &str) {
          max_abs_delta={worst:e} identical={}",
         differing == 0
     );
+    assert_eq!(
+        differing, 0,
+        "token-length regrouping changed catalog-model vector bytes; bump the \
+         canonical projection revision before accepting this change"
+    );
 }
 
 #[test]
 #[ignore = "requires a verified local FastEmbed fixture directory in \
             TRACEDECAY_FASTEMBED_FIXTURE_DIR; run with --ignored"]
-fn merging_encoder_groups_is_not_a_shape_preserving_operation() {
+fn length_bucket_regrouping_preserves_catalog_model_vector_bytes() {
     let root = env::var(FIXTURE_ENV).unwrap_or_else(|_| {
         panic!("this gate must provide its verified FastEmbed fixture in {FIXTURE_ENV}")
     });
@@ -213,6 +204,6 @@ fn merging_encoder_groups_is_not_a_shape_preserving_operation() {
         let label = format!("[intra_threads={intra_threads}]");
         let mut embedding = model(root, intra_threads);
         assert_equal_size_merge_is_byte_identical(&mut embedding, &label);
-        report_cross_group_merge(&mut embedding, &label);
+        assert_cross_group_merge_is_byte_identical(&mut embedding, &label);
     }
 }

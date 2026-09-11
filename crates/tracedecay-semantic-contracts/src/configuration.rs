@@ -67,7 +67,7 @@ impl Default for SemanticResourceCeilings {
             )
             .unwrap_or(1),
             max_batch_size: 32,
-            max_sequence_length: 512,
+            max_sequence_length: 4096,
             load_deadline_ms: 30_000,
         }
     }
