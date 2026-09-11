@@ -993,6 +993,16 @@ impl VerifiedSealedTextGenerationMetadataV1 {
 }
 
 impl<R: Read + Seek> VerifiedSealedLexicalPageSourceV1<R> {
+    // Every argument is a distinct authority the constructor binds together
+    // exactly once: the reader, the manifest, the sanitized snapshot, the
+    // optional statistics, the partitioned file source, its state digest, and
+    // the two page bounds. Grouping any of them into a parameter struct would
+    // invent a type with one construction site and hide which authority a
+    // caller failed to supply.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is a separate authority bound once at construction"
+    )]
     pub(super) fn open_partitioned_parts(
         reader: R,
         manifest: CodeGenerationManifestV1,
