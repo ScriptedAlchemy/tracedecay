@@ -11,7 +11,7 @@ pub const DEFAULT_INCREMENTAL_MAX_DEPTH: i64 = 1;
 pub(crate) const POLICY_ANCHOR_ROLES: &[&str] = &["system", "developer"];
 
 pub(crate) fn is_policy_anchor_role(role: &str) -> bool {
-    POLICY_ANCHOR_ROLES.iter().any(|anchor| *anchor == role)
+    POLICY_ANCHOR_ROLES.contains(&role)
 }
 
 pub(crate) fn policy_anchor_role_sql_in_list() -> String {
