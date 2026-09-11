@@ -15,7 +15,7 @@ use tracedecay_contracts::session_sync::{
 use tracedecay_contracts::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, now_micros,
 };
-use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
+use tracedecay_domain::{BrainId, ProjectId, SessionId, UserProfileId, UtcMicros};
 
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -573,16 +573,42 @@ impl DaemonSessionSyncService {
                 }
             }
             SessionSyncWorkResult::Finished {
-                interruption,
+                mut interruption,
                 committed,
                 stats,
                 coverage,
                 source_frontiers,
-                failure_codes,
+                mut failure_codes,
             } => {
-                let interrupted = interruption.is_some();
+                let mut interrupted = interruption.is_some();
                 let coverage_complete = !coverage.is_empty()
                     && coverage.iter().all(|entry| entry.coverage.is_complete());
+                let projection_current = if !interrupted
+                    && coverage_complete
+                    && failure_codes.is_empty()
+                    && matches!(
+                        request.command(),
+                        SessionSyncCommandV1::ImportTranscripts(_)
+                    ) {
+                    match self
+                        .await_import_projection(&context, &project_sessions, &request)
+                        .await
+                    {
+                        Ok(()) => true,
+                        Err(Some(reason)) => {
+                            interruption = Some(reason);
+                            interrupted = true;
+                            false
+                        }
+                        Err(None) => {
+                            failure_codes
+                                .push("session_temporal_projection_not_current".to_owned());
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
                 let termination = completion_termination(
                     interruption.and_then(work::SessionSyncInterruption::termination),
                     committed,
@@ -606,11 +632,101 @@ impl DaemonSessionSyncService {
                     .is_ok()
                     && committed
                     && !interrupted
+                    && !projection_current
                 {
                     context.project_refresh.wake();
                     context.user_refresh.wake();
                 }
             }
+        }
+    }
+
+    async fn await_import_projection(
+        &self,
+        context: &SessionSyncProjectContext,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
+        request: &SessionSyncRequestV1,
+    ) -> Result<(), Option<work::SessionSyncInterruption>> {
+        let remaining_micros = request
+            .deadline()
+            .expires_at
+            .0
+            .saturating_sub(now_micros().0);
+        let Ok(remaining_micros) = u64::try_from(remaining_micros) else {
+            return Err(Some(work::SessionSyncInterruption::TimedOut));
+        };
+        if remaining_micros == 0 {
+            return Err(Some(work::SessionSyncInterruption::TimedOut));
+        }
+        let timeout = Duration::from_micros(remaining_micros);
+        let projection = async {
+            tokio::join!(
+                context.project_refresh.wake_and_wait_until_idle(timeout),
+                context.user_refresh.wake_and_wait_until_idle(timeout),
+            )
+        };
+        tokio::pin!(projection);
+        let settled = tokio::select! {
+            settled = &mut projection => settled,
+            interruption = self.wait_for_interruption(request) => {
+                return Err(Some(interruption));
+            }
+        };
+        let project = context.project_refresh.status();
+        let user = context.user_refresh.status();
+        if settled.0
+            && settled.1
+            && project.backlog == 0
+            && user.backlog == 0
+            && project.unavailable_reason.is_none()
+            && user.unavailable_reason.is_none()
+            && self
+                .projection_store_is_current(project_sessions, request)
+                .await?
+            && self
+                .projection_store_is_current(&context.user_sessions, request)
+                .await?
+        {
+            Ok(())
+        } else {
+            Err(None)
+        }
+    }
+
+    async fn projection_store_is_current(
+        &self,
+        database: &RegisteredGlobalDbLeaseV1,
+        request: &SessionSyncRequestV1,
+    ) -> Result<bool, Option<work::SessionSyncInterruption>> {
+        let page_limit =
+            crate::session_temporal_refresh_scheduler::projector::SessionTemporalRefreshPolicy::default()
+                .max_begin_requests_per_pass;
+        let active_scan_slots = page_limit / 2;
+
+        let mut active_after: Option<SessionId> = None;
+        loop {
+            let page = {
+                let discovery = database.pending_session_temporal_refresh_page_result(
+                    page_limit,
+                    active_scan_slots,
+                    active_after.as_ref(),
+                );
+                tokio::pin!(discovery);
+                tokio::select! {
+                    page = &mut discovery => page.map_err(|_| None)?,
+                    interruption = self.wait_for_interruption(request) => {
+                        return Err(Some(interruption));
+                    }
+                }
+            };
+            let (pending, next_active, has_more) = page.into_parts();
+            if !pending.is_empty() {
+                return Ok(false);
+            }
+            if !has_more {
+                return Ok(true);
+            }
+            active_after = next_active;
         }
     }
 
