@@ -128,7 +128,6 @@
           "projection": "evidence"
         },
         "node_id": "node.application-parity",
-        "resolve_trait_dispatch": true,
         "scope": {
           "path_prefix": "src"
         }
