@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use serde_json::{Map, Value as JsonValue, json};
 use tracedecay_domain::{ComponentVersion, SanitizationReceiptV1, SanitizerDispositionV1};
@@ -16,8 +17,8 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, p
 use tracedecay_store::SessionMessageRecord;
 
 use super::{
-    LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind, payload,
-    security,
+    LcmError, LcmPayloadRef, LcmRawMessage, LcmRawMessageMetadata, LcmStorageKind,
+    LcmSummarySourceRange, payload, security,
 };
 
 pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
@@ -453,56 +454,153 @@ async fn persist_raw_predecessor_range(
 
 /// Predecessor-range upsert for the `current` rows selected by a predicate.
 ///
-/// Captures each selected message's exact preceding raw interval within its
-/// session. Host recognizers decide whether a row is native compaction
-/// evidence; the generic raw authority only preserves its bounded provenance.
-/// A session's first message has no predecessor, so the joins yield no row for
-/// it. The predicate only narrows which `current` rows are visited; every
-/// visited row is written with its own identity and relation.
-macro_rules! predecessor_range_upsert_sql {
-    ($current_predicate:literal) => {
-        concat!(
-            "INSERT INTO lcm_raw_predecessor_ranges (
-                 provider, message_id, session_id, from_store_id, to_store_id
-             )
-             SELECT current.provider, current.message_id, current.session_id,
-                    first.store_id, prior.store_id
-             FROM lcm_raw_messages AS current
-             JOIN lcm_raw_messages AS first
-               ON first.store_id = (
-                    SELECT candidate.store_id
-                    FROM lcm_raw_messages AS candidate
-                    WHERE candidate.provider = current.provider
-                      AND candidate.session_id = current.session_id
-                      AND candidate.store_id < current.store_id
-                    ORDER BY candidate.store_id
-                    LIMIT 1
-               )
-             JOIN lcm_raw_messages AS prior
-               ON prior.store_id = (
-                    SELECT candidate.store_id
-                    FROM lcm_raw_messages AS candidate
-                    WHERE candidate.provider = current.provider
-                      AND candidate.session_id = current.session_id
-                      AND candidate.store_id < current.store_id
-                    ORDER BY candidate.store_id DESC
-                    LIMIT 1
-               )
-             WHERE ",
-            $current_predicate,
-            "
-             ON CONFLICT(provider, message_id) DO UPDATE SET
-                 session_id = excluded.session_id,
-                 from_store_id = excluded.from_store_id,
-                 to_store_id = excluded.to_store_id"
-        )
-    };
+/// Captures each selected message's preceding conversational interval: first
+/// and last earlier raw rows whose roles are not policy anchors. Compression
+/// pins `system`/`developer` rows separately as `pinned_anchors` and drops
+/// them from the backlog native evidence is compared against, so those
+/// leading/trailing markers must not widen this interval. A session whose
+/// only earlier rows are policy anchors has no predecessor, and the joins
+/// yield no row. The predicate only narrows which `current` rows are
+/// visited; every visited row is written with its own identity and relation.
+///
+/// Ingest writes one range per message, so the statement text is built once
+/// per predicate ([`PREDECESSOR_RANGE_UPSERT_BY_IDENTITY`],
+/// [`PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE`]) instead of per call.
+fn predecessor_range_upsert_sql(current_predicate: &str) -> String {
+    let role_list = crate::compression_policy::policy_anchor_role_sql_in_list();
+    format!(
+        "INSERT INTO lcm_raw_predecessor_ranges (
+             provider, message_id, session_id, from_store_id, to_store_id
+         )
+         SELECT current.provider, current.message_id, current.session_id,
+                first.store_id, prior.store_id
+         FROM lcm_raw_messages AS current
+         JOIN lcm_raw_messages AS first
+           ON first.store_id = (
+                SELECT candidate.store_id
+                FROM lcm_raw_messages AS candidate
+                WHERE candidate.provider = current.provider
+                  AND candidate.session_id = current.session_id
+                  AND candidate.store_id < current.store_id
+                  AND candidate.role NOT IN ({role_list})
+                ORDER BY candidate.store_id
+                LIMIT 1
+           )
+         JOIN lcm_raw_messages AS prior
+           ON prior.store_id = (
+                SELECT candidate.store_id
+                FROM lcm_raw_messages AS candidate
+                WHERE candidate.provider = current.provider
+                  AND candidate.session_id = current.session_id
+                  AND candidate.store_id < current.store_id
+                  AND candidate.role NOT IN ({role_list})
+                ORDER BY candidate.store_id DESC
+                LIMIT 1
+           )
+         WHERE {current_predicate}
+         ON CONFLICT(provider, message_id) DO UPDATE SET
+             session_id = excluded.session_id,
+             from_store_id = excluded.from_store_id,
+             to_store_id = excluded.to_store_id"
+    )
 }
 
-const PREDECESSOR_RANGE_FOR_IDENTITY_SQL: &str =
-    predecessor_range_upsert_sql!("current.provider = ?1 AND current.message_id = ?2");
-const PREDECESSOR_RANGES_FOR_STORE_RANGE_SQL: &str =
-    predecessor_range_upsert_sql!("current.store_id > ?1 AND current.store_id <= ?2");
+static PREDECESSOR_RANGE_UPSERT_BY_IDENTITY: LazyLock<String> = LazyLock::new(|| {
+    predecessor_range_upsert_sql("current.provider = ?1 AND current.message_id = ?2")
+});
+
+static PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE: LazyLock<String> = LazyLock::new(|| {
+    predecessor_range_upsert_sql("current.store_id > ?1 AND current.store_id <= ?2")
+});
+
+/// Typed state of one raw message's conversational predecessor interval.
+///
+/// An absent row in `lcm_raw_predecessor_ranges` is ambiguous on its own, so
+/// this resolves it against the same policy-anchor authority the interval is
+/// derived from: a message with no earlier conversational row genuinely has
+/// no interval, while a message that is owed one and has none is unavailable
+/// (the background rewrite has not reached it, or the range was lost).
+/// Neither may be published as summary provenance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LcmPredecessorRangeState {
+    Interval(LcmSummarySourceRange),
+    NoPredecessor,
+    Unavailable,
+}
+
+impl LcmPredecessorRangeState {
+    pub fn interval(&self) -> Option<&LcmSummarySourceRange> {
+        match self {
+            Self::Interval(interval) => Some(interval),
+            Self::NoPredecessor | Self::Unavailable => None,
+        }
+    }
+
+    /// Stable reason label for the states that carry no interval.
+    pub fn absent_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Interval(_) => None,
+            Self::NoPredecessor => Some("no_predecessor_interval"),
+            Self::Unavailable => Some("predecessor_interval_unavailable"),
+        }
+    }
+}
+
+static PREDECESSOR_RANGE_STATE_SQL: LazyLock<String> = LazyLock::new(|| {
+    let role_list = crate::compression_policy::policy_anchor_role_sql_in_list();
+    format!(
+        "SELECT range.from_store_id, range.to_store_id,
+                EXISTS (
+                    SELECT 1
+                    FROM lcm_raw_messages AS earlier
+                    WHERE earlier.provider = ?1
+                      AND earlier.session_id = ?2
+                      AND earlier.store_id < ?3
+                      AND earlier.role NOT IN ({role_list})
+                )
+         FROM lcm_raw_messages AS owner
+         LEFT JOIN lcm_raw_predecessor_ranges AS range
+           ON range.provider = owner.provider
+          AND range.message_id = owner.message_id
+          AND range.session_id = owner.session_id
+         WHERE owner.provider = ?1 AND owner.session_id = ?2
+           AND owner.store_id = ?3
+         LIMIT 1"
+    )
+});
+
+/// Resolves the persisted predecessor interval of one raw message.
+pub async fn predecessor_range_state(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    store_id: i64,
+) -> Result<LcmPredecessorRangeState, LcmError> {
+    let mut rows = conn
+        .query(
+            PREDECESSOR_RANGE_STATE_SQL.as_str(),
+            params![provider, session_id, store_id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        // The store id names no row in the raw authority, so no interval can
+        // be derived for it at all.
+        return Ok(LcmPredecessorRangeState::Unavailable);
+    };
+    let from_store_id = row.get::<Option<i64>>(0)?;
+    let to_store_id = row.get::<Option<i64>>(1)?;
+    let owes_interval = row.get::<i64>(2)? != 0;
+    Ok(match (from_store_id, to_store_id) {
+        (Some(from_store_id), Some(to_store_id)) => {
+            LcmPredecessorRangeState::Interval(LcmSummarySourceRange {
+                from_store_id,
+                to_store_id,
+            })
+        }
+        _ if owes_interval => LcmPredecessorRangeState::Unavailable,
+        _ => LcmPredecessorRangeState::NoPredecessor,
+    })
+}
 
 pub(crate) async fn persist_raw_predecessor_range_for_identity(
     conn: &(impl Executor + ?Sized),
@@ -511,7 +609,7 @@ pub(crate) async fn persist_raw_predecessor_range_for_identity(
 ) -> Result<(), LcmError> {
     // Capture the exact preceding raw interval in the same ingest transaction.
     conn.execute(
-        PREDECESSOR_RANGE_FOR_IDENTITY_SQL,
+        PREDECESSOR_RANGE_UPSERT_BY_IDENTITY.as_str(),
         params![provider, message_id],
     )
     .await?;
@@ -528,11 +626,44 @@ pub(crate) async fn persist_raw_predecessor_ranges_for_store_range(
     to_store_id_inclusive: i64,
 ) -> Result<(), LcmError> {
     conn.execute(
-        PREDECESSOR_RANGES_FOR_STORE_RANGE_SQL,
+        PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE.as_str(),
         params![from_store_id_exclusive, to_store_id_inclusive],
     )
     .await?;
     Ok(())
+}
+
+/// Rewrite persisted predecessor ranges for one keyset page of raw messages.
+///
+/// Rows ingested before the policy-anchor filter hold unfiltered intervals,
+/// and a row whose only earlier rows are policy anchors must lose its range
+/// entirely rather than keep a widened one, so the page deletes the selected
+/// rows' ranges before re-deriving them from the current authority. Both
+/// statements are set-based over the same keyset window.
+pub(crate) async fn rewrite_predecessor_ranges_for_store_range(
+    conn: &(impl Executor + ?Sized),
+    from_store_id_exclusive: i64,
+    to_store_id_inclusive: i64,
+) -> Result<(), LcmError> {
+    conn.execute(
+        "DELETE FROM lcm_raw_predecessor_ranges
+         WHERE EXISTS (
+             SELECT 1
+             FROM lcm_raw_messages AS owner
+             WHERE owner.provider = lcm_raw_predecessor_ranges.provider
+               AND owner.message_id = lcm_raw_predecessor_ranges.message_id
+               AND owner.store_id > ?1
+               AND owner.store_id <= ?2
+         )",
+        params![from_store_id_exclusive, to_store_id_inclusive],
+    )
+    .await?;
+    persist_raw_predecessor_ranges_for_store_range(
+        conn,
+        from_store_id_exclusive,
+        to_store_id_inclusive,
+    )
+    .await
 }
 
 fn externalized_payload_metadata(
