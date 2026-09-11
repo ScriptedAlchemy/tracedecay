@@ -855,7 +855,7 @@ impl DaemonConfigurationRuntimeRegistrar {
     /// profile `ProfileSessions` configuration is the sole installer; project
     /// registration must never invent or replace process CPU authority.
     pub fn ensure_worker_plan(&self) -> Result<(), TraceDecayError> {
-        tracedecay_code_index::parallelism::installed_worker_status()
+        tracedecay_code_index_runtime::parallelism::installed_worker_status()
             .map(|_| ())
             .ok_or_else(|| TraceDecayError::Config {
                 message: "profile code-index worker plan was not installed during daemon bootstrap"
