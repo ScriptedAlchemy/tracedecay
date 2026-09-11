@@ -19,9 +19,11 @@ use tracedecay_domain::{BrainId, ProjectId, SessionId, UserProfileId, UtcMicros}
 
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
+use tracedecay_sessions::serving::{
+    SessionProjectionServingState, SessionProjectionServingStatusPort,
+};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
 const COALESCED_JOURNAL_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
@@ -36,7 +38,6 @@ pub struct DaemonSessionSyncService {
     scan_slots: Arc<tokio::sync::Semaphore>,
     project_gates: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
-    completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
     shutdown: tracedecay_application::observation::ObservationCancellation,
     shutdown_notify: Arc<tokio::sync::Notify>,
     journal_changed: Arc<tokio::sync::Notify>,
@@ -130,7 +131,6 @@ impl Default for DaemonSessionSyncService {
             scan_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             project_gates: Arc::new(Mutex::new(BTreeMap::new())),
             active_imports: Arc::new(Mutex::new(BTreeMap::new())),
-            completed_profile_sweeps: Arc::new(Mutex::new(BTreeMap::new())),
             shutdown: tracedecay_application::observation::ObservationCancellation::default(),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             journal_changed: Arc::new(tokio::sync::Notify::new()),
@@ -529,7 +529,7 @@ impl DaemonSessionSyncService {
                 .await;
             return;
         }
-        let running = match self.transition_running(&context, &key).await {
+        let _running = match self.transition_running(&context, &key).await {
             Ok(running) => running,
             Err(_) => {
                 drop(permit);
@@ -539,13 +539,7 @@ impl DaemonSessionSyncService {
         let work = match request.command() {
             SessionSyncCommandV1::ImportTranscripts(_) => {
                 hotpath::future!(
-                    context.import_transcripts(
-                        self,
-                        &key,
-                        running.admission.accepted_at,
-                        &request,
-                        project_sessions.clone(),
-                    ),
+                    context.import_transcripts(self, &key, &request, project_sessions.clone(),),
                     label = "daemon.session_sync.import_transcripts"
                 )
                 .await
@@ -581,34 +575,34 @@ impl DaemonSessionSyncService {
                 mut failure_codes,
             } => {
                 let mut interrupted = interruption.is_some();
+                let is_import = matches!(
+                    request.command(),
+                    SessionSyncCommandV1::ImportTranscripts(_)
+                );
+                let mut projection_current = false;
                 let coverage_complete = !coverage.is_empty()
                     && coverage.iter().all(|entry| entry.coverage.is_complete());
-                let projection_current = if !interrupted
+                if !projection_current
+                    && !interrupted
                     && coverage_complete
                     && failure_codes.is_empty()
-                    && matches!(
-                        request.command(),
-                        SessionSyncCommandV1::ImportTranscripts(_)
-                    ) {
+                    && is_import
+                {
                     match self
                         .await_import_projection(&context, &project_sessions, &request)
                         .await
                     {
-                        Ok(()) => true,
+                        Ok(()) => projection_current = true,
                         Err(Some(reason)) => {
                             interruption = Some(reason);
                             interrupted = true;
-                            false
                         }
                         Err(None) => {
                             failure_codes
                                 .push("session_temporal_projection_not_current".to_owned());
-                            false
                         }
                     }
-                } else {
-                    false
-                };
+                }
                 let termination = completion_termination(
                     interruption.and_then(work::SessionSyncInterruption::termination),
                     committed,
@@ -638,6 +632,71 @@ impl DaemonSessionSyncService {
                     context.user_refresh.wake();
                 }
             }
+        }
+    }
+
+    async fn await_import_history(
+        &self,
+        context: &SessionSyncProjectContext,
+        project_sessions: &RegisteredGlobalDbLeaseV1,
+        request: &SessionSyncRequestV1,
+    ) -> Result<
+        crate::session_temporal_refresh_scheduler::history::SessionHistoricalIngestProgress,
+        Option<work::SessionSyncInterruption>,
+    > {
+        let remaining_micros = request
+            .deadline()
+            .expires_at
+            .0
+            .saturating_sub(now_micros().0);
+        let Ok(remaining_micros) = u64::try_from(remaining_micros) else {
+            return Err(Some(work::SessionSyncInterruption::TimedOut));
+        };
+        if remaining_micros == 0 {
+            return Err(Some(work::SessionSyncInterruption::TimedOut));
+        }
+        let timeout = Duration::from_micros(remaining_micros);
+        let history = async {
+            tokio::join!(
+                context
+                    .project_refresh
+                    .wake_history_and_wait_until_idle(timeout),
+                context
+                    .user_refresh
+                    .wake_history_and_wait_until_idle(timeout),
+            )
+        };
+        tokio::pin!(history);
+        let settled = tokio::select! {
+            settled = &mut history => settled,
+            interruption = self.wait_for_interruption(request) => {
+                return Err(Some(interruption));
+            }
+        };
+        if let (Some(project), Some(user)) = settled
+            && matches!(
+                context.project_refresh.serving_status().state,
+                SessionProjectionServingState::Current
+            )
+            && matches!(
+                context.user_refresh.serving_status().state,
+                SessionProjectionServingState::Current
+            )
+            && self
+                .projection_store_is_current(project_sessions, request)
+                .await?
+            && self
+                .projection_store_is_current(&context.user_sessions, request)
+                .await?
+        {
+            Ok(
+                crate::session_temporal_refresh_scheduler::history::SessionHistoricalIngestProgress {
+                    stats: project.stats.merge(user.stats),
+                    committed: project.committed || user.committed,
+                },
+            )
+        } else {
+            Err(None)
         }
     }
 
@@ -680,6 +739,14 @@ impl DaemonSessionSyncService {
             && user.backlog == 0
             && project.unavailable_reason.is_none()
             && user.unavailable_reason.is_none()
+            && matches!(
+                context.project_refresh.serving_status().state,
+                SessionProjectionServingState::Current
+            )
+            && matches!(
+                context.user_refresh.serving_status().state,
+                SessionProjectionServingState::Current
+            )
             && self
                 .projection_store_is_current(project_sessions, request)
                 .await?
@@ -1036,15 +1103,6 @@ pub mod test_harness {
     use std::sync::{Arc, PoisonError};
     use std::time::Duration;
 
-    use tokio::sync::Semaphore;
-    use tracedecay_contracts::session_sync::{
-        SessionSyncJournalV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncStatsV1,
-    };
-    use tracedecay_contracts::{
-        CancellationSignal, Deadline, IdempotencyKey, OperationTermination,
-    };
-    use tracedecay_domain::UtcMicros;
-
     use super::{DaemonSessionSyncService, SessionSyncTaskV1};
     use crate::session_temporal_refresh_scheduler::projector::{
         SessionTemporalRefreshPolicy, SessionTemporalRefreshProjector,
@@ -1054,6 +1112,13 @@ pub mod test_harness {
     };
     use crate::session_temporal_refresh_scheduler::wake::{
         RecoverySelectionGuard, SessionTemporalRefreshRetryClass,
+    };
+    use tokio::sync::Semaphore;
+    use tracedecay_contracts::session_sync::{
+        SessionSyncJournalV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncStatsV1,
+    };
+    use tracedecay_contracts::{
+        CancellationSignal, Deadline, IdempotencyKey, OperationTermination,
     };
 
     pub use crate::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshPassReport;
@@ -1115,13 +1180,6 @@ pub mod test_harness {
 
     pub fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
         super::journal_prefix(scope)
-    }
-
-    pub fn completed_profile_sweep_covers(
-        sweep_started_at: Option<&UtcMicros>,
-        admitted_at: UtcMicros,
-    ) -> bool {
-        super::completed_profile_sweep_covers(sweep_started_at, admitted_at)
     }
 
     pub fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {
@@ -1251,38 +1309,6 @@ fn import_scope_key(scope: &SessionSyncScopeV1) -> String {
         scope.project_id().as_str().len(),
         scope.project_id().as_str(),
     )
-}
-
-fn completed_profile_sweep_covers(
-    sweep_started_at: Option<&UtcMicros>,
-    admitted_at: UtcMicros,
-) -> bool {
-    sweep_started_at.is_some_and(|sweep_started_at| *sweep_started_at >= admitted_at)
-}
-
-fn source_coverage(
-    store_scope: &str,
-    coverage: tracedecay_sessions::runtime::IngestPassCoverage,
-) -> SessionSyncSourceCoverageV1 {
-    let coverage = match coverage {
-        tracedecay_sessions::runtime::IngestPassCoverage::Complete => {
-            SessionSyncCoverageV1::Complete
-        }
-        tracedecay_sessions::runtime::IngestPassCoverage::Partial { deferred_units } => {
-            SessionSyncCoverageV1::Partial { deferred_units }
-        }
-        tracedecay_sessions::runtime::IngestPassCoverage::Backpressured {
-            admitted_units,
-            rejected_units,
-        } => SessionSyncCoverageV1::Backpressured {
-            admitted_units,
-            rejected_units,
-        },
-    };
-    SessionSyncSourceCoverageV1 {
-        store_scope: store_scope.to_owned(),
-        coverage,
-    }
 }
 
 fn journal_key(scope: &SessionSyncScopeV1, key: &IdempotencyKey) -> String {

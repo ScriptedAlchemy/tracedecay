@@ -200,23 +200,7 @@ fn seed_profile(temp: &TempDir) -> (PathBuf, PathBuf) {
 
         fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    // Publish the identity record the way the daemon does: through the private
-    // record authority, so the file carries the exact owner-private mode/DACL
-    // the backup reader admits on every platform, instead of a per-platform
-    // repair of a file the fixture created permissively.
-    let identity_path = profile.join("profile-identity.json");
-    DatabaseAuthority::publish_record_atomically(
-        &identity_path.with_extension("json.tmp"),
-        &identity_path,
-        &serde_json::to_vec_pretty(&serde_json::json!({
-            "schema_version": 1,
-            "brain_id": BRAIN_ID,
-            "profile_id": PROFILE_ID,
-        }))
-        .unwrap(),
-        PROFILE_IDENTITY_RECORD_NAME,
-    )
-    .unwrap();
+    crate::profile_backup_rehearsal_test::write_profile_identity(&profile, BRAIN_ID, PROFILE_ID);
     for (name, value) in [("enrollment.json", "{}"), ("config.toml", "[profile]\n")] {
         fs::write(profile.join(name), value).unwrap();
     }
