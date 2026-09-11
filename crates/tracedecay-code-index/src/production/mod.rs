@@ -1554,7 +1554,8 @@ where
                 )),
             ));
         }
-        active.validate()?;
+        // Extractor revisions may change persisted row identity. Reject stale
+        // artifacts before applying same-revision integrity validation.
         let compatibility = active.compatibility_with(&self.config);
         if !compatibility.is_reusable() {
             return Ok(ActiveGenerationLookupV1 {
@@ -1562,6 +1563,7 @@ where
                 cas_incumbent: Some(active.manifest.generation_id.clone()),
             });
         }
+        active.validate()?;
         let cas_incumbent = Some(active.manifest.generation_id.clone());
         Ok(ActiveGenerationLookupV1 {
             reusable: Some(active),
