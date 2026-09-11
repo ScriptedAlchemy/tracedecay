@@ -431,6 +431,19 @@ impl BranchPublicationContextV1 {
                 )
             })?;
         if !schedulers
+            .request_complete_generation(canonical_worktree_root)
+            .await
+        {
+            return Err(TraceDecayError::project_route(
+                CODE_INDEX_SCHEDULER_UNAVAILABLE,
+                true,
+                format!(
+                    "code-index scheduler is unavailable for branch worktree '{}'",
+                    canonical_worktree_root.display()
+                ),
+            ));
+        }
+        if !schedulers
             .notify_hook_overflow(canonical_worktree_root)
             .await
         {

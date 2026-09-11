@@ -65,6 +65,10 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         .subscribe_serving_generation_changes(&project)
         .await
         .expect("serving subscription");
+    assert!(
+        registry.request_complete_generation(&project).await,
+        "mounted worktree admits complete-generation demand"
+    );
     drop(admission);
     let published = tokio::time::timeout(Duration::from_secs(5), publications.recv())
         .await

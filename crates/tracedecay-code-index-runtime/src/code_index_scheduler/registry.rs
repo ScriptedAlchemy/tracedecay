@@ -2629,10 +2629,13 @@ impl CodeIndexSchedulerRegistryV1 {
         self.generation_publications.subscribe()
     }
 
-    /// Admit complete-generation demand and subscribe before probing the serving
-    /// slot. Sealed publication precedes serving, including on a restored mount
-    /// where no new publication event is emitted. Successful source revalidation
-    /// also signals this watch when an unchanged complete generation stays seated.
+    /// Subscribe before probing the serving slot. Sealed publication precedes
+    /// serving, including on a restored mount where no new publication event is
+    /// emitted. Successful source revalidation also signals this watch when an
+    /// unchanged complete generation stays seated.
+    ///
+    /// This is a watch only. Callers that need complete-generation demand must
+    /// also call [`Self::request_complete_generation`].
     pub async fn subscribe_serving_generation_changes(
         &self,
         project_root: &Path,
@@ -2640,7 +2643,20 @@ impl CodeIndexSchedulerRegistryV1 {
         let project_root = project_root.canonicalize().ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&project_root)?;
-        let changes = worktree.serving_generation_changed.subscribe();
+        Some(worktree.serving_generation_changed.subscribe())
+    }
+
+    /// Stamp complete-generation demand for a mounted worktree. The first flip
+    /// notes a [`CodeIndexCadenceTriggerV1::QueryAdmission`] wake so the worker
+    /// yields text-only work and seats a complete generation.
+    pub async fn request_complete_generation(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
         if !worktree
             .complete_generation_requested
             .swap(true, Ordering::AcqRel)
@@ -2651,7 +2667,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 CodeIndexCadenceTriggerV1::QueryAdmission,
             );
         }
-        Some(changes)
+        true
     }
 
     /// Observe serving-slot seating. Each advance means the serving slot was
