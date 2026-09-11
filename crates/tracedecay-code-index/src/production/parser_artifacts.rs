@@ -1,6 +1,6 @@
 use tracedecay_code_extraction::incremental::{ParseCompleteness, ParseDocumentIdentity};
 use tracedecay_code_extraction::{
-    ExtractionArtifactV1, LanguageExtractor as ParserLanguageExtractor,
+    ExtractionArtifactV1, LanguageExtractor as ParserLanguageExtractor, SchemaEvidenceIssueV1,
 };
 use tracedecay_domain::SanitizedCodeFileV1;
 
@@ -47,6 +47,9 @@ pub(super) fn parse_for_indexing(
             .result
             .errors
             .push(format!("retained parse incomplete: {reasons:?}"));
+        if let Some(evidence) = &mut extraction.artifact.schema_evidence {
+            evidence.mark_partial(SchemaEvidenceIssueV1::ParseError);
+        }
     }
     Ok((extraction.artifact, parsed_len))
 }

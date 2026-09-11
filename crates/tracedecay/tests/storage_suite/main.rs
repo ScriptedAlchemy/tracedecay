@@ -5,6 +5,7 @@
 //! Windows CI time. Migration engine coverage now lives beside the private
 //! runtime APIs in `db::schema::tests`.
 
+#![allow(clippy::too_many_lines)]
 #[path = "../common/mod.rs"]
 mod common;
 mod home_env_lock;

@@ -448,6 +448,59 @@ pub(crate) async fn read_or_initialize_profile_code_index_worker_configuration(
         .map_err(map_configuration_error)
 }
 
+/// Runs only against an uninitialized store; the initial revision publishes
+/// exactly the daemon-owned project source binding.
+async fn initialize_canonical_project_configuration(
+    store: &GlobalDbConfigurationControlStore<'_>,
+    target: &RuntimeConfigurationTarget,
+) -> Result<()> {
+    let registry = registry::ConfigurationRegistry::core()
+        .map_err(|error| config_error(format!("configuration registry unavailable: {error}")))?;
+    let target_layer = ConfigurationLayerIdV1::Project {
+        project_id: target.project_id.clone(),
+    };
+    let initial_revision_id = ConfigurationRevisionId::new("configuration.initial.canonical.v1")
+        .map_err(|error| {
+            config_error(format!("invalid initial configuration revision: {error}"))
+        })?;
+    let daemon_binding =
+        tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
+            &target.project_id,
+            &target.project_root,
+        )
+        .map_err(|error| {
+            config_error(format!(
+                "daemon project source binding could not be derived: {error}"
+            ))
+        })?;
+    let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
+        .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))?;
+    let resolution = resolver::resolve_configuration(
+        &registry,
+        &[resolver::ConfigurationLayerV1 {
+            layer: target_layer,
+            revision_id: initial_revision_id.clone(),
+            entries: BTreeMap::from([(
+                source_bindings_key,
+                ConfigurationValueV1::SourceBindings(vec![daemon_binding]),
+            )]),
+        }],
+    )
+    .map_err(|error| {
+        config_error(format!(
+            "canonical configuration initialization could not resolve: {error}"
+        ))
+    })?;
+    store
+        .initialize_canonical(&initial_revision_id, &resolution, now_micros())
+        .await
+        .map_err(map_configuration_error)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Open converges the durable current revision and verifies the daemon-owned source binding before any caller sees the pin."
+)]
 async fn open_runtime_configuration_from_store(
     target: RuntimeConfigurationTarget,
     store: &GlobalDbConfigurationControlStore<'_>,
@@ -460,50 +513,7 @@ async fn open_runtime_configuration_from_store(
         {
             return Err(map_configuration_error(error));
         }
-        let registry = registry::ConfigurationRegistry::core().map_err(|error| {
-            config_error(format!("configuration registry unavailable: {error}"))
-        })?;
-        let target_layer = ConfigurationLayerIdV1::Project {
-            project_id: target.project_id.clone(),
-        };
-        let initial_revision_id =
-            ConfigurationRevisionId::new("configuration.initial.canonical.v1").map_err(
-                |error| config_error(format!("invalid initial configuration revision: {error}")),
-            )?;
-        let daemon_binding =
-            tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
-                &target.project_id,
-                &target.project_root,
-            )
-            .map_err(|error| {
-                config_error(format!(
-                    "daemon project source binding could not be derived: {error}"
-                ))
-            })?;
-        let source_bindings_key =
-            SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).map_err(|error| {
-                config_error(format!("invalid source bindings setting key: {error}"))
-            })?;
-        let resolution = resolver::resolve_configuration(
-            &registry,
-            &[resolver::ConfigurationLayerV1 {
-                layer: target_layer,
-                revision_id: initial_revision_id.clone(),
-                entries: BTreeMap::from([(
-                    source_bindings_key,
-                    ConfigurationValueV1::SourceBindings(vec![daemon_binding]),
-                )]),
-            }],
-        )
-        .map_err(|error| {
-            config_error(format!(
-                "canonical configuration initialization could not resolve: {error}"
-            ))
-        })?;
-        store
-            .initialize_canonical(&initial_revision_id, &resolution, now_micros())
-            .await
-            .map_err(map_configuration_error)?;
+        initialize_canonical_project_configuration(store, &target).await?;
     }
     let daemon_binding =
         tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(

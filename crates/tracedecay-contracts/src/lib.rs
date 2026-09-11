@@ -186,7 +186,6 @@ pub use git::{
     NativeIntegrationApplySurfaceRequest, NativeIntegrationCancelDispositionV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationCancelSurfaceRequest,
     NativeIntegrationCancellationProjectionV1, NativeIntegrationContractError,
-    NativeIntegrationEvidenceRevisionsV1, NativeIntegrationEvidenceRevisionsWireV1,
     NativeIntegrationPort, NativeIntegrationPortError, NativeIntegrationPreflightOutcomeV1,
     NativeIntegrationPreflightRequestV1, NativeIntegrationPreflightSurfaceRequest,
     NativeIntegrationPreviewProjectionV1, NativeIntegrationReceiptProjectionV1,

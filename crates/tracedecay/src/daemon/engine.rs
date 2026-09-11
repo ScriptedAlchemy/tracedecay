@@ -1032,6 +1032,10 @@ impl DaemonEngine {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Owner reconciliation is one compare-and-swap pass over mounted databases."
+    )]
     pub(super) fn database_owner_reconciler(
         &self,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,

@@ -3195,6 +3195,10 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // The Workflows workspace's standing read (`operation.workflow.
   // list_definitions`), through the same application envelope walker.
   '/api/application/workflow/list-definitions': workEnvelope(workflowDefinitionsPayload()),
+  // Agents token frontier (`operation.handoff.list_task_handoffs`). Same
+  // application envelope as Work/Workflow reads; payload is the generated
+  // `ListTaskHandoffsResultV1`.
+  '/api/application/handoff/list-task': workEnvelope(listTaskHandoffsPayload()),
 };
 
 /** Two registered workflow definitions with real step graphs, so the audited
@@ -3266,6 +3270,54 @@ function workflowDefinitionsPayload(): Record<string, unknown>[] {
       ],
     },
   ];
+}
+
+/** Outstanding and dropped tokens for the newest tree session the Agents
+ * page actually names (`session.cursor.solo`). Counts match the rows. */
+function listTaskHandoffsPayload(): Record<string, unknown> {
+  const digest = (label: string): string =>
+    `sha256:${label.padEnd(8, '0')}${'0'.repeat(56)}`.slice(0, 71);
+  return {
+    observed_at: WORK_GRAPH_OBSERVED_AT,
+    open_count: 1,
+    expired_count: 1,
+    consumed_count: 0,
+    truncated: false,
+    handoffs: [
+      {
+        token_digest: digest('open'),
+        issued_request_id: 'request.handoff.outstanding',
+        session_id: 'session.cursor.solo',
+        kind: 'task',
+        target: {
+          kind: 'task',
+          task_id: 'task.agents-handoff-surface',
+          version: 1,
+          owner_version_digest: digest('owner'),
+        },
+        issued_at: WORK_GRAPH_OBSERVED_AT - 4 * WORK_HOUR_MICROS,
+        expires_at: WORK_GRAPH_OBSERVED_AT + 20 * WORK_HOUR_MICROS,
+        state: 'open',
+        consumed_at: null,
+      },
+      {
+        token_digest: digest('lapse'),
+        issued_request_id: 'request.handoff.lapsed',
+        session_id: 'session.cursor.solo',
+        kind: 'task',
+        target: {
+          kind: 'task',
+          task_id: 'task.agents-failure-context',
+          version: 1,
+          owner_version_digest: digest('owner'),
+        },
+        issued_at: WORK_GRAPH_OBSERVED_AT - 30 * WORK_HOUR_MICROS,
+        expires_at: WORK_GRAPH_OBSERVED_AT - 6 * WORK_HOUR_MICROS,
+        state: 'expired',
+        consumed_at: null,
+      },
+    ],
+  };
 }
 
 /** Prefix fixtures for query-bearing / dynamic routes. The resolver falls back

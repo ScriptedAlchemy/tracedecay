@@ -571,7 +571,7 @@ pub async fn apply_code_generation_retention(
     // pass reports its degradation and collects nothing until an exact — or
     // canonically empty — inventory is readable again. Reset, corrupt, and
     // denied vector authorities stay fail-closed for the same reason.
-    let (vector_readable_sources, inventory_mode) = match &vector_inventory {
+    let (mut vector_readable_sources, inventory_mode) = match &vector_inventory {
         VectorRetentionInventoryV1::Online { sources, .. } => (sources.clone(), "online"),
         VectorRetentionInventoryV1::SemanticUnseated => (
             serving_generation_pins(schedulers, &layout.project_root).await,
@@ -584,6 +584,27 @@ pub async fn apply_code_generation_retention(
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
+    // Native previews bind retained-only candidate generations between
+    // preflight and terminal apply. Their durable commitments are liveness
+    // roots just like vector-readable generations; omitting them lets an
+    // ordinary maintenance tick collect the exact evidence apply must reopen.
+    let Some(serving_scope) = schedulers.serving_code_scope(&layout.project_root).await else {
+        return CodeGenerationRetentionOutcomeV1::Failed;
+    };
+    let native_store = tracedecay_global_db::GlobalDbNativeIntegrationStore::new(
+        lease.profile_database().as_ref(),
+    );
+    let native_pins = match native_store
+        .live_candidate_generation_bindings(
+            &serving_scope.repository_id,
+            tracedecay_contracts::clock::now_micros(),
+        )
+        .await
+    {
+        Ok(pins) => pins,
+        Err(_) => return CodeGenerationRetentionOutcomeV1::Failed,
+    };
+    vector_readable_sources.extend(native_pins);
     // A held replay pool makes every later phase of this pass fail closed:
     // the release reconcile's pool acquisition would burn its whole
     // graph-operation deadline discovering the holder (the live wedge logged

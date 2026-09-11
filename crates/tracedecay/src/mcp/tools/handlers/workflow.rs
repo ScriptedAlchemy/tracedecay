@@ -128,6 +128,10 @@ fn test_target_key(node: &GraphTestSymbol) -> String {
 
 /// Handles `tracedecay_diagnose`.
 #[hotpath::measure(future = true, label = "mcp.workflow.diagnose.total")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Diagnose handling is one workflow match onto the live diagnostic readers."
+)]
 pub(super) async fn handle_diagnose(
     cg: &TraceDecay,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
@@ -555,6 +559,10 @@ where
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Affected-test run is one select-and-execute through the injected runner."
+)]
 async fn handle_run_affected_tests_with_runner<F, Runner, RunFuture>(
     cg: &TraceDecay,
     graph: F,

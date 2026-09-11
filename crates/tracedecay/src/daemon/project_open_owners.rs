@@ -18,6 +18,7 @@ use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 
 use super::DaemonInvocationState;
 use crate::mcp::McpServer;
+use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationAnalysisV1;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::primitives::admitted_root_uri_for_project;
 use tracedecay_application::semantic_runtime::{
@@ -162,6 +163,10 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 
 /// Registers code-index-independent owners for one newly inserted project.
 #[hotpath::measure(label = "daemon.project.owners.register", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Production owner registration is one ordered phase list for a project open."
+)]
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
@@ -369,6 +374,11 @@ pub(super) async fn register_project_open_production_owners(
     // policy identity. Non-Git projects advertise no native mutation
     // authority; the handler keeps answering the typed unavailable result.
     let native_owner = if let Some(repository_root) = repository_root {
+        let analysis = Arc::new(DaemonNativeIntegrationAnalysisV1::new(
+            invocation.code_index_schedulers.clone(),
+            scope.clone(),
+            tokio::runtime::Handle::current(),
+        ));
         let native_owner = hotpath::future!(
             async {
                 let native_owner = native_integration
@@ -379,6 +389,7 @@ pub(super) async fn register_project_open_production_owners(
                         scope.repository_id.clone(),
                         configuration_policy_digest.clone(),
                         now_micros(),
+                        analysis,
                     )
                     .await
                     .map_err(|error| TraceDecayError::Config {
@@ -785,6 +796,10 @@ pub(super) async fn register_project_open_production_owners(
 }
 
 #[hotpath::measure(label = "daemon.project.activate.semantic", future = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Semantic configuration owners are registered as one catalog-and-runtime bind."
+)]
 async fn register_semantic_configuration_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,

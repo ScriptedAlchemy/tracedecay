@@ -11,8 +11,8 @@ use std::time::Instant;
 
 use thiserror::Error;
 use tracedecay_contracts::feedback::{
-    CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, FeedbackCompletedPublicationV1,
-    FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest, GitHubReviewReadRequestV1,
+    CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, FeedbackCycleAdvisoryV1,
+    FeedbackCycleExecutionRequest, FeedbackPublicationV1, GitHubReviewReadRequestV1,
     ProximityEvaluationRequestV1,
 };
 use tracedecay_contracts::{
