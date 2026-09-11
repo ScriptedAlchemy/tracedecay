@@ -94,13 +94,12 @@ use crate::{
         },
         graph::{GraphLane, production_code_index_freshness},
         lexical::{
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
             CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
             CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
             CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-            LexicalLaneRetriever,
+            LexicalLaneRetriever, code_lexical_artifact_build_memory_budget_for,
         },
         ports::RetrievalPortError,
     },
@@ -4700,8 +4699,10 @@ impl LatestCodeTextGenerationV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<TextHeadOpenOutcomeV1, RetrievalPortError> {
         let store = &self.text_artifact_store;
-        hotpath::gauge!("query.artifact.build_memory_budget_bytes")
-            .set(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1);
+        let build_memory_budget = code_lexical_artifact_build_memory_budget_for(
+            store.resident_memory.snapshot().limit_bytes,
+        );
+        hotpath::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget);
         hotpath::gauge!("query.artifact.source_batch_pages_max").set(TEXT_ARTIFACT_BATCH_PAGES_V1);
         hotpath::gauge!("query.artifact.source_batch_bytes_max").set(TEXT_ARTIFACT_BATCH_BYTES_V1);
         let generation_id = self.metadata.manifest().generation_id.clone();
@@ -4766,7 +4767,7 @@ impl LatestCodeTextGenerationV1 {
         let build_reservation = store.reserve_resident_memory(
             &generation_id,
             "code-text-artifact-build",
-            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            build_memory_budget,
         )?;
         let sealed_identity = store.sealed_identity(&generation_id)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
@@ -4778,7 +4779,8 @@ impl LatestCodeTextGenerationV1 {
         ensure_private_text_artifacts_root(&artifacts_root)?;
         let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
         let mut source = self.take_preopened_source_or_open(&sealed_identity, control)?;
-        let builder_budget = text_artifact_builder_budget(source.staging_window_bytes())?;
+        let builder_budget =
+            text_artifact_builder_budget(build_memory_budget, source.staging_window_bytes())?;
         let metadata = self.text_projection_metadata()?;
         let mut builder = if staging_path.exists() {
             match CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
@@ -9034,8 +9036,11 @@ fn checkpoint_text_artifact_control(
 /// retained decode window and the `SQLite` builder. Each component fitting the
 /// ceiling independently is insufficient because both remain live while a
 /// page is admitted.
-fn text_artifact_builder_budget(source_window_bytes: usize) -> Result<usize, RetrievalPortError> {
-    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+fn text_artifact_builder_budget(
+    build_memory_budget: usize,
+    source_window_bytes: usize,
+) -> Result<usize, RetrievalPortError> {
+    build_memory_budget
         .checked_sub(source_window_bytes)
         .filter(|remaining| *remaining > 0)
         .ok_or(RetrievalPortError::BudgetExceeded)

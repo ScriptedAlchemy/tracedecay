@@ -1100,7 +1100,8 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         let layout = revision.layout();
-        let (connection, private_file, file_identity) = create_private_builder_connection(path)?;
+        let (connection, private_file, file_identity) =
+            create_private_builder_connection(path, memory_budget_bytes)?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
         create_schema(&connection, layout)?;
         verify_builder_mutation_gate_schema(&connection)?;
@@ -1152,7 +1153,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let path = path.as_ref();
         let (connection, private_file, file_identity) = hotpath::measure_block!(
             "query.artifact.open.sqlite_connect",
-            open_private_builder_connection(path)
+            open_private_builder_connection(path, memory_budget_bytes)
         )?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
         let layout = read_staged_artifact_layout(&connection)?;
@@ -1920,25 +1921,28 @@ impl CodeLexicalArtifactBuilderV1 {
 
 fn create_private_builder_connection(
     path: &Path,
+    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let private_file = create_private_file_retained(path)
         .map_err(|failure| private_staging_error(failure.into_error()))?;
-    open_bound_builder_connection(path, private_file)
+    open_bound_builder_connection(path, private_file, memory_budget_bytes)
 }
 
 fn open_private_builder_connection(
     path: &Path,
+    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let private_file = open_private_file(path).map_err(private_staging_error)?;
-    open_bound_builder_connection(path, private_file)
+    open_bound_builder_connection(path, private_file, memory_budget_bytes)
 }
 
 fn open_bound_builder_connection(
     path: &Path,
     private_file: File,
+    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let identity = stable_file_identity(&private_file)?;
-    let connection = open_builder_connection(path)?;
+    let connection = open_builder_connection(path, memory_budget_bytes)?;
     let rebound = open_private_file(path).map_err(private_staging_error)?;
     if stable_file_identity(&rebound)? != identity {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -6360,7 +6364,10 @@ mod tests {
         symlink(&target, &linked).expect("link private target");
 
         assert!(matches!(
-            open_private_builder_connection(&linked),
+            open_private_builder_connection(
+                &linked,
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            ),
             Err(CodeLexicalArtifactErrorV1::Contract(_))
         ));
     }
@@ -6370,8 +6377,11 @@ mod tests {
         let directory = tempfile::tempdir().expect("private staging directory");
         let artifact = directory.path().join("artifact.sqlite");
         let replacement = directory.path().join("replacement.sqlite");
-        let (connection, _retained, identity) =
-            create_private_builder_connection(&artifact).expect("open artifact");
+        let (connection, _retained, identity) = create_private_builder_connection(
+            &artifact,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+        .expect("open artifact");
         drop(connection);
         drop(create_private_file_retained(&replacement).expect("create replacement"));
         std::fs::rename(&replacement, &artifact).expect("replace staged artifact");

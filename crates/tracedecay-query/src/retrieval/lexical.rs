@@ -39,7 +39,8 @@ pub use self::projection::{
     CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalProjectionMetadataV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
     PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
-    VerifiedCodeLexicalArtifactV1, lexical_projection_build_deadline_micros,
+    VerifiedCodeLexicalArtifactV1, code_lexical_artifact_build_memory_budget_for,
+    lexical_projection_build_deadline_micros,
 };
 pub use self::routes::{
     LexicalAnchorV1, LexicalRouteErrorV1, LexicalRouteKindV1, LexicalRouteMatchV1,
