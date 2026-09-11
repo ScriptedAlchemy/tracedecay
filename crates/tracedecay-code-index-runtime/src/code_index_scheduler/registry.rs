@@ -539,6 +539,19 @@ fn query_admission_controls()
     CONTROLS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// Register for `notify` before reading `flag`. `Notify::notified()` is inert
+/// until it is polled or `enable()`d; a notification between the flag load and
+/// the first poll is otherwise dropped forever.
+#[cfg(test)]
+async fn wait_notified_if_unset(flag: &AtomicBool, notify: &tokio::sync::Notify) {
+    let notified = notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if !flag.load(Ordering::Acquire) {
+        notified.await;
+    }
+}
+
 /// Deterministically holds a cancelling query's wake claim while it owns the
 /// canonical wake state. A foreign producer announces before it contends on
 /// that state lock, which exercises the old split-CAS interleaving without a
@@ -1181,18 +1194,30 @@ impl PendingWakeClaimV1 {
     fn settle(mut self) {
         self.settled = true;
     }
+
+    fn still_owns(&self) -> bool {
+        let state = self
+            .pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.owner == self.owner && state.micros == self.claimed_micros
+    }
 }
 
 impl Drop for PendingWakeClaimV1 {
     fn drop(&mut self) {
         if !self.settled {
+            // The test drop gate parks on a Condvar. Do that before taking
+            // `pending_wake.state` so a runtime worker never blocks under
+            // the production lock.
+            #[cfg(test)]
+            self.pending_wake.pause_claim_drop_for_test();
             let mut state = self
                 .pending_wake
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            #[cfg(test)]
-            self.pending_wake.pause_claim_drop_for_test();
             if state.owner == self.owner && state.micros == self.claimed_micros {
                 state.micros = 0;
                 state.trigger = 0;
@@ -1825,10 +1850,7 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub async fn wait_for_query_claim(&self, scope: &tracedecay_contracts::ResolvedScope) {
         let control = Self::query_admission_control_for_test(scope).expect("query-claim gate");
-        let entered = control.claim_entered.notified();
-        if !control.claim_reached.load(Ordering::Acquire) {
-            entered.await;
-        }
+        wait_notified_if_unset(&control.claim_reached, &control.claim_entered).await;
     }
 
     #[cfg(test)]
@@ -2093,10 +2115,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_contracts::ResolvedScope,
     ) {
         let gate = self.pending_wake_drop_gate_for_test(scope).await;
-        let entered = gate.drop_entered.notified();
-        if !gate.drop_reached.load(Ordering::Acquire) {
-            entered.await;
-        }
+        wait_notified_if_unset(&gate.drop_reached, &gate.drop_entered).await;
     }
 
     #[cfg(test)]
@@ -2105,10 +2124,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_contracts::ResolvedScope,
     ) {
         let gate = self.pending_wake_drop_gate_for_test(scope).await;
-        let entered = gate.foreign_entered.notified();
-        if !gate.foreign_attempted.load(Ordering::Acquire) {
-            entered.await;
-        }
+        wait_notified_if_unset(&gate.foreign_attempted, &gate.foreign_entered).await;
     }
 
     #[cfg(test)]
@@ -2739,10 +2755,13 @@ impl CodeIndexSchedulerRegistryV1 {
         self.generation_publications.subscribe()
     }
 
-    /// Admit complete-generation demand and subscribe before probing the serving
-    /// slot. Sealed publication precedes serving, including on a restored mount
-    /// where no new publication event is emitted. Successful source revalidation
-    /// also signals this watch when an unchanged complete generation stays seated.
+    /// Subscribe before probing the serving slot. Sealed publication precedes
+    /// serving, including on a restored mount where no new publication event is
+    /// emitted. Successful source revalidation also signals this watch when an
+    /// unchanged complete generation stays seated.
+    ///
+    /// This is a watch only. Callers that need complete-generation demand must
+    /// also call [`Self::request_complete_generation`].
     pub async fn subscribe_serving_generation_changes(
         &self,
         project_root: &Path,
@@ -2750,7 +2769,20 @@ impl CodeIndexSchedulerRegistryV1 {
         let project_root = project_root.canonicalize().ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&project_root)?;
-        let changes = worktree.serving_generation_changed.subscribe();
+        Some(worktree.serving_generation_changed.subscribe())
+    }
+
+    /// Stamp complete-generation demand for a mounted worktree. The first flip
+    /// notes a [`CodeIndexCadenceTriggerV1::QueryAdmission`] wake so the worker
+    /// yields text-only work and seats a complete generation.
+    pub async fn request_complete_generation(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
         if !worktree
             .complete_generation_requested
             .swap(true, Ordering::AcqRel)
@@ -2761,7 +2793,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 CodeIndexCadenceTriggerV1::QueryAdmission,
             );
         }
-        Some(changes)
+        true
     }
 
     /// Observe serving-slot seating. Each advance means the serving slot was
@@ -6887,9 +6919,12 @@ impl CodeIndexSchedulerRegistryV1 {
         if let Some(test_control) = test_control.as_ref()
             && test_control.pauses_after_claim.load(Ordering::Acquire)
         {
+            let released = test_control.claim_release.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
             test_control.claim_reached.store(true, Ordering::Release);
             test_control.claim_entered.notify_waiters();
-            test_control.claim_release.notified().await;
+            released.await;
         }
         let nothing_servable = serving_generation
             .read()
@@ -6916,6 +6951,21 @@ impl CodeIndexSchedulerRegistryV1 {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .overflow();
+        }
+        // `claim` only proves the slot was free at that instant. `note_wake`
+        // coalesces a foreign arrival into a live claim — it keeps the claimed
+        // `micros` and takes the owner — so a hook hint, overflow, or watcher
+        // probe can land in the window between the claim and here. That
+        // arrival is the remedy this admission would ask for, and stamping
+        // `QueryAdmission` over it is exactly the fabricated cadence arrival
+        // the pending-wake suppression exists to prevent. The remedy above is
+        // already recorded; leave the claim unsettled so its drop releases
+        // this admission's owner without erasing the foreign marker. The
+        // claim is also lost when the worker consumed the marker through
+        // `take_pending_arrival` (owner reset to zero); that only happens
+        // inside a reconcile pass, which is itself the remedy.
+        if !wake_claim.still_owns() {
+            return false;
         }
         Self::note_wake(
             &pending_wake,
@@ -7736,5 +7786,38 @@ mod text_slice_fairness_tests {
             CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
             "text continuation resumes only after reconcile claims the pending arrival"
         );
+    }
+}
+
+#[cfg(test)]
+mod notify_rendezvous_tests {
+    use super::wait_notified_if_unset;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn wait_notified_if_unset_observes_a_notify_completed_before_first_poll() {
+        let flag = AtomicBool::new(false);
+        let notify = Notify::new();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        flag.store(true, Ordering::Release);
+        notify.notify_waiters();
+        // The flag check would skip the wait and hide a missed notify. Poll
+        // the enabled Notified after the notifier has already finished.
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .expect("enable() must retain a notify that completed before the first poll");
+
+        let already = AtomicBool::new(true);
+        let quiet = Notify::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_notified_if_unset(&already, &quiet),
+        )
+        .await
+        .expect("an already-set flag must not wait");
     }
 }
