@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_session_memory::provider_usage::{
-    ProviderUsageCostSummaryV1, ProviderUsageCoverageV1,
-};
+use tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1;
+
+use crate::cost_summary::{CostAdminPayload, CostSummaryPayload, TodayCostPayload};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -120,24 +120,6 @@ impl CostCache {
         }
         self.last_refresh = Instant::now();
     }
-}
-
-#[derive(serde::Deserialize)]
-struct CostAdminPayload {
-    summary: CostSummaryPayload,
-    today: TodayCostPayload,
-}
-
-#[derive(serde::Deserialize)]
-struct CostSummaryPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
-    tokens_saved: u64,
-    efficiency_ratio: Option<f64>,
-}
-
-#[derive(serde::Deserialize)]
-struct TodayCostPayload {
-    provider_usage: ProviderUsageCostSummaryV1,
 }
 
 fn map_cost_payloads(

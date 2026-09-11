@@ -42,6 +42,7 @@ mod cli;
 mod cloud;
 mod commands;
 mod cost_cmd;
+mod cost_summary;
 mod display;
 mod git_cmd;
 mod global;
