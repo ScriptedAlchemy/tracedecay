@@ -1,12 +1,13 @@
 use std::path::{Component, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use crate::manifest::ResourceCeilingV1;
 use tracedecay_domain::canonical_text::default_true;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
     ComponentRevision, EmbeddingDocumentCompositionV1, ManifestDigest, host_cpu_target,
 };
+
+use crate::manifest::ResourceCeilingV1;
 
 /// Catalog ids of the shipped embedding models. These name the catalog
 /// entries; whether a `selected_model` is actually cataloged is decided by
