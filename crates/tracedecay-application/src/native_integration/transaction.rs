@@ -306,26 +306,24 @@ where
         };
 
         if cancellation.is_cancelled() {
-            let receipt = self.finish_from_probe(
-                &record,
-                NativeIntegrationProbeV1::OldState {
-                    tip: record.preview.repository_snapshot.destination_tip.clone(),
-                    tree: record.preview.repository_snapshot.destination_tree.clone(),
-                    index_digest: record.preview.repository_snapshot.index_digest.clone(),
-                    worktree_digest: record.preview.repository_snapshot.worktree_digest.clone(),
-                },
-                request.observed_at,
-            );
+            let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
-        let candidate_verified = advance_status(
+        let candidate_verified = match advance_status(
             self.store.as_ref(),
             &record.status,
             NativeIntegrationPhaseV1::CandidateVerified,
             false,
             request.observed_at,
-        )?;
+        ) {
+            Ok(status) => status,
+            Err(_) => {
+                let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+                self.clear_cancellation(&request.transaction_id)?;
+                return receipt;
+            }
+        };
         let record = NativeIntegrationRecordV1 {
             status: candidate_verified,
             ..record
@@ -333,30 +331,12 @@ where
         if self.authorization.authorize_apply(request, true)
             != NativeIntegrationAuthorizationOutcomeV1::Authorized
         {
-            let receipt = self.finish_from_probe(
-                &record,
-                NativeIntegrationProbeV1::OldState {
-                    tip: request.preview.repository_snapshot.destination_tip.clone(),
-                    tree: request.preview.repository_snapshot.destination_tree.clone(),
-                    index_digest: request.preview.repository_snapshot.index_digest.clone(),
-                    worktree_digest: request.preview.repository_snapshot.worktree_digest.clone(),
-                },
-                request.observed_at,
-            );
+            let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
         if cancellation.is_cancelled() {
-            let receipt = self.finish_from_probe(
-                &record,
-                NativeIntegrationProbeV1::OldState {
-                    tip: request.preview.repository_snapshot.destination_tip.clone(),
-                    tree: request.preview.repository_snapshot.destination_tree.clone(),
-                    index_digest: request.preview.repository_snapshot.index_digest.clone(),
-                    worktree_digest: request.preview.repository_snapshot.worktree_digest.clone(),
-                },
-                request.observed_at,
-            );
+            let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
@@ -369,33 +349,7 @@ where
             Ok(NativeIntegrationAnalysisRevalidationV1::Current)
         );
         if !analysis_current {
-            let receipt = match self.native.probe(&record) {
-                Ok(
-                    NativeIntegrationProbeV1::OldState {
-                        tip,
-                        tree,
-                        index_digest,
-                        worktree_digest,
-                    }
-                    | NativeIntegrationProbeV1::Diverged {
-                        tip,
-                        tree,
-                        index_digest,
-                        worktree_digest,
-                    },
-                ) => self.write_terminal(
-                    &record,
-                    NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
-                    tip,
-                    tree,
-                    index_digest,
-                    worktree_digest,
-                    request.observed_at,
-                ),
-                Ok(NativeIntegrationProbeV1::CommittedState { .. })
-                | Ok(NativeIntegrationProbeV1::Unavailable)
-                | Err(_) => self.needs_inspection(&record, request.observed_at),
-            };
+            let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
@@ -404,14 +358,14 @@ where
         // stale preview: no native write has started, so record the actual
         // foreign state as this transaction's no-change terminal receipt
         // rather than quarantining the repository as an uncertain outcome.
-        match self.native.probe(&record)? {
-            NativeIntegrationProbeV1::OldState { .. } => {}
-            NativeIntegrationProbeV1::Diverged {
+        match self.native.probe(&record) {
+            Ok(NativeIntegrationProbeV1::OldState { .. }) => {}
+            Ok(NativeIntegrationProbeV1::Diverged {
                 tip,
                 tree,
                 index_digest,
                 worktree_digest,
-            } => {
+            }) => {
                 let receipt = self.write_terminal(
                     &record,
                     NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
@@ -427,27 +381,35 @@ where
             // A candidate-looking ref or unavailable native state before the
             // first write cannot be attributed to this transaction. Preserve
             // the existing fail-closed inspection path for that ambiguity.
-            NativeIntegrationProbeV1::CommittedState { .. }
-            | NativeIntegrationProbeV1::Unavailable => {
+            Ok(NativeIntegrationProbeV1::CommittedState { .. })
+            | Ok(NativeIntegrationProbeV1::Unavailable)
+            | Err(_) => {
                 let receipt = self.needs_inspection(&record, request.observed_at);
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
         }
-        let commit_started = advance_status(
+        let commit_started = match advance_status(
             self.store.as_ref(),
             &record.status,
             NativeIntegrationPhaseV1::RefCommitStarted,
             false,
             request.observed_at,
-        )?;
+        ) {
+            Ok(status) => status,
+            Err(_) => {
+                let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+                self.clear_cancellation(&request.transaction_id)?;
+                return receipt;
+            }
+        };
         let record = NativeIntegrationRecordV1 {
             status: commit_started,
             ..record
         };
         let effect = self.native.apply(&record.preview, &cancellation);
         let receipt = match effect {
-            Err(error) => Err(error),
+            Err(_) => self.needs_inspection(&record, request.observed_at),
             Ok(NativeApplyEffectV1::Committed {
                 new_tip,
                 final_tree,
@@ -464,17 +426,22 @@ where
                 request.observed_at,
             ),
             Ok(NativeApplyEffectV1::FailedNoChange) => {
-                self.finish_from_probe(&record, self.native.probe(&record)?, request.observed_at)
+                self.finish_from_live_probe(&record, request.observed_at)
             }
             Ok(NativeApplyEffectV1::UnknownAfterCommitPoint { candidate_tip }) => {
-                let probe = self.native.probe(&record)?;
-                if matches!(probe, NativeIntegrationProbeV1::Diverged { .. })
-                    && let Some(candidate_tip) = candidate_tip
-                {
-                    let rolled_back = self.native.rollback(&record, &candidate_tip)?;
-                    self.finish_rolled_back_or_inspect(&record, rolled_back, request.observed_at)
-                } else {
-                    self.finish_from_probe(&record, probe, request.observed_at)
+                match (self.native.probe(&record), candidate_tip) {
+                    (Ok(NativeIntegrationProbeV1::Diverged { .. }), Some(candidate_tip)) => {
+                        match self.native.rollback(&record, &candidate_tip) {
+                            Ok(rolled_back) => self.finish_rolled_back_or_inspect(
+                                &record,
+                                rolled_back,
+                                request.observed_at,
+                            ),
+                            Err(_) => self.needs_inspection(&record, request.observed_at),
+                        }
+                    }
+                    (Ok(probe), _) => self.finish_from_probe(&record, probe, request.observed_at),
+                    (Err(_), _) => self.needs_inspection(&record, request.observed_at),
                 }
             }
         };
@@ -587,6 +554,51 @@ where
                 observed_at,
             ),
             _ => self.needs_inspection(record, observed_at),
+        }
+    }
+
+    fn finish_from_live_precommit_probe(
+        &self,
+        record: &NativeIntegrationRecordV1,
+        observed_at: UtcMicros,
+    ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError> {
+        match self.native.probe(record) {
+            Ok(
+                NativeIntegrationProbeV1::OldState {
+                    tip,
+                    tree,
+                    index_digest,
+                    worktree_digest,
+                }
+                | NativeIntegrationProbeV1::Diverged {
+                    tip,
+                    tree,
+                    index_digest,
+                    worktree_digest,
+                },
+            ) => self.write_terminal(
+                record,
+                NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
+                tip,
+                tree,
+                index_digest,
+                worktree_digest,
+                observed_at,
+            ),
+            Ok(NativeIntegrationProbeV1::CommittedState { .. })
+            | Ok(NativeIntegrationProbeV1::Unavailable)
+            | Err(_) => self.needs_inspection(record, observed_at),
+        }
+    }
+
+    fn finish_from_live_probe(
+        &self,
+        record: &NativeIntegrationRecordV1,
+        observed_at: UtcMicros,
+    ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError> {
+        match self.native.probe(record) {
+            Ok(probe) => self.finish_from_probe(record, probe, observed_at),
+            Err(_) => self.needs_inspection(record, observed_at),
         }
     }
 
