@@ -426,6 +426,101 @@ fn remove_historical_pointer_entries(store_root: &Path) {
     .expect("write legacy publication pointer");
 }
 
+fn rewrite_active_rust_extractor_revision(store_root: &Path, revision: &str) {
+    use tracedecay_code_index::{
+        capabilities::expected_seal_digest,
+        languages::{LanguageRegistry, StaticLanguageRegistry},
+    };
+    use tracedecay_code_index_retention::code_index_generations::{
+        DurablePublicationPointerV1, durable_generation_index_digest,
+    };
+    use tracedecay_domain::{CodeGenerationManifestV1, ExtractorRevision, LanguageId};
+
+    let pointer_path = store_root.join("active-code-generation-v1.json");
+    let mut pointer: DurablePublicationPointerV1 =
+        serde_json::from_slice(&std::fs::read(&pointer_path).expect("read publication pointer"))
+            .expect("decode publication pointer");
+    let generation_path = store_root
+        .join("code-generations-v1")
+        .join(&pointer.generation_file);
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&generation_path).expect("read generation manifest"))
+            .expect("decode generation envelope");
+    let mut manifest: CodeGenerationManifestV1 =
+        serde_json::from_value(envelope["generation"]["manifest"].clone())
+            .expect("decode generation identity manifest");
+    let rust = LanguageId::new("rust").expect("Rust language id");
+    let mut descriptor = StaticLanguageRegistry::new()
+        .descriptor(&rust)
+        .expect("compiled Rust descriptor")
+        .clone();
+    descriptor.extractor_revision =
+        ExtractorRevision::new(revision).expect("historical extractor revision");
+    let historical_registry = StaticLanguageRegistry::try_from_descriptors(vec![descriptor])
+        .expect("historical snapshot registry");
+    manifest.registry_revision = historical_registry.registry_revision();
+    manifest.extractor_revisions = historical_registry
+        .descriptors()
+        .iter()
+        .map(|descriptor| {
+            (
+                descriptor.language.clone(),
+                descriptor.extractor_revision.clone(),
+            )
+        })
+        .collect();
+    manifest.seal.expected_digest =
+        expected_seal_digest(&manifest).expect("reseal historical manifest identity");
+    envelope["generation"]["manifest"] =
+        serde_json::to_value(manifest).expect("encode historical manifest identity");
+
+    let generation_bytes =
+        serde_json::to_vec(&envelope["generation"]).expect("encode generation payload");
+    envelope["state_digest"] = serde_json::Value::String(format!(
+        "sha256:{}",
+        Sha256::digest(&generation_bytes).iter().fold(
+            String::with_capacity(64),
+            |mut encoded, byte| {
+                write!(&mut encoded, "{byte:02x}").expect("encode generation digest");
+                encoded
+            }
+        )
+    ));
+    let envelope_bytes = serde_json::to_vec(&envelope).expect("encode generation envelope");
+    std::fs::write(&generation_path, &envelope_bytes).expect("write historical generation");
+    let state_digest = format!(
+        "sha256:{}",
+        Sha256::digest(&envelope_bytes).iter().fold(
+            String::with_capacity(64),
+            |mut encoded, byte| {
+                write!(&mut encoded, "{byte:02x}").expect("encode envelope digest");
+                encoded
+            }
+        )
+    );
+    pointer.state_digest = state_digest.clone();
+    let active = pointer
+        .generation_index
+        .iter_mut()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .expect("active generation index entry");
+    active.state_digest = state_digest;
+    active.size_bytes = envelope_bytes.len() as u64;
+    active.text_artifact = None;
+    pointer.generation_index_digest = Some(
+        durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("digest rewritten generation index"),
+    );
+    std::fs::write(
+        pointer_path,
+        serde_json::to_vec(&pointer).expect("encode publication pointer"),
+    )
+    .expect("write publication pointer");
+}
+
 #[test]
 fn one_file_increment_captures_only_edited_bytes_with_one_thousand_unchanged_files() {
     let mut owned_sources = (0..1_000)
@@ -3078,6 +3173,49 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
         "the retained restore stays silent; the first broadcast is the rebuilt generation"
     );
     restarted.shutdown().await;
+}
+
+#[test]
+fn retained_v2_rust_extractor_generation_is_refused_and_rebuilt_by_v3() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut seed = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let stale = published(seed.reconcile_now().expect("publish retained generation"));
+    drop(seed);
+
+    rewrite_active_rust_extractor_revision(store.path(), "extractor.rust.v2");
+    let mut restarted = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    assert!(
+        restarted.servable_retained_text_generation().is_none(),
+        "a retained v2 Rust extraction must not enter a v3 serving slot"
+    );
+
+    let rebuilt = published(
+        restarted
+            .reconcile_now()
+            .expect("rebuild generation under the current extractor"),
+    );
+    assert_ne!(rebuilt.generation_id, stale.generation_id);
+    assert_eq!(
+        restarted
+            .latest_complete()
+            .expect("rebuilt generation")
+            .generation
+            .manifest()
+            .extractor_revisions
+            .iter()
+            .find(|(language, _)| language.as_str() == "rust")
+            .map(|(_, revision)| revision.as_str()),
+        Some("extractor.rust.v3")
+    );
 }
 
 /// A restart over a dirty checkout must seat the retained complete generation
