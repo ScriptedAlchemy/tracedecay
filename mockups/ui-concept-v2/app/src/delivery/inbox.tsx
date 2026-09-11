@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useId, useState } from "react";
 import { useWorkspaceState } from "../app/workspace";
 import {
   AGENT_FILTERS,
@@ -10,14 +10,12 @@ import {
   PROVIDER_OUTCOMES,
   REVIEW_FINDINGS,
   STATUS_FILTERS,
-  UMBRELLA_SAMPLE,
-  UMBRELLA_SAMPLE_COUNT,
   UNKNOWN_DIRS,
   type DeliveryFixturePr,
   type HonestInbox,
   type StatusTone,
 } from "./data";
-import { GlobalConstellation, ProjectConstellation, umbrellaRepositoryPosition } from "./constellation";
+import { ProjectConstellation } from "./constellation";
 import { HonestMark } from "./marks";
 
 const REPO_COLOR: Record<string, string> = {
@@ -445,28 +443,7 @@ const NODE_LEGEND = [
 ];
 
 export function UmbrellaGraph() {
-  const full = {x:0,y:0,w:890,h:950};
-  const [view,setView] = useWorkspaceState<{repo:string|null;pr:string|null;membership:boolean;camera:typeof full}>("delivery.fixture.umbrella.view",(()=>{const id=new URLSearchParams(location.search).get("repository");const p=id?umbrellaRepositoryPosition(id):null;const requestedPr=new URLSearchParams(location.search).get("fixturePr");const pr=UMBRELLA_SAMPLE.find((cluster)=>cluster.id===id)?.prs.some((record)=>record.id===requestedPr)?requestedPr:null;return {repo:p?.id??null,pr,membership:false,camera:p?{x:p.x-180,y:p.y-170,w:360,h:350}:full};})());
-  const [back,setBack] = useWorkspaceState<(typeof view)[]>("delivery.fixture.umbrella.back",[]);
-  useEffect(()=>{const params=new URLSearchParams(location.search);const repository=params.get("repository");const position=repository?umbrellaRepositoryPosition(repository):null;if(!position)return;const requested=params.get("fixturePr");const pr=UMBRELLA_SAMPLE.find((cluster)=>cluster.id===repository)?.prs.some((record)=>record.id===requested)?requested:null;setView({repo:repository,pr,membership:false,camera:{x:position.x-180,y:position.y-170,w:360,h:350}});},[]);
-  const [query,setQuery] = useState("");
-  const remember = () => setBack((history)=>[...history.slice(-12),view]);
-  const focus = (repo:string|null) => {remember();const p=repo?umbrellaRepositoryPosition(repo):null;setView({repo,pr:null,membership:false,camera:p?{x:p.x-180,y:p.y-170,w:360,h:350}:full});};
-  const selectPr = (repo:string,pr:string) => {remember();const p=umbrellaRepositoryPosition(repo);setView({repo,pr,membership:false,camera:p?{x:p.x-180,y:p.y-170,w:360,h:350}:full});};
-  const group=UMBRELLA_SAMPLE.find((item)=>item.id===view.repo);
-  const fixtureRecord=(repo:string,id:string|null)=>GLOBAL_PRS.find((item)=>item.id===id && (repo==="rslib" ? /^(rslib|rsbuild) \/ /.test(item.repo) : item.repo.startsWith(({td:"trace-decay",mf:"module-federation"} as Record<string,string>)[repo] ?? repo)));
-  const record=fixtureRecord(view.repo??"",view.pr);
-  const move=(x:number,y:number,scale=1)=>{remember();setView({...view,camera:{x:view.camera.x+x,y:view.camera.y+y,w:view.camera.w*scale,h:view.camera.h*scale}});};
-  return view.camera.w >= 0 ? <DeliveryEvidenceGraph /> : <div className={`dl-stage is-3 is-umbrella dl-umbrella-interactive${view.camera.w < 800 ? " is-focused" : ""}`}>
-    <aside className="dl-pane"><h3>EXAMPLE REPOSITORIES · {UMBRELLA_SAMPLE_COUNT} PRs</h3><div className="dl-scroll"><input className="dl-search" aria-label="Find example repository or PR" placeholder="Repository or PR number" value={query} onChange={(event)=>setQuery(event.target.value)}/>{UMBRELLA_SAMPLE.filter((item)=>`${item.label} ${item.prs.map((pr)=>pr.id).join(" ")}`.toLowerCase().includes(query.toLowerCase())).map((item)=><div className="dl-repogroup" key={item.id}><button className="head" aria-label={`Focus repository ${item.label}`} onClick={()=>focus(item.id)}><b style={{color:item.color}}>{item.label}</b><em>{item.prs.length} represented</em></button>{item.prs.map((pr)=><button className="dl-umbrella-pr-row" key={pr.id} onClick={()=>selectPr(item.id,pr.id)} aria-label={`Inspect example ${item.label} ${pr.id}`}>{pr.id}<span>{fixtureRecord(item.id,pr.id)?.title ?? "Example PR · detail"}</span></button>)}</div>)}</div></aside>
-    <section className="dl-pane"><h3>EXAMPLE OUTCOME <span>SYNTHETIC GROUPING</span></h3><nav className="dl-umbrella-toolbar" aria-label="Example umbrella camera"><button disabled={!back.length} onClick={()=>{const previous=back.at(-1);if(previous){setView(previous);setBack(back.slice(0,-1));}}}>Back</button><button onClick={()=>focus(null)}>Example outcome</button>{group&&<button onClick={()=>focus(group.id)}>{group.label}</button>}{view.pr&&<span>{view.pr}</span>}<button onClick={()=>{remember();setView({...view,camera:full});}}>Fit all</button><button aria-label="Pan example left" onClick={()=>move(-60,0)}>←</button><button aria-label="Pan example right" onClick={()=>move(60,0)}>→</button><button aria-label="Pan example up" onClick={()=>move(0,-60)}>↑</button><button aria-label="Pan example down" onClick={()=>move(0,60)}>↓</button><button aria-label="Zoom example in" onClick={()=>move(0,0,.8)}>+</button><button aria-label="Zoom example out" onClick={()=>move(0,0,1.25)}>−</button></nav>
-    <GlobalConstellation dense camera={view.camera} selectedRepository={view.repo} onSelectRepository={focus} onSelectPr={selectPr} onSelectMembership={(repo)=>{remember();setView({...view,repo,pr:null,membership:true});}}/>
-    </section>
-    <aside className="dl-pane"><h3>EXAMPLE DETAIL · LOCAL FIXTURE</h3><div className="dl-scroll dl-umbrella-detail"><p className="dl-umbrella-breadcrumb">Example outcome{group?` / ${group.label}`:""}{view.pr?` / ${view.pr}`:""}</p>
-    {view.pr ? <><h2>{view.pr} · {group?.label}</h2><p>{record?.title ?? "No title is authored for this represented PR."}</p>{record&&<dl><dt>Authored author</dt><dd>{record.author}</dd><dt>Example changed files</dt><dd>{record.chg}</dd><dt>Example review coverage</dt><dd>{record.cov}</dd><dt>Example attention</dt><dd>{record.attention.join(", ") || "None authored"}</dd><dt>Example CI</dt><dd>{record.ci}</dd></dl>}<p>Chronology and exact diff are not attached to this PR’s fixture detail. This selection does not open another PR’s journey.</p><button onClick={()=>focus(group?.id??null)}>Return to repository</button></> : <><h2>{view.membership?"Inferred membership":group?.label??"Example outcome"}</h2><p>{group?`${group.prs.length} individually inspectable PR records in this repository envelope.`:`${UMBRELLA_SAMPLE_COUNT} illustrated PRs across ${UMBRELLA_SAMPLE.length} repository envelopes.`}</p><p>V2 concept grouping · synthetic root <code>example:v2-release</code>. This is not a GitHub PR or observed product outcome.</p></>}
-    <h3>MEMBERSHIP BASIS</h3><dl><dt>Type</dt><dd>Outcome membership · inferred</dd><dt>Basis</dt><dd>Authored concept grouping. No recorded Work task, session-Git join or handoff token supports this example.</dd><dt>Grade</dt><dd>Inferred · fixture only</dd></dl><p>Repository enclosure means ownership. Named PR markers are the represented records. Dashed lines mean example membership; no dependency or merge order is asserted.</p>
-    </div></aside>
-  </div>;
+  return <DeliveryEvidenceGraph />;
 }
 
 function pipeTone(state: string): HonestInbox | null {
