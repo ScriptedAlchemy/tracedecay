@@ -3186,7 +3186,7 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
 }
 
 #[test]
-fn retained_v2_rust_extractor_generation_is_refused_and_rebuilt_by_v3() {
+fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v4() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let mut seed = scheduler(
@@ -3197,7 +3197,7 @@ fn retained_v2_rust_extractor_generation_is_refused_and_rebuilt_by_v3() {
     let stale = published(seed.reconcile_now().expect("publish retained generation"));
     drop(seed);
 
-    rewrite_active_rust_extractor_revision(store.path(), "extractor.rust.v2");
+    rewrite_active_rust_extractor_revision(store.path(), "extractor.rust.v3");
     let mut restarted = scheduler(
         &fixture,
         store.path().to_path_buf(),
@@ -3205,7 +3205,7 @@ fn retained_v2_rust_extractor_generation_is_refused_and_rebuilt_by_v3() {
     );
     assert!(
         restarted.servable_retained_text_generation().is_none(),
-        "a retained v2 Rust extraction must not enter a v3 serving slot"
+        "a retained v3 Rust extraction must not enter a v4 serving slot"
     );
 
     let rebuilt = published(
@@ -3224,7 +3224,7 @@ fn retained_v2_rust_extractor_generation_is_refused_and_rebuilt_by_v3() {
             .iter()
             .find(|(language, _)| language.as_str() == "rust")
             .map(|(_, revision)| revision.as_str()),
-        Some("extractor.rust.v3")
+        Some("extractor.rust.v4")
     );
 }
 
