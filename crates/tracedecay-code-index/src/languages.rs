@@ -199,9 +199,13 @@ impl StaticLanguageRegistry {
                 aliases.insert(alias.to_owned());
             }
             // Rust v3 adds parser-backed grouped and relative import evidence;
-            // TypeScript v3 adds variable type-relation evidence. Pinning these
-            // behaviors forces older file artifacts to be re-extracted.
-            let extractor_revision = if matches!(language.as_str(), "rust" | "typescript") {
+            // TypeScript v3 adds variable type-relation evidence; protobuf and
+            // SQL v3 retain canonical schema evidence. Pinning these behaviors
+            // forces older file artifacts to be re-extracted.
+            let extractor_revision = if matches!(
+                language.as_str(),
+                "rust" | "typescript" | "protobuf" | "sql"
+            ) {
                 3
             } else {
                 2
