@@ -2746,6 +2746,23 @@ mod tests {
 
     fn batch_for(file: &ReceiptBoundCodeFileV1, outcome: ParseOutcomeV1) -> ExtractionBatchV1 {
         let descriptor = rust_descriptor();
+        // The parser import digest is the extractor's to state, never the
+        // fixture's: chunking re-derives the rows and refuses a batch that
+        // declares different ones. An outcome that attests no structure
+        // carries no rows at all, which is what the unsupported-document path
+        // builds its artifacts from.
+        let parser_import_rows_digest = match &outcome {
+            ParseOutcomeV1::Complete | ParseOutcomeV1::Partial { .. } => TreeSitterExtractor::new()
+                .extract(file, &descriptor, &NeverCancelled)
+                .expect("fixture extraction")
+                .batch()
+                .parser_import_rows_digest
+                .clone(),
+            ParseOutcomeV1::Failed { .. }
+            | ParseOutcomeV1::TimedOut
+            | ParseOutcomeV1::Cancelled => crate::extract::parser_import_rows_digest(&[])
+                .expect("empty parser import rows digest"),
+        };
         ExtractionBatchV1 {
             generation_id: file.generation_id.clone(),
             file_occurrence_id: file.file.file_occurrence_id.clone(),
@@ -2765,8 +2782,7 @@ mod tests {
                 parsed_bytes: file.sanitized_bytes.len() as u64,
                 ..ExtractionCoverageV1::default()
             },
-            parser_import_rows_digest: crate::extract::parser_import_rows_digest(&[])
-                .expect("empty parser import rows digest"),
+            parser_import_rows_digest,
             rows_digest: id::<ManifestDigest>(&digest('d')),
         }
     }
@@ -3377,6 +3393,19 @@ mod tests {
         fn extract(&self, file_path: &str, source: &str) -> tracedecay_domain::ExtractionResult {
             self.calls.fetch_add(1, Ordering::Relaxed);
             tracedecay_code_extraction::RustExtractor.extract(file_path, source)
+        }
+
+        // Delegating to the real artifact walk, not to the trait default over
+        // `extract`, is what keeps the counting double honest: the default
+        // carries no import evidence, so a batch minted through it would
+        // declare rows the live extractor does not agree with.
+        fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            tracedecay_code_extraction::LanguageExtractor::extract_artifact(
+                &tracedecay_code_extraction::RustExtractor,
+                file_path,
+                source,
+            )
         }
 
         fn extract_parsed(
