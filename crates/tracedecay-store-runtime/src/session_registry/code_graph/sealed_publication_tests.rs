@@ -259,9 +259,12 @@ fn journal_publication_without_head(
     });
 }
 
+/// A pending replay whose sealed source this build refuses to read is
+/// discarded by the next fresh publication rather than retried forever. The
+/// archival carrier supplies such a source: it is sealed at a retired
+/// manifest revision, so hydration refuses it at the revision gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn historical_pending_replay_without_source_commitments_is_discarded_before_fresh_publication()
- {
+async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
     let temporary = tempfile::tempdir().expect("temporary fixture parent");
     let root = temporary
         .path()
