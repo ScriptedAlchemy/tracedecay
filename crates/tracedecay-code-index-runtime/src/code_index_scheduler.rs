@@ -81,6 +81,7 @@ use crate::{
             VerifiedSealedLexicalCursorRestoreErrorV1, VerifiedSealedLexicalPageBatchBoundsV1,
             VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageSourceV1,
             VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedTextGenerationMetadataV1,
+            generation_language_revisions_are_current,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -7220,6 +7221,15 @@ impl CodeIndexWorktreeSchedulerV1 {
             || metadata.snapshot().worktree.as_ref() != Some(&self.worktree_id)
             || metadata.snapshot().content_identity.as_str() != pointer.snapshot_content_identity
         {
+            text_control.retire();
+            return None;
+        }
+        if !generation_language_revisions_are_current(metadata.manifest(), metadata.snapshot()) {
+            tracing::info!(
+                event = "code_index_retained_generation_language_incompatible",
+                generation_id = %generation_id,
+                "retained generation refused: language registry, grammar, or extractor revision is no longer current"
+            );
             text_control.retire();
             return None;
         }
