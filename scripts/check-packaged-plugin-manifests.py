@@ -70,6 +70,9 @@ def validate_codex(path: Path) -> None:
     interface = manifest.get("interface")
     if not isinstance(interface, dict):
         fail(f"{path} requires object field 'interface'")
+    default_prompt = require_string(interface, "defaultPrompt", path)
+    if len(default_prompt) > 128:
+        fail(f"{path} interface.defaultPrompt must be at most 128 characters")
     capabilities = interface.get("capabilities")
     required = {"mcp", "skills", "code-search", "project-memory"}
     if not isinstance(capabilities, list) or not required.issubset(capabilities):
