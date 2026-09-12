@@ -14,7 +14,7 @@ use super::feedback_component::{
     aggregate_with_feedback_component, companion_owned_live_paths, live_feedback_receipt,
     selected_feedback_component,
 };
-use super::{host_bundle_error, host_kind_for_agent};
+use super::{host_bundle_error, host_kind_for_agent, load_host_lifecycle_user_config};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
