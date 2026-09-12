@@ -1274,19 +1274,6 @@ fn continuation_cases() -> Vec<ContinuationCase> {
             },
         },
         ContinuationCase {
-            operation: ApplicationSurfaceOperation::CodeDefinition,
-            arguments: |anchors, cursor| {
-                serde_json::json!({
-                    "node_id": anchors.sink,
-                    "scope": code_query_scope(),
-                    "meta": callable_code_meta(cursor),
-                })
-            },
-            expectation: ContinuationExpectation::BoundedToOneRow {
-                authority: "navigation_symbol_query pushes the one resolved start symbol",
-            },
-        },
-        ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeTimeline,
             arguments: |_, cursor| {
                 serde_json::json!({

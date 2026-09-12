@@ -2440,7 +2440,6 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::CodeFacets
         | ApplicationSurfaceOperation::CodeTimeline
         | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
         | ApplicationSurfaceOperation::CodeTypeDefinition
         | ApplicationSurfaceOperation::CodeReferences
         | ApplicationSurfaceOperation::SessionLookup
@@ -2848,7 +2847,6 @@ fn http_page_projection(operation: ApplicationSurfaceOperation) -> HttpPageProje
         | ApplicationSurfaceOperation::CodeFacets
         | ApplicationSurfaceOperation::CodeTimeline
         | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
         | ApplicationSurfaceOperation::CodeTypeDefinition
         | ApplicationSurfaceOperation::CodeReferences => HttpPageProjection::MetaCursor,
         ApplicationSurfaceOperation::DiagnosticsRead => HttpPageProjection::BodyPageControls,

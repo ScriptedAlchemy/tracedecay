@@ -3315,14 +3315,6 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         navigation_symbol_query(self, context, request, "code_declaration", false)
     }
 
-    fn definition<'a>(
-        &'a self,
-        context: RetrievalPortContext<'a>,
-        request: &'a CodeNavigationRequest,
-    ) -> PortFuture<'a, SymbolPrimitiveRecord> {
-        navigation_symbol_query(self, context, request, "code_definition", false)
-    }
-
     fn type_definition<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,

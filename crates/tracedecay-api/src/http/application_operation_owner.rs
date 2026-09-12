@@ -42,7 +42,6 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::CodeFacets
         | ApplicationSurfaceOperation::CodeTimeline
         | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
         | ApplicationSurfaceOperation::CodeTypeDefinition
         | ApplicationSurfaceOperation::CodeReferences => HttpApplicationOwnerKind::CallableCode,
         ApplicationSurfaceOperation::TestResults
