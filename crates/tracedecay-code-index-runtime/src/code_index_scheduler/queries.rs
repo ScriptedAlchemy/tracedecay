@@ -2476,42 +2476,6 @@ fn graph_relation_keys(
     Ok(GraphRelationKeysV1 { keys, complete })
 }
 
-fn graph_symbols_matching(
-    reader: &CodeGraphInteractiveReader,
-    cap: usize,
-    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
-    mut predicate: impl FnMut(
-        &tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1,
-    ) -> Result<bool, PreparedQueryErrorV1>,
-) -> Result<
-    (
-        Vec<tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1>,
-        bool,
-    ),
-    PreparedQueryErrorV1,
-> {
-    const PAGE_SIZE: usize = 1_024;
-    let mut after = None;
-    let mut matches = Vec::new();
-    loop {
-        let page = reader
-            .symbols_page(after.as_ref(), PAGE_SIZE, Arc::clone(&cancellation))
-            .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
-        for summary in page.symbols {
-            after = Some(summary.occurrence.clone());
-            if predicate(&summary)? {
-                if matches.len() == cap {
-                    return Ok((matches, false));
-                }
-                matches.push(summary);
-            }
-        }
-        if !page.has_more {
-            return Ok((matches, true));
-        }
-    }
-}
-
 fn hydrate_graph_relation_records(
     reader: &CodeGraphInteractiveReader,
     keys: &[RelationKeyV1],
@@ -3293,24 +3257,34 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let selector_simple = selector
                 .rsplit_once("::")
                 .map_or(selector.as_str(), |(_, name)| name);
-            let Ok((targets, mut complete)) = graph_symbols_matching(
-                &prepared.reader,
-                cap,
-                Arc::clone(&cancellation),
-                |summary| {
-                    let metadata = summary
-                        .metadata
-                        .as_ref()
-                        .ok_or(PreparedQueryErrorV1::Unavailable)?;
-                    Ok(metadata.qualified_name == *selector
-                        || metadata.simple_name.eq_ignore_ascii_case(selector_simple))
-                },
+            let lookup_limit = cap.saturating_add(1);
+            let (Ok(mut targets), Ok(simple_targets)) = (
+                prepared.reader.resolve_qualified_name(
+                    selector,
+                    None,
+                    lookup_limit,
+                    Arc::clone(&cancellation),
+                ),
+                prepared.reader.resolve_simple_name(
+                    selector_simple,
+                    None,
+                    lookup_limit,
+                    Arc::clone(&cancellation),
+                ),
             ) else {
                 return unavailable_for_generation(
                     query_finished_at(),
                     prepared.generation().clone(),
                 );
             };
+            let mut complete = targets.len() <= cap && simple_targets.len() <= cap;
+            targets.extend(simple_targets);
+            targets.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+            targets.dedup_by(|left, right| left.occurrence == right.occurrence);
+            if targets.len() > cap {
+                targets.truncate(cap);
+                complete = false;
+            }
             let mut keys = Vec::new();
             for target in targets {
                 let remaining = cap.saturating_sub(keys.len());
@@ -3593,38 +3567,27 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 graph_budget_for_request(prepared.query.request().budget, context.request);
             let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
             let cancellation = graph_read_cancellation(graph_control, graph_budget.deadline_micros);
-            let Ok((summaries, complete)) = graph_symbols_matching(
-                &prepared.reader,
-                graph_budget.max_candidates_per_lane as usize,
-                Arc::clone(&cancellation),
-                |summary| {
-                    let binding = summary
-                        .binding
-                        .as_ref()
-                        .ok_or(PreparedQueryErrorV1::Unavailable)?;
-                    let path = binding
-                        .logical_path
-                        .as_deref()
-                        .ok_or(PreparedQueryErrorV1::Unavailable)?;
-                    if path != request.path && !path.starts_with(&prefix) {
-                        return Ok(false);
-                    }
-                    if !path_is_in_code_query_scope(path, &request.scope) {
-                        return Ok(false);
-                    }
-                    let visibility = summary
-                        .metadata
-                        .as_ref()
-                        .map(|metadata| metadata.visibility.as_str())
-                        .ok_or(PreparedQueryErrorV1::Unavailable)?;
-                    Ok(visibility == "public")
+            let cap = graph_budget.max_candidates_per_lane as usize;
+            let Ok(mut summaries) = prepared.reader.find_symbols(
+                &|_, binding, metadata| {
+                    let Some(path) = binding.and_then(|binding| binding.logical_path.as_deref())
+                    else {
+                        return false;
+                    };
+                    (path == request.path || path.starts_with(&prefix))
+                        && path_is_in_code_query_scope(path, &request.scope)
+                        && metadata.is_some_and(|metadata| metadata.visibility == "public")
                 },
+                cap.saturating_add(1),
+                Arc::clone(&cancellation),
             ) else {
                 return unavailable_for_generation(
                     query_finished_at(),
                     prepared.generation().clone(),
                 );
             };
+            let complete = summaries.len() <= cap;
+            summaries.truncate(cap);
             let Ok(mut items) = summaries
                 .into_iter()
                 .map(graph_summary_symbol_record)
@@ -3981,13 +3944,20 @@ fn navigation_symbol_query<'a>(
                 );
             }
         };
-        if let Ok(symbol) = graph_summary_symbol_record(summary) {
-            let is_type = ["struct", "enum", "class", "interface", "trait", "type"]
-                .iter()
-                .any(|kind| symbol.kind.to_ascii_lowercase().contains(kind));
-            if !resolve_type || is_type {
-                items.push(symbol);
+        let symbol = match graph_summary_symbol_record(summary) {
+            Ok(symbol) => symbol,
+            Err(_) => {
+                return unavailable_for_generation(
+                    query_finished_at(),
+                    prepared.generation().clone(),
+                );
             }
+        };
+        let is_type = ["struct", "enum", "class", "interface", "trait", "type"]
+            .iter()
+            .any(|kind| symbol.kind.to_ascii_lowercase().contains(kind));
+        if !resolve_type || is_type {
+            items.push(symbol);
         }
         if resolve_type && items.is_empty() {
             let Ok(found) = graph_relation_keys(
