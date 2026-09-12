@@ -227,7 +227,7 @@ mod tests {
 
     use super::{
         PinnedWorkExecutableBindingResolver, WorkExecutableBindingError,
-        WorkExecutableBindingResolver,
+        WorkExecutableBindingResolver, digest_file,
     };
     use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
@@ -235,6 +235,28 @@ mod tests {
         let mut hasher = ManifestDigestHasher::new();
         hasher.update(bytes);
         hasher.finalize().unwrap()
+    }
+
+    #[test]
+    fn executable_digest_remains_raw_sha256() {
+        let directory = TempDir::new().unwrap();
+        let executable_path = directory.path().join("fixture");
+        std::fs::write(&executable_path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&executable_path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&executable_path, permissions).unwrap();
+        }
+
+        let (digest, byte_length) = digest_file(&executable_path).unwrap();
+        assert_eq!(
+            digest.as_str(),
+            "sha256:306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb"
+        );
+        assert_eq!(byte_length, 17);
     }
 
     fn pinned(root: &Path, bindings: Vec<WorkExecutableBindingV1>) -> PinnedRuntimeConfiguration {
