@@ -6,9 +6,10 @@ Branch `fable/test-prune` (40 prune/style commits on top of the
 `fable/test-slop` floor 13452d3ea; `origin/fable/test-slop` is that floor
 itself, with no prune commits, and no prune commit had landed on the
 integration branch) was merged forward onto
-`origin/codex/tracedecay-total-redesign-plan-reopened` in two merge
-commits: 03427d2b48 (tip 84f29ec656, 117 conflicted files / 157 hunks) and
-6fd74ec325 (tip 23dde7695d, 11 files / 14 hunks). Not pushed, no PR.
+`origin/codex/tracedecay-total-redesign-plan-reopened` in three merge
+commits: 03427d2b48 (tip 84f29ec656, 117 conflicted files / 157 hunks),
+6fd74ec325 (tip 23dde7695d, 11 files / 14 hunks) and e8c8fa36b2 (tip
+0ebeedf7dc after #1241, 3 files / 3 hunks). Pushed as PR #1242.
 
 Rule applied to every conflict, per test item: a lane deletion stays only
 when the item is identical between the lane floor (95893a92a) and the tip,
@@ -121,11 +122,28 @@ but not run or counted here.
 - cc-16947 — `cargo test --lib` agent-hosts / query / semantic / domain after the second merge: green.
 - cc-16952 — `cargo test -p tracedecay --lib daemon::core_doctor daemon::maintenance`: 40 passed.
 
+### Third merge (e8c8fa36b2, tip 0ebeedf7dc)
+
+Three conflicted files. `orphan_stores/tests.rs`: the lane deletion of
+`sweep_unregistered_stores_collects_an_exactly_empty_old_directory` stays
+(identical on tip); the tip-added
+`unregistered_store_with_a_vanished_manifest_root_is_collected_at_once`
+is kept. `host_bundle_acceptance.rs`: use-group only, the lane's trimmed
+`agents` import group stays because the two tests it served are unchanged
+on tip and remain deleted. `NOTES.md` (both added): this section stays on
+top, the #1103 text-build lane notes from tip follow.
+
+- cc-17119 — `cargo check --workspace --all-targets`: 0 errors, 0 warnings.
+- cc-17125 — `product_surface_suite host_bundle_acceptance`: 17 passed.
+- cc-17124 — `cargo test -p tracedecay-maintenance --lib`: 128 passed,
+  3 failed (`portable_inventory_*` timeouts under load 30–50; two of the
+  three were already red in the unmodified tip run cc-16734). cc-17153
+  re-ran the 6 `portable_inventory` tests single-threaded: 6 passed.
+
 ### Undone
 
 - Integration suites (`--tests`) were type-checked only; their pruned
   counts are not measured.
-- The integration tip keeps moving; re-merge before pushing.
 
 # #1103 text-build lane — Fable lane notes
 
