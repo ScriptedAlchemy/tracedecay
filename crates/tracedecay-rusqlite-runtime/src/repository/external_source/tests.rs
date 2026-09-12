@@ -1503,8 +1503,10 @@ fn history_reads_report_the_migration_instead_of_a_partial_answer() {
     };
     let read_pending_count = |connection: &mut rusqlite::Connection| {
         let snapshot = connection.transaction().unwrap();
-        let result = ExternalSourceExecutor::default()
-            .execute_read(&snapshot, &ExternalSourceReadOperationV1::AcquisitionPendingCount);
+        let result = ExternalSourceExecutor::default().execute_read(
+            &snapshot,
+            &ExternalSourceReadOperationV1::AcquisitionPendingCount,
+        );
         snapshot.finish().unwrap();
         result
     };
