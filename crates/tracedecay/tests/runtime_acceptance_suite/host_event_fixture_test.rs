@@ -5,7 +5,6 @@ use std::process::{Command, Output, Stdio};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_application::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
@@ -25,6 +24,7 @@ use tracedecay_privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
+use tracedecay_sessions::observation::{CaptureObservationRequest, ObservationCancellation};
 use tracedecay_sessions::runtime::source::TranscriptSource;
 use tracedecay_sessions::runtime::source::try_stream_new_jsonl_raw_strict_with_resume;
 use tracedecay_sessions::runtime::{claude, codex, cursor, hermes};

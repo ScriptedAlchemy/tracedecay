@@ -145,9 +145,9 @@ pub async fn collect_database_snapshot(
     ctx: &McpToolContext<'_>,
     include_integrity: bool,
     generation_census: Option<
-        &tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot,
+        &tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot,
     >,
-) -> Result<tracedecay_session_memory::runtime_telemetry::DatabaseSnapshot> {
+) -> Result<tracedecay_runtime_core::runtime_telemetry::DatabaseSnapshot> {
     let database = ctx.graph_database();
     let db_path = ctx.graph_db_path();
     let store_runtime = ctx.store_runtime();
@@ -159,18 +159,18 @@ pub async fn collect_database_snapshot(
     )
     .await?;
     let generation_census = generation_census.cloned().unwrap_or(
-        tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-            reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+        tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+            reason: tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
         },
     );
     Ok(
-        tracedecay_session_memory::runtime_telemetry::DatabaseSnapshot::from_collected(
+        tracedecay_runtime_core::runtime_telemetry::DatabaseSnapshot::from_collected(
             collected,
-            tracedecay_session_memory::runtime_telemetry::read_dirty_marker(
-                &tracedecay_session_memory::runtime_telemetry::with_suffix(db_path, ".dirty"),
+            tracedecay_runtime_core::runtime_telemetry::read_dirty_marker(
+                &tracedecay_runtime_core::runtime_telemetry::with_suffix(db_path, ".dirty"),
             ),
             generation_census,
-            tracedecay_session_memory::runtime_telemetry::RuntimeRegistrySnapshot::from_projection(
+            tracedecay_runtime_core::runtime_telemetry::RuntimeRegistrySnapshot::from_projection(
                 store_runtime.runtime_telemetry(),
             ),
         ),
@@ -181,15 +181,15 @@ async fn collect_runtime_snapshot(
     ctx: &McpToolContext<'_>,
     include_integrity: bool,
     tracedecay_version: &str,
-) -> Result<tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot> {
-    tracedecay_session_memory::runtime_telemetry::read_cached_process_sample();
+) -> Result<tracedecay_runtime_core::runtime_telemetry::RuntimeSnapshot> {
+    tracedecay_runtime_core::runtime_telemetry::read_cached_process_sample();
     let database =
         collect_database_snapshot(ctx, include_integrity, ctx.generation_census()).await?;
-    let process = tracedecay_session_memory::runtime_telemetry::read_cached_process_sample_at_response_boundary()
+    let process = tracedecay_runtime_core::runtime_telemetry::read_cached_process_sample_at_response_boundary()
         .await;
     Ok(
-        tracedecay_session_memory::runtime_telemetry::RuntimeSnapshot {
-            captured_at: tracedecay_session_memory::runtime_telemetry::unix_epoch_secs()?,
+        tracedecay_runtime_core::runtime_telemetry::RuntimeSnapshot {
+            captured_at: tracedecay_runtime_core::runtime_telemetry::unix_epoch_secs()?,
             tracedecay_version: tracedecay_version.to_owned(),
             host_os: std::env::consts::OS.to_owned(),
             process,

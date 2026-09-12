@@ -142,6 +142,104 @@ async fn current_final_store_is_admitted_without_mutation() {
     );
 }
 
+async fn admit_existing(path: &Path, context: &str) {
+    let authority = DatabaseAuthority::acquire_test(path, "final-shape admission fixture")
+        .expect("acquire final-shape admission authority");
+    let (database, _) =
+        Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing)
+            .await
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+    drop(database);
+}
+
+fn ledger_tables(path: &Path) -> Vec<String> {
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open final-shape fixture read-only");
+    let mut statement = connection
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name LIKE 'td_runtime_writer_%' ORDER BY name",
+        )
+        .expect("prepare ledger table probe");
+    statement
+        .query_map((), |row| row.get(0))
+        .expect("query ledger tables")
+        .collect::<Result<_, _>>()
+        .expect("read ledger tables")
+}
+
+/// The runtime writer creates its ledger lazily inside the canonical store, so
+/// a store's first lifetime used to leave a shape its next open refused. The
+/// ledger is part of the exact shape now: a store that predates it gains it
+/// on open, one that already carries it is admitted unchanged, and one still
+/// holding the retired idempotency table has it folded into the current one.
+#[tokio::test]
+async fn runtime_writer_ledger_is_part_of_the_final_shape() {
+    let (_directory, path) = fresh_current_store().await;
+    let expected_ledger = ledger_tables(&path);
+    assert_eq!(expected_ledger.len(), 4, "fresh store carries the ledger");
+    let before = store_snapshot(&path);
+    admit_existing(&path, "store carrying the ledger must be admitted").await;
+    assert_eq!(
+        store_snapshot(&path),
+        before,
+        "ledger-carrying admission stays query-only"
+    );
+
+    tamper(
+        &path,
+        "DROP TABLE td_runtime_writer_checkpoint_v1;
+         DROP TABLE td_runtime_writer_idempotency_v2;
+         DROP TABLE td_runtime_writer_outbox_v1;
+         DROP TABLE td_runtime_writer_inbox_v1;",
+    );
+    assert!(ledger_tables(&path).is_empty());
+    admit_existing(&path, "store predating the ledger must be admitted").await;
+    assert_eq!(
+        ledger_tables(&path),
+        expected_ledger,
+        "open installs the ledger"
+    );
+    assert_eq!(store_snapshot(&path).schema_bytes, before.schema_bytes);
+
+    tamper(
+        &path,
+        "DROP TABLE td_runtime_writer_idempotency_v2;
+         CREATE TABLE td_runtime_writer_idempotency_v1 (
+             shard_json TEXT NOT NULL, incarnation INTEGER NOT NULL,
+             authority_epoch INTEGER NOT NULL, idempotency_key TEXT NOT NULL,
+             request_digest TEXT NOT NULL, original_receipt_json TEXT NOT NULL,
+             transaction_scope_json TEXT NOT NULL, operation_id TEXT NOT NULL,
+             durability_json TEXT NOT NULL, committed_at_micros INTEGER NOT NULL,
+             PRIMARY KEY (shard_json, incarnation, authority_epoch, idempotency_key)
+         ) WITHOUT ROWID;
+         INSERT INTO td_runtime_writer_idempotency_v1 VALUES
+             ('{}', 1, 1, 'key-1', 'digest', '{}', '{}', 'op-1', '{}', 42);",
+    );
+    admit_existing(
+        &path,
+        "store with the retired idempotency ledger must be admitted",
+    )
+    .await;
+    assert_eq!(
+        ledger_tables(&path),
+        expected_ledger,
+        "open folds the retired ledger"
+    );
+    let connection =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open final-shape fixture read-only");
+    let migrated: (String, i64) = connection
+        .query_row(
+            "SELECT idempotency_key, committed_at_micros FROM td_runtime_writer_idempotency_v2",
+            (),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("retired receipt survives the fold");
+    assert_eq!(migrated, ("key-1".to_owned(), 42));
+}
+
 #[tokio::test]
 async fn automation_run_receipt_indexes_are_required_final_shape() {
     let (_directory, path) = fresh_current_store().await;

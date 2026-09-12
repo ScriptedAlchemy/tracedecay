@@ -41,7 +41,6 @@ use super::analytics_api::{
     AnalyticsUsageSummaryV1,
 };
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
-use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
 use super::delivery_api::DeliveryOverviewV1;
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
 use super::explorer_api::{ExplorerQueryRunV1, ExplorerReadContextV1, ExplorerSessionSizeV1};
@@ -71,6 +70,7 @@ use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
 use super::work_api::registered_route_contracts as registered_work_route_contracts;
 use crate::application::feedback::observations::FeedbackObservationReadModelV1;
+use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessPayloadV1;
 
 #[derive(JsonSchema)]
 #[allow(dead_code)]

@@ -13,8 +13,7 @@ use crate::daemon::maintenance::project_store_maintenance_lease;
 use crate::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
-    DEFAULT_SUPERSEDED_GENERATION_FLOOR, DurableGenerationIndexEntryV1,
+    CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurableGenerationIndexEntryV1,
     DurablePublicationPointerV1, durable_generation_index_digest,
     execute_code_generation_retention, plan_code_generation_retention,
     try_acquire_code_generation_store_lock,
@@ -728,12 +727,8 @@ async fn publisher_between_probe_and_execute_releases_writer_gate_promptly() {
     let publisher = try_acquire_code_generation_store_lock(&replay_root)
         .expect("publisher probe")
         .expect("publisher wins the probe-to-execute window");
-    let plan = plan_code_generation_retention(
-        &fixture.store_root,
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan collectable retention");
+    let plan = plan_code_generation_retention(&fixture.store_root, &BTreeSet::new())
+        .expect("plan collectable retention");
     assert!(
         !plan.collectable_generations.is_empty(),
         "execute only acquires the pool when a generation is collectable"

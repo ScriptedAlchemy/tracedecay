@@ -19,7 +19,7 @@ use tracedecay_global_db::{
     RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
 };
 
-use tracedecay_session_memory::event_lane::record_observability;
+use tracedecay_session_memory::observability_store::record_observability_batch;
 
 mod outbox;
 mod rollup_rebuild;
@@ -32,6 +32,7 @@ const PRODUCER_RUNNING: u8 = 0;
 const PRODUCER_STOPPING: u8 = 1;
 const PRODUCER_STOPPED: u8 = 2;
 const MAX_PRODUCER_CAPACITY: usize = 1_024;
+const OBSERVABILITY_WRITE_BATCH: usize = 32;
 const MAX_PRODUCER_DEADLINE: Duration = Duration::from_secs(60);
 const ROLLUP_BACKLOG_REBUILD_INTERVAL: Duration = Duration::from_secs(1);
 const ROLLUP_IDLE_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -638,15 +639,21 @@ async fn run_worker(
                 let Some(observation) = observation else {
                     break;
                 };
-                let wakes_rollup = observation_dirties_rollup(&observation);
+                let mut observations = Vec::with_capacity(OBSERVABILITY_WRITE_BATCH);
+                observations.push(observation);
+                while observations.len() < OBSERVABILITY_WRITE_BATCH {
+                    let Ok(observation) = data.try_recv() else {
+                        break;
+                    };
+                    observations.push(observation);
+                }
+                let wakes_rollup = observations.iter().any(observation_dirties_rollup);
                 let persisted_before = progress.persisted;
-                record_queued(
+                record_queued_batch(
                     &db,
-                    &state.durable_emission_lock,
-                    &state.next_sequence,
-                    observation,
+                    &state,
+                    observations,
                     &mut progress,
-                    state.deadlines.persistence,
                 )
                 .await;
                 recover_pending(
@@ -689,6 +696,81 @@ async fn run_worker(
         }
     }
     state.lifecycle.store(PRODUCER_STOPPED, Ordering::Release);
+}
+
+async fn record_queued_batch(
+    db: &RegisteredGlobalDb,
+    state: &ProducerWorkerState,
+    observations: Vec<QueuedObservation>,
+    progress: &mut ProducerWorkerProgress,
+) {
+    let mut ordinary = Vec::new();
+    for observation in observations {
+        if observation.owner_fact.is_some() {
+            record_batch(
+                db,
+                std::mem::take(&mut ordinary),
+                &mut progress.persisted,
+                &mut progress.first_error,
+                state.deadlines.persistence,
+            )
+            .await;
+            record_queued(
+                db,
+                &state.durable_emission_lock,
+                &state.next_sequence,
+                observation,
+                progress,
+                state.deadlines.persistence,
+            )
+            .await;
+            continue;
+        }
+        ordinary.extend(
+            observation
+                .carried_drops
+                .into_iter()
+                .map(|range| telemetry_drop_envelope(range, false)),
+        );
+        ordinary.push(observation.envelope);
+    }
+    record_batch(
+        db,
+        ordinary,
+        &mut progress.persisted,
+        &mut progress.first_error,
+        state.deadlines.persistence,
+    )
+    .await;
+}
+
+#[hotpath::measure(label = "usecases.observability.persist_batch", future = true)]
+async fn record_batch(
+    db: &RegisteredGlobalDb,
+    envelopes: Vec<ObservabilityEnvelopeV1>,
+    persisted: &mut u64,
+    first_error: &mut Option<ApplicationContractError>,
+    persistence_deadline: Duration,
+) {
+    if envelopes.is_empty() {
+        return;
+    }
+    let count = u64::try_from(envelopes.len()).unwrap_or(u64::MAX);
+    match timeout(
+        persistence_deadline,
+        record_observability_batch(db, envelopes),
+    )
+    .await
+    {
+        Ok(Ok(_)) => *persisted = persisted.saturating_add(count),
+        Ok(Err(error)) if first_error.is_none() => *first_error = Some(error),
+        Err(_) if first_error.is_none() => {
+            *first_error = Some(ApplicationContractError::Domain(
+                "observability_persistence_deadline".to_owned(),
+            ));
+        }
+        Ok(Err(_)) | Err(_) => {}
+    }
 }
 
 fn should_wake_rollup_now(
@@ -974,16 +1056,14 @@ async fn record(
     first_error: &mut Option<ApplicationContractError>,
     persistence_deadline: Duration,
 ) {
-    match timeout(persistence_deadline, record_observability(db, envelope)).await {
-        Ok(Ok(_)) => *persisted = persisted.saturating_add(1),
-        Ok(Err(error)) if first_error.is_none() => *first_error = Some(error),
-        Err(_) if first_error.is_none() => {
-            *first_error = Some(ApplicationContractError::Domain(
-                "observability_persistence_deadline".to_owned(),
-            ));
-        }
-        Ok(Err(_)) | Err(_) => {}
-    }
+    record_batch(
+        db,
+        vec![envelope],
+        persisted,
+        first_error,
+        persistence_deadline,
+    )
+    .await;
 }
 
 fn telemetry_drop_envelope(

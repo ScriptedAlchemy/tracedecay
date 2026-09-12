@@ -98,45 +98,31 @@ async fn table_trigger_sql(conn: &Connection, table: &str) -> Vec<String> {
     triggers
 }
 
-/// Rebuilds the two tables the v4 migration widened from their exact beta.37
-/// definitions. Recreating them costs two statement parses; the equivalent
-/// `DROP COLUMN` sequence reparses the whole 700-object schema several times
-/// per column, which under a full parallel test run exceeded the exact-SQL
-/// statement budget.
+/// Authority-invariant trigger bodies exactly as every v3 release published
+/// them, extracted verbatim from the tagged source. The file header carries the
+/// tag-to-inventory table. Deriving these from the current contract instead
+/// would make the fixture agree with whatever
+/// `released_v3_invariant_triggers_intact` reconstructs, including a
+/// reconstruction that no release ever wrote to disk.
+const RELEASED_V3_AUTHORITY_TRIGGERS_SQL: &str =
+    include_str!("../../../../tests/fixtures/session-temporal-released-v3-triggers.sql");
+
+/// Rebuilds the two tables the v4 migration widened, and the three authority
+/// triggers whose bodies changed after v3, from their exact published
+/// definitions. Recreating the tables costs two statement parses; the
+/// equivalent `DROP COLUMN` sequence reparses the whole 700-object schema
+/// several times per column, which under a full parallel test run exceeded the
+/// exact-SQL statement budget.
 async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
     let raw_db = TestConnection::open(db_path);
     let conn = (*raw_db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = 'session_refresh_progress_insert_guard_v1'",
-            (),
-        )
-        .await
-        .unwrap();
-    let current_guard = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<String>(0)
-        .unwrap();
-    drop(rows);
-    let current_accounting = "AND NEW.committed_records = receipt.committed_item_count";
-    let released_accounting = "AND NEW.committed_records =
-                                receipt.occurrence_count
-                                + receipt.copy_count
-                                + receipt.assertion_count";
-    assert_eq!(current_guard.matches(current_accounting).count(), 1);
-    let released_guard = current_guard.replacen(current_accounting, released_accounting, 1);
     // Dropping the table drops its triggers; their text is identical in v3.
     let projection_receipt_triggers =
         table_trigger_sql(&conn, "session_temporal_projection_receipts").await;
     assert_eq!(projection_receipt_triggers.len(), 3);
 
     conn.execute_batch(
-        "DROP TRIGGER session_refresh_progress_insert_guard_v1;
-         DROP TABLE session_temporal_projection_receipts;
+        "DROP TABLE session_temporal_projection_receipts;
          DROP TABLE session_relation_receipts;",
     )
     .await
@@ -150,7 +136,9 @@ async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
     for trigger in &projection_receipt_triggers {
         conn.execute_batch(trigger).await.unwrap();
     }
-    conn.execute_batch(&released_guard).await.unwrap();
+    conn.execute_batch(RELEASED_V3_AUTHORITY_TRIGGERS_SQL)
+        .await
+        .unwrap();
     conn.execute(
         "UPDATE session_temporal_schema_migrations
          SET version = 3, applied_at = 100
@@ -159,6 +147,71 @@ async fn convert_final_temporal_schema_to_released_v3(db_path: &Path) {
     )
     .await
     .unwrap();
+}
+
+/// The authority triggers whose published v3 body differs from the current
+/// contract. Two guard `session_messages`, one guards `session_refresh_progress`.
+const RELEASED_V3_DRIFTED_TRIGGERS: [&str; 3] = [
+    "projection_output_audit_invalidate_delete_v1",
+    "projection_output_audit_invalidate_update_v1",
+    "session_refresh_progress_insert_guard_v1",
+];
+
+/// Seeds the retained user sessions and messages a reset would destroy.
+/// `session_messages` carries two of the three drifted authority triggers, so
+/// these rows also prove the migration replaces a trigger without touching the
+/// table under it.
+async fn seed_retained_sessions_and_messages(db_path: &Path) {
+    let raw_db = TestConnection::open(db_path);
+    let conn = (*raw_db).clone();
+    conn.execute_batch(
+        "INSERT INTO sessions
+            (provider, session_id, project_key, project_path, title, started_at,
+             ended_at, transcript_path, metadata_json)
+         VALUES
+            ('claude', 'mac-session-one', '/Users/mac/project', '/Users/mac/project',
+             'first mac session', 1000, 1100, '/Users/mac/.claude/one.jsonl',
+             '{\"host\":\"mac\"}'),
+            ('cursor', 'mac-session-two', '/Users/mac/project', '/Users/mac/project',
+             NULL, 2000, NULL, NULL, NULL);
+         INSERT INTO session_messages
+            (provider, message_id, session_id, role, timestamp, ordinal, text,
+             kind, model, tool_names, source_path, source_offset, metadata_json)
+         VALUES
+            ('claude', 'mac-message-one', 'mac-session-one', 'user', 1001, 0,
+             'keep my sessions', 'text', NULL, NULL,
+             '/Users/mac/.claude/one.jsonl', 0, NULL),
+            ('claude', 'mac-message-two', 'mac-session-one', 'assistant', 1002, 1,
+             'byte-exact after migration', 'text', 'claude-opus', 'Read,Edit',
+             '/Users/mac/.claude/one.jsonl', 512, '{\"turn\":1}'),
+            ('cursor', 'mac-message-three', 'mac-session-two', 'user', 2001, 0,
+             'second provider', NULL, NULL, NULL, NULL, NULL, NULL);",
+    )
+    .await
+    .unwrap();
+}
+
+/// Every retained session and message column, as a stable comparable snapshot.
+async fn retained_sessions_and_messages(db_path: &Path) -> Vec<String> {
+    let raw_db = TestConnection::open(db_path);
+    let conn = (*raw_db).clone();
+    let mut snapshot = Vec::new();
+    for sql in [
+        "SELECT json_array(provider, session_id, project_key, project_path, title,
+                started_at, ended_at, transcript_path, metadata_json,
+                parent_session_id, is_subagent, agent_id, parent_tool_use_id)
+         FROM sessions ORDER BY provider, session_id",
+        "SELECT json_array(provider, message_id, session_id, role, timestamp, ordinal,
+                text, kind, model, tool_names, source_path, source_offset,
+                metadata_json)
+         FROM session_messages ORDER BY provider, message_id",
+    ] {
+        let mut rows = conn.query(sql, ()).await.unwrap();
+        while let Some(row) = rows.next().await.unwrap() {
+            snapshot.push(row.get::<String>(0).unwrap());
+        }
+    }
+    snapshot
 }
 
 /// `session_temporal_projection_receipts` exactly as published in beta.37.
@@ -603,6 +656,103 @@ async fn released_v3_temporal_receipts_migrate_to_v4_with_exact_progress_counts(
         )
         .await,
         "migration must restore projection receipt immutability before commit"
+    );
+}
+
+/// A profile written by a released v3 binary carries the authority triggers
+/// that release published, not the bodies the tip contracts. Triggers are
+/// derived objects holding no data, so admission must classify the store as the
+/// shipped v3 shape and the migration must replace them — a reset would destroy
+/// the operator's sessions over a trigger body.
+#[tokio::test]
+async fn published_v3_authority_triggers_migrate_and_retain_every_session() {
+    let tmp = TempDir::new().unwrap();
+    let fresh_path = tmp.path().join(".tracedecay").join("fresh.db");
+    let db = open_global_db(&fresh_path)
+        .await
+        .expect("fresh initialization should install the final temporal schema");
+    drop(db);
+    let fresh_catalog = temporal_schema_object_catalog(&fresh_path).await;
+    let mut current_drifted = Vec::new();
+    for trigger in RELEASED_V3_DRIFTED_TRIGGERS {
+        current_drifted.push(normalized_trigger_sql(&fresh_path, trigger).await);
+    }
+
+    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
+    let db = open_global_db(&db_path).await.unwrap();
+    drop(db);
+    seed_retained_sessions_and_messages(&db_path).await;
+    let retained = retained_sessions_and_messages(&db_path).await;
+    assert_eq!(
+        retained.len(),
+        5,
+        "the fixture must seed sessions to retain"
+    );
+    convert_final_temporal_schema_to_released_v3(&db_path).await;
+    insert_seeded_active_released_v3_refresh_receipts(&db_path, (8, 2, 2)).await;
+
+    let mut published_drifted = Vec::new();
+    for trigger in RELEASED_V3_DRIFTED_TRIGGERS {
+        published_drifted.push(normalized_trigger_sql(&db_path, trigger).await);
+    }
+    assert!(
+        published_drifted
+            .iter()
+            .zip(&current_drifted)
+            .all(|(published, current)| published != current),
+        "the fixture must present the published bodies, not the current contract"
+    );
+
+    let reopened = open_global_db(&db_path)
+        .await
+        .expect("a store carrying the published v3 triggers must migrate, not reset");
+    drop(reopened);
+
+    // Admission's own `authority_invariant_triggers_intact` gate runs inside
+    // the migration transaction, so a successful open already proves all
+    // eighty-one triggers converged; these read back the three that drifted.
+    assert_eq!(temporal_schema_version(&db_path).await, 4);
+    for (trigger, current) in RELEASED_V3_DRIFTED_TRIGGERS.iter().zip(&current_drifted) {
+        assert_eq!(
+            &normalized_trigger_sql(&db_path, trigger).await,
+            current,
+            "the migration must leave '{trigger}' at the current contract"
+        );
+    }
+    assert_eq!(
+        temporal_schema_object_catalog(&db_path).await,
+        fresh_catalog,
+        "a migrated store must carry exactly the fresh store's temporal objects"
+    );
+    assert_eq!(
+        retained_sessions_and_messages(&db_path).await,
+        retained,
+        "every retained session and message row must survive byte-exact"
+    );
+    assert_eq!(
+        projection_receipt_progress_counts(&db_path).await,
+        [(0, 4, 9, 1), (1, 3, 12, 2)]
+    );
+
+    let restart_path = tmp.path().join(".tracedecay").join("restart.db");
+    copy_database_for_temporal_restart(&db_path, &restart_path).await;
+    let reopened = open_global_db(&restart_path)
+        .await
+        .expect("a migrated store must reopen as exactly current");
+    drop(reopened);
+    assert_eq!(temporal_schema_version(&restart_path).await, 4);
+    assert_eq!(
+        temporal_schema_object_catalog(&restart_path).await,
+        fresh_catalog,
+        "the second open must be a no-op on the schema"
+    );
+    assert_eq!(
+        retained_sessions_and_messages(&restart_path).await,
+        retained
+    );
+    assert_eq!(
+        projection_receipt_progress_counts(&restart_path).await,
+        [(0, 4, 9, 1), (1, 3, 12, 2)]
     );
 }
 

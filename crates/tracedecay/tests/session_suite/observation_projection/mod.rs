@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
@@ -15,6 +14,7 @@ use tracedecay_domain::{
 };
 use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
     AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,

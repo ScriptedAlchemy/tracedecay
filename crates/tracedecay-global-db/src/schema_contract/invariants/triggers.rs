@@ -1632,6 +1632,85 @@ pub(super) async fn trigger_contracts_intact(
     Ok(true)
 }
 
+/// One authority trigger body a session-temporal v3 store carries in the shape
+/// that shipped rather than the current one.
+///
+/// Every release that persisted schema marker 3 — v0.1.0-beta.25 through
+/// v0.1.0-beta.37, the newest tag — published one identical 81-trigger
+/// authority inventory (the exact SQL lives in
+/// `tests/fixtures/session-temporal-released-v3-triggers.sql`). No trigger name
+/// changed, so a v3 store differs from the current contract in exactly these
+/// bodies and matches it everywhere else. Each released body is reconstructed
+/// from the current contract so every trigger keeps one definition; a fragment
+/// that is not present exactly once is a typed error, never a store admitted or
+/// refused against a body nobody published.
+struct ReleasedV3TriggerDrift {
+    trigger: &'static str,
+    current: &'static str,
+    released: &'static str,
+}
+
+const RELEASED_V3_TRIGGER_DRIFT: &[ReleasedV3TriggerDrift] = &[
+    ReleasedV3TriggerDrift {
+        trigger: "session_refresh_progress_insert_guard_v1",
+        current: "AND NEW.committed_records = receipt.committed_item_count",
+        released: "AND NEW.committed_records =
+                                receipt.occurrence_count
+                                + receipt.copy_count
+                                + receipt.assertion_count",
+    },
+    ReleasedV3TriggerDrift {
+        trigger: "projection_output_audit_invalidate_update_v1",
+        current: "WHERE output_provider = OLD.provider",
+        released: "WHERE projector_version = 'claude-session-message-v4'
+                  AND output_provider = OLD.provider",
+    },
+    ReleasedV3TriggerDrift {
+        trigger: "projection_output_audit_invalidate_delete_v1",
+        current: "WHERE output_provider = OLD.provider",
+        released: "WHERE projector_version = 'claude-session-message-v4'
+                  AND output_provider = OLD.provider",
+    },
+];
+
+/// The released-v3 body of every drifted authority trigger, keyed by name.
+fn released_v3_trigger_contracts() -> tracedecay_domain::errors::Result<Vec<(&'static str, String)>>
+{
+    RELEASED_V3_TRIGGER_DRIFT
+        .iter()
+        .map(|drift| {
+            let Some(trigger) = INVARIANTS
+                .iter()
+                .flat_map(|invariant| invariant.triggers)
+                .find(|trigger| trigger.name == drift.trigger)
+            else {
+                return Err(global_db_operation_message(
+                    OPERATION,
+                    format!(
+                        "released v3 trigger '{}' is not a defined authority invariant trigger",
+                        drift.trigger
+                    ),
+                ));
+            };
+            if trigger.create_sql.matches(drift.current).count() != 1 {
+                return Err(global_db_operation_message(
+                    OPERATION,
+                    format!(
+                        "released v3 '{}' trigger contract is unavailable",
+                        drift.trigger
+                    ),
+                ));
+            }
+            Ok((
+                drift.trigger,
+                trigger
+                    .create_sql
+                    .replacen(drift.current, drift.released, 1),
+            ))
+        })
+        .collect()
+}
+
 #[hotpath::measure(
     future = true,
     label = "global_db.schema_contract.triggers.released_v3_intact"
@@ -1639,29 +1718,14 @@ pub(super) async fn trigger_contracts_intact(
 pub async fn released_v3_invariant_triggers_intact(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<bool> {
-    const CURRENT_ACCOUNTING: &str = "AND NEW.committed_records = receipt.committed_item_count";
-    const RELEASED_V3_ACCOUNTING: &str = "AND NEW.committed_records =
-                                receipt.occurrence_count
-                                + receipt.copy_count
-                                + receipt.assertion_count";
-
+    let released = released_v3_trigger_contracts()?;
     for invariant in INVARIANTS {
         for trigger in invariant.triggers {
-            if trigger.name == "session_refresh_progress_insert_guard_v1" {
-                let released_sql =
-                    trigger
-                        .create_sql
-                        .replacen(CURRENT_ACCOUNTING, RELEASED_V3_ACCOUNTING, 1);
-                if released_sql == trigger.create_sql {
-                    return Err(global_db_operation_message(
-                        OPERATION,
-                        "released v3 refresh accounting trigger contract is unavailable",
-                    ));
-                }
-                if !trigger_matches_sql(conn, trigger, &released_sql).await? {
-                    return Ok(false);
-                }
-            } else if !trigger_matches(conn, trigger).await? {
+            let expected = released
+                .iter()
+                .find(|(name, _)| *name == trigger.name)
+                .map_or(trigger.create_sql, |(_, sql)| sql.as_str());
+            if !trigger_matches_sql(conn, trigger, expected).await? {
                 return Ok(false);
             }
         }

@@ -1,11 +1,10 @@
+use super::overlay_admission::admit_overlay;
 use std::sync::Arc;
 
 use tracedecay_domain::ContentDigest;
 use tracedecay_lsp::{
     OverlayExtractionState, OverlayParseState, OverlayParseUnavailable, OverlaySnapshot,
 };
-
-use super::admit_overlay;
 
 fn overlay(content_digest: ContentDigest) -> OverlaySnapshot {
     OverlaySnapshot {
