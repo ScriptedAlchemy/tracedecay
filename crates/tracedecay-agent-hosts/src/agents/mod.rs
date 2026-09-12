@@ -82,7 +82,7 @@ pub use host_config_io::{
 };
 pub(crate) use host_config_io::{
     JsonConfigMutation, collect_regular_files, ensure_project_local_safe_path,
-    ensure_project_local_safe_paths, hook_command, hook_command_for_platform, host_home_override,
+    ensure_project_local_safe_paths, hook_command, host_home_override,
     record_host_config_observation_bytes, sweep_superseded_plugin_siblings,
     update_json_config_transactionally, update_toml_config_transactionally,
 };
@@ -92,7 +92,7 @@ use host_config_io::{
     TestHostConfigWritePauseController, pause_next_host_config_write_after_validation,
     pause_next_host_config_write_at_publication,
 };
-use host_config_io::{render_json_config, strip_jsonc_comments, which_tracedecay_path_from};
+use host_config_io::{render_json_config, strip_jsonc_comments};
 pub(crate) use mcp_registration::doctor_check_prompt_contains_tracedecay;
 pub use mcp_registration::{
     McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, expected_tool_perms,

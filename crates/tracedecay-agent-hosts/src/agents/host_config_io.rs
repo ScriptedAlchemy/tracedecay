@@ -42,7 +42,7 @@ impl JsonConfigDialect {
     /// Strict parse of already-observed config contents for a write path.
     /// Missing or blank content is a fresh `{}`; anything unparseable is a
     /// typed error so a transform never runs against fabricated state.
-    fn parse_for_edit(self, path: &Path, contents: &str) -> Result<serde_json::Value> {
+    pub(super) fn parse_for_edit(self, path: &Path, contents: &str) -> Result<serde_json::Value> {
         if contents.trim().is_empty() {
             return Ok(serde_json::json!({}));
         }
@@ -440,7 +440,7 @@ pub(super) struct TestHostConfigWritePauseController(std::sync::Arc<TestHostConf
 
 #[cfg(test)]
 impl TestHostConfigWritePauseController {
-    fn wait_until_reached(&self) {
+    pub(super) fn wait_until_reached(&self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut state = self.0.state.lock().expect("host write pause state");
         while !state.0 {
@@ -461,7 +461,7 @@ impl TestHostConfigWritePauseController {
         }
     }
 
-    fn resume(&self) {
+    pub(super) fn resume(&self) {
         let mut state = self.0.state.lock().expect("host write pause state");
         state.1 = true;
         self.0.changed.notify_all();
@@ -767,7 +767,7 @@ fn which_tracedecay_from(
         .and_then(|path| path.to_str().map(normalize_path_separators))
 }
 
-pub(super) fn which_tracedecay_path_from(
+fn which_tracedecay_path_from(
     current_exe: Option<&Path>,
     path_var: Option<&std::ffi::OsStr>,
     cargo_target_dir: Option<&Path>,
@@ -965,11 +965,7 @@ pub(crate) fn hook_command(tracedecay_bin: &str, subcommand: &str) -> String {
     hook_command_for_platform(tracedecay_bin, subcommand, cfg!(windows))
 }
 
-pub(crate) fn hook_command_for_platform(
-    tracedecay_bin: &str,
-    subcommand: &str,
-    windows: bool,
-) -> String {
+fn hook_command_for_platform(tracedecay_bin: &str, subcommand: &str, windows: bool) -> String {
     let quoted = if windows {
         quote_windows_command_arg(&normalize_path_separators(tracedecay_bin))
     } else {
