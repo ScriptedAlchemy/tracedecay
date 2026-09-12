@@ -458,17 +458,41 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     _run_checked(["git", "init", "--initial-branch=main", "--quiet"], root, "fixture git init")
     _run_checked(["git", "config", "user.name", "TraceDecay Catalog Sweep"], root, "fixture git config")
     _run_checked(["git", "config", "user.email", "catalog-sweep@example.invalid"], root, "fixture git config")
+    _run_checked(
+        ["git", "remote", "add", "origin", "https://github.com/tracedecay/tool-sweep-fixture.git"],
+        root,
+        "fixture GitHub remote",
+    )
     _run_checked(["git", "add", "."], root, "fixture git add")
     _run_checked(["git", "commit", "--quiet", "-m", "test: seed catalog sweep fixture"], root, "fixture git commit")
+    cleanup_branch = "tool-sweep-cleanup"
+    _run_checked(["git", "branch", cleanup_branch], root, "fixture cleanup branch")
+    with (root / "src/lib.rs").open("a") as source:
+        source.write("pub fn sweep_integration_marker() -> i32 { 9 }\n")
+    _run_checked(["git", "add", "src/lib.rs"], root, "fixture integration add")
+    _run_checked(
+        ["git", "commit", "--quiet", "-m", "test: add integration source commit"],
+        root,
+        "fixture integration commit",
+    )
     commit = _run_checked(
         ["git", "rev-parse", "HEAD"], root, "fixture git revision"
     ).stdout.strip()
+    cleanup_root = parent / "cleanup-worktree"
+    _run_checked(
+        ["git", "worktree", "add", "--quiet", str(cleanup_root), cleanup_branch],
+        root,
+        "fixture cleanup worktree",
+    )
     # One uncommitted modification on top of the committed baseline: the
     # git_hunks producer mints its expiring preview input from real
     # working-tree hunks, and a clean tree would leave nothing to stage.
     with (root / "docs/large.md").open("a") as hunk_source:
         hunk_source.write("catalog sweep uncommitted hunk line\n")
     _run_checked([str(binary), "init"], root, "fixture tracedecay init", timeout_s=180)
+    _run_checked(
+        [str(binary), "init"], cleanup_root, "fixture cleanup tracedecay init", timeout_s=180
+    )
     session_id = f"tool-sweep-session-{os.getpid()}-{time.monotonic_ns()}"
     _run_checked(
         [str(binary), "hook-codex-session-start"],
@@ -546,6 +570,8 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         "session_id": session_id,
         "lcm_message": lcm_message,
         "root": str(root),
+        "cleanup_root": str(cleanup_root),
+        "cleanup_branch": cleanup_branch,
         "glob": "Cargo.toml",
         "key": "package.name",
         "from_ref": "HEAD",
