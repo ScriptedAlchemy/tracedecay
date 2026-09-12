@@ -23,16 +23,24 @@ use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingId, BindingSurface, CapabilityId, SchemaId, UseCaseId,
 };
 
+use super::catalog::{application_negotiated_features, resolve_application_binding};
+use super::dispatch::apply_http_page_to_surface_body;
+use super::feedback_observation::surface_rejection_metadata;
 use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindings;
+use super::operation_events::{
+    HttpOperationEventState, http_operation_event_router,
+    resolve_authenticated_http_request_context,
+};
+use super::problems::{current_micros, invocation_problem};
+use super::request_control::{
+    ActiveHttpRequest, HttpCancellationRegistry, application_http_context,
+};
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
-    APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, CallableCodeSurfaceRequest,
-    HttpCancellationRegistry, HttpOperationEventState, NativeIntegrationSurfaceRequest,
-    PrimitiveCodeSurfaceRequest, application_http_context, application_negotiated_features,
-    application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
-    http_operation_event_router, invocation_problem, parse_http_application_surface_request,
-    resolve_application_binding, resolve_application_surface_dispatch,
-    resolve_authenticated_http_request_context, surface_rejection_metadata,
+    APPLICATION_PROTOCOL_REVISION, CallableCodeSurfaceRequest, NativeIntegrationSurfaceRequest,
+    PrimitiveCodeSurfaceRequest, application_surface_dispatch_input_with_controls,
+    execute_application_surface, parse_http_application_surface_request,
+    resolve_application_surface_dispatch,
 };
 use tracedecay_application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
@@ -2194,7 +2202,7 @@ fn diagnostics_public_name_adapts_the_shipped_flat_request() {
     let page = PageRequest::new(25, Some(OpaqueCursor::new("opaque-http").expect("cursor")))
         .expect("page");
     assert_eq!(
-        super::apply_http_page_to_surface_body(
+        apply_http_page_to_surface_body(
             ApplicationSurfaceOperation::DiagnosticsRead,
             json!({
                 "scope": "workspace",
