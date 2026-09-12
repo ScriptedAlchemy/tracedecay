@@ -709,9 +709,12 @@ fn build_code_graph_manifest_inputs_checked(
             "code graph projection identity uses a foreign projector".to_owned(),
         ));
     }
-    let built = hotpath::measure_block!("code_index.graph.build_projection", {
-        build_projection(&projection, generation, edges, chunks, production, check)
-    })?;
+    let built = hotpath::measure_block!(
+        "code_index.seal.collect",
+        hotpath::measure_block!("code_index.graph.build_projection", {
+            build_projection(&projection, generation, edges, chunks, production, check)
+        })
+    )?;
     hotpath::measure_block!("code_index.graph.seal_manifest", {
         GraphGenerationManifest::new_checked(
             projection,

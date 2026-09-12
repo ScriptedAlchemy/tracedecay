@@ -2032,9 +2032,12 @@ impl RetainedCodeGraphRuntimeV1 {
             let completion = publish_registration();
             let _gate = self.hold_publication_gate();
             hotpath::measure_block!(
-                "daemon.session_registry.publish_snapshot.gate_hold",
-                self.graph_registry
-                    .complete_verified_publication(completion, storage, &context, *proven,)
+                "code_index.seal.seat",
+                hotpath::measure_block!(
+                    "daemon.session_registry.publish_snapshot.gate_hold",
+                    self.graph_registry
+                        .complete_verified_publication(completion, storage, &context, *proven,)
+                )
             )
         };
         // Classification slice: the manifest-provider bind (a shared-map

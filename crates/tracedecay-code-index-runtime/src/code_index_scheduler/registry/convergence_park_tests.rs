@@ -26,6 +26,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     code_text_artifacts_root, scoped_code_index_store_root,
 };
 
+use super::super::graph_activation::install_injected_activation_gate;
 use super::CodeIndexSchedulerRegistryV1;
 
 /// Ceiling on how long a test waits for the worker to reach the asserted
@@ -53,6 +54,20 @@ impl Fixture {
         project_id: &str,
         poison: impl FnOnce(&Path),
     ) -> Self {
+        let (fixture, admission) =
+            Self::mount_with_poisoned_artifacts_root_held(project_id, poison).await;
+        drop(admission);
+        fixture
+    }
+
+    /// [`Self::mount_with_poisoned_artifacts_root`] with the background
+    /// worker held at its dequeue point: the first pass starts only when the
+    /// returned permit is dropped, so a test can arm observation hooks that
+    /// need the mounted worktree's identity first.
+    async fn mount_with_poisoned_artifacts_root_held(
+        project_id: &str,
+        poison: impl FnOnce(&Path),
+    ) -> (Self, tokio::sync::OwnedSemaphorePermit) {
         let root = TempDir::new().expect("fixture root");
         let project = root.path().join("project");
         fs::create_dir_all(project.join("src")).expect("create source root");
@@ -73,6 +88,11 @@ impl Fixture {
         poison(&artifacts_root);
 
         let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+        let admission = registry
+            .background_reconcile_admission()
+            .acquire_owned()
+            .await
+            .expect("hold the background worker before its first pass");
         registry
             .mount_worktree(
                 tracedecay_domain::ProjectId::new(project_id).expect("project identity"),
@@ -83,12 +103,15 @@ impl Fixture {
             .await
             .expect("mount scheduler");
 
-        Self {
-            _root: root,
-            project,
-            artifacts_root,
-            registry,
-        }
+        (
+            Self {
+                _root: root,
+                project,
+                artifacts_root,
+                registry,
+            },
+            admission,
+        )
     }
 
     /// One wake that carries no new input, exactly like the periodic cadence
@@ -248,6 +271,70 @@ async fn an_unhealable_text_artifacts_root_parks_typed_and_recovers_when_fixed()
         .mode()
         & 0o777;
     assert_eq!(mode, 0o700, "the recovered root is created owner-private");
+
+    fixture.registry.shutdown().await;
+}
+
+/// A publication's graph activation consumes the sealed generation, not the
+/// text artifact, so it must not queue behind the text owner's projection.
+/// The pinned defect: the seat gate demanded a *finished* text owner before
+/// any graph work began, so on a 772-file fixture the graph build (tens of
+/// seconds) started only after the whole text build and their sum missed the
+/// journey's restart bound. A text owner that can never finish — parked on an
+/// unhealable artifacts root — makes the ordering observable: activation must
+/// start while the owner is still parked. The seat itself still waits for a
+/// ready owner, so the parked state stays truthful throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_activation_starts_while_the_published_text_owner_is_parked() {
+    let (fixture, admission) = Fixture::mount_with_poisoned_artifacts_root_held(
+        "project.text-artifacts-root-graph-ahead",
+        |artifacts_root| {
+            fs::write(artifacts_root, b"squatter").expect("occupy artifacts root path");
+        },
+    )
+    .await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let gate = install_injected_activation_gate(&scope.worktree_id);
+    drop(admission);
+
+    let parked = fixture
+        .wait_for_freshness(|freshness| freshness.parked.is_some())
+        .await
+        .expect("freshness projection for the mounted worktree");
+    assert_eq!(
+        parked.staleness_state.as_deref(),
+        Some("parked"),
+        "the text owner must park on the unhealable root: {parked:?}"
+    );
+
+    tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
+        .await
+        .expect("graph activation must start without waiting for the parked text owner");
+    let observed = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("freshness projection for the mounted worktree");
+    assert_eq!(
+        observed.staleness_state.as_deref(),
+        Some("parked"),
+        "activation must not seat or unpark an owner that has not finished: {observed:?}"
+    );
+    assert!(
+        fixture
+            .registry
+            .serving_code_scope(&fixture.project)
+            .await
+            .expect("mounted scope")
+            .serving_generation
+            .is_none(),
+        "the seat still waits for a ready text owner"
+    );
+    gate.release();
 
     fixture.registry.shutdown().await;
 }

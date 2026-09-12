@@ -243,10 +243,17 @@ const TRANSCRIPT_SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_session_messages_session
         ON session_messages(provider, session_id, ordinal);
-    CREATE INDEX IF NOT EXISTS idx_session_messages_session_activity
+    -- The activity read fetches a bounded LIMIT of rows per session, so a
+    -- covering index buys little there and copying `metadata_json` (kilobytes
+    -- per message) into it once doubled the table's footprint: on one store
+    -- the index alone was 0.77 GB against 0.66 GB of table. Keep the ordering
+    -- columns covered and let the scan fetch the blob from the table. The
+    -- earlier definition carried the blob under the same name; a store that
+    -- still has it rebuilds on this open.
+    DROP INDEX IF EXISTS idx_session_messages_session_activity;
+    CREATE INDEX IF NOT EXISTS idx_session_messages_session_activity_v2
         ON session_messages(
-            provider, session_id, timestamp, ordinal, message_id,
-            kind, tool_names, metadata_json
+            provider, session_id, timestamp, ordinal, message_id, kind, tool_names
         );
     CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp
         ON session_messages(timestamp);

@@ -28103,7 +28103,8 @@
           "type": "integer"
         },
         "pinned_catalog_digest": {
-          "$ref": "#/$defs/ManifestDigest"
+          "$ref": "#/$defs/ManifestDigest",
+          "description": "Must equal the live Work executable catalog digest. Validation and\nactivation report the current digest when this pin is stale."
         },
         "pinned_configuration_digest": {
           "$ref": "#/$defs/ManifestDigest"
@@ -28145,6 +28146,7 @@
           "type": "integer"
         },
         "expected_revision": {
+          "description": "Current candidate disposition revision. A newly registered candidate\nstarts at revision 1; activation reports expected and observed values\nwhen this compare-and-swap precondition is stale.",
           "format": "uint64",
           "minimum": 1,
           "type": "integer"

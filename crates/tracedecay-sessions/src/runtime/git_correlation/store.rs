@@ -821,13 +821,22 @@ impl GitEvidenceGraphView {
         filter: &GitScopeFilter,
         maximum: usize,
     ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
-        let (hub, relation_kind) = match (&filter.branch, &filter.worktree, &filter.commit) {
-            (Some(branch), None, None) => (branch_entity_id(branch)?, BRANCH_SPAN_RELATION),
-            (None, Some(worktree), None) => (worktree_entity_id(worktree)?, WORKTREE_SPAN_RELATION),
+        let (hub, relation_kind, git_ref) = match (&filter.branch, &filter.worktree, &filter.commit)
+        {
+            (Some(branch), None, None) => (
+                branch_entity_id(branch)?,
+                BRANCH_SPAN_RELATION,
+                GitRefFilter::Branch(branch.clone()),
+            ),
+            (None, Some(worktree), None) => (
+                worktree_entity_id(worktree)?,
+                WORKTREE_SPAN_RELATION,
+                GitRefFilter::Worktree(worktree.clone()),
+            ),
             _ => return self.session_ids_for_scope(filter),
         };
         let query = SessionsForQuery {
-            git_ref: GitRefFilter::Branch(String::new()),
+            git_ref,
             since: None,
             until: None,
             limit: maximum,
