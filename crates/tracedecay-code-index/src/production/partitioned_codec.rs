@@ -3984,8 +3984,7 @@ mod tests {
         for descriptor in &generation.file_segments {
             let name = descriptor
                 .segment_digest
-                .as_str()
-                .strip_prefix("sha256:")
+                .hex_suffix()
                 .expect("sha256 segment digest");
             let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
                 .expect("historical segment bytes");
@@ -4030,8 +4029,7 @@ mod tests {
         let descriptor = &generation.file_segments[0];
         let name = descriptor
             .segment_digest
-            .as_str()
-            .strip_prefix("sha256:")
+            .hex_suffix()
             .expect("sha256 segment digest");
         let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
             .expect("historical segment bytes");

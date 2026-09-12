@@ -86,6 +86,7 @@ semantic-model2vec = ["tracedecay/semantic-model2vec"]
 # `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu` opts out.
 semantic-gpu-coreml = ["tracedecay/semantic-gpu-coreml"]
 semantic-gpu-cuda = ["tracedecay/semantic-gpu-cuda"]
+semantic-gpu-webgpu = ["tracedecay/semantic-gpu-webgpu"]
 test-transport = ["tracedecay/test-transport"]
 lang-dart = ["tracedecay/lang-dart"]
 lang-pascal = ["tracedecay/lang-pascal"]

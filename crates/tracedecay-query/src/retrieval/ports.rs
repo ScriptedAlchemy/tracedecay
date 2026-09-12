@@ -19,6 +19,16 @@ use super::exact::{ExactLaneEvidence, ExactLaneRequest};
 use super::graph::{GraphLaneEvidence, GraphLaneRequest};
 use super::lexical::{LexicalLaneEvidence, LexicalLaneRequest};
 
+/// Request-scoped cancellation and monotonic deadline authority shared by
+/// retrieval lanes.
+pub trait RetrievalExecutionControl: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+
+    /// Monotonic elapsed time in the request-relative domain used by
+    /// [`RetrievalBudget::deadline_micros`].
+    fn elapsed_micros(&self) -> u64;
+}
+
 /// Incompatible indexes or models never trigger silent fallback.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RetrievalPortError {
@@ -218,7 +228,7 @@ pub trait GraphEvidenceReadPort {
     fn read_graph_evidence(
         &self,
         request: &GraphLaneRequest,
-        control: std::sync::Arc<dyn super::graph::GraphExecutionControl>,
+        control: std::sync::Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
 }
 

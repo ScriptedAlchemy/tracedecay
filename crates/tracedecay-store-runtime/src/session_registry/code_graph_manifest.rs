@@ -14,7 +14,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     try_acquire_code_generation_store_lock,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
-use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId};
+use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, sha256_hex_suffix};
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphDbError, GraphGenerationManifest, GraphGenerationManifestProvider,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
@@ -454,8 +454,7 @@ fn decode_verified_seal_with_bundle_barrier(
             })?;
         if encode_lowercase_hex(&Sha256::digest(&manifest))
             != expected_digest
-                .as_str()
-                .strip_prefix("sha256:")
+                .hex_suffix()
                 .unwrap_or(expected_digest.as_str())
         {
             return Err(GraphDbError::Corrupt {
@@ -598,7 +597,7 @@ fn select_partitioned_segment_root<'a>(
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
 ) -> Result<&'a std::path::Path, CodeIndexProductionErrorV1> {
     let (digest, _, _, _) = partitioned_segment_request(request)?;
-    let digest = digest.strip_prefix("sha256:").ok_or_else(|| {
+    let digest = sha256_hex_suffix(digest).ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
     })?;
     for root in roots {
@@ -628,7 +627,7 @@ fn open_partitioned_segment(
     use tracedecay_code_index::production::CodeIndexProductionErrorV1;
 
     let (digest, expected_size, _, _) = partitioned_segment_request(request)?;
-    let digest_hex = digest.strip_prefix("sha256:").ok_or_else(|| {
+    let digest_hex = sha256_hex_suffix(digest).ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
     })?;
     let path = segments_root.join(format!("segment-{digest_hex}.json"));
@@ -710,7 +709,7 @@ fn read_partitioned_segment(
 ) -> Result<(), tracedecay_code_index::production::CodeIndexProductionErrorV1> {
     use tracedecay_code_index::production::CodeIndexProductionErrorV1;
     let (digest, expected_size, offset, length) = partitioned_segment_request(request)?;
-    let digest_hex = digest.strip_prefix("sha256:").ok_or_else(|| {
+    let digest_hex = sha256_hex_suffix(digest).ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
     })?;
     let segment_path = segments_root.join(format!("segment-{digest_hex}.json"));
@@ -885,9 +884,7 @@ pub(super) fn verify_sealed_generation_source_from_roots(
     sealed_state_digest: &SealedGraphStateDigest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    let digest = sealed_state_digest
-        .as_str()
-        .strip_prefix("sha256:")
+    let digest = sha256_hex_suffix(sealed_state_digest.as_str())
         .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
     let seal_file = format!("generation-{digest}.json");
     let segments_root = generations_root
@@ -1460,10 +1457,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                 already_decoded
             }
             None => {
-                let digest = source
-                    .sealed_state_digest
-                    .as_str()
-                    .strip_prefix("sha256:")
+                let digest = sha256_hex_suffix(source.sealed_state_digest.as_str())
                     .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
                 let seal_file = format!("generation-{digest}.json");
                 let mut decoded = None;
@@ -1625,7 +1619,9 @@ mod tests {
         DurablePublicationPointerV1, acquire_code_generation_store_lock,
         run_code_generation_retention,
     };
-    use tracedecay_domain::{CodeGenerationId, ProjectId, RepositoryId, UtcMicros};
+    use tracedecay_domain::{
+        CodeGenerationId, ProjectId, RepositoryId, UtcMicros, sha256_hex_suffix,
+    };
     use tracedecay_graph_db::{
         GraphDbError, GraphGenerationManifestProvider, GraphNamespace, GraphProjectorRevision,
         SealedCodeGenerationReplay, SealedGraphStateDigest,
@@ -1707,11 +1703,7 @@ mod tests {
             fixture(generations_root.clone(), replay_root.clone());
         let seal_file = format!(
             "generation-{}.json",
-            source
-                .sealed_state_digest
-                .as_str()
-                .strip_prefix("sha256:")
-                .unwrap()
+            sha256_hex_suffix(source.sealed_state_digest.as_str()).unwrap()
         );
 
         assert!(matches!(
@@ -1785,11 +1777,7 @@ mod tests {
         // Only the branch worktree's store holds it, and the read reaches there.
         let seal_file = format!(
             "generation-{}.json",
-            source
-                .sealed_state_digest
-                .as_str()
-                .strip_prefix("sha256:")
-                .unwrap()
+            sha256_hex_suffix(source.sealed_state_digest.as_str()).unwrap()
         );
         std::fs::write(branch_generations.join(&seal_file), b"corrupt").unwrap();
         assert!(matches!(
@@ -1821,11 +1809,7 @@ mod tests {
             fixture(generations_root.clone(), replay_root.clone());
         let seal_file = format!(
             "generation-{}.json",
-            source
-                .sealed_state_digest
-                .as_str()
-                .strip_prefix("sha256:")
-                .unwrap()
+            sha256_hex_suffix(source.sealed_state_digest.as_str()).unwrap()
         );
         std::fs::write(generations_root.join(&seal_file), b"canonical").unwrap();
         std::fs::write(replay_root.join(&seal_file), b"pool").unwrap();
@@ -2033,11 +2017,7 @@ mod tests {
             &std::fs::read(scoped_store.join("active-code-generation-v1.json")).unwrap(),
         )
         .unwrap();
-        let digest = pointer
-            .state_digest
-            .strip_prefix("sha256:")
-            .unwrap()
-            .to_owned();
+        let digest = sha256_hex_suffix(&pointer.state_digest).unwrap().to_owned();
         let canonical_manifest = scoped_store
             .join("code-generations-v1")
             .join(pointer.generation_file);
@@ -2356,7 +2336,7 @@ mod tests {
         let pointer_path = scoped_store.join("active-code-generation-v1.json");
         let pointer: DurablePublicationPointerV1 =
             serde_json::from_slice(&std::fs::read(&pointer_path).unwrap()).unwrap();
-        let digest = pointer.state_digest.strip_prefix("sha256:").unwrap();
+        let digest = sha256_hex_suffix(&pointer.state_digest).unwrap();
         let generations_root = scoped_store.join("code-generations-v1");
         let canonical_manifest = generations_root.join(&pointer.generation_file);
         let manifest: serde_json::Value =
@@ -2370,9 +2350,8 @@ mod tests {
         );
         let evidence_digest = manifest["generation"]["generation_evidence"]["segment_digest"]
             .as_str()
-            .unwrap()
-            .strip_prefix("sha256:")
             .unwrap();
+        let evidence_digest = sha256_hex_suffix(evidence_digest).unwrap();
         let evidence_path = scoped_store
             .join("code-generation-segments-v1")
             .join(format!("segment-{evidence_digest}.json"));
@@ -2519,7 +2498,7 @@ mod tests {
             .expect("first hydration decodes the sealed payload from disk");
 
         // Delete the seal from both roots so any further byte pass must fail.
-        let digest = pointer.state_digest.strip_prefix("sha256:").unwrap();
+        let digest = sha256_hex_suffix(&pointer.state_digest).unwrap();
         let seal_file = format!("generation-{digest}.json");
         std::fs::remove_file(generations_root.join(&seal_file)).unwrap();
 

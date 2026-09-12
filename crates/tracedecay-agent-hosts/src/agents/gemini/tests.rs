@@ -328,7 +328,7 @@ fn deactivation_drives_the_hosts_own_uninstall_by_extension_name() {
 /// rather than "missing".
 #[test]
 fn registration_state_follows_the_hosts_installed_extension() {
-    use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+    use crate::agents::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 
     let home = tempfile::tempdir().unwrap();
     let health = HealthcheckContext {

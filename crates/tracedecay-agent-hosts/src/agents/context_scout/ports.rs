@@ -34,7 +34,7 @@ use tracedecay_domain::{
 };
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopeBindingV1};
 
-use super::context_scout_v2::{
+use super::{
     ContextScoutControlV1, ContextScoutDeliverySelectionInputV1, ContextScoutEvidenceEnvelopeExt,
     ContextScoutLimitsV1, ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1,
     ContextScoutServiceStateV1, select_context_scout_delivery_window,
@@ -1124,7 +1124,7 @@ fn valid_opaque_address(address: ContextScoutAddressV1) -> bool {
 }
 
 fn digest_bytes(digest: &ManifestDigest) -> Option<[u8; 32]> {
-    let encoded = digest.as_str().strip_prefix("sha256:")?;
+    let encoded = digest.hex_suffix()?;
     let mut bytes = [0_u8; 32];
     hex::decode_to_slice(encoded, &mut bytes).ok()?;
     Some(bytes)
@@ -1265,7 +1265,7 @@ mod tests {
         let envelope = decode_bound_native_hook_event(
             HookHostV1::ClaudeCode,
             include_bytes!(
-                "../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+                "../../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
             ),
             &binding,
             NativeEnvelopeMaterialV1 {

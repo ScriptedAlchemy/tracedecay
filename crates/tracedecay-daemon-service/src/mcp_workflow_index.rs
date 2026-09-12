@@ -16,7 +16,7 @@ use tracedecay_global_db::GlobalDbWorkflowStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_sessions::runtime::git_correlation::{GitCorrelationError, GitScopeFilter};
 use tracedecay_sessions::runtime::workflow_index::{
-    RegisteredWorkflowIndexSnapshot, WorkflowIndexError,
+    MAX_WORKFLOW_LIMIT, RegisteredWorkflowIndexSnapshot, WorkflowIndexError,
 };
 
 /// Keeps the workflow index's own error text, so a read failure still reads the
@@ -90,7 +90,10 @@ impl DaemonWorkflowIndexReadService {
                     worktree: filter.worktree,
                     commit: filter.commit,
                 };
-                let session_ids = match self.database.git_scope_session_ids(&filter) {
+                let session_ids = match self
+                    .database
+                    .git_scope_session_ids_bounded(&filter, MAX_WORKFLOW_LIMIT + 1)
+                {
                     Ok(session_ids) => session_ids,
                     Err(GitCorrelationError::Unavailable(_)) => {
                         return Ok(WorkflowRunListOutcome::Unavailable(

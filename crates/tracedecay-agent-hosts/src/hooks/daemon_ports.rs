@@ -19,7 +19,7 @@ use tracedecay_hooks::{
     HookTransportDispositionV1,
 };
 
-use crate::agents::context_scout_v2::ContextScoutDeliveryReceiptHookV1;
+use crate::agents::context_scout::ContextScoutDeliveryReceiptHookV1;
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::analytics::HookTimingSpan;

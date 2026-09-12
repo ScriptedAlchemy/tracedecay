@@ -13,7 +13,7 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle_v2::HostBundleRegistrationStateV1;
+use super::host_bundle::HostBundleRegistrationStateV1;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, TextFileMutation, config_backup_path, load_json_file, report_mcp_registration,
@@ -82,22 +82,22 @@ impl AgentIntegration for DevinIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
-            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle::HostBundleComponentV1::ContextMcp {
+            return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
         devin_mcp_registration_state(&devin_mcp_config_path(&ctx.home), None)
     }
 
     fn host_component_registration_for_lifecycle(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
     ) -> HostBundleRegistrationStateV1 {
-        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+        if component != super::host_bundle::HostBundleComponentV1::ContextMcp {
             return HostBundleRegistrationStateV1::Missing;
         }
         devin_mcp_registration_state(
@@ -116,10 +116,10 @@ impl AgentIntegration for DevinIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
             let path = devin_mcp_config_path(home);
             vec![
                 path.clone(),
@@ -133,11 +133,11 @@ impl AgentIntegration for DevinIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
             let path = devin_project_mcp_config_path(project_path);
             Ok(vec![
                 path.clone(),
@@ -152,7 +152,7 @@ impl AgentIntegration for DevinIntegration {
     #[hotpath::measure(label = "devin_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         install_mcp_if_selected(components, &devin_mcp_config_path(&ctx.home), ctx)
@@ -160,7 +160,7 @@ impl AgentIntegration for DevinIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
         uninstall_mcp_if_selected(components, &devin_mcp_config_path(&ctx.home))
@@ -168,7 +168,7 @@ impl AgentIntegration for DevinIntegration {
 
     fn activate_project_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -183,7 +183,7 @@ impl AgentIntegration for DevinIntegration {
 
     fn deactivate_project_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         _ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -265,11 +265,11 @@ fn doctor_check_devin_registration(
 }
 
 fn install_mcp_if_selected(
-    components: &[super::host_bundle_v2::HostBundleComponentV1],
+    components: &[super::host_bundle::HostBundleComponentV1],
     config_path: &Path,
     ctx: &InstallContext,
 ) -> Result<()> {
-    if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+    if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
                 message: format!(
@@ -324,10 +324,10 @@ enum DevinMcpRemoval {
 }
 
 fn uninstall_mcp_if_selected(
-    components: &[super::host_bundle_v2::HostBundleComponentV1],
+    components: &[super::host_bundle::HostBundleComponentV1],
     config_path: &Path,
 ) -> Result<()> {
-    if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+    if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
         if !config_path.exists() {
             eprintln!("  {} not found, skipping", config_path.display());
             return Ok(());
@@ -432,7 +432,7 @@ mod tests {
 
         assert_eq!(
             DevinIntegration.host_component_registration_for_lifecycle(
-                super::super::host_bundle_v2::HostBundleComponentV1::ContextMcp,
+                super::super::host_bundle::HostBundleComponentV1::ContextMcp,
                 &health,
                 &install,
             ),
@@ -488,7 +488,7 @@ mod tests {
         };
 
         let result = DevinIntegration.deactivate_project_host_component_registration(
-            &[super::super::host_bundle_v2::HostBundleComponentV1::ContextMcp],
+            &[super::super::host_bundle::HostBundleComponentV1::ContextMcp],
             &install,
             project.path(),
         );
@@ -509,7 +509,7 @@ mod tests {
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         let original = br#"{"mcpServers":{"other":{"command":"other-mcp"}},"ui":{"theme":"dark"}}"#;
         std::fs::write(&config, original).unwrap();
-        let components = [super::super::host_bundle_v2::HostBundleComponentV1::ContextMcp];
+        let components = [super::super::host_bundle::HostBundleComponentV1::ContextMcp];
         let install = InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: "/tmp/tracedecay-a".to_string(),

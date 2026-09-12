@@ -149,7 +149,7 @@ mod tests {
         assert!(named_config.contains("engine: tracedecay"));
         assert_eq!(
             super::super::hermes_registration_state(home.path(), Some(true)),
-            crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current,
+            crate::agents::host_bundle::HostBundleRegistrationStateV1::Current,
             "the state used by transaction verification must accept the activated profile set"
         );
     }

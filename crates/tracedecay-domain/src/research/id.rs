@@ -61,6 +61,14 @@ macro_rules! digest_id_body {
                 &self.0
             }
 
+            /// Hex body when this digest is `sha256:`-tagged.
+            ///
+            /// `None` for `blake3:` / `sha512:` values, which integrity
+            /// digests also accept.
+            pub fn hex_suffix(&self) -> Option<&str> {
+                $crate::canonical_text::sha256_hex_suffix(self.as_str())
+            }
+
             pub fn validate(&self) -> Result<(), $error> {
                 $crate::research::id::validate_integrity_digest(&self.0, stringify!($name))
                     .map_err($map)
@@ -285,6 +293,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integrity_digest_types_accept_supported_algorithms() {
+        let sha256 = format!("sha256:{}", "a".repeat(64));
+        let sha512 = format!("sha512:{}", "b".repeat(128));
+        let blake3 = format!("blake3:{}", "c".repeat(64));
+
+        assert!(ManifestDigest::new(&sha256).is_ok());
+        assert!(LocatorDigest::new(&sha256).is_ok());
+        assert!(AccessPolicyDigest::new(&sha256).is_ok());
+        assert!(RegistryManifestDigest::new(&sha256).is_ok());
+        assert!(DataVersionDigest::new(&sha256).is_ok());
+        assert_eq!(
+            ManifestDigest::new(&sha256)
+                .expect("sha256 digest")
+                .hex_suffix(),
+            Some(sha256.as_str().get(7..).expect("sha256 tag"))
+        );
+        assert!(
+            ManifestDigest::new(&sha512)
+                .expect("sha512 digest")
+                .hex_suffix()
+                .is_none()
+        );
+        assert!(
+            ManifestDigest::new(&blake3)
+                .expect("blake3 digest")
+                .hex_suffix()
+                .is_none()
+        );
+        assert!(ManifestDigest::new(sha512).is_ok());
+        assert!(ManifestDigest::new(blake3).is_ok());
+    }
 
     #[test]
     fn integrity_digests_reject_non_cryptographic_or_noncanonical_values() {

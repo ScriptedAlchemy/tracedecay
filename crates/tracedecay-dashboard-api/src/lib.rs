@@ -48,7 +48,7 @@ pub use tracedecay::DashboardProjectContext;
 /// directly need this call.
 #[cfg(test)]
 pub(crate) fn register_test_schema_installer() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
 }
 
 /// Fixtures for states this crate's tests build without a project runtime.
@@ -2919,7 +2919,9 @@ mod authority_tests {
         fn apply_configuration_batch(
             &self,
             _request_id: tracedecay_contracts::RequestId,
-            _mutations: Vec<tracedecay_configuration::DirectConfigurationMutation>,
+            _mutations: Vec<
+                tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation,
+            >,
             _expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
             _idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey,
         ) -> DashboardConfigurationApplyFuture<'_> {

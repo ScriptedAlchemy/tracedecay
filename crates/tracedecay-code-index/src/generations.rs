@@ -30,7 +30,7 @@ use tracedecay_domain::{
     CodeSearchChunkV1, ComponentVersion, ContentDigest, ExtractorRevision, FileOccurrenceId,
     GenerationSealV1, GrammarRevision, LanguageId, LanguageRegistryRevision, ManifestDigest,
     PrivacyDomainId, ProjectId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SnapshotFileDispositionV1, UtcMicros, canonical_sha256,
+    SnapshotFileDispositionV1, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 
 use super::capabilities::expected_seal_digest;
@@ -249,14 +249,11 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
                 })?
             }
         };
-        let fingerprint = invalidation_digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or_else(|| {
-                GenerationPlanningErrorV1::Contract(
-                    "invalidation digest is not a sha256 manifest digest".to_owned(),
-                )
-            })?;
+        let fingerprint = sha256_hex_suffix(invalidation_digest.as_str()).ok_or_else(|| {
+            GenerationPlanningErrorV1::Contract(
+                "invalidation digest is not a sha256 manifest digest".to_owned(),
+            )
+        })?;
         CodeGenerationId::new(format!(
             "generation.v1.{discriminator}.{sequence:08}.{fingerprint}"
         ))

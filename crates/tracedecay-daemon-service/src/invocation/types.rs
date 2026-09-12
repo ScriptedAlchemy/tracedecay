@@ -827,7 +827,7 @@ pub type ConfigurationRuntimeRefreshFuture =
 pub trait ConfigurationRuntimeRefreshPort: Send + Sync {
     fn refresh(
         &self,
-        current: tracedecay_configuration::ConfigurationCurrentStateV1,
+        current: tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
     ) -> ConfigurationRuntimeRefreshFuture;
 }
 

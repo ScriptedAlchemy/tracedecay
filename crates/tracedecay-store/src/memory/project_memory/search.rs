@@ -1,6 +1,6 @@
 use tracedecay_domain::{
     Confidence, DomainError, FactCategoryV1, FactId, FactOwnerV1, ManifestDigest, ProvenanceId,
-    UtcMicros, canonical_sha256,
+    UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 
 use super::super::queries::{MAX_CURRENT_LIMIT, validate_limit};
@@ -541,9 +541,7 @@ impl ProjectMemoryFactRetrievalCommandV1 {
             targets,
             self.recall,
         ))?;
-        digest
-            .as_str()
-            .strip_prefix("sha256:")
+        sha256_hex_suffix(digest.as_str())
             .map(ToOwned::to_owned)
             .ok_or_else(|| {
                 FactStoreError::Contract(DomainError::NonCanonical {

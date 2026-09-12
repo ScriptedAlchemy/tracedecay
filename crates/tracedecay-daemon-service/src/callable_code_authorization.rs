@@ -17,9 +17,10 @@ use tracedecay_application::{
     CallableCodeAuthorizationSourcePort, CurrentCallableCodeAccessFuture,
     ProjectSourceAccessSnapshot, ProjectSourceAccessSnapshotPort,
 };
+use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_configuration::config::PinnedRuntimeConfiguration;
-use tracedecay_configuration::{
-    ConfigurationControlStore, ConfigurationError, ProjectConfigurationRuntime,
+use tracedecay_global_db::configuration::contracts::{
+    ConfigurationControlStore, ConfigurationError,
 };
 use tracedecay_graph_query::CodeGraphReadError;
 

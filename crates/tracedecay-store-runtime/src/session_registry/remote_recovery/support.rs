@@ -16,7 +16,6 @@ use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeRequestProbeV1,
 };
 
-use super::artifacts::safe_digest_suffix;
 use super::{interruption_value, safe_suffix};
 
 pub(super) fn validate_recovery_artifact_file(
@@ -76,8 +75,7 @@ impl RecoveryRuntimeProbeV1 {
         let digest = canonical_sha256(&("tracedecay.remote-recovery-control.v1", request_id))
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         let suffix = digest
-            .as_str()
-            .strip_prefix("sha256:")
+            .hex_suffix()
             .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         Ok(Self {
             cancellation: RuntimeCancellationIdentityV1 {
@@ -141,7 +139,12 @@ pub(super) fn backup_id(
 ) -> Result<String, RemoteRecoveryPhysicalEffectErrorV1> {
     let digest = canonical_sha256(&("tracedecay.remote-backup.v1", operation_id, expected))
         .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-    Ok(format!("remote.backup.{}", safe_digest_suffix(&digest)?))
+    Ok(format!(
+        "remote.backup.{}",
+        digest
+            .hex_suffix()
+            .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)?
+    ))
 }
 
 #[cfg(test)]

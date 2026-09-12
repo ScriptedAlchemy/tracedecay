@@ -37,8 +37,6 @@ pub mod store_locator_resolver;
 pub mod store_shutdown;
 pub mod writer_gate;
 
-mod schema;
-
 pub use remote_credentials::{
     DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1,
     DaemonRemoteCredentialRegistryErrorV1, MAX_REGISTERED_REMOTE_NODES,
@@ -47,7 +45,6 @@ pub use remote_credentials::{
 pub use remote_frame_transfer::DaemonRemoteFrameTransferProtocolPortV1;
 pub use remote_query::DaemonRemoteExactObservationQueryPortV1;
 pub use remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
-pub use schema::register_registered_schema_installer;
 pub use semantic_artifact_gc::{
     SemanticArtifactGcMaintenanceTask, spawn_semantic_artifact_gc_maintenance,
 };

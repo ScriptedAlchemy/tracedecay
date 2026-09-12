@@ -3,10 +3,10 @@ use tracedecay_daemon_protocol::{FramePoll, FrameSend};
 use super::super::*;
 use super::{initialize, session};
 use crate::PublicationDelivery;
+use crate::analyzer::broker::DiagnosticSeverity;
 use crate::bridge::DaemonLspSessionTransport;
 use crate::diagnostics::{
-    DiagnosticSeverity, DiagnosticSource, GatewayDiagnosticRelatedInformation, LspPosition,
-    LspRange,
+    DiagnosticSource, GatewayDiagnosticRelatedInformation, LspPosition, LspRange,
 };
 use crate::overlay::{MAX_OVERLAY_BYTES, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS};
 

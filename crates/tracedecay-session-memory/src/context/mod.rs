@@ -10,7 +10,9 @@ mod registered_scope;
 use std::fmt;
 
 use tracedecay_contracts::now_micros;
-use tracedecay_domain::{AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId};
+use tracedecay_domain::{
+    AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId, sha256_hex_suffix,
+};
 
 pub use registered_scope::RegisteredScopeResolver;
 
@@ -281,7 +283,7 @@ impl PolicyDigest {
     pub fn from_access_policy_digest(
         digest: &AccessPolicyDigest,
     ) -> Result<Self, ApplicationScopeError> {
-        let encoded = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+        let encoded = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
             ApplicationScopeError::Contract(
                 "session access policy must use a sha256 digest".to_owned(),
             )

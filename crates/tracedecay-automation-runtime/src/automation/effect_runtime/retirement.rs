@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_contracts::retained_surfaces::AutomationTaskV1;
 use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_tagged_lowercase_hex};
+#[cfg(test)]
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_private_fs::capability_dir::rename_noreplace;
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
@@ -898,7 +900,7 @@ mod tests {
                 source_digest: digest.clone(),
                 archive_name: format!(
                     "fact_proposals.{}.json",
-                    digest.strip_prefix("sha256:").unwrap()
+                    sha256_hex_suffix(&digest).unwrap()
                 ),
             },
             source_path: root.join("fact_proposals.json"),

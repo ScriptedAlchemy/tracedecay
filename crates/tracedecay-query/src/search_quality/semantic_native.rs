@@ -22,12 +22,13 @@ use super::candidate_output::{ProfileSpecV1, ResourceSampleV1};
 use crate::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, FusionStageError, FusionStageInput,
 };
+use crate::retrieval::ports::RetrievalExecutionControl;
 /// Deterministic local executor admitted from one verified artifact.
 pub use crate::retrieval::rerank::AdmittedNativeRerankExecutorV1;
 use crate::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1,
-    LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
-    RerankViewOutcomeV1, RerankViewPermitV1,
+    LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankViewOutcomeV1,
+    RerankViewPermitV1,
 };
 use crate::retrieval::semantic::{
     CodeSemanticEvidenceV1, SemanticLaneRetriever, SemanticRetrievalRequestV1,
@@ -166,7 +167,7 @@ pub struct SemanticNativeRerankInputV1<'a> {
     pub policy: &'a RerankPolicy,
     pub views: &'a mut dyn EphemeralRerankViewSourceV1,
     pub executor: &'a dyn AdmittedNativeRerankExecutorV1,
-    pub control: &'a dyn RerankExecutionControlV1,
+    pub control: &'a dyn RetrievalExecutionControl,
 }
 
 /// Raw measured work returned by the admitted reranker.

@@ -10,11 +10,12 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::configuration::contracts::types::{
+    ConfigurationError, ConfigurationMutationAuthority, DirectConfigurationMutation,
+};
 use tracedecay_global_db::configuration::{
     ProfileCodeIndexWorkerCommitV1, ProfileCodeIndexWorkerConfigurationStore,
 };
-
-use super::{ConfigurationError, ConfigurationMutationAuthority, DirectConfigurationMutation};
 
 /// Open the exact registered profile-sessions store and build the worker mutation.
 pub fn profile_code_index_worker_mutation(

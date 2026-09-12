@@ -10,7 +10,9 @@ use tracedecay_contracts::{
     RetryDirective, SafeDiagnostic, TemporalState, WorkProductApplicationErrorV1,
     WorkProjectionApplicationError, WorkflowEffectTerminalV1,
 };
-use tracedecay_domain::{ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
+};
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use tracedecay_daemon_protocol::{
@@ -414,11 +416,10 @@ where
         })?,
     )?;
     let authority = AuthorityReceipt::from_context(context, policy, observed_at)?;
-    let suffix = input_digest.as_str().strip_prefix("sha256:").ok_or(
-        ApplicationContractError::Inconsistent {
+    let suffix =
+        sha256_hex_suffix(input_digest.as_str()).ok_or(ApplicationContractError::Inconsistent {
             field: "Work read input digest",
-        },
-    )?;
+        })?;
     let execution = OperationReceipt::completed(
         observed_at,
         current_micros(),

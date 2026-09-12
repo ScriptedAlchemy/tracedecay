@@ -46,18 +46,18 @@ impl AgentIntegration for HermesIntegration {
 
     fn host_component_registration(
         &self,
-        _component: super::host_bundle_v2::HostBundleComponentV1,
+        _component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
         hermes_registration_state(&ctx.home, None)
     }
 
     fn host_component_registration_for_lifecycle(
         &self,
-        _component: super::host_bundle_v2::HostBundleComponentV1,
+        _component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
         hermes_registration_state(&ctx.home, Some(install.dashboard))
     }
 
@@ -91,7 +91,7 @@ impl AgentIntegration for HermesIntegration {
 
     fn host_component_registration_paths_checked(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Result<Vec<PathBuf>> {
         let mut paths = self.host_registration_paths(home);
@@ -140,8 +140,8 @@ impl AgentIntegration for HermesIntegration {
 fn hermes_registration_state(
     home: &Path,
     expected_dashboard: Option<bool>,
-) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-    use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+) -> super::host_bundle::HostBundleRegistrationStateV1 {
+    use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
     let plugin_dirs = profile_plugin_dirs(home);
     let default_plugin = hermes_home(home).join("plugins/tracedecay");
@@ -709,7 +709,7 @@ mod registration_tests {
 
         let paths = HermesIntegration
             .host_component_registration_paths_checked(
-                &[super::super::host_bundle_v2::HostBundleComponentV1::Core],
+                &[super::super::host_bundle::HostBundleComponentV1::Core],
                 home.path(),
             )
             .unwrap();

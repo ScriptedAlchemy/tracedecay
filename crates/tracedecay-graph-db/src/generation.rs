@@ -329,6 +329,20 @@ pub enum GraphReplayCollectionOutcome {
     RetentionPending,
 }
 
+/// Receipt of one superseded-replay retirement pass over a projection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SupersededReplayRetirement {
+    /// Superseded replays tombstoned, their generation contents deleted, and
+    /// their cleanup finalized.
+    pub retired: usize,
+    /// Superseded replays kept because a live reader, a dependency edge, a
+    /// pending publication, or a concurrent retirement still names them.
+    pub retained: usize,
+    /// Relational retirements whose native row delete waits for the staging
+    /// engine to be resident; the tombstone is revisited by the next pass.
+    pub pending: usize,
+}
+
 impl GraphGenerationManifest {
     pub fn new(
         projection: GraphProjectionIdentity,

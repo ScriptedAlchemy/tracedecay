@@ -17,7 +17,7 @@ use tracedecay_contracts::{
     DisclosureClass, EffectReceipt, ProblemOwningLayer, RequestId, ResolvedScope,
     retained_surface_application_operation, retained_surface_execution_problem,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RunId};
+use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RunId, sha256_hex_suffix};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, with_owned_temp_publish};
 use tracedecay_store::{FactReadControl, ProjectMemoryAutomationRunReceiptsV1};
 
@@ -1233,7 +1233,7 @@ fn read_index(path: &Path) -> Result<PendingIndex> {
 }
 
 fn validate_sha256_digest(digest: &str) -> Result<()> {
-    let Some(body) = digest.strip_prefix("sha256:") else {
+    let Some(body) = sha256_hex_suffix(digest) else {
         return Err(contract_error(
             "automation retirement transition digest prefix is invalid",
         ));

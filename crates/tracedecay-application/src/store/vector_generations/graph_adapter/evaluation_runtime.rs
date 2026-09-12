@@ -17,6 +17,7 @@ use tracedecay_code_index::{
 use tracedecay_contracts::{ClockError, try_now_micros};
 use tracedecay_domain::{
     CodeGenerationId, ProjectId, RepositoryId, VectorGenerationIdV1, WorktreeId, canonical_sha256,
+    sha256_hex_suffix,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbOwnerAttachmentV1, GraphDbOwnerRegistrationV1,
@@ -232,9 +233,7 @@ impl IsolatedSemanticEvaluationGraphV1 {
             &self.worktree,
         ))
         .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let code_scope_hash = code_scope_digest
-            .as_str()
-            .strip_prefix("sha256:")
+        let code_scope_hash = sha256_hex_suffix(code_scope_digest.as_str())
             .ok_or_else(|| GraphDbError::Corrupt {
                 message: "semantic evaluation code-scope digest is not canonical".to_owned(),
             })

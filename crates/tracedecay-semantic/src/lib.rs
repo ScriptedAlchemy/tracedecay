@@ -942,6 +942,12 @@ impl DaemonSemanticRuntimeHandleV1 {
 
     pub fn status_projection(&self) -> SemanticRuntimeStatusProjectionV1 {
         let status = self.status();
+        let execution_provider = self
+            .runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(CurrentSemanticQueryRuntimeV1::execution_provider);
         let (degraded_reason, prior_generation) = match &status {
             SemanticRuntimeScheduleStatusV1::Indexing {
                 prior_generation, ..
@@ -980,6 +986,7 @@ impl DaemonSemanticRuntimeHandleV1 {
             status,
             degraded_reason,
             prior_generation,
+            execution_provider,
         }
     }
 }

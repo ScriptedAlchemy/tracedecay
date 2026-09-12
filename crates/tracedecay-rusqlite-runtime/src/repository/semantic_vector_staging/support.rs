@@ -13,6 +13,8 @@ use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRow, ExactSqlRows,
     ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
 };
+
+pub(super) use crate::exact_sql::{optional_text, text};
 use std::{collections::BTreeSet, time::Duration};
 
 pub(super) struct Stage {
@@ -721,14 +723,6 @@ pub(super) fn decode_json<T: serde::de::DeserializeOwned>(
     serde_json::from_str(value).map_err(|error| corrupt(error.to_string()))
 }
 
-pub(super) fn text(value: impl Into<String>) -> ExactSqlValue {
-    ExactSqlValue::Text(value.into())
-}
-
-pub(super) fn optional_text(value: Option<String>) -> ExactSqlValue {
-    value.map_or(ExactSqlValue::Null, ExactSqlValue::Text)
-}
-
 pub(super) fn integer(value: u64) -> SemanticVectorStagingStoreResult<ExactSqlValue> {
     i64::try_from(value)
         .map(ExactSqlValue::Integer)
@@ -736,41 +730,28 @@ pub(super) fn integer(value: u64) -> SemanticVectorStagingStoreResult<ExactSqlVa
 }
 
 pub(super) fn text_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingStoreResult<&str> {
-    match row.values.get(index) {
-        Some(ExactSqlValue::Text(value)) => Ok(value),
-        _ => Err(corrupt(
-            "semantic vector text column has wrong storage class",
-        )),
-    }
+    crate::exact_sql::text_at(&row.values, index)
+        .map_err(|_| corrupt("semantic vector text column has wrong storage class"))
 }
 
 pub(super) fn optional_text_at(
     row: &ExactSqlRow,
     index: usize,
 ) -> SemanticVectorStagingStoreResult<Option<&str>> {
-    match row.values.get(index) {
-        Some(ExactSqlValue::Text(value)) => Ok(Some(value)),
-        Some(ExactSqlValue::Null) => Ok(None),
-        _ => Err(corrupt(
-            "semantic vector optional text column has wrong storage class",
-        )),
-    }
+    crate::exact_sql::optional_text_at(&row.values, index)
+        .map_err(|_| corrupt("semantic vector optional text column has wrong storage class"))
 }
 
 pub(super) fn integer_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingStoreResult<i64> {
-    match row.values.get(index) {
-        Some(ExactSqlValue::Integer(value)) if *value >= 0 => Ok(*value),
+    match crate::exact_sql::integer_at(&row.values, index) {
+        Ok(value) if value >= 0 => Ok(value),
         _ => Err(corrupt("semantic vector integer column is invalid")),
     }
 }
 
 fn signed_integer_at(row: &ExactSqlRow, index: usize) -> SemanticVectorStagingStoreResult<i64> {
-    match row.values.get(index) {
-        Some(ExactSqlValue::Integer(value)) => Ok(*value),
-        _ => Err(corrupt(
-            "semantic vector signed integer column has wrong storage class",
-        )),
-    }
+    crate::exact_sql::integer_at(&row.values, index)
+        .map_err(|_| corrupt("semantic vector signed integer column has wrong storage class"))
 }
 
 fn optional_integer_at(

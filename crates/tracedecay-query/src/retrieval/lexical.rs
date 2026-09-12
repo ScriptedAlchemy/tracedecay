@@ -17,11 +17,10 @@ use tracedecay_domain::{
     RetrieverOutcome, ScoreDomainId, split_subtokens, technical_tokens,
 };
 
-use super::graph::GraphExecutionControl;
 use super::ports::{
     CodeCandidateBindingV1, LaneBoundEvidence, LaneEvidenceRejections, LexicalPostingReadPort,
-    RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest, contract_error,
-    lane_bound_evidence, lane_candidate_cap,
+    RetrievalExecutionControl, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
+    contract_error, lane_bound_evidence, lane_candidate_cap,
 };
 
 mod projection;
@@ -247,7 +246,7 @@ pub struct LexicalLaneRequest<'a> {
     /// search execution permit occupied while the remaining rows decode and
     /// score. Cancellation unwinds the scan with
     /// [`RetrievalPortError::Cancelled`] instead of an empty or partial batch.
-    pub control: &'a dyn GraphExecutionControl,
+    pub control: &'a dyn RetrievalExecutionControl,
 }
 
 /// The lexical lane's cooperative cancellation checkpoint.
@@ -257,7 +256,7 @@ pub struct LexicalLaneRequest<'a> {
 /// after the signal. An uncancelled request never observes it, which keeps
 /// candidate order, evidence, and coverage identical to an unchecked scan.
 pub(crate) fn lexical_checkpoint(
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> Result<(), RetrievalPortError> {
     if control.is_cancelled() {
         return Err(RetrievalPortError::Cancelled);

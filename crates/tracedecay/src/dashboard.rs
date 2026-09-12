@@ -60,7 +60,7 @@ pub fn spa_router(assets: tracedecay_api::StaticDashboardAssets) -> axum::Router
 #[doc(hidden)]
 pub fn register_test_schema_installer() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
-    REGISTER.call_once(tracedecay_store_runtime::register_registered_schema_installer);
+    REGISTER.call_once(tracedecay_global_db::register_registered_schema_installer);
 }
 
 pub(crate) fn dashboard_project_context(

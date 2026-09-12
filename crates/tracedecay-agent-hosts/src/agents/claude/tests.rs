@@ -152,7 +152,7 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
 #[test]
 fn missing_manifest_with_stale_registration_is_repairable() {
     use crate::agents::AgentIntegration;
-    use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+    use crate::agents::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 
     let home = tempfile::TempDir::new().unwrap();
     let project = tempfile::TempDir::new().unwrap();
@@ -181,7 +181,7 @@ fn missing_manifest_with_stale_registration_is_repairable() {
 #[test]
 fn project_only_legacy_residue_does_not_claim_plugin_registration() {
     use crate::agents::AgentIntegration;
-    use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+    use crate::agents::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 
     let home = tempfile::TempDir::new().unwrap();
     let project = tempfile::TempDir::new().unwrap();

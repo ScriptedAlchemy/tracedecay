@@ -385,10 +385,7 @@ impl SemanticModelLifecycleOwnerV1 {
         &self,
         pins: RerankCompatibilityPinsV1,
     ) -> Result<super::rerank_adapter::ProductionCodeRerankAuthorityV1, ModelLifecycleErrorV1> {
-        let digest = pins
-            .artifact_manifest_digest
-            .as_str()
-            .strip_prefix("sha256:")
+        let digest = sha256_hex_suffix(pins.artifact_manifest_digest.as_str())
             .ok_or(ModelLifecycleErrorV1::VerificationFailed)
             .and_then(|digest| {
                 Sha256DigestHex::new(digest.to_owned())
@@ -982,8 +979,8 @@ impl SemanticModelLifecycleOwnerV1 {
             return Err(ModelLifecycleErrorV1::Rejected);
         }
         let prior_durable = guard.durable.clone();
-        if let Some(digest) = install_path_of(&previous)
-            .and_then(|path| self.artifact_store.installed_digest(path))
+        if let Some(digest) =
+            install_path_of(&previous).and_then(|path| self.artifact_store.installed_digest(path))
         {
             self.artifact_store.activate_artifact_with_rollback(
                 &digest,

@@ -47,6 +47,7 @@ mod session;
 mod workspace;
 mod workspace_diagnostics;
 
+pub use analyzer::broker::DiagnosticSeverity;
 pub use bridge::{
     AsyncContentLengthError, BridgeDirection, BridgePumpOutcome, ContentLengthCodec,
     ContentLengthCodecError, ContentLengthStdioError, ContentLengthStdioTransport,
@@ -76,8 +77,8 @@ pub use context::{
     TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_CONTEXT_REVISION, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 pub use diagnostics::{
-    DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
-    GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
+    DiagnosticMerge, DiagnosticSource, DocumentDiagnosticReport, GatewayDiagnostic,
+    GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
     GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
     GatewayDiagnosticRelatedInformation, LspPosition, LspRange, MAX_DIAGNOSTIC_MESSAGE_BYTES,
     MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,

@@ -812,6 +812,34 @@ impl GitEvidenceGraphView {
         Ok(Some(scope_session_ids(Some(identities))))
     }
 
+    /// Resolves a single branch or worktree selector only far enough for a
+    /// caller to detect that its own session bound was exceeded. Compound and
+    /// commit selectors retain the complete intersection semantics above.
+    #[hotpath::measure(label = "sessions.git_correlation.graph_view.session_ids_for_scope_bounded")]
+    pub fn session_ids_for_scope_bounded(
+        &self,
+        filter: &GitScopeFilter,
+        maximum: usize,
+    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
+        let (hub, relation_kind) = match (&filter.branch, &filter.worktree, &filter.commit) {
+            (Some(branch), None, None) => (branch_entity_id(branch)?, BRANCH_SPAN_RELATION),
+            (None, Some(worktree), None) => (worktree_entity_id(worktree)?, WORKTREE_SPAN_RELATION),
+            _ => return self.session_ids_for_scope(filter),
+        };
+        let query = SessionsForQuery {
+            git_ref: GitRefFilter::Branch(String::new()),
+            since: None,
+            until: None,
+            limit: maximum,
+        };
+        let identities = self
+            .leading_sessions(hub, relation_kind, &query, maximum)?
+            .into_iter()
+            .map(|digest| self.session_identity(&digest))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        Ok(Some(scope_session_ids(Some(identities))))
+    }
+
     fn span_hits_from_hub(
         &self,
         hub: GraphEntityId,

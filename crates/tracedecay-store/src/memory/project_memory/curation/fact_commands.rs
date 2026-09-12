@@ -3,7 +3,7 @@ use serde_json::Value;
 use tracedecay_domain::{
     ActorId, Confidence, DomainError, FactCategoryV1, FactEventId, FactId, FactOwnerV1,
     FactPayloadV1, PayloadAccessState, ProvenanceId, SanitizationReceiptV1, SanitizerDispositionV1,
-    canonical_sha256,
+    canonical_sha256, sha256_hex_suffix,
 };
 
 use super::super::super::{
@@ -209,9 +209,7 @@ fn project_memory_fact_add_input_digest(
         );
     }
     let digest = canonical_sha256(&("tracedecay.project-memory.fact-add-input.v1", material))?;
-    digest
-        .as_str()
-        .strip_prefix("sha256:")
+    sha256_hex_suffix(digest.as_str())
         .map(ToOwned::to_owned)
         .ok_or_else(|| {
             FactStoreError::Contract(DomainError::NonCanonical {

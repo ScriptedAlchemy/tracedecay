@@ -59,7 +59,7 @@ async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown
 async fn context_scout_registry_remounts_same_project_database_after_daemon_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let database_path = temporary.path().join("graph.db");
-    tracedecay_store_runtime::register_registered_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &database_path,
         "daemon Context Scout registry",
@@ -134,7 +134,7 @@ async fn context_scout_registry_remounts_same_project_database_after_daemon_rest
 async fn context_scout_retirement_preserves_same_project_in_another_profile() {
     let temporary = tempfile::tempdir().unwrap();
     let database_path = temporary.path().join("graph.db");
-    tracedecay_store_runtime::register_registered_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
         &database_path,
         "daemon Context Scout lifecycle",

@@ -10,7 +10,7 @@ use tracedecay_domain::{
     HostCapabilityUnavailableReasonV1, canonical_json_bytes, host_integration_catalog_v1,
 };
 
-use super::host_bundle_v2::{
+use super::host_bundle::{
     HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleComponentV1, HostBundleError,
     HostBundleManifestV1, HostBundleVerificationAdapterV1, HostComponentSetEntryV1,
     HostComponentSetV1, HostKindV1, require_component_capabilities,
@@ -808,7 +808,7 @@ mod tests {
     }
 
     /// Safety premise for per-host component-set journal isolation in
-    /// `host_bundle_v2`: a transaction for host X may proceed while host Y's
+    /// `host_bundle`: a transaction for host X may proceed while host Y's
     /// journal awaits recovery only because the two hosts never mutate the same
     /// artifact path. Pin that here so a future host which shares a deployed
     /// path fails this test instead of silently widening the blast radius of an

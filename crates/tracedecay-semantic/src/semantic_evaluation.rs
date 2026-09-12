@@ -3,13 +3,12 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tracedecay_code_index::embedding_document::{EmbeddingDocumentComposerV1, EmbeddingDocumentV1};
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, CodeSearchChunkV1, EmbeddingProjectionKeyV1,
-    ProjectionBatchRequestV1,
+    AdmittedEmbeddingProjectionKeyV1, CodeSearchChunkV1, EmbeddingExecutionProviderV1,
+    EmbeddingProjectionKeyV1, ProjectionBatchRequestV1,
 };
-use tracedecay_query::retrieval::ports::RetrievalPortError;
+use tracedecay_query::retrieval::ports::{RetrievalExecutionControl, RetrievalPortError};
 use tracedecay_query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, SemanticExecutionControl, SemanticQueryEmbeddingPort,
-    SemanticQueryEmbeddingRequestV1,
+    EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
 };
 use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
@@ -233,6 +232,7 @@ struct SemanticEvaluationProjectionBatchCacheKeyV1 {
     /// FastEmbed's intra-op width can change floating-point numerics even
     /// with an otherwise identical admitted projection and tensor input.
     max_threads: u32,
+    execution_provider: EmbeddingExecutionProviderV1,
     group_len: usize,
     tensor_batch_size: u32,
     tensor_dimensions: u32,
@@ -672,6 +672,7 @@ struct CachedSemanticEvaluationChunkEncoderV1<'a, E> {
     inner: E,
     admitted_projection: AdmittedEmbeddingProjectionKeyV1,
     max_threads: u32,
+    execution_provider: EmbeddingExecutionProviderV1,
     cache: &'a SemanticEvaluationProjectionBatchCacheV1,
     cache_policy: SemanticEvaluationProjectionBatchCachePolicyV1,
     request_id: u64,
@@ -693,6 +694,7 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
             admitted_projection: artifact_authority.projection().clone(),
             max_threads: u32::try_from(artifact_authority.embedding_execution_plan().intra_threads)
                 .unwrap_or(u32::MAX),
+            execution_provider: artifact_authority.execution_provider(),
             request_id: cache.request_id,
             cache,
             cache_policy,
@@ -739,6 +741,7 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
         Ok(Arc::new(SemanticEvaluationProjectionBatchCacheKeyV1 {
             admitted_projection: self.admitted_projection.clone(),
             max_threads: self.max_threads,
+            execution_provider: self.execution_provider,
             group_len: chunks.len(),
             tensor_batch_size: embedding_key.inference_batch_size,
             tensor_dimensions: embedding_key.dimensions,
@@ -1186,7 +1189,7 @@ impl SemanticEvaluationQueryFactoryV1 {
         deadline_micros: Option<u64>,
     ) -> SemanticEvaluationQueryEmbedderV1<'a>
     where
-        C: SemanticExecutionControl + Sync,
+        C: RetrievalExecutionControl + Sync,
     {
         let cancellation = Arc::new(QueryExecutionAuthorityV1 {
             control,
@@ -1218,7 +1221,7 @@ struct QueryExecutionAuthorityV1<'a, C> {
 
 impl<C> SemanticExecutionAuthority for QueryExecutionAuthorityV1<'_, C>
 where
-    C: SemanticExecutionControl + Sync,
+    C: RetrievalExecutionControl + Sync,
 {
     fn interruption(&self) -> Option<SemanticExecutionInterruptionV1> {
         if self.control.is_cancelled() {
@@ -1264,11 +1267,11 @@ mod tests {
     use tracedecay_domain::{
         BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
         CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
-        ContentDigest, EmbeddingDocumentCompositionV1, EphemeralSanitizedQueryViewV1,
-        FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
-        ProjectionBatchRequestV1, ProjectionReplayReasonV1, QueryDigest, QueryMac,
-        QueryNormalizationRevision, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-        SourceSpan,
+        ContentDigest, EmbeddingDocumentCompositionV1, EmbeddingExecutionProviderV1,
+        EphemeralSanitizedQueryViewV1, FileOccurrenceId, LanguageDescriptorRevision,
+        ManifestDigest, PolicyRevisionId, ProjectionBatchRequestV1, ProjectionReplayReasonV1,
+        QueryDigest, QueryMac, QueryNormalizationRevision, SanitizerRevision, SensitivityDecision,
+        SensitivityLevelV1, SourceSpan,
     };
     use tracedecay_query::retrieval::semantic::{
         SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
@@ -2139,6 +2142,38 @@ mod tests {
 
         assert_eq!(one_thread.inner.group_invocations, 1);
         assert_eq!(four_threads.inner.group_invocations, 1);
+        assert_eq!(cache.entry_count_for_tests(), 2);
+    }
+
+    #[test]
+    fn changed_execution_provider_forces_an_exact_batch_cache_miss() {
+        let authority = lifecycle_authority_with_threads(1);
+        let embedding_key = authority.authority.projection().embedding_key().clone();
+        let chunk = chunk('a', "same tensor with a different execution provider");
+        let group = [&chunk];
+        let cache = SemanticEvaluationProjectionBatchCacheV1::new();
+        let mut cpu = cached_encoder_with_authority(
+            CountingEncoderV1::healthy(),
+            &authority.authority,
+            &cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        );
+        cpu.execution_provider = EmbeddingExecutionProviderV1::Cpu;
+        cpu.encode_batches(&embedding_key, &[group.as_slice()])
+            .expect("cpu batch");
+        let mut webgpu = cached_encoder_with_authority(
+            CountingEncoderV1::healthy(),
+            &authority.authority,
+            &cache,
+            SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
+        );
+        webgpu.execution_provider = EmbeddingExecutionProviderV1::WebGpu;
+        webgpu
+            .encode_batches(&embedding_key, &[group.as_slice()])
+            .expect("WebGPU batch must not reuse CPU numerics");
+
+        assert_eq!(cpu.inner.group_invocations, 1);
+        assert_eq!(webgpu.inner.group_invocations, 1);
         assert_eq!(cache.entry_count_for_tests(), 2);
     }
 
