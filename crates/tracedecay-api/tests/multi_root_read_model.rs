@@ -1,7 +1,7 @@
 use schemars::{JsonSchema, schema_for};
 use serde_json::Value;
 use tracedecay_api::read_model::multi_root::MultiRootQueryReadModelV1;
-use tracedecay_contracts::{MultiRootContinuationV1, MultiRootQueryPageV1};
+use tracedecay_contracts::{MultiRootContinuationV1, MultiRootQueryPageV1, OpaqueCursor};
 use tracedecay_domain::{
     CollectionRevision, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome,
     ScopePartialReasonV1, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, StackRevision,
@@ -20,7 +20,7 @@ fn dashboard_read_model_preserves_per_root_partial_truth() {
     )
     .unwrap();
     let generations = vec![
-        RootScopeOutcomeV1::new(digest('a'), ScopeOutcome::Exact(generation)).unwrap(),
+        RootScopeOutcomeV1::new(digest('a'), ScopeOutcome::Exact(Some(generation))).unwrap(),
         RootScopeOutcomeV1::new(
             digest('d'),
             ScopeOutcome::Unavailable {
@@ -29,9 +29,29 @@ fn dashboard_read_model_preserves_per_root_partial_truth() {
         )
         .unwrap(),
     ];
-    let continuation =
-        MultiRootContinuationV1::new(digest('e'), generations, digest('f'), digest('1'), 1)
-            .unwrap();
+    let cursors = vec![
+        RootScopeOutcomeV1::new(
+            digest('a'),
+            ScopeOutcome::Exact(Some(OpaqueCursor::new("cursor.next").unwrap())),
+        )
+        .unwrap(),
+        RootScopeOutcomeV1::new(
+            digest('d'),
+            ScopeOutcome::Unavailable {
+                reason: ScopeUnavailableReasonV1::StoreUnavailable,
+            },
+        )
+        .unwrap(),
+    ];
+    let continuation = MultiRootContinuationV1::new(
+        digest('e'),
+        generations,
+        cursors,
+        digest('f'),
+        digest('1'),
+        1,
+    )
+    .unwrap();
     let page = MultiRootQueryPageV1 {
         scope_set_id: ScopeSetId::new("scope-set.dashboard").unwrap(),
         scope_set_revision: ScopeSetRevision::new(1).unwrap(),
@@ -51,7 +71,7 @@ fn dashboard_read_model_preserves_per_root_partial_truth() {
             value: vec!["result".to_owned()],
             reason: ScopePartialReasonV1::RootUnavailable,
         },
-        continuation,
+        continuation: Some(continuation),
     };
 
     let wire = serde_json::to_value(MultiRootQueryReadModelV1::from(page)).unwrap();
