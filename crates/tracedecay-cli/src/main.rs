@@ -286,7 +286,7 @@ fn async_runtime_flavor(command: Option<&Commands>) -> AsyncRuntimeFlavor {
 /// most `available + MIN_SERVING_BLOCKING_RESERVE`.
 fn tokio_blocking_thread_limit() -> usize {
     let available = std::thread::available_parallelism().map_or(1, usize::from);
-    let effective = tracedecay::code_index::parallelism::installed_worker_status()
+    let effective = tracedecay_code_index::parallelism::installed_worker_status()
         .map(|status| usize::from(status.effective_workers))
         .unwrap_or(available);
     tokio_blocking_thread_limit_from(available, effective)

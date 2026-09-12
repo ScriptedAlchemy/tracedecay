@@ -36,15 +36,13 @@
 pub mod bench;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(clippy::too_many_lines)]
-pub mod test_support;
-pub use tracedecay_code_index as code_index;
-pub use tracedecay_query as query;
 pub mod config;
 pub mod daemon;
 pub mod dashboard;
 pub mod doctor;
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::too_many_lines)]
+pub mod test_support;
 pub use tracedecay_application::git_query;
 mod hooks;
 #[cfg(test)]
