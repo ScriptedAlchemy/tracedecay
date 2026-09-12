@@ -508,9 +508,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     expected_generation,
                     |generation| async move {
                         if let Some(latest) = self
-                            .retained_text_owner_freshness_for_scope(&scope)
+                            .latest_text_serving_for_scope(&scope)
                             .await
-                            .map(|(latest, _)| latest)
                             .filter(|latest| {
                                 latest.metadata().manifest().generation_id == generation
                             })
@@ -528,14 +527,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
                 .ok_or(CallableCodeCursorError::Unavailable)
             } else if is_unpinned_latest(requested) {
-                self.retained_text_owner_freshness_for_scope(request.scope())
+                self.latest_text_fresh_for_scope(request.scope())
                     .await
-                    .and_then(|(latest, fresh)| fresh.then_some(latest))
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else if let Some(latest) = self
-                .retained_text_owner_freshness_for_scope(request.scope())
+                .latest_text_serving_for_scope(request.scope())
                 .await
-                .map(|(latest, _)| latest)
                 .filter(|latest| latest.metadata().manifest().generation_id == *requested)
             {
                 Ok(latest)
@@ -581,8 +578,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     expected_generation,
                     |generation| async move {
                         if let Some(latest) = self
-                            .latest_text_serving_for_scope(&scope)
+                            .retained_text_owner_freshness_for_scope(&scope)
                             .await
+                            .map(|(latest, _)| latest)
                             .filter(|latest| {
                                 latest.metadata().manifest().generation_id == generation
                             })
@@ -602,12 +600,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
                 .ok_or(CallableCodeCursorError::Unavailable)
             } else if is_unpinned_latest(requested) {
-                self.latest_text_fresh_for_scope(request.scope())
+                self.retained_text_owner_freshness_for_scope(request.scope())
                     .await
+                    .and_then(|(latest, fresh)| fresh.then_some(latest))
                     .ok_or(CallableCodeCursorError::Unavailable)
             } else if let Some(latest) = self
-                .latest_text_serving_for_scope(request.scope())
+                .retained_text_owner_freshness_for_scope(request.scope())
                 .await
+                .map(|(latest, _)| latest)
                 .filter(|latest| latest.metadata().manifest().generation_id == *requested)
             {
                 Ok(latest)

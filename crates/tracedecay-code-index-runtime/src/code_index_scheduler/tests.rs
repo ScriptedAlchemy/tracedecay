@@ -2838,6 +2838,13 @@ fn query_meta() -> RetrievalRequestMeta {
 }
 
 fn install_verified_graph_store(latest: &super::LatestCompleteCodeIndexV1) {
+    install_verified_graph_store_on_text(&latest.text_generation_handle(), latest);
+}
+
+fn install_verified_graph_store_on_text(
+    text: &super::LatestCodeTextGenerationV1,
+    latest: &super::LatestCompleteCodeIndexV1,
+) {
     let generation = latest.generation.manifest().generation_id.clone();
     let cancellation =
         tracedecay_contracts::CancellationSignal::active("cancel.callable-graph-projection")
@@ -2873,13 +2880,12 @@ fn install_verified_graph_store(latest: &super::LatestCompleteCodeIndexV1) {
             Arc::new(tracedecay_graph_db::NeverCancelled),
         )
         .expect("graph reader");
-    latest
-        .install_graph_serving(
-            graph_reader,
-            Some(graph_store),
-            super::CodeGraphServingAuthorityV1::Memory,
-        )
-        .expect("install interactive graph serving");
+    text.install_graph_serving(
+        graph_reader,
+        Some(graph_store),
+        super::CodeGraphServingAuthorityV1::Memory,
+    )
+    .expect("install interactive graph serving");
 }
 
 fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
@@ -13407,6 +13413,22 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             .is_empty()
     );
 
+    let warming_text = {
+        let mounted = registry.mounted.lock().await;
+        mounted
+            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .expect("mounted worktree")
+            .historical_generation_owner
+            .published_text_generation(&generation)
+            .expect("read retained generation metadata")
+            .expect("partitioned retained generation")
+    };
+    install_verified_graph_store_on_text(&warming_text, &latest);
+    assert!(
+        !warming_text.text_serving_is_ready(),
+        "the callable graph check must use an owner whose lexical projection is still warming"
+    );
+
     let cold_repository = latest.generation.snapshot().repository.clone();
     let cold_worktree = latest
         .generation
@@ -13424,6 +13446,10 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             .serving_generation
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *worktree
+            .text_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(warming_text);
         assert!(
             worktree
                 .text_generation
