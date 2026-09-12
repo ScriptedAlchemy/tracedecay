@@ -123,13 +123,12 @@ pub fn observatory_read_catalog_contribution()
         ])?,
         required_features: Vec::new(),
     })?;
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new(CONTRIBUTION_ID)?,
-        depends_on: Vec::new(),
-        capabilities: vec![manifest],
-        retrieval_primitives: Vec::new(),
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
+        ContributionId::new(CONTRIBUTION_ID)?,
+        Vec::new(),
+        vec![manifest],
         bindings,
-    })?;
+    ))?;
     let executable_schema = observatory_read_executable_schema(&contribution)?;
     Ok(contribution.with_executable_schemas(vec![executable_schema])?)
 }

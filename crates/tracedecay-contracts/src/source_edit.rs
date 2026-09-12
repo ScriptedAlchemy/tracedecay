@@ -648,13 +648,12 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
         required_features: Vec::new(),
     })?);
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.source-edit")?,
-        depends_on: Vec::new(),
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
+        ContributionId::new("contribution.application.source-edit")?,
+        Vec::new(),
         capabilities,
-        retrieval_primitives: Vec::new(),
         bindings,
-    })?;
+    ))?;
     let schemas = source_edit_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
 }

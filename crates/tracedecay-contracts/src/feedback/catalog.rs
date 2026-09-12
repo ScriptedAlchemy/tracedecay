@@ -245,13 +245,12 @@ fn feedback_surface_catalog_contribution_from_specs()
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
 
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new("contribution.application.feedback-surface")?,
-        depends_on: Vec::new(),
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
+        ContributionId::new("contribution.application.feedback-surface")?,
+        Vec::new(),
         capabilities,
-        retrieval_primitives: Vec::new(),
         bindings,
-    })?;
+    ))?;
     let schemas = feedback_executable_schemas(&contribution)?;
     Ok(contribution.with_executable_schemas(schemas)?)
 }
