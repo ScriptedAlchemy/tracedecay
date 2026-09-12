@@ -588,8 +588,13 @@ pub(super) async fn collect_code_generation_retention_findings(
     // interrupted seal left behind. Liveness comes from the journal, so an
     // unreadable journal leaves the census unknown rather than zero.
     let head_generations = live_sealed_generations(graph).await;
+    // Retirements the journal has decided but the engine has not applied: a
+    // hibernated engine is never opened to delete, so these rows sit in the
+    // live container until the next publication holds it open.
+    let deferred_retirements = deferred_native_retirements(graph).await;
     let graph_container = graph.database_path().with_extension("grafeo");
     let Ok(census) = tokio::task::spawn_blocking(move || {
+        let live_container_bytes = live_graph_container_bytes(&graph_container);
         let sealed = head_generations.and_then(|heads| {
             tracedecay_graph_db::census_sealed_store(&graph_container, &heads).ok()
         });
@@ -615,20 +620,24 @@ pub(super) async fn collect_code_generation_retention_findings(
             )
             .ok()
         });
-        (plan, scopes, sealed)
+        (plan, scopes, sealed, live_container_bytes)
     })
     .await
     else {
         return semantic_only_unknown();
     };
-    let (plan, scopes, sealed) = census;
+    let (plan, scopes, sealed, live_container_bytes) = census;
     let Ok(plan) = plan else {
         return semantic_only_unknown();
     };
     let Ok(store) = StoreKeyV1::new("code-index-v1") else {
         return semantic_only_unknown();
     };
-    let completeness = if scopes.is_some() && sealed.is_some() && !vector_liveness_incomplete {
+    let completeness = if scopes.is_some()
+        && sealed.is_some()
+        && deferred_retirements.is_some()
+        && !vector_liveness_incomplete
+    {
         DoctorCoverageCompletenessV1::Complete
     } else {
         DoctorCoverageCompletenessV1::Partial
@@ -679,6 +688,11 @@ pub(super) async fn collect_code_generation_retention_findings(
         },
         abandoned_sealed_staging_count: sealed.abandoned_staging_count,
         abandoned_sealed_staging_bytes: StorageByteSizeV1(sealed.abandoned_staging_bytes),
+        sealed_head_generation_bytes: StorageByteSizeV1(sealed.head_bytes),
+        live_graph_container_bytes: StorageByteSizeV1(live_container_bytes),
+        // Unknown deferrals publish as zero under `Partial`, never as a claim
+        // that nothing is waiting.
+        deferred_native_retirement_count: deferred_retirements.unwrap_or(0),
     };
     let Ok(finding) = code_generation_retention_finding(&record, completeness) else {
         return semantic_only_unknown();
@@ -725,6 +739,45 @@ async fn live_sealed_generations(
         heads.insert(row.get::<String>(0).ok()?);
     }
     Some(heads)
+}
+
+/// Retirements the journal has linearized whose native rows are still in the
+/// live container: retirement tombstones awaiting their engine delete, plus
+/// replays behind an installed head that no active replay depends on and
+/// that retirement has not yet reached. `None` when the journal cannot be
+/// read.
+async fn deferred_native_retirements(graph: &tracedecay_runtime_core::db::Database) -> Option<u64> {
+    let mut rows = graph
+        .read_connection()
+        .query(
+            "SELECT (SELECT COUNT(*) FROM graph_publication_replay_tombstones_v1)
+                  + (SELECT COUNT(*)
+                     FROM graph_publication_replay_v1 AS replay
+                     JOIN graph_verified_heads_v1 AS head
+                       ON head.shard_id = replay.shard_id
+                      AND head.namespace = replay.namespace
+                      AND head.projection = replay.projection
+                     WHERE replay.sequence < head.replay_sequence
+                       AND replay.generation NOT IN (
+                           SELECT generation FROM graph_publication_replay_dependencies_v1
+                       ))",
+            (),
+        )
+        .await
+        .ok()?;
+    let row = rows.next().await.ok()??;
+    u64::try_from(row.get::<i64>(0).ok()?).ok()
+}
+
+/// On-disk bytes of the live staging container and its WAL sidecar; a
+/// container that does not exist yet weighs nothing.
+fn live_graph_container_bytes(container: &Path) -> u64 {
+    let wal = container.with_extension("grafeo.wal");
+    [container, wal.as_path()]
+        .into_iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum()
 }
 
 /// Resolved kernel reads wired into the Doctor composer for one report.

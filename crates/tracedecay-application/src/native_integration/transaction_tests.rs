@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_contracts::{
@@ -324,6 +325,79 @@ impl NativeIntegrationAuthorizationPort for Authorized {
 struct ControlledMechanics {
     probe: Result<NativeIntegrationProbeV1, NativeIntegrationPortError>,
     apply: Result<NativeApplyEffectV1, NativeIntegrationPortError>,
+}
+
+struct DurableCancelDuringRevalidation {
+    store: Arc<StatusStore>,
+    revalidations: AtomicUsize,
+    probe: NativeIntegrationProbeV1,
+}
+
+impl NativeIntegrationMechanics for DurableCancelDuringRevalidation {
+    fn preflight(
+        &self,
+        _selection: &NativeIntegrationSelectionV1,
+        _request: &NativeIntegrationPreflightRequestV1,
+        _cancellation_signal: &CancellationSignal,
+        _cancellation: &CancellationToken,
+    ) -> Result<NativeIntegrationPreviewV1, NativeIntegrationPortError> {
+        Err(NativeIntegrationPortError::Unavailable)
+    }
+
+    fn apply(
+        &self,
+        _preview: &NativeIntegrationPreviewV1,
+        _cancellation: &CancellationToken,
+    ) -> Result<NativeApplyEffectV1, NativeIntegrationPortError> {
+        Err(NativeIntegrationPortError::Unavailable)
+    }
+
+    fn revalidate_analysis(
+        &self,
+        _preview: &NativeIntegrationPreviewV1,
+        _deadline: &Deadline,
+        _cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationAnalysisRevalidationV1, NativeIntegrationPortError> {
+        if self.revalidations.fetch_add(1, Ordering::SeqCst) == 1 {
+            let transaction_id = self
+                .store
+                .statuses
+                .lock()
+                .unwrap()
+                .keys()
+                .next()
+                .cloned()
+                .expect("durable transaction");
+            let status = self
+                .store
+                .read_status(&transaction_id)
+                .unwrap()
+                .expect("durable status");
+            let mut cancelled = status.clone();
+            cancelled.phase_revision = cancelled.phase_revision.saturating_add(1);
+            cancelled.cancellation_requested = true;
+            self.store
+                .compare_and_swap_status(&transaction_id, status.phase_revision, cancelled)
+                .expect("concurrent durable cancellation");
+            return Ok(NativeIntegrationAnalysisRevalidationV1::Stale);
+        }
+        Ok(NativeIntegrationAnalysisRevalidationV1::Current)
+    }
+
+    fn probe(
+        &self,
+        _record: &NativeIntegrationRecordV1,
+    ) -> Result<NativeIntegrationProbeV1, NativeIntegrationPortError> {
+        Ok(self.probe.clone())
+    }
+
+    fn rollback(
+        &self,
+        _record: &NativeIntegrationRecordV1,
+        _committed_tip: &GitOidV1,
+    ) -> Result<NativeIntegrationProbeV1, NativeIntegrationPortError> {
+        Err(NativeIntegrationPortError::Unavailable)
+    }
 }
 
 impl NativeIntegrationMechanics for ControlledMechanics {
@@ -697,6 +771,47 @@ fn cancellation_after_begin_records_live_diverged_state() {
     assert_eq!(receipt.final_tree, oid('b'));
     assert_eq!(receipt.final_index_digest, digest('c'));
     assert_eq!(receipt.final_worktree_digest, digest('d'));
+}
+
+#[test]
+fn durable_cancellation_revision_is_settled_after_candidate_verification() {
+    let store = Arc::new(StatusStore::default());
+    let coordinator = NativeIntegrationTransactionCoordinator::new(
+        store.clone(),
+        Arc::new(UnusedTopology),
+        Arc::new(DurableCancelDuringRevalidation {
+            store: store.clone(),
+            revalidations: AtomicUsize::new(0),
+            probe: NativeIntegrationProbeV1::OldState {
+                tip: oid('a'),
+                tree: oid('b'),
+                index_digest: digest('c'),
+                worktree_digest: digest('d'),
+            },
+        }),
+        Arc::new(Authorized),
+    );
+    let (request, transaction_id) = apply_fixture("transaction.concurrent-cancel");
+    let cancellation =
+        CancellationSignal::active("external.concurrent-cancel").expect("external cancellation");
+
+    let receipt = coordinator
+        .apply(&request, &cancellation)
+        .expect("durably cancelled apply must settle");
+
+    assert_eq!(
+        receipt.status.terminal_outcome,
+        Some(NativeIntegrationTerminalOutcomeV1::AbortedNoChange)
+    );
+    assert!(receipt.status.cancellation_requested);
+    assert_eq!(receipt.status.phase_revision, 4);
+    assert_eq!(
+        store
+            .read_receipt(&transaction_id)
+            .unwrap()
+            .expect("terminal receipt"),
+        receipt
+    );
 }
 
 #[test]

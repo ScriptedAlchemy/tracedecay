@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use tracedecay_domain::framed_log::checksum as frame_checksum;
 use tracedecay_domain::framed_log::partial_tail_matches_prefix;
-use tracedecay_domain::{canonical_json_bytes, framed_log::checksum as frame_checksum};
 use tracedecay_private_fs::framed_log::atomic_write as shared_atomic_write;
 
 use crate::HookHostV1;
 use serde_json::Value;
 
-use super::frame::{decode_complete_frame, encode_frame};
+use super::frame::decode_complete_frame;
 use super::types::{
     AcknowledgedSequenceV1, AppendIntentV1, HookSpoolLimitsV1, HookSpoolMetaV1, PendingRecordV1,
 };
@@ -101,19 +101,9 @@ pub(super) fn reconcile_append_intent(
         .iter()
         .find(|record| record.sequence == intent.sequence)
     {
-        let envelope = record
-            .envelope
-            .as_ref()
-            .ok_or(HookSpoolError::MetadataCorrupted)?;
-        let payload =
-            canonical_json_bytes(envelope).map_err(|_| HookSpoolError::MetadataCorrupted)?;
-        let frame = encode_frame(
-            record.sequence,
-            record.queued_at,
-            record.protected_session_id,
-            &payload,
-        )?;
-        if record.framed_len != intent.framed_len || frame != intent.frame {
+        let intent_record = decode_complete_frame(&intent.frame, intent.file_offset, host)
+            .map_err(|_| HookSpoolError::MetadataCorrupted)?;
+        if record.framed_len != intent.framed_len || !record.matches_record(&intent_record) {
             return Err(HookSpoolError::MetadataCorrupted);
         }
         meta.next_sequence = meta

@@ -173,6 +173,15 @@ impl RepositoryProvenanceAdmissionContext {
         ))
     }
 
+    /// Private daemon-authoritative root for repository-scoped operations.
+    ///
+    /// This path must never be copied from a sanitized observation or exposed
+    /// through a wire contract. Callers use it only while holding this exact
+    /// admission context.
+    pub fn admitted_project_root(&self) -> &Path {
+        &self.project_root
+    }
+
     /// Capture only after the observation has crossed the privacy boundary.
     pub fn capture_after_sanitization(
         &self,

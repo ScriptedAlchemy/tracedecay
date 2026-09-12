@@ -522,6 +522,16 @@ where
         if status.phase >= NativeIntegrationPhaseV1::RefCommitStarted {
             return Ok(NativeIntegrationCancelDispositionV1::CommitPointPassed);
         }
+        let mut replacement = status.clone();
+        replacement.phase_revision = replacement.phase_revision.saturating_add(1);
+        replacement.cancellation_requested = true;
+        replacement.updated_at = request.requested_at;
+        self.store
+            .compare_and_swap_status(&request.transaction_id, status.phase_revision, replacement)
+            .map_err(map_store_error)?;
+        // Publish the durable cancellation revision before waking the live
+        // apply. Once the token is visible, its terminal settlement can reload
+        // and CAS from this exact revision instead of racing a stale status.
         if let Some(cancellation) = self
             .cancellations
             .lock()
@@ -530,13 +540,6 @@ where
         {
             cancellation.cancel();
         }
-        let mut replacement = status.clone();
-        replacement.phase_revision = replacement.phase_revision.saturating_add(1);
-        replacement.cancellation_requested = true;
-        replacement.updated_at = request.requested_at;
-        self.store
-            .compare_and_swap_status(&request.transaction_id, status.phase_revision, replacement)
-            .map_err(map_store_error)?;
         Ok(NativeIntegrationCancelDispositionV1::CancellationRequested)
     }
 
@@ -603,6 +606,22 @@ where
     }
 
     fn finish_from_live_precommit_probe(
+        &self,
+        record: &NativeIntegrationRecordV1,
+        observed_at: UtcMicros,
+    ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError> {
+        let current = self
+            .store
+            .read_record(&record.status.transaction_id)
+            .map_err(map_store_error)?
+            .ok_or(NativeIntegrationPortError::Stale)?;
+        if current.preview != record.preview || current.approval != record.approval {
+            return Err(NativeIntegrationPortError::TransactionConflict);
+        }
+        self.finish_current_from_live_precommit_probe(&current, observed_at)
+    }
+
+    fn finish_current_from_live_precommit_probe(
         &self,
         record: &NativeIntegrationRecordV1,
         observed_at: UtcMicros,

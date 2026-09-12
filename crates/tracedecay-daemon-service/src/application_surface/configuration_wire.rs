@@ -2,7 +2,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracedecay_contracts::{
     ApplicationOutcome, CancellationStage, ComponentConfigurationState, ConfigurationAuditPage,
-    ConfigurationMutationReceipt, OperationTermination, ResolvedSetting, SettingSummary,
+    ConfigurationMutationReceipt, FeedbackGetResultV1, OperationTermination, ResolvedSetting,
+    SettingSummary,
 };
 use tracedecay_domain::configuration::ProtectedChangePlan;
 use tracedecay_tool_catalog::{
@@ -115,7 +116,7 @@ fn configuration_cancellation_is_legal(
 
 /// Validate the transport serialization carrier against the concrete result
 /// DTO before an adapter can publish it.
-pub(super) fn validate_configuration_outcome(
+pub(super) fn validate_application_outcome(
     operation: ApplicationSurfaceOperation,
     outcome: &ApplicationOutcome<Value>,
     cancellation: &CancellationContract,
@@ -147,6 +148,9 @@ pub(super) fn validate_configuration_outcome(
         return false;
     }
     match (operation, outcome) {
+        (ApplicationSurfaceOperation::FeedbackGet, ApplicationOutcome::Evidence(packet)) => {
+            payload_decodes::<FeedbackGetResultV1>(packet.payload.as_ref())
+        }
         (ApplicationSurfaceOperation::ConfigurationList, ApplicationOutcome::Evidence(packet)) => {
             payload_decodes::<Vec<SettingSummary>>(packet.payload.as_ref())
         }

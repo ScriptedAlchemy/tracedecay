@@ -47,12 +47,14 @@
 //! re-proves the digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_core::graph::compact::IncrementalCompactStoreBuilder;
 use grafeo_engine::GrafeoDB;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
@@ -523,6 +525,18 @@ struct SealedCompactRows {
     next_edge: u64,
 }
 
+struct PreparedSealedNode {
+    labels: Vec<String>,
+    properties: Vec<(PropertyKey, Value)>,
+}
+
+struct PreparedSealedRelation {
+    edge: EdgeId,
+    edge_type: String,
+    edge_properties: Vec<(PropertyKey, Value)>,
+    locator: PreparedSealedNode,
+}
+
 impl SealedCompactRows {
     fn new() -> Self {
         Self {
@@ -537,16 +551,26 @@ impl SealedCompactRows {
         labels: &[String],
         properties: Vec<(String, Value)>,
     ) -> Result<NodeId, GraphDbError> {
+        self.push_prepared_node(Self::prepare_node(labels.to_vec(), properties))
+    }
+
+    fn prepare_node(labels: Vec<String>, properties: Vec<(String, Value)>) -> PreparedSealedNode {
+        PreparedSealedNode {
+            labels,
+            properties: properties
+                .into_iter()
+                .map(|(key, value)| (PropertyKey::new(&key), value))
+                .collect(),
+        }
+    }
+
+    fn push_prepared_node(&mut self, prepared: PreparedSealedNode) -> Result<NodeId, GraphDbError> {
         let id = NodeId::new(self.next_node);
-        let properties: Vec<(PropertyKey, Value)> = properties
-            .into_iter()
-            .map(|(key, value)| (PropertyKey::new(&key), value))
-            .collect();
         self.builder
             .push_node(
                 id,
-                labels.iter().map(String::as_str),
-                properties.iter().map(|(key, value)| (key, value)),
+                prepared.labels.iter().map(String::as_str),
+                prepared.properties.iter().map(|(key, value)| (key, value)),
             )
             .map_err(|error| sealed_build_failure("node", error))?;
         self.next_node += 1;
@@ -561,9 +585,18 @@ impl SealedCompactRows {
         projection: &GraphProjectionId,
         entity: &GraphEntity,
     ) -> Result<NodeId, GraphDbError> {
-        let labels = entity_labels(namespace, projection, &entity.labels);
-        let properties = entity_properties(namespace, projection, entity);
-        self.push_node(&labels, properties)
+        self.push_prepared_node(Self::prepare_entity(namespace, projection, entity))
+    }
+
+    fn prepare_entity(
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        entity: &GraphEntity,
+    ) -> PreparedSealedNode {
+        Self::prepare_node(
+            entity_labels(namespace, projection, &entity.labels),
+            entity_properties(namespace, projection, entity),
+        )
     }
 
     /// Writes one relation: the native edge between two already-written
@@ -577,24 +610,55 @@ impl SealedCompactRows {
         to: NodeId,
     ) -> Result<(), GraphDbError> {
         let edge = EdgeId::new(self.next_edge);
-        let properties: Vec<(PropertyKey, Value)> =
-            edge_properties(namespace, projection, relation)
+        let prepared = Self::prepare_relation(namespace, projection, relation, edge)?;
+        self.push_prepared_relation(prepared, from, to)
+    }
+
+    fn prepare_relation(
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        relation: &GraphRelation,
+        edge: EdgeId,
+    ) -> Result<PreparedSealedRelation, GraphDbError> {
+        Ok(PreparedSealedRelation {
+            edge,
+            edge_type: relation_type_for_kind(&relation.kind),
+            edge_properties: edge_properties(namespace, projection, relation)
                 .into_iter()
                 .map(|(key, value)| (PropertyKey::new(&key), value))
-                .collect();
+                .collect(),
+            locator: Self::prepare_node(
+                relation_locator_labels(namespace, projection),
+                relation_properties(namespace, projection, relation, edge)?,
+            ),
+        })
+    }
+
+    fn push_prepared_relation(
+        &mut self,
+        prepared: PreparedSealedRelation,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<(), GraphDbError> {
+        if prepared.edge.as_u64() != self.next_edge {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed relation preparation diverged from canonical order".to_owned(),
+            });
+        }
         self.builder
             .push_edge(
-                edge,
-                &relation_type_for_kind(&relation.kind),
+                prepared.edge,
+                &prepared.edge_type,
                 from,
                 to,
-                properties.iter().map(|(key, value)| (key, value)),
+                prepared
+                    .edge_properties
+                    .iter()
+                    .map(|(key, value)| (key, value)),
             )
             .map_err(|error| sealed_build_failure("edge", error))?;
         self.next_edge += 1;
-        let locator_labels = relation_locator_labels(namespace, projection);
-        let locator_properties = relation_properties(namespace, projection, relation, edge)?;
-        self.push_node(&locator_labels, locator_properties)?;
+        self.push_prepared_node(prepared.locator)?;
         Ok(())
     }
 
@@ -631,10 +695,10 @@ impl SealedCompactRows {
     /// LPG overlay whose id allocators start past the written ids, and a
     /// catalog naming the unique-key property indexes.
     fn write_container(self, path: &Path) -> Result<(), GraphDbError> {
-        let store = hotpath::measure_block!("graph_db.sealed_store.encode", self.builder.finish())
+        let store = hotpath::measure_block!("code_index.seal.write.compact", self.builder.finish())
             .map_err(|error| sealed_build_failure("encode", error))?;
         hotpath::measure_block!(
-            "graph_db.sealed_store.write_container",
+            "code_index.seal.write.container",
             GrafeoDB::write_compact_container(
                 path,
                 Arc::new(store),
@@ -654,6 +718,54 @@ fn sealed_build_failure(
     GraphDbError::Corrupt {
         message: format!("sealed compact build refused a {what}: {error}"),
     }
+}
+
+fn collect_prepared_rows_ordered<T, R>(
+    items: &[T],
+    operation: impl Fn(usize, &T) -> Result<R, GraphDbError> + Send + Sync,
+) -> Result<Vec<R>, GraphDbError>
+where
+    T: Sync,
+    R: Send,
+{
+    const ROWS_PER_WORK_UNIT: usize = 512;
+    if items.len() < 2 || rayon::current_thread_index().is_none() {
+        return items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| operation(index, item))
+            .collect();
+    }
+    let chunks = items
+        .par_chunks(ROWS_PER_WORK_UNIT)
+        .enumerate()
+        .map(|(chunk_index, chunk)| {
+            catch_unwind(AssertUnwindSafe(|| {
+                chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, item)| {
+                        operation(
+                            chunk_index
+                                .saturating_mul(ROWS_PER_WORK_UNIT)
+                                .saturating_add(offset),
+                            item,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            }))
+            .unwrap_or_else(|_| {
+                Err(GraphDbError::unavailable(
+                    "sealed row preparation worker panicked",
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut collected = Vec::with_capacity(items.len());
+    for chunk in chunks {
+        collected.extend(chunk?);
+    }
+    Ok(collected)
 }
 
 /// The commit a sealed namespace's projection-state node records: the
@@ -1311,64 +1423,97 @@ fn push_manifest_rows(
     }
     let projection = &identity.projection.projection;
     let entities = &manifest.entities;
-    hotpath::measure_block!("graph_db.sealed_store.direct.entities", {
-        for (index, entity) in entities.iter().enumerate() {
-            check()?;
-            if index
-                .checked_sub(1)
-                .is_some_and(|prior| entities[prior].identity >= entity.identity)
-            {
-                return Err(GraphDbError::Corrupt {
-                    message: "graph generation manifest entities are not in canonical order"
-                        .to_owned(),
-                });
+    let workers = rayon::current_thread_index()
+        .map(|_| rayon::current_num_threads())
+        .unwrap_or(1);
+    let row_window = workers.max(1).saturating_mul(512);
+    hotpath::gauge!("code_index.seal.encode.effective_workers").set(workers);
+    hotpath::measure_block!("code_index.seal.encode.entities", {
+        for (window_index, window) in entities.chunks(row_window).enumerate() {
+            let start = window_index.saturating_mul(row_window);
+            for (offset, entity) in window.iter().enumerate() {
+                check()?;
+                let index = start.saturating_add(offset);
+                if index
+                    .checked_sub(1)
+                    .is_some_and(|prior| entities[prior].identity >= entity.identity)
+                {
+                    return Err(GraphDbError::Corrupt {
+                        message: "graph generation manifest entities are not in canonical order"
+                            .to_owned(),
+                    });
+                }
             }
-            let node = sealed.push_entity(physical_namespace, projection, entity)?;
-            if node.as_u64() != index as u64 {
-                return Err(GraphDbError::Corrupt {
-                    message: "sealed build entity ids diverged from manifest order".to_owned(),
-                });
+            let prepared = collect_prepared_rows_ordered(window, |_, entity| {
+                Ok(SealedCompactRows::prepare_entity(
+                    physical_namespace,
+                    projection,
+                    entity,
+                ))
+            })?;
+            for (offset, prepared) in prepared.into_iter().enumerate() {
+                let node = sealed.push_prepared_node(prepared)?;
+                if usize::try_from(node.as_u64()).ok() != Some(start.saturating_add(offset)) {
+                    return Err(GraphDbError::Corrupt {
+                        message: "sealed build entity ids diverged from manifest order".to_owned(),
+                    });
+                }
             }
         }
         Ok::<(), GraphDbError>(())
     })?;
-    hotpath::measure_block!("graph_db.sealed_store.direct.relations", {
+    hotpath::measure_block!("code_index.seal.encode.relations", {
         let relations = &manifest.relations;
-        for (index, relation) in relations.iter().enumerate() {
-            check()?;
-            if index
-                .checked_sub(1)
-                .is_some_and(|prior| relations[prior].identity >= relation.identity)
-            {
-                return Err(GraphDbError::Corrupt {
-                    message: "graph generation manifest relations are not in canonical order"
-                        .to_owned(),
-                });
-            }
-            let mut endpoints = [NodeId::new(0); 2];
-            for (slot, endpoint) in endpoints.iter_mut().zip([&relation.from, &relation.to]) {
-                if endpoint.projection != identity.projection {
+        for (window_index, window) in relations.chunks(row_window).enumerate() {
+            let start = window_index.saturating_mul(row_window);
+            for (offset, relation) in window.iter().enumerate() {
+                check()?;
+                let index = start.saturating_add(offset);
+                if index
+                    .checked_sub(1)
+                    .is_some_and(|prior| relations[prior].identity >= relation.identity)
+                {
                     return Err(GraphDbError::Corrupt {
-                        message: "sealed build relation escapes its dependency closure".to_owned(),
+                        message: "graph generation manifest relations are not in canonical order"
+                            .to_owned(),
                     });
                 }
-                let index = entities
-                    .binary_search_by(|entity| entity.identity.cmp(&endpoint.identity))
-                    .map_err(|_| GraphDbError::Corrupt {
-                        message: format!(
-                            "local relation endpoint `{}` is absent from the candidate generation",
-                            endpoint.identity
-                        ),
-                    })?;
-                *slot = NodeId::new(index as u64);
             }
-            sealed.push_relation(
-                physical_namespace,
-                projection,
-                &relation.storage_relation()?,
-                endpoints[0],
-                endpoints[1],
-            )?;
+            let prepared = collect_prepared_rows_ordered(window, |offset, relation| {
+                let mut endpoints = [NodeId::new(0); 2];
+                for (slot, endpoint) in endpoints.iter_mut().zip([&relation.from, &relation.to]) {
+                    if endpoint.projection != identity.projection {
+                        return Err(GraphDbError::Corrupt {
+                            message: "sealed build relation escapes its dependency closure"
+                                .to_owned(),
+                        });
+                    }
+                    let index = entities
+                        .binary_search_by(|entity| entity.identity.cmp(&endpoint.identity))
+                        .map_err(|_| GraphDbError::Corrupt {
+                            message: format!(
+                                "local relation endpoint `{}` is absent from the candidate generation",
+                                endpoint.identity
+                            ),
+                        })?;
+                    *slot = NodeId::new(u64::try_from(index).map_err(|_| {
+                        GraphDbError::unavailable("sealed entity count exceeds u64")
+                    })?);
+                }
+                let edge_index = u64::try_from(start.saturating_add(offset))
+                    .map_err(|_| GraphDbError::unavailable("sealed relation count exceeds u64"))?;
+                let stored = relation.storage_relation()?;
+                let prepared = SealedCompactRows::prepare_relation(
+                    physical_namespace,
+                    projection,
+                    &stored,
+                    EdgeId::new(edge_index),
+                )?;
+                Ok((prepared, endpoints))
+            })?;
+            for (prepared, endpoints) in prepared {
+                sealed.push_prepared_relation(prepared, endpoints[0], endpoints[1])?;
+            }
         }
         Ok::<(), GraphDbError>(())
     })?;
@@ -1580,7 +1725,10 @@ fn open_sealed_store(
     // resolved by marker against the container that engine opened. The proof
     // is filed now, so the engine is pure resident cost until a read actually
     // arrives: release it and let the first read reopen.
-    if let Err(error) = database.hibernate_if_lazy() {
+    if let Err(error) = hotpath::measure_block!(
+        "code_index.seal.verify.hibernate",
+        database.hibernate_if_lazy()
+    ) {
         let _ = database.close();
         return Err(sealed_store_failure("post-proof hibernation failed", error));
     }
@@ -1610,8 +1758,11 @@ fn sealed_copy_proof(
     let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
     // The marker is consulted only against the container the resident engine
     // loaded, so the engine has to be open before the lookup can answer.
-    database.ensure_opened()?;
-    if let Some(canonical_bytes) = database.inner.markers.lookup(&locator, expected.as_str()) {
+    hotpath::measure_block!("code_index.seal.verify.open", database.ensure_opened())?;
+    if let Some(canonical_bytes) = hotpath::measure_block!(
+        "code_index.seal.verify.marker_lookup",
+        database.inner.markers.lookup(&locator, expected.as_str())
+    ) {
         database.inner.markers.record_fresh(&locator);
         #[cfg(test)]
         crate::generation::record_sealed_copy_marker_hit();
@@ -1621,13 +1772,13 @@ fn sealed_copy_proof(
         );
         return Ok(canonical_bytes);
     }
-    let canonical_bytes = {
+    let canonical_bytes = hotpath::measure_block!("code_index.seal.verify.rows", {
         let guard = database.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let (_, canonical_bytes) =
             verify_sealed_copy_generation(native, identity, expected, check)?;
-        canonical_bytes
-    };
+        Ok::<u64, GraphDbError>(canonical_bytes)
+    })?;
     database
         .inner
         .markers
@@ -1641,7 +1792,10 @@ fn sealed_copy_proof(
     // then re-records the container as the closed handle reports it for the
     // next boot. A marker is a cache of completed proofs; failing to write one
     // costs the next open a re-proof and nothing else.
-    if let Err(error) = database.inner.markers.publish_resident() {
+    if let Err(error) = hotpath::measure_block!(
+        "code_index.seal.verify.marker_publish",
+        database.inner.markers.publish_resident()
+    ) {
         let _ = error;
     }
     crate::hotpath_observe::record_sealed_copy_verification(
@@ -1656,6 +1810,8 @@ mod build_tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rayon::ThreadPoolBuilder;
 
     use super::{
         SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
@@ -1999,7 +2155,7 @@ mod build_tests {
         // The same rows, staged and copied out of the staging database.
         let database = open_source(&database_path);
         database
-            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .apply_generation_unverified_with_digest(Arc::new(manifest.clone()), &expected, check)
             .unwrap();
         let (staged, staged_proof) = build_or_open_sealed_store(
             SealedRowSource::Staging(&database),
@@ -2016,6 +2172,29 @@ mod build_tests {
         assert!(
             payload(&staged_bytes) == payload(&direct_bytes),
             "the direct and staged builds of one generation must write the same sealed payload"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        // Preparation may fan out, but the canonical push order and compact
+        // section bytes remain identical to the serial direct build.
+        let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let (parallel, _) = pool
+            .install(|| {
+                build_or_open_sealed_store(
+                    SealedRowSource::Manifest(&manifest),
+                    &identity,
+                    &expected,
+                    &database_path,
+                    &|| Ok(()),
+                )
+            })
+            .unwrap();
+        let _ = parallel.database().close();
+        let parallel_bytes = std::fs::read(&artifact).unwrap();
+        assert_eq!(parallel_bytes.len(), direct_bytes.len());
+        assert!(
+            payload(&parallel_bytes) == payload(&direct_bytes),
+            "parallel and serial direct builds must write the same sealed payload"
         );
     }
 

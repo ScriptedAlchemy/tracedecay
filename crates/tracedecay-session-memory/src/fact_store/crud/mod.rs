@@ -31,8 +31,10 @@ mod payload_access_tests;
 mod tests;
 
 pub(super) use self::commands::{
-    add_project_memory_fact_tx, load_mutable_project_memory_fact_tx, remove_project_memory_fact_tx,
-    supersede_project_memory_fact_tx, update_project_memory_fact_tx,
+    add_project_memory_fact_tx, load_mutable_project_memory_fact_tx,
+    remove_project_memory_fact_after_curation_review_tx, remove_project_memory_fact_tx,
+    supersede_project_memory_fact_tx, update_project_memory_fact_after_curation_review_tx,
+    update_project_memory_fact_tx,
 };
 use self::commands::{
     commit_receipt_json, project_memory_commit_receipt_from_operation_tx,

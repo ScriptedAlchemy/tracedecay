@@ -108,3 +108,40 @@ fn expertise_uses_category_intersection_and_earliest_expiry() {
         } if authorized == categories
     ));
 }
+
+#[test]
+fn experience_accepts_only_fresh_successful_artifact_receipts() {
+    let receipt = serde_json::from_value::<WorkAttemptReceiptV1>(serde_json::json!({
+        "identity": {"task_id":"task.experienced","run_id":"run.experienced","attempt_id":"attempt.experienced"},
+        "artifacts": [{"artifact_id":"artifact.provider.stdout","digest":format!("sha256:{}", "a".repeat(64)),"byte_length":92}],
+        "evidence": {
+            "identity":{"task_id":"task.experienced","run_id":"run.experienced","attempt_id":"attempt.experienced"},
+            "requested_route":{"provider_id":"provider.work.codex-app-server","route_id":"route.work.codex"},
+            "actual_route":{"provider_id":"provider.work.codex-app-server","route_id":"route.work.codex"},
+            "outcome":{"outcome":"exited","code":0},
+            "stdout":null,"stderr":null,"provider_fallback":null,"observed_at":80
+        }
+    })).expect("canonical attempt receipt");
+    let target = TaskId::new("task.target").expect("target task id");
+    assert!(qualifying_experience_receipt(
+        &receipt,
+        &target,
+        UtcMicros(70),
+        UtcMicros(90)
+    ));
+
+    let mut without_artifact = receipt.clone();
+    without_artifact.artifacts.clear();
+    assert!(!qualifying_experience_receipt(
+        &without_artifact,
+        &target,
+        UtcMicros(70),
+        UtcMicros(90)
+    ));
+    assert!(!qualifying_experience_receipt(
+        &receipt,
+        &target,
+        UtcMicros(81),
+        UtcMicros(90)
+    ));
+}

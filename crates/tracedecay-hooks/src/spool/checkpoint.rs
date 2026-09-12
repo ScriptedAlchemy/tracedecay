@@ -479,6 +479,7 @@ fn decode_checkpoint_entry(bytes: &[u8], file_offset: u64) -> Option<PendingReco
         event_id: bytes[52..68].try_into().ok()?,
         checksum: bytes[68..100].try_into().ok()?,
         envelope: None,
+        native_lifecycle: None,
     })
 }
 

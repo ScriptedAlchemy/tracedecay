@@ -25,6 +25,24 @@ impl tracedecay_graph_query::VerifiedGraphQueryPort for PendingVerifiedGraphQuer
     }
 }
 
+struct YieldingUnavailableVerifiedGraphQueryPort;
+
+impl tracedecay_graph_query::VerifiedGraphQueryPort for YieldingUnavailableVerifiedGraphQueryPort {
+    fn open<'a>(
+        &'a self,
+        _request: tracedecay_graph_query::VerifiedGraphQueryRequest<'a>,
+    ) -> tracedecay_graph_query::VerifiedGraphQueryFuture<'a> {
+        Box::pin(async {
+            tokio::task::yield_now().await;
+            Err(tracedecay_graph_query::map_code_graph_read_runtime_error(
+                tracedecay_graph_query::CodeGraphReadError::Unavailable {
+                    detail: "ready graph admission result".to_owned(),
+                },
+            ))
+        })
+    }
+}
+
 fn lexical_candidate() -> RankedCandidate {
     RankedCandidate {
         candidate: FusedCandidate {
@@ -399,6 +417,54 @@ async fn tracedecay_context_preserves_fallback_results_while_semantic_and_graph_
     assert!(text.contains("LexicalWidget"));
     assert!(text.contains("Semantic results pending"));
     assert!(text.contains("Graph enrichment unavailable"));
+    cg.close();
+}
+
+#[tokio::test]
+async fn tracedecay_context_waits_for_requested_code_graph_admission() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().expect("requested context code isolation");
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("context-requested-code-graph");
+    fs::create_dir_all(project.join("src")).expect("create fixture sources");
+    fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
+        .expect("write lexical fixture");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.context-requested-code-graph",
+    )
+    .await
+    .expect("registered context fixture");
+
+    let mut options = lexical_search_options(&cg);
+    options.verified_graph_query_port = Some(Arc::new(YieldingUnavailableVerifiedGraphQueryPort));
+    let result = handle_tool_call_with_registry_options(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "explain LexicalWidget",
+            "include_code": true,
+            "include_memory": false,
+            "format": "json",
+        }),
+        None,
+        None,
+        options,
+    )
+    .await
+    .expect("requested code keeps the graph admission result");
+    let payload: Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("context JSON text"),
+    )
+    .expect("context JSON payload");
+
+    assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        payload["verified_graph_evidence"]["detail"],
+        "the exact project code graph is unavailable: ready graph admission result"
+    );
     cg.close();
 }
 

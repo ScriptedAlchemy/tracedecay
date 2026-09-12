@@ -2,12 +2,15 @@ use tracedecay_domain::{CanonicalObservationIdV1, ProjectionGenerationId};
 use tracedecay_store::{ObservationCommitReceipt, ObservationStoreError, ObservationStoreResult};
 
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_rusqlite_runtime::repository::{
+    REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,
+};
 
 use super::codec::{decode, decode_repository_provenance_attachment, decode_sequence, storage};
 
 async fn read_observation_row(
     conn: &impl QueryExecutor,
-    sql: &'static str,
+    sql: &str,
     value: &str,
     operation: &'static str,
 ) -> ObservationStoreResult<Option<ObservationCommitReceipt>> {
@@ -74,19 +77,22 @@ pub(super) async fn read_by_observation_id(
 ) -> ObservationStoreResult<Option<ObservationCommitReceipt>> {
     read_observation_row(
         conn,
-        "SELECT observation.sequence, observation.observation_json,
+        &format!(
+            "SELECT observation.sequence, observation.observation_json,
                 observation.committed_cursor_json, anchor.anchor_json,
-                anchor.projection_generation, repository.availability_json,
-                repository.capture_json, repository_anchor.anchor_json
+                anchor.projection_generation, {REPOSITORY_PROVENANCE_HYDRATED_COLUMNS},
+                repository_anchor.anchor_json
          FROM observations AS observation
          JOIN observation_retrieval_anchors AS binding
            ON binding.observation_id = observation.observation_id
          JOIN retrieval_anchors AS anchor ON anchor.anchor_id = binding.anchor_id
          JOIN observation_repository_provenance AS repository
            ON repository.observation_id = observation.observation_id
+         {REPOSITORY_PROVENANCE_CAPTURE_JOIN}
          LEFT JOIN retrieval_anchors AS repository_anchor
            ON repository_anchor.anchor_id = repository.retrieval_anchor_id
-         WHERE observation.observation_id = ?1",
+         WHERE observation.observation_id = ?1"
+        ),
         observation_id.as_str(),
         "read observation",
     )
