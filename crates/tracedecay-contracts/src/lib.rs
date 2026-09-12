@@ -535,8 +535,8 @@ pub use work_placement::{
 };
 pub use work_product::{
     AcceptWorkTaskRequestV1, AddWorkTaskRequestV1, AdmitWorkExecutionRequestV1,
-    AuthorizedWorkProductScopeV1, CreateWorkProductRequestV1, CreateWorkTaskRequestV1,
-    DecideWorkProposalRequestV1, MAX_WORK_EVIDENCE_SELECTION_V1,
+    AdmittedWorkExecutionV1, AuthorizedWorkProductScopeV1, CreateWorkProductRequestV1,
+    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, MAX_WORK_EVIDENCE_SELECTION_V1,
     MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, MAX_WORK_HISTORY_EVENTS_V1,
     PrepareWorkProductMutationRequestV1, SelectedWorkEvidenceV1, VerifiedWorkEvidenceExpansionV1,
     VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1, WorkEvidenceExpansionV1,

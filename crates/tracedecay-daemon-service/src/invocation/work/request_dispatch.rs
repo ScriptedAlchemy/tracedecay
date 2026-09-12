@@ -276,10 +276,20 @@ pub(super) async fn dispatch_work_application(
                                     tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
                                 ));
                             }
-                            product
+                            let execution_snapshot = preparation::prepare_execution_snapshot(
+                                &registered,
+                                &context,
+                                &binding,
+                                &command,
+                            )?;
+                            let mutation = product
                                 .mutations()
                                 .admit_execution(&context, &binding, command)
-                                .map_err(work_product_problem)
+                                .map_err(work_product_problem)?;
+                            Ok(tracedecay_contracts::AdmittedWorkExecutionV1 {
+                                mutation,
+                                execution_snapshot,
+                            })
                         })
                 });
                 complete_work_effect(

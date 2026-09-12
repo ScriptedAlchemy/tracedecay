@@ -182,6 +182,7 @@ fn rooted_graph() -> (
         WorkRouteDecisionV1::abstain("execution admission selects the route").unwrap(),
         "Admit the sealed attempt identity".to_owned(),
         digest('d'),
+        digest('e'),
     )
     .unwrap();
     let graph = graph

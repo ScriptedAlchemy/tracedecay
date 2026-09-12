@@ -27,15 +27,16 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand,
-    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
-    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, RequestId,
-    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1,
-    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
-    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+    AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, ApplicationProblem,
+    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
+    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
+    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, RequestId, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    RetryDirective, RetryWorkAttemptCommandV1, StartWorkAttemptCommand,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
@@ -323,9 +324,10 @@ impl WorkOperation {
     pub fn result_schema_name(self) -> Cow<'static, str> {
         match self {
             Self::GenerateProposal => schema_name::<GeneratedWorkProposal>(),
-            Self::Create | Self::ReviewProposal | Self::AcceptProposal | Self::AdmitExecution => {
+            Self::Create | Self::ReviewProposal | Self::AcceptProposal => {
                 schema_name::<WorkProductMutationReceiptV1>()
             }
+            Self::AdmitExecution => schema_name::<AdmittedWorkExecutionV1>(),
             Self::StartAttempt | Self::AttemptStatus | Self::CancelAttempt => {
                 schema_name::<WorkAttemptV1>()
             }
@@ -562,12 +564,11 @@ mod tests {
     }
 
     #[test]
-    fn task_creation_proposal_decisions_and_execution_admission_publish_product_receipts() {
+    fn execution_admission_publishes_the_snapshot_consumed_by_attempt_start() {
         for operation in [
             WorkOperation::Create,
             WorkOperation::ReviewProposal,
             WorkOperation::AcceptProposal,
-            WorkOperation::AdmitExecution,
         ] {
             assert_eq!(
                 operation.result_schema_name(),
@@ -591,6 +592,10 @@ mod tests {
         assert_eq!(
             WorkOperation::AdmitExecution.request_schema_name(),
             "AdmitWorkExecutionRequestV1"
+        );
+        assert_eq!(
+            WorkOperation::AdmitExecution.result_schema_name(),
+            "AdmittedWorkExecutionV1"
         );
     }
 }
