@@ -14,9 +14,9 @@ use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
+use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
 use tracedecay_contracts::doctor::SemanticOwnerStateV1;
 use tracedecay_dashboard_api::AdmittedDoctorReportV1;
-use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader;
 use tracedecay_mcp::handlers::analysis as portable_analysis;
 use tracedecay_mcp::handlers::ast_grep as portable_ast_grep;
 use tracedecay_mcp::handlers::git;

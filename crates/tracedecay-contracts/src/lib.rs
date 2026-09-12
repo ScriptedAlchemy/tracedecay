@@ -24,6 +24,7 @@ pub mod branch_snapshots;
 mod capability_manifest;
 pub mod catalog_composition;
 pub mod clock;
+pub mod code_index_freshness;
 pub mod configuration;
 pub mod context;
 pub mod context_scout;

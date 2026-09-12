@@ -452,7 +452,7 @@ struct OpenedProjectGraph {
 struct ProjectRoutePorts {
     code_index: ProjectCodeIndexAuthorities,
     dashboard_code_index_freshness_reader:
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader,
     dashboard_feedback_status_reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     dashboard_pr_autotrack_reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
@@ -2017,8 +2017,8 @@ fn project_code_index_authorities(
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader {
-    let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+) -> tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader {
+    let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
         Arc::new(move |project_root| {
             let schedulers = schedulers.clone();
             Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })

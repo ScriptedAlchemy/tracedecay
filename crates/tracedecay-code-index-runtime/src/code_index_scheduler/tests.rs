@@ -341,7 +341,7 @@ fn replace_scheduler_chunker_revision(
 
 fn build_progress_snapshot(
     scheduler: &CodeIndexWorktreeSchedulerV1,
-) -> Arc<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1> {
+) -> Arc<tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1> {
     scheduler
         .build_progress_slot()
         .read()
@@ -353,15 +353,14 @@ fn build_progress_snapshot(
 fn progress_snapshot_for_generation(
     generation_id: &CodeGenerationId,
     committed_pages: u64,
-) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1 {
-    tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1 {
+) -> tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1 {
+    tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1 {
         generation_id: generation_id.as_str().to_owned(),
         daemon_incarnation: 1,
         producer_incarnation: 1,
         progress_epoch: 0,
         sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
-        phase:
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        phase: tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit,
         committed_pages,
         committed_chunks: committed_pages,
         committed_imports: 0,
@@ -3726,7 +3725,7 @@ fn unchanged_policy_transition_refuses_unsafe_serving_and_rebuilds_once() {
     assert_eq!(recovery.incompatibilities, ["policy_revision"]);
     assert_eq!(
         recovery.serving,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryServingV1::Refused
+        tracedecay_contracts::code_index_freshness::CodeIndexGenerationRecoveryServingV1::Refused
     );
     let generation_b = published(
         config_b
@@ -3820,7 +3819,7 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
     assert_eq!(recovery.incompatibilities, ["chunker_revision"]);
     assert_eq!(
         recovery.serving,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryServingV1::Preserved
+        tracedecay_contracts::code_index_freshness::CodeIndexGenerationRecoveryServingV1::Preserved
     );
     let generation_b = published(
         config_b
@@ -4656,7 +4655,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         let progress = build_progress_snapshot(&scheduler);
         assert_eq!(
             progress.phase,
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         );
         progress
     };
@@ -4720,7 +4719,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     let completed_after_restart = build_progress_snapshot(&scheduler);
     assert_eq!(
         completed_after_restart.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
     );
     assert_eq!(
         completed_after_restart.generation_id,
@@ -4907,7 +4906,7 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
     let scan = build_progress_snapshot(&reopened);
     assert_eq!(
         scan.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::SourceScan
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::SourceScan
     );
     assert!(scan.total_lexical_units > 0);
     assert_eq!(scan.completed_lexical_units, scan.total_lexical_units);
@@ -6555,7 +6554,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
                 .snapshot()
                 .is_some_and(|snapshot| {
                     snapshot.phase
-                        == tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+                        == tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit
                 });
             if cancel {
                 self.observed_bulk_commit
@@ -6643,7 +6642,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
     let dashboard_after = build_progress_snapshot(&scheduler);
     assert_eq!(
         dashboard_after.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit
     );
     assert_eq!(dashboard_after.current_batch_pages, 1);
     assert_eq!(
@@ -6664,7 +6663,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
     let dashboard_ready = build_progress_snapshot(&scheduler);
     assert_eq!(
         dashboard_ready.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
     );
     assert!(dashboard_ready.progress_epoch > dashboard_after.progress_epoch);
 }
@@ -6998,7 +6997,7 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
     );
     assert!(replacement_progress.progress_epoch > original_progress.progress_epoch);
     original.publish_text_progress_phase(
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit,
         99,
         99,
     );
@@ -9354,7 +9353,7 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
             .await
             .expect("mounted dashboard freshness");
         if let Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Unavailable {
                 ref reason,
             },
         ) = freshness.code_graph_serving
@@ -9368,13 +9367,13 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
             .is_some_and(|latest| {
                 latest.generation().manifest().generation_id == sealed_generation_id
                     && latest.code_graph_serving_readiness()
-                        == tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+                        == tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
             });
         if seated
             && matches!(
                 freshness.code_graph_serving,
                 Some(
-                    tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
                 )
             )
         {
@@ -16529,7 +16528,7 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
         .expect("mounted worktree freshness");
     match freshness.code_graph_serving {
         Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Refused {
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
                 reason,
             },
         ) => assert_eq!(
@@ -16639,7 +16638,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         if let (owner_epoch, Some(progress)) = observed
             && progress.committed_pages > 0
             && progress.phase
-                != tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+                != tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         {
             break (owner_epoch, progress);
         }
@@ -16804,7 +16803,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     assert!(progress_after_overflow.committed_pages >= progress_before_overflow.committed_pages);
     assert_eq!(
         progress_after_overflow.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
     );
     assert_eq!(
         decode_count, 0,
@@ -16864,7 +16863,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             .as_ref()
             .expect("ready progress stays observable")
             .phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
     );
     let current = registry
         .execute_query_search(&scope, core_search_request("alpha_0000"))
@@ -18220,7 +18219,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         if let Some(progress) = observed
             && progress.committed_pages > 0
             && progress.phase
-                != tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+                != tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         {
             break progress;
         }
@@ -18326,7 +18325,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         assert_ne!(progress.generation_id, progress_before_retry.generation_id);
         assert_eq!(
             progress.phase,
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         );
     }
     assert!(
@@ -18412,7 +18411,7 @@ fn dashboard_graph_readiness_follows_the_current_text_generation() {
     old_ready.warm_serving_caches();
     assert_eq!(
         old_ready.code_graph_serving_readiness(),
-        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
     );
 
     fixture.edit("src/current.rs", "pub fn current() -> u32 { 2 }\n");
@@ -18428,9 +18427,7 @@ fn dashboard_graph_readiness_follows_the_current_text_generation() {
             Some(&current.text_generation_handle()),
             true,
         ),
-        Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
-        ),
+        Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Pending),
         "an older Ready graph must not mask the current text generation's Pending state"
     );
 }
@@ -18492,7 +18489,7 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
             .await
             .expect("mounted dashboard freshness");
         if let Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Unavailable {
                 ref reason,
             },
         ) = freshness.code_graph_serving

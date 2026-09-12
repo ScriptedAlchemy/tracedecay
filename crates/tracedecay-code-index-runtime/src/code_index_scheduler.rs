@@ -57,7 +57,7 @@ use tracedecay_runtime_core::resident_memory::{
 use self::freshness_witness::{
     ReconciledSourceWitnessV1, RestoreFreshnessWitnessV1, SourceContentManifestV1,
 };
-use tracedecay_dashboard_api::code_index_freshness_api::{
+use tracedecay_contracts::code_index_freshness::{
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
     CodeIndexGenerationRecoveryServingV1, CodeIndexGenerationRecoveryV1,
 };
@@ -4194,7 +4194,7 @@ impl LatestCompleteCodeIndexV1 {
     /// cannot combine states from opposite sides of an activation transition.
     pub fn code_graph_serving_readiness(
         &self,
-    ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1 {
+    ) -> tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1 {
         self.text.code_graph_serving_readiness()
     }
 
@@ -4236,27 +4236,27 @@ impl LatestCodeTextGenerationV1 {
 impl LatestCodeTextGenerationV1 {
     pub fn code_graph_serving_readiness(
         &self,
-    ) -> tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1 {
+    ) -> tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1 {
         match &*self
             .graph_activation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
         {
             CodeGraphActivationStateV1::Pending => {
-                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Pending
             }
             CodeGraphActivationStateV1::Refused(reason) => {
-                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Refused {
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
                     reason: (*reason).to_owned(),
                 }
             }
             CodeGraphActivationStateV1::Unavailable(reason) => {
-                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Unavailable {
                     reason: reason.clone(),
                 }
             }
             CodeGraphActivationStateV1::Ready(_) => {
-                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+                tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
             }
         }
     }

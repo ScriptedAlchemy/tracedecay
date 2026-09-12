@@ -2,7 +2,7 @@
 use std::os::unix::fs::symlink;
 
 use tempfile::TempDir;
-use tracedecay_dashboard_api::code_index_freshness_api::{
+use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
