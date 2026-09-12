@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde_json::Value;
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{SessionId, SignedCursorKeyRefV1};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_temporal_query::ports::{
@@ -160,7 +161,9 @@ pub(super) async fn freeze_prepared_candidate_participants(
         });
     }
     if keys.len() > MAX_TEMPORAL_PARTICIPANTS {
-        return Err(SessionTemporalExecutionError::BudgetExhausted);
+        return Err(SessionTemporalExecutionError::BudgetExhausted {
+            stage: SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
+        });
     }
     let encoded_keys = serde_json::to_string(
         &keys
@@ -470,11 +473,13 @@ struct FrozenWatermarksWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
     use tracedecay_domain::{RetrievalGrainV1, TemporalModeV1};
+    use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
     use tracedecay_global_db::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{Executor, TestConnection};
+    use tracedecay_temporal_query::candidates::CandidateChannel;
     use tracedecay_temporal_query::context::ContextBudget;
     use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
     use tracedecay_temporal_query::ranking::DiversityLimits;
@@ -701,17 +706,127 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn root_no_hit_over_256_sessions_is_truthful_zero_not_manifest_limit() {
-        let directory = tempdir().expect("temporary directory");
+    async fn open_root_fixture(
+        directory: &TempDir,
+    ) -> (
+        RegisteredGlobalDbLeaseV1,
+        RegisteredGlobalDbOwnerV1,
+        TestConnection,
+    ) {
         let database_path = directory.path().join("sessions.db");
-        let (database, _owner) = open_registered_test_database_fixture(
+        let (database, owner) = open_registered_test_database_fixture(
             &database_path,
             TestDatabaseRuntimeScope::ProfileSessions,
         )
         .await
         .expect("registered schema");
-        let connection = TestConnection::open(&database_path);
+        (database, owner, TestConnection::open(&database_path))
+    }
+
+    /// Groups the first seeded session's matching occurrence together with
+    /// `extra_members` further matching occurrences into one span evidence row.
+    async fn seed_root_span_evidence(connection: &TestConnection, extra_members: usize) {
+        let mut members = vec!["occurrence.000".to_owned()];
+        for extra in 0..extra_members {
+            let occurrence_id = format!("occurrence.000.m{extra}");
+            connection
+                .execute(
+                    "INSERT INTO session_occurrences (
+                         session_id, generation, occurrence_id, source_observation_id,
+                         source_provider, projection_output_ordinal, retrieval_anchor_id,
+                         message_id, turn_id, role, knowledge_at, valid_time_json,
+                         evidence_json, sanitized_content_digest, sanitized_content_bytes,
+                         snippet_text, index_text
+                     ) VALUES ('session.000', 1, ?1, 'observation.000', 'codex', ?2,
+                               'anchor.000', ?3, 'turn.000', 'user', ?2,
+                               '{\"kind\":\"unknown\"}', '{}',
+                               '0000000000000000000000000000000000000000000000000000000000000000',
+                               14, 'needle cohort', 'needle cohort')",
+                    params![
+                        occurrence_id.as_str(),
+                        i64::try_from(extra + 1).expect("member ordinal"),
+                        format!("message.000.m{extra}")
+                    ],
+                )
+                .await
+                .expect("span member occurrence");
+            members.push(occurrence_id);
+        }
+        connection
+            .execute(
+                "INSERT INTO session_derived_evidence (
+                     session_id, generation, evidence_kind, evidence_id, retrieval_anchor_id,
+                     first_occurrence_id, last_occurrence_id, algorithm_version,
+                     configuration_digest, member_count, member_digest, evidence_json
+                 ) VALUES ('session.000', 1, 'span', 'span.000', 'anchor.000',
+                           ?1, ?2, 'fixture.v1', 'sha256:fixture', ?3, 'sha256:members', '{}')",
+                params![
+                    members.first().expect("first member").as_str(),
+                    members.last().expect("last member").as_str(),
+                    i64::try_from(members.len()).expect("member count")
+                ],
+            )
+            .await
+            .expect("span evidence");
+        for (ordinal, occurrence_id) in members.iter().enumerate() {
+            let role = if ordinal == 0 {
+                "first"
+            } else if ordinal + 1 == members.len() {
+                "last"
+            } else {
+                "member"
+            };
+            connection
+                .execute(
+                    "INSERT INTO session_derived_evidence_members (
+                         session_id, generation, evidence_kind, evidence_id, ordinal,
+                         occurrence_id, member_role
+                     ) VALUES ('session.000', 1, 'span', 'span.000', ?1, ?2, ?3)",
+                    params![
+                        i64::try_from(ordinal).expect("ordinal"),
+                        occurrence_id.as_str(),
+                        role
+                    ],
+                )
+                .await
+                .expect("span member");
+        }
+    }
+
+    #[tokio::test]
+    async fn root_span_matched_by_many_members_is_one_candidate_over_300_sessions() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
+        seed_root_sessions(&connection, 300, 1, 1).await;
+        seed_root_span_evidence(&connection, 4).await;
+
+        let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
+        let (_, snapshot, _) = execution
+            .freeze(&root_execution_request("needle cohort"))
+            .await
+            .expect("rare root hit with derived evidence");
+
+        let spans: Vec<_> = snapshot
+            .prepared_candidate_cohort()
+            .expect("prepared cohort")
+            .candidates()
+            .iter()
+            .filter(|candidate| candidate.channel == CandidateChannel::Span)
+            .collect();
+        // The clause reports the span once however many of its five members
+        // match; one row per matching member would overrun the candidate read.
+        assert_eq!(
+            spans.len(),
+            1,
+            "a span matched by several members must be one candidate: {spans:?}"
+        );
+        assert_eq!(spans[0].session.as_deref(), Some("session.000"));
+    }
+
+    #[tokio::test]
+    async fn root_no_hit_over_256_sessions_is_truthful_zero_not_manifest_limit() {
+        let directory = tempdir().expect("temporary directory");
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
         seed_root_sessions(&connection, 300, 0, 1).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -731,14 +846,7 @@ mod tests {
     #[tokio::test]
     async fn root_no_hit_reports_aggregate_projection_staleness() {
         let directory = tempdir().expect("temporary directory");
-        let database_path = directory.path().join("sessions.db");
-        let (database, _owner) = open_registered_test_database_fixture(
-            &database_path,
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("registered schema");
-        let connection = TestConnection::open(&database_path);
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
         seed_root_sessions(&connection, 3, 0, 2).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -757,14 +865,7 @@ mod tests {
     #[tokio::test]
     async fn root_rare_hit_over_256_sessions_freezes_only_the_admitted_participant() {
         let directory = tempdir().expect("temporary directory");
-        let database_path = directory.path().join("sessions.db");
-        let (database, _owner) = open_registered_test_database_fixture(
-            &database_path,
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("registered schema");
-        let connection = TestConnection::open(&database_path);
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
         seed_root_sessions(&connection, 300, 1, 1).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -789,14 +890,7 @@ mod tests {
     #[tokio::test]
     async fn root_common_hit_over_256_sessions_reports_candidate_budget_not_manifest_limit() {
         let directory = tempdir().expect("temporary directory");
-        let database_path = directory.path().join("sessions.db");
-        let (database, _owner) = open_registered_test_database_fixture(
-            &database_path,
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .expect("registered schema");
-        let connection = TestConnection::open(&database_path);
+        let (database, _owner, connection) = open_root_fixture(&directory).await;
         seed_root_sessions(&connection, 300, 300, 1).await;
 
         let execution = super::super::RegisteredGlobalDbSessionTemporalExecution::new(&database);
@@ -804,10 +898,21 @@ mod tests {
             .freeze(&root_execution_request("needle cohort"))
             .await;
 
-        assert!(matches!(
-            result,
-            Err(SessionTemporalExecutionError::BudgetExhausted)
-        ));
+        let refusal = result.err().map(|error| format!("{error:?}"));
+        assert_eq!(
+            refusal.as_deref(),
+            Some(
+                format!(
+                    "{:?}",
+                    SessionTemporalExecutionError::BudgetExhausted {
+                        stage: SessionRetrievalBudgetStageV1::CandidateReadExhausted,
+                    }
+                )
+                .as_str()
+            ),
+            "a common root hit must name the candidate read budget, not the \
+             participant manifest limit"
+        );
     }
 
     #[tokio::test]

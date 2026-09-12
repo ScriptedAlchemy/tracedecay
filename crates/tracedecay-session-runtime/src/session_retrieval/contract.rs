@@ -20,7 +20,9 @@ use tracedecay_global_db::WorkflowScopeFilter;
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
-use tracedecay_session_memory::session::{SessionDataFreshness, SessionTemporalQuery};
+use tracedecay_session_memory::session::{
+    SessionDataFreshness, SessionRetrievalBudgetStageV1, SessionTemporalQuery,
+};
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
 use tracedecay_sessions::runtime::{
     SessionMessageSearchResult, SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
@@ -394,7 +396,9 @@ pub enum LcmDescribeServiceOutcome {
         observed: usize,
         maximum: usize,
     },
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+    },
     TimedOut,
     Cancelled,
 }
@@ -435,7 +439,9 @@ pub enum LcmExpandServiceOutcome {
         observed: usize,
         maximum: usize,
     },
-    BudgetExhausted,
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+    },
     TimedOut,
     Cancelled,
 }
@@ -481,7 +487,7 @@ pub enum SessionRetrievalServiceOutcome {
         maximum: usize,
     },
     BudgetExhausted {
-        stage: tracedecay_session_memory::session::SessionRetrievalBudgetStageV1,
+        stage: SessionRetrievalBudgetStageV1,
     },
     TimedOut,
     Cancelled,

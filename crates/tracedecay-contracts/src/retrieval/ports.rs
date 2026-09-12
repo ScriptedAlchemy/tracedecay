@@ -76,12 +76,38 @@ pub enum SessionRetrievalBudgetStageV1 {
     RequestHydrationBytes,
     EstimatorVersionMismatch,
     ExecutionWorkExhausted,
+    CandidateReadExhausted,
+    RecordReadExhausted,
     KernelResultLimit,
     ParticipantManifestParticipants,
     ParticipantManifestCanonicalBytes,
+    // A cursor manifest limit re-projected from a result status that carries no
+    // manifest kind. A doc comment here would split this flat wire enum into a
+    // `oneOf` in the generated schema; naming the unreported kind would
+    // fabricate it.
+    CursorManifestLimit,
     HydrationBytes,
     ContextBytes,
     ContextTokens,
+}
+
+impl SessionRetrievalBudgetStageV1 {
+    /// Classifies a kernel port budget resource into the stage a refusal
+    /// reports. The kernel names its own resources (`"record item count"`,
+    /// `"candidate filter scans"`, …); matching on the family prefix keeps a
+    /// newly named resource inside the right stage instead of silently
+    /// collapsing it into the work-unit stage.
+    #[must_use]
+    pub fn for_port_budget_resource(resource: &str) -> Self {
+        if resource.starts_with("candidate") {
+            Self::CandidateReadExhausted
+        } else if resource.starts_with("record") {
+            Self::RecordReadExhausted
+        } else {
+            Self::ExecutionWorkExhausted
+        }
+    }
+
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

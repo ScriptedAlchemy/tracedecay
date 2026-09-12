@@ -125,7 +125,7 @@ impl DaemonRuntimeConfiguration {
 
     /// Splits the daemon runtime shape from the runtime pin the configuration
     /// control plane retains.
-    pub(crate) fn into_parts(
+    pub fn into_parts(
         self,
     ) -> (
         TraceDecayConfig,
@@ -299,7 +299,7 @@ pub fn runtime_configuration_for_layout(
 /// store mints the sole canonical initial revision instead of failing; an
 /// initialized-but-unreadable store still yields a typed authority error rather
 /// than a fabricated default authority.
-pub(crate) async fn resolve_runtime_configuration_for_registered_database(
+pub async fn resolve_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
@@ -329,18 +329,18 @@ pub(crate) async fn resolve_runtime_configuration_for_registered_database(
 /// Retained store handle paired with the exact revision resolved at project
 /// open. Daemon composition consumes this bundle instead of opening a second
 /// configuration database or resolving a second snapshot.
-pub(crate) struct OpenedRuntimeConfiguration {
-    pub(crate) configuration: DaemonRuntimeConfiguration,
+pub struct OpenedRuntimeConfiguration {
+    pub configuration: DaemonRuntimeConfiguration,
     /// Exact daemon-owned registered session runtime used to resolve this
     /// snapshot. Configuration composition retains this authority directly;
     /// it never reacquires the physical database by path.
-    pub(crate) registered_database: RegisteredGlobalDbLeaseV1,
+    pub registered_database: RegisteredGlobalDbLeaseV1,
 }
 
 impl OpenedRuntimeConfiguration {
     /// Splits the daemon runtime shape from the bundle the configuration
     /// control plane retains (runtime pin plus the exact registered store).
-    pub(crate) fn into_parts(
+    pub fn into_parts(
         self,
     ) -> (
         TraceDecayConfig,
@@ -387,7 +387,7 @@ impl tracedecay_configuration::config::PinnedRuntimeConfigurationCachePort
 /// Installs the root-owned configuration read ports the lower crates reach
 /// through their process-global slots: the pin cache and the dashboard
 /// configuration reader. Idempotent.
-pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
+pub fn install_usecase_runtime_configuration_authority() -> Result<()> {
     static INSTALLATION: LazyLock<std::result::Result<(), String>> = LazyLock::new(|| {
         tracedecay_configuration::config::install_pinned_runtime_configuration_cache(Arc::new(
             RootPinnedRuntimeConfigurationCache,
@@ -408,7 +408,7 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
 /// Once any revision exists, open always reads that durable current revision;
 /// a corrupt or ambiguous history is never replaced with local defaults.
 #[hotpath::measure(label = "daemon.config.open", future = true)]
-pub(crate) async fn open_runtime_configuration_for_registered_database(
+pub async fn open_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
@@ -426,7 +426,7 @@ pub(crate) async fn open_runtime_configuration_for_registered_database(
 /// Resolve the daemon-wide worker selection from the exact registered
 /// `ProfileSessions` authority, initializing only a genuinely fresh profile
 /// store from the canonical registry default.
-pub(crate) async fn read_or_initialize_profile_code_index_worker_selection(
+pub async fn read_or_initialize_profile_code_index_worker_selection(
     database: RegisteredGlobalDbLeaseV1,
     profile_id: &UserProfileId,
 ) -> Result<CodeIndexWorkerSelectionV1> {
@@ -436,7 +436,7 @@ pub(crate) async fn read_or_initialize_profile_code_index_worker_selection(
 }
 
 #[hotpath::measure(label = "daemon.config.profile_workers.read", future = true)]
-pub(crate) async fn read_or_initialize_profile_code_index_worker_configuration(
+pub async fn read_or_initialize_profile_code_index_worker_configuration(
     database: RegisteredGlobalDbLeaseV1,
     profile_id: &UserProfileId,
 ) -> Result<ProfileCodeIndexWorkerConfigurationV1> {
@@ -620,8 +620,8 @@ async fn open_runtime_configuration_from_store(
 /// [`open_runtime_configuration_for_registered_database`] that returns just the
 /// pinned snapshot. Production open paths keep the full
 /// [`OpenedRuntimeConfiguration`] bundle (snapshot + registered database).
-#[cfg(test)]
-pub(crate) async fn ensure_runtime_configuration_for_registered_database(
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn ensure_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
@@ -636,7 +636,7 @@ pub(crate) async fn ensure_runtime_configuration_for_registered_database(
 /// Loads an already-persisted current configuration without creating a store
 /// or publishing a fallback revision.
 #[hotpath::measure(label = "daemon.config.open.read_only", future = true)]
-pub(crate) async fn open_runtime_configuration_for_registered_database_read_only(
+pub async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
@@ -767,19 +767,19 @@ pub async fn discover_project_root_with_identity(start: &Path) -> Option<PathBuf
 ///
 /// Single source of truth: [`tracedecay_runtime_core::config`] owns the lock,
 /// [`lock_user_data_dir_test_env`], and `PinnedUserDataDir`; this module only
-/// re-exports them so every historical `crate::config::…` call site keeps
+/// re-exports them so every historical `config::…` call site keeps
 /// resolving. The re-export follows the same gate as its only non-test
-/// consumer, `session_temporal_benchmark`, so a production build carries
-/// neither the harness nor its accessor.
+/// consumer, the root's `session_temporal_benchmark`, so a production build
+/// carries neither the harness nor its accessor.
 #[cfg(any(test, feature = "test-helpers"))]
-pub(crate) use tracedecay_runtime_core::config::lock_user_data_dir_test_env;
+pub use tracedecay_runtime_core::config::lock_user_data_dir_test_env;
 
 /// Pins [`USER_DATA_DIR_ENV`] and agent home discovery to an isolated temp
 /// profile while holding the shared user-data-dir test lock, so parallel lib
 /// tests cannot race profile resolution or scan live host transcripts during
 /// `TraceDecay::init` / indexing.
-#[cfg(test)]
-pub(crate) use tracedecay_runtime_core::config::PinnedUserDataDir;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use tracedecay_runtime_core::config::PinnedUserDataDir;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

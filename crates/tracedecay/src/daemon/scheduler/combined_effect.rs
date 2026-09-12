@@ -855,7 +855,7 @@ mod tests {
             std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
                 .expect("combined admission source");
             let memory = Arc::new(
-                TraceDecay::init_with_options(
+                TraceDecay::init_with_options_for_test(
                     &project_root,
                     crate::project::TraceDecayOpenOptions {
                         profile_root: Some(profile_root.clone()),

@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::SessionSourceCoverageAggregateStateV1;
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalAnchorId, RetrievalRequest,
@@ -214,7 +215,10 @@ pub enum SessionTemporalExecutionError {
     Unavailable,
     ResetRequired,
     Empty { freshness: SessionDataFreshness },
-    BudgetExhausted,
+    /// The bounded budget boundary that refused, classified where the kernel
+    /// port resource is still known. Dropping it here left every refusal
+    /// indistinguishable from an oversized request at the application surface.
+    BudgetExhausted { stage: SessionRetrievalBudgetStageV1 },
     Cancelled,
     Kernel(TemporalKernelError),
 }
@@ -231,7 +235,7 @@ impl fmt::Display for SessionTemporalExecutionError {
             Self::Unavailable => "temporal execution is unavailable",
             Self::ResetRequired => "temporal execution persisted state requires an explicit reset",
             Self::Empty { .. } => "temporal execution root is authoritatively empty",
-            Self::BudgetExhausted => "temporal execution budget was exhausted",
+            Self::BudgetExhausted { .. } => "temporal execution budget was exhausted",
             Self::Cancelled => "temporal execution was cancelled",
             Self::Kernel(_) => "temporal kernel failed",
         };

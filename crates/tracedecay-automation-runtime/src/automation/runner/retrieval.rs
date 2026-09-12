@@ -615,8 +615,17 @@ const fn automation_budget_refusal_reason(
         SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
             "session_evidence_budget_exhausted_execution_work_exhausted"
         }
+        SessionRetrievalBudgetStageV1::CandidateReadExhausted => {
+            "session_evidence_budget_exhausted_candidate_read_exhausted"
+        }
+        SessionRetrievalBudgetStageV1::RecordReadExhausted => {
+            "session_evidence_budget_exhausted_record_read_exhausted"
+        }
         SessionRetrievalBudgetStageV1::KernelResultLimit => {
             "session_evidence_budget_exhausted_kernel_result_limit"
+        }
+        SessionRetrievalBudgetStageV1::CursorManifestLimit => {
+            "session_evidence_budget_exhausted_cursor_manifest_limit"
         }
         SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
             "session_evidence_budget_exhausted_participant_manifest_participants"

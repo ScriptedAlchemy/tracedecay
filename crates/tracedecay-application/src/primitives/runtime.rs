@@ -1043,8 +1043,17 @@ const fn session_budget_diagnostic_code(stage: SessionRetrievalBudgetStageV1) ->
         SessionRetrievalBudgetStageV1::ExecutionWorkExhausted => {
             "application.retrieval.session-budget-execution-work-exhausted"
         }
+        SessionRetrievalBudgetStageV1::CandidateReadExhausted => {
+            "application.retrieval.session-budget-candidate-read-exhausted"
+        }
+        SessionRetrievalBudgetStageV1::RecordReadExhausted => {
+            "application.retrieval.session-budget-record-read-exhausted"
+        }
         SessionRetrievalBudgetStageV1::KernelResultLimit => {
             "application.retrieval.session-budget-kernel-result-limit"
+        }
+        SessionRetrievalBudgetStageV1::CursorManifestLimit => {
+            "application.retrieval.session-budget-cursor-manifest-limit"
         }
         SessionRetrievalBudgetStageV1::ParticipantManifestParticipants => {
             "application.retrieval.session-budget-participant-manifest-participants"

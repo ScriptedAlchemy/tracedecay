@@ -4447,7 +4447,7 @@ export type SessionId = z.infer<typeof SessionIdSchema>;
 /** Structural budget boundary that rejected a session retrieval request.
 These causes are non-retryable request corrections; concurrent permit or
 queue pressure remains a separate capacity-saturation failure. */
-export const SessionRetrievalBudgetStageV1Schema = z.enum(["context_bytes", "context_tokens", "estimator_version_mismatch", "execution_work_exhausted", "hydration_bytes", "kernel_result_limit", "participant_manifest_canonical_bytes", "participant_manifest_participants", "request_candidate_bytes", "request_context_bytes", "request_hydration_bytes", "request_hydration_limit", "request_record_bytes", "request_result_limit"]);
+export const SessionRetrievalBudgetStageV1Schema = z.enum(["candidate_read_exhausted", "context_bytes", "context_tokens", "cursor_manifest_limit", "estimator_version_mismatch", "execution_work_exhausted", "hydration_bytes", "kernel_result_limit", "participant_manifest_canonical_bytes", "participant_manifest_participants", "record_read_exhausted", "request_candidate_bytes", "request_context_bytes", "request_hydration_bytes", "request_hydration_limit", "request_record_bytes", "request_result_limit"]);
 export type SessionRetrievalBudgetStageV1 = z.infer<typeof SessionRetrievalBudgetStageV1Schema>;
 
 export const SessionRetrievalStructuralRefusalV1Schema = z.discriminatedUnion("refusal", [z.object({

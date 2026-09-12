@@ -600,7 +600,11 @@ impl McpServer {
         retained_servers: Vec<Arc<McpServer>>,
     ) -> tracedecay_domain::errors::Result<Arc<Self>> {
         let runtime = runtime.into_runtime();
-        let mut context = runtime.mcp_server_context_for_test(cg, scope_prefix)?;
+        let mut context = crate::test_support::host_admission::mcp_server_context_for_test(
+            runtime,
+            cg,
+            scope_prefix,
+        )?;
         // Hook notifications require a durable admission spool before their
         // plans replay and their post-commit side writes (route analytics,
         // span observations) run. Mount one on the runtime's project

@@ -82,8 +82,7 @@ async fn daemon_profile_ingest_admits_through_the_mounted_profile_store() {
         .unwrap();
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(temp.path()).unwrap();
-    let authorities = fixture
-        .mcp_session_authorities()
+    let authorities = crate::test_support::host_admission::mcp_session_authorities(&fixture)
         .with_profile_identity(Some(std::sync::Arc::new(profile_identity)));
     let admission = host_admission_facade(None, HostAdmissionScope::Profile, authorities)
         .unwrap()
