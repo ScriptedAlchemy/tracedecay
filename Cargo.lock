@@ -5957,7 +5957,7 @@ dependencies = [
  "tracedecay-host-integration",
  "tracedecay-lcm",
  "tracedecay-lsp",
- "tracedecay-mcp",
+ "tracedecay-mcp-catalog",
  "tracedecay-policy",
  "tracedecay-private-fs",
  "tracedecay-query",
