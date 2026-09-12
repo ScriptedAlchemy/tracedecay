@@ -8,6 +8,7 @@ use tracedecay_code_index::{
         build_published_code_graph_manifest_checked, code_graph_generation_id,
         code_graph_projection_identity,
     },
+    parallelism,
     production::{
         CodeIndexBuildRequestV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
     },
@@ -115,6 +116,49 @@ fn projection_manifest(
 fn current_projector_revision() -> GraphProjectorRevision {
     GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
         .expect("current projector revision")
+}
+
+struct ForcedGraphWidth;
+
+impl ForcedGraphWidth {
+    fn install(width: usize) -> Self {
+        parallelism::force_indexing_workers_for_test(width);
+        Self
+    }
+}
+
+impl Drop for ForcedGraphWidth {
+    fn drop(&mut self) {
+        parallelism::clear_forced_indexing_workers_for_test();
+    }
+}
+
+#[test]
+fn graph_manifest_is_identical_at_serial_and_parallel_widths() {
+    let serial = {
+        let _width = ForcedGraphWidth::install(1);
+        projection_manifest(
+            &published_import_generation(),
+            &current_projector_revision(),
+        )
+    };
+    let parallel = {
+        let _width = ForcedGraphWidth::install(4);
+        projection_manifest(
+            &published_import_generation(),
+            &current_projector_revision(),
+        )
+    };
+
+    assert_eq!(serial, parallel);
+    assert_eq!(
+        serial
+            .expected_recovered_digest(&|| Ok(()))
+            .expect("serial graph digest"),
+        parallel
+            .expected_recovered_digest(&|| Ok(()))
+            .expect("parallel graph digest"),
+    );
 }
 
 fn has_label(entity: &GraphEntity, label: &str) -> bool {
