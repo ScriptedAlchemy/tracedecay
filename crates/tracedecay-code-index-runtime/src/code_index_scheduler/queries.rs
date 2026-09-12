@@ -824,7 +824,14 @@ fn rejected_cursor<T>(
     let RetrievalPortOutcome::Unavailable(mut evidence) = unavailable(finished_at) else {
         unreachable!("unavailable helper returns the unavailable variant")
     };
-    evidence.temporal.source_generation = Some(generation);
+    // The unpinned sentinel asks this authority to resolve a generation; it
+    // is never itself a source generation. If resolution fails before a
+    // serving generation is selected, leave the source identity unbound so
+    // the application reports the typed unavailable/cursor cause rather than
+    // fabricating a generation mismatch against the sentinel.
+    if !is_unpinned_latest(&generation) {
+        evidence.temporal.source_generation = Some(generation);
+    }
     evidence.omissions.push(Omission {
         domain: EvidenceDomain::Symbol,
         count: 0,
@@ -4035,6 +4042,20 @@ mod tests {
             generation_resolution_wait_from_remaining(Duration::from_secs(90)),
             MAX_GENERATION_RESOLUTION_WAIT
         );
+    }
+
+    #[test]
+    fn rejected_unpinned_query_does_not_claim_the_request_sentinel_as_source() {
+        let outcome = rejected_cursor::<CodeQueryPage<String>>(
+            UtcMicros(1),
+            unpinned_latest_generation(),
+            CallableCodeCursorError::Unavailable,
+        );
+        let RetrievalPortOutcome::Unavailable(evidence) = outcome else {
+            panic!("a rejected unpinned query must remain unavailable");
+        };
+        assert_eq!(evidence.temporal.source_generation, None);
+        assert_eq!(evidence.omissions[0].reason, OmissionReason::Unavailable);
     }
 
     #[tokio::test(start_paused = true)]
