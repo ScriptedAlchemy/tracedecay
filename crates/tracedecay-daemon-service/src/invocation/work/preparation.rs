@@ -153,7 +153,9 @@ pub(super) fn prepare_execution_snapshot(
     let tracedecay_contracts::WorkProductExpectedAuthorityV1::Verified { verified_version } =
         &request.mutation.expected_authority
     else {
-        return Err(invalid_work_product_request());
+        return Err(work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::InvalidRequest,
+        ));
     };
     if snapshot.verified_version() != verified_version
         || snapshot.graph().version() != request.based_on_version
