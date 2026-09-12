@@ -66,7 +66,6 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::CodeFacets
         | DaemonInvocationOperation::CodeTimeline
         | DaemonInvocationOperation::CodeDeclaration
-        | DaemonInvocationOperation::CodeDefinition
         | DaemonInvocationOperation::CodeTypeDefinition
         | DaemonInvocationOperation::CodeReferences
         | DaemonInvocationOperation::Configuration

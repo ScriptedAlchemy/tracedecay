@@ -287,30 +287,48 @@ fn wait_for_described_session(home: &Path, project: &Path, phase: &str) -> Value
     }
 }
 
-/// A search without catch-up serves the retained projection and must answer
-/// evidence at once. A catch-up search demands fresh history, so while the
-/// worker's last pass is still retrying (a first pass after reopen can end
-/// retryable) it may refuse — but only with the typed historical state, and
-/// it must settle to evidence within the convergence bound.
+/// A search without the freshness precondition serves the retained projection
+/// and must answer evidence at once. The deprecated `catch_up` flag now only
+/// requires fresh data: while projection catches up it may return a typed
+/// stale result or a historical-convergence refusal, and must settle to the
+/// retained session within the convergence bound.
 fn assert_search_hits(home: &Path, project: &Path, catch_up: bool, phase: &str) {
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     let envelope = loop {
         let envelope = message_search(home, project, catch_up);
         if is_evidence(&envelope) {
-            break envelope;
+            let payload = payload(&envelope);
+            let has_session = payload["results"].as_array().is_some_and(|hits| {
+                hits.iter()
+                    .any(|hit| hit["session"]["session_id"] == SESSION_ID)
+            });
+            let has_generation = payload["temporal"]["watermarks"]["generation"]
+                .as_u64()
+                .is_some_and(|generation| generation > 0);
+            if has_session && has_generation {
+                break envelope;
+            }
+            assert!(
+                catch_up,
+                "{phase}: message_search must answer retained evidence: {envelope}"
+            );
+            assert_eq!(payload["status"], "stale", "{phase}: {payload}");
+            assert_eq!(payload["outcome"], "stale", "{phase}: {payload}");
+            assert_eq!(payload["refresh_required"], true, "{phase}: {payload}");
+        } else {
+            assert!(
+                catch_up,
+                "{phase}: message_search must answer evidence: {envelope}"
+            );
+            let message = problem_message(&envelope);
+            assert!(
+                message.contains("HistoricalRetry") || message.contains("HistoricalConvergence"),
+                "{phase}: a refused fresh read must name the historical state: {envelope}"
+            );
         }
         assert!(
-            catch_up,
-            "{phase}: message_search must answer evidence: {envelope}"
-        );
-        let message = problem_message(&envelope);
-        assert!(
-            message.contains("HistoricalRetry") || message.contains("HistoricalConvergence"),
-            "{phase}: a refused catch-up must name the historical state: {envelope}"
-        );
-        assert!(
             Instant::now() < deadline,
-            "{phase}: catch-up never reached a terminal state; last answer: {envelope}"
+            "{phase}: fresh search never reached retained evidence; last answer: {envelope}"
         );
         std::thread::sleep(Duration::from_millis(250));
     };

@@ -33,9 +33,9 @@ fn validate_reports_the_direct_checked_in_workload() {
     let payload = stdout_json(&output);
     assert_eq!(payload["command"], "validate");
     assert_eq!(payload["status"], "pass");
-    assert_eq!(payload["query_count"], 28);
-    assert_eq!(payload["partition_counts"]["train"], 14);
-    assert_eq!(payload["partition_counts"]["validation"], 14);
+    assert_eq!(payload["query_count"], 32);
+    assert_eq!(payload["partition_counts"]["train"], 16);
+    assert_eq!(payload["partition_counts"]["validation"], 16);
     assert_eq!(payload["profile_count"], 3);
     assert!(
         payload["workload_digest"]
@@ -45,7 +45,7 @@ fn validate_reports_the_direct_checked_in_workload() {
 }
 
 #[test]
-fn compare_reports_unmeasured_semantic_and_rerank_stages_as_pending() {
+fn compare_reports_conceptual_misses_before_pending_optional_stages() {
     let output = run(&["compare", "--profiles", "hybrid-reranked"]);
     assert_eq!(
         output.status.code(),
@@ -56,17 +56,24 @@ fn compare_reports_unmeasured_semantic_and_rerank_stages_as_pending() {
     let payload = stdout_json(&output);
     assert_eq!(payload["command"], "compare");
     assert_eq!(
-        payload["status"], "pending",
-        "comparison did not preserve the measured baseline: {payload}"
+        payload["status"], "fail",
+        "comparison did not retain the measured conceptual misses: {payload}"
     );
-    for profile in payload["profiles"].as_array().expect("profiles array") {
-        assert_eq!(profile["status"], "pending");
+    let profiles = payload["profiles"].as_array().expect("profiles array");
+    assert_eq!(profiles[0]["failed_queries"], 2, "{payload}");
+    assert_eq!(profiles[1]["failed_queries"], 1, "{payload}");
+    for profile in profiles {
+        assert_eq!(profile["status"], "fail");
         assert!(matches!(
             profile["resource_status"].as_str(),
             Some("pass" | "pending")
         ));
         assert_eq!(profile["optional_stages"]["semantic"], "pending");
         assert_eq!(profile["optional_stages"]["rerank"], "pending");
+        assert_eq!(
+            profile["quality"]["protected_recall_at_10"]["numerator"],
+            profile["quality"]["protected_recall_at_10"]["denominator"]
+        );
     }
 }
 

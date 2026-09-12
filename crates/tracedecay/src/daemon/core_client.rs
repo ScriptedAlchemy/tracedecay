@@ -13,9 +13,7 @@ use tracedecay_daemon_control::default_socket_path;
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::current_daemon_connection;
 use tracedecay_daemon_identity::{ResolvedDaemonConnection, client_connection};
-use tracedecay_framing::{
-    WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
-};
+use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, tool_request_deadline};
@@ -135,14 +133,12 @@ pub(crate) async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    // Pin one frame-read future for the whole wait. Liveness polls must not
-    // recreate `read_bounded_mcp_line`: that future owns the partial-frame
-    // accumulator after bytes have already been consumed from `reader`.
-    let read = read_bounded_mcp_line(reader);
-    tokio::pin!(read);
+    // Hold the reader across liveness polls. `read_mcp_line` is dropped when
+    // the poll wins `select!`; the accumulator lives on `line_reader`.
+    let mut line_reader = BoundedLineReader::new(reader);
     loop {
         tokio::select! {
-            result = &mut read => {
+            result = line_reader.read_mcp_line() => {
                 return match result {
                     Ok(line) => Ok(line),
                     Err(error) if is_wire_oversized_io_error(&error) => {

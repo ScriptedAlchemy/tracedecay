@@ -99,6 +99,15 @@ pub(crate) async fn handle_host_bundle_component_command(
         })?
         .as_secs();
     for agent_id in &agent_ids {
+        if !explicitly_scoped
+            && let Some(component) = options.component
+            && component_is_not_applicable(agent_id, component)
+        {
+            eprintln!(
+                "not applicable: agent {agent_id:?} does not support the requested {component:?} component; continuing sweep"
+            );
+            continue;
+        }
         let component_set = canonical_host_component_set(agent_id, options.component, now_unix)?;
         let Some(component_set) = component_set else {
             if explicitly_scoped {
@@ -175,6 +184,13 @@ fn canonical_host_component_set(
     let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
         .unwrap_or_else(|| "tracedecay".to_string());
     canonical_host_component_set_with_tracedecay_bin(agent, component, now_unix, &tracedecay_bin)
+}
+
+fn component_is_not_applicable(agent: &str, component: crate::cli::HostBundleComponentArg) -> bool {
+    host_kind_for_agent(agent).is_ok_and(|host| {
+        !tracedecay_agent_hosts::agents::host_bundle_registry::supported_components(host)
+            .contains(&host_bundle_component(component))
+    })
 }
 
 fn canonical_host_component_set_with_tracedecay_bin(
@@ -1741,7 +1757,8 @@ mod tests {
         HostBundleCliOperation, apply_canonical_component_set,
         apply_default_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
-        component_set_request, reinstall_agent_integrations_with_persisted_dashboard_policies,
+        component_is_not_applicable, component_set_request,
+        reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
     use tracedecay_agent_hosts::agents::host_bundle::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
@@ -1764,6 +1781,40 @@ mod tests {
     /// windows from overlapping each other or a profile pin.
     fn pinned_host_profile() -> tracedecay_runtime_core::config::PinnedUserDataDir {
         tracedecay_runtime_core::config::PinnedUserDataDir::new()
+    }
+
+    #[test]
+    fn unscoped_component_sweep_distinguishes_unsupported_from_optional() {
+        assert!(component_is_not_applicable(
+            "cline",
+            crate::cli::HostBundleComponentArg::Core
+        ));
+        assert!(!component_is_not_applicable(
+            "cline",
+            crate::cli::HostBundleComponentArg::ContextMcp
+        ));
+        assert!(!component_is_not_applicable(
+            "claude",
+            crate::cli::HostBundleComponentArg::OperatorMcp
+        ));
+        assert!(
+            canonical_host_component_set(
+                "claude",
+                Some(crate::cli::HostBundleComponentArg::OperatorMcp),
+                0,
+            )
+            .is_ok(),
+            "a supported optional component remains selectable"
+        );
+        assert!(
+            canonical_host_component_set(
+                "cline",
+                Some(crate::cli::HostBundleComponentArg::Core),
+                0,
+            )
+            .is_err(),
+            "an explicitly scoped incompatible component remains a typed refusal"
+        );
     }
 
     /// A `home` fixture for tests that drive a real host-native plugin CLI
@@ -3887,10 +3938,12 @@ mod tests {
             tracedecay_agent_hosts::agents::kimi::KIMI_CODE_HOME_ENV,
             &code_home,
         );
+        let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
+            .unwrap_or_else(|| "tracedecay".to_string());
         let integration = tracedecay_agent_hosts::agents::get_integration("kimi").unwrap();
         let ctx = tracedecay_agent_hosts::agents::InstallContext {
             home: home.path().to_path_buf(),
-            tracedecay_bin: "new-tracedecay".to_string(),
+            tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay_agent_hosts::agents::expected_tool_perms()
                 .expect("tool catalog"),
             project_root: None,
@@ -3905,6 +3958,8 @@ mod tests {
             .join(".tracedecay/host-bundle-stage/kimi/tracedecay")
             .canonicalize()
             .unwrap();
+        let managed = code_home.join("plugins/managed/tracedecay");
+        copy_test_bundle(&staged, &managed);
         let installed_path = code_home.join("plugins/installed.json");
         std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -3915,7 +3970,8 @@ mod tests {
                     "id": "tracedecay",
                     "enabled": true,
                     "source": "local-path",
-                    "root": staged,
+                    "root": managed,
+                    "originalSource": staged,
                 }],
             })
             .to_string(),
@@ -3925,7 +3981,7 @@ mod tests {
         let results = reinstall_agent_integrations_with_persisted_dashboard_policies(
             &["kimi".to_string()],
             home.path(),
-            "new-tracedecay",
+            &tracedecay_bin,
         )
         .await;
         assert!(matches!(

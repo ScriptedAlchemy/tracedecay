@@ -398,6 +398,16 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
         replay,
         SessionSyncOutcomeV1::Complete(receipt)
             if receipt.termination == OperationTermination::TimedOut
+                && receipt.coverage == vec![
+                    SessionSyncSourceCoverageV1 {
+                        store_scope: "project".to_owned(),
+                        coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+                    },
+                    SessionSyncSourceCoverageV1 {
+                        store_scope: "profile".to_owned(),
+                        coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+                    },
+                ]
     ));
 
     release_b.notify_one();
@@ -491,6 +501,16 @@ async fn registration_recovery_fences_concurrent_execute() {
         execute.await.unwrap(),
         SessionSyncOutcomeV1::Complete(receipt)
             if receipt.termination == OperationTermination::TimedOut
+                && receipt.coverage == vec![
+                    SessionSyncSourceCoverageV1 {
+                        store_scope: "project".to_owned(),
+                        coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+                    },
+                    SessionSyncSourceCoverageV1 {
+                        store_scope: "profile".to_owned(),
+                        coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+                    },
+                ]
     ));
     SessionSyncServicePort::shutdown(&service).await;
 }

@@ -190,6 +190,7 @@ pub(super) const fn advisory_diagnostic_source(
     producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1,
 ) -> DiagnosticSource {
     match producer {
+        FeedbackDiagnosticProducerV1::CodeDiagnostic => DiagnosticSource::TraceDecay,
         FeedbackDiagnosticProducerV1::GitHubReview => DiagnosticSource::TraceDecayGitHub,
         FeedbackDiagnosticProducerV1::CiLocalization => DiagnosticSource::TraceDecayCi,
         FeedbackDiagnosticProducerV1::Proximity => DiagnosticSource::TraceDecayProximity,

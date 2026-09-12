@@ -251,7 +251,7 @@ impl McpAdmittedProjectV1 {
     /// read off `TraceDecay`.
     #[must_use]
     pub fn branch_diagnostics(&self) -> tracedecay_application::tracedecay::BranchDiagnostics {
-        self.branch_diagnostics_for_serving_source(None, None)
+        self.branch_diagnostics_for_serving_source(None, None, false)
     }
 
     #[must_use]
@@ -259,6 +259,7 @@ impl McpAdmittedProjectV1 {
         &self,
         serving_source_reference: Option<&str>,
         serving_source_revision: Option<&str>,
+        serving_source_is_current: bool,
     ) -> tracedecay_application::tracedecay::BranchDiagnostics {
         tracedecay_application::tracedecay::build_branch_diagnostics(
             &self.identity.project_root,
@@ -267,7 +268,8 @@ impl McpAdmittedProjectV1 {
             self.identity.serving_branch.clone(),
             self.identity.fallback_warning.clone(),
             self.graph_db_path.clone(),
-            serving_source_reference.zip(serving_source_revision),
+            serving_source_reference.map(|reference| (reference, serving_source_revision)),
+            serving_source_is_current,
         )
     }
 
@@ -522,10 +524,12 @@ impl<'a> McpToolContext<'a> {
         &self,
         serving_source_reference: Option<&str>,
         serving_source_revision: Option<&str>,
+        serving_source_is_current: bool,
     ) -> tracedecay_application::tracedecay::BranchDiagnostics {
         self.project.branch_diagnostics_for_serving_source(
             serving_source_reference,
             serving_source_revision,
+            serving_source_is_current,
         )
     }
 

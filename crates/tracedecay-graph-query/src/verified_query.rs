@@ -17,7 +17,9 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CodeGenerationId, RelationEdgeKindV1, SanitizedCodeFileV1, SymbolOccurrenceId,
+};
 use tracedecay_graph_db::GraphCancellation;
 
 use super::queries::{GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1};
@@ -396,6 +398,13 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
+    pub fn files(&self, max_files: usize) -> Result<Vec<SanitizedCodeFileV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .files(max_files, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
     pub fn find_symbols(
         &self,
         predicate: &CodeGraphSymbolPredicate<'_>,
@@ -426,49 +435,12 @@ impl VerifiedGraphQuery {
         max_symbols_examined: usize,
     ) -> Result<CodeGraphSymbolPageV1> {
         self.refuse_if_bound_closed()?;
-        if limit == 0 || max_symbols_examined == 0 {
-            return Err(graph_invalid_request(
-                "verified graph file-symbol paging requires positive limits",
-            ));
-        }
-        if logical_paths.is_empty() {
-            return Ok(CodeGraphSymbolPageV1 {
-                symbols: Vec::new(),
-                has_more: false,
-            });
-        }
-        let mut matched = Vec::new();
-        for path in logical_paths {
-            let budget = max_symbols_examined
-                .checked_sub(matched.len())
-                .filter(|remaining| *remaining > 0)
-                .ok_or_else(|| {
-                    graph_budget_exhausted(
-                        "verified graph file-symbol paging exceeded its scan budget",
-                    )
-                })?;
-            let mut in_file = self.symbols_in_logical_file(path, budget.saturating_add(1))?;
-            if in_file.len() > budget {
-                return Err(graph_budget_exhausted(
-                    "verified graph file-symbol paging exceeded its scan budget",
-                ));
-            }
-            matched.append(&mut in_file);
-        }
-        matched.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
-        let mut symbols = Vec::with_capacity(limit.min(matched.len()));
-        let mut has_more = false;
-        for symbol in matched {
-            if after.is_some_and(|after| symbol.occurrence <= *after) {
-                continue;
-            }
-            if symbols.len() == limit {
-                has_more = true;
-                break;
-            }
-            symbols.push(symbol);
-        }
-        Ok(CodeGraphSymbolPageV1 { symbols, has_more })
+        self.manager().symbols_in_logical_files_page(
+            logical_paths,
+            after,
+            limit,
+            max_symbols_examined,
+        )
     }
 
     pub fn symbols_in_logical_file(
@@ -677,12 +649,7 @@ impl VerifiedGraphQuery {
                 graph_corrupt("verified graph symbol is missing lineage metadata")
             })?;
             paths.insert(symbol.occurrence.clone(), path.clone());
-            if metadata.kind == "annotation_usage"
-                && matches!(
-                    metadata.simple_name.as_str(),
-                    "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-                )
-            {
+            if tracedecay_code_index::is_test_marker(metadata) {
                 test_markers.insert(symbol.occurrence.clone());
             }
         }
@@ -832,10 +799,6 @@ fn graph_projection_error(
     error: tracedecay_code_index::graph_projection::CodeGraphProjectionError,
 ) -> TraceDecayError {
     map_code_graph_read_runtime_error(map_projection_error(error))
-}
-
-fn graph_invalid_request(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("code-graph-invalid-request", false, detail)
 }
 
 fn graph_budget_exhausted(detail: &str) -> TraceDecayError {

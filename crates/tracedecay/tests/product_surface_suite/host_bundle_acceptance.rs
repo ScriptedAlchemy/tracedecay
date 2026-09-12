@@ -143,6 +143,17 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         .join(".tracedecay/host-bundle-stage/kimi/tracedecay")
         .canonicalize()
         .unwrap();
+    let managed_dir = artifact_root
+        .path()
+        .join(".kimi-code/plugins/managed/tracedecay");
+    for content in &bundle.contents {
+        let relative = Path::new(&content.relative_path)
+            .strip_prefix(".tracedecay/host-bundle-stage/kimi/tracedecay")
+            .unwrap();
+        let path = managed_dir.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, &content.bytes).unwrap();
+    }
     let installed_path = artifact_root
         .path()
         .join(".kimi-code/plugins/installed.json");
@@ -155,8 +166,17 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
                 "id": "tracedecay",
                 "enabled": true,
                 "source": "local-path",
-                "root": staged_dir,
+                "root": managed_dir,
+                "originalSource": staged_dir,
             }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        artifact_root.path().join(".kimi-code/mcp.json"),
+        serde_json::to_vec_pretty(&json!({
+            "mcpServers": {"tracedecay": {"command": "tracedecay", "args": ["serve"]}}
         }))
         .unwrap(),
     )

@@ -41,6 +41,15 @@ impl DeterministicDiversity {
         policy: &DiversityPolicy,
         candidates: Vec<FusedCandidate>,
     ) -> Result<(Vec<RankedCandidate>, Vec<DiversityDecisionV1>), DiversityStageError> {
+        self.apply_caps_preserving(policy, candidates, &[])
+    }
+
+    pub(crate) fn apply_caps_preserving(
+        &self,
+        policy: &DiversityPolicy,
+        candidates: Vec<FusedCandidate>,
+        incumbents: &[RankedCandidate],
+    ) -> Result<(Vec<RankedCandidate>, Vec<DiversityDecisionV1>), DiversityStageError> {
         let candidate_count = candidates.len();
         let enabled = [
             policy.per_source_namespace,
@@ -59,7 +68,7 @@ impl DeterministicDiversity {
         // Absent caps are a no-op over candidate data: the fused order is the
         // final order, and no key or counter is ever derived.
         let (admitted, decisions) = if enabled {
-            cap_candidates(policy, candidates)
+            cap_candidates(policy, candidates, incumbents)
         } else {
             (candidates, Vec::new())
         };
@@ -84,20 +93,45 @@ impl DeterministicDiversity {
 fn cap_candidates(
     policy: &DiversityPolicy,
     candidates: Vec<FusedCandidate>,
+    incumbents: &[RankedCandidate],
 ) -> (Vec<FusedCandidate>, Vec<DiversityDecisionV1>) {
     let mut counters = CapCounters::default();
+    // An optional lane may change fused rank, but it cannot retroactively
+    // take a bounded slot already granted by the canonical fallback. Reserve
+    // those slots from the newly fused candidates so their current scores,
+    // occurrences, and comparator order remain authoritative.
+    let incumbent_ids = incumbents
+        .iter()
+        .map(|ranked| {
+            (
+                ranked.candidate.anchor_id.clone(),
+                ranked.candidate.logical_evidence_id.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for candidate in &candidates {
+        if incumbent_ids.contains(&(
+            candidate.anchor_id.clone(),
+            candidate.logical_evidence_id.clone(),
+        )) && !is_protected(candidate)
+        {
+            counters.admit(&CandidateCapKeys::derive(policy, candidate));
+        }
+    }
     let mut admitted = Vec::with_capacity(candidates.len());
     let mut decisions = Vec::new();
     for candidate in candidates {
         // Exact and contradiction evidence is protected: diversity may
         // neither demote exact technical lookup nor erase an admitted
         // contradiction, and protected evidence never counts against a cap.
-        let protected = candidate.exact_class != ExactClass::Approximate
-            || candidate
-                .occurrences
-                .iter()
-                .any(|occurrence| occurrence.evidence_role == EvidenceRole::Contradiction);
-        if protected {
+        if is_protected(&candidate) {
+            admitted.push(candidate);
+            continue;
+        }
+        if incumbent_ids.contains(&(
+            candidate.anchor_id.clone(),
+            candidate.logical_evidence_id.clone(),
+        )) {
             admitted.push(candidate);
             continue;
         }
@@ -125,6 +159,14 @@ fn cap_candidates(
         });
     }
     (admitted, decisions)
+}
+
+fn is_protected(candidate: &FusedCandidate) -> bool {
+    candidate.exact_class != ExactClass::Approximate
+        || candidate
+            .occurrences
+            .iter()
+            .any(|occurrence| occurrence.evidence_role == EvidenceRole::Contradiction)
 }
 
 #[derive(Default)]

@@ -1454,7 +1454,30 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
             crate::agents::host_bundle::HostBundleLifecycleOpV1::Update
             | crate::agents::host_bundle::HostBundleLifecycleOpV1::Repair => true,
         };
-        if self.integration.interactive_activation_guidance().is_some() {
+        let interactive_guidance = match self.operation {
+            crate::agents::host_bundle::HostBundleLifecycleOpV1::Uninstall => {
+                self.integration.interactive_removal_guidance()
+            }
+            crate::agents::host_bundle::HostBundleLifecycleOpV1::Install
+            | crate::agents::host_bundle::HostBundleLifecycleOpV1::Update
+            | crate::agents::host_bundle::HostBundleLifecycleOpV1::Repair => {
+                if component_set.host == crate::agents::host_bundle::HostKindV1::KimiCode {
+                    match self
+                        .integration
+                        .preflight_non_interactive_install(&self.context)
+                        .map_err(|error| Self::registration_error(component_set.host, error))?
+                    {
+                        crate::agents::NonInteractiveInstallOutcome::Ready => None,
+                        crate::agents::NonInteractiveInstallOutcome::DeferredUserAction(action) => {
+                            Some(action.remediation)
+                        }
+                    }
+                } else {
+                    self.integration.interactive_activation_guidance()
+                }
+            }
+        };
+        if interactive_guidance.is_some() {
             let native_state_already_matches = match self.operation {
                 crate::agents::host_bundle::HostBundleLifecycleOpV1::Uninstall => all_missing,
                 crate::agents::host_bundle::HostBundleLifecycleOpV1::Install

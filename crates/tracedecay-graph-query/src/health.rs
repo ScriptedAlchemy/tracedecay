@@ -324,46 +324,48 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Step 5: Reconstruct chains (use first node of each SCC as representative)
-    let mut max_depth = 0;
-    let mut results: Vec<DepthChain> = Vec::new();
+    // Step 5: Rank every SCC before applying the response limit. Reconstructing
+    // only the selected chains keeps small-limit callers proportional to their
+    // requested result count.
+    let max_depth = dist.iter().copied().max().unwrap_or(0);
+    let mut ranked_sccs = (0..scc_count).collect::<Vec<_>>();
+    ranked_sccs.sort_unstable_by(|left, right| {
+        dist[*right]
+            .cmp(&dist[*left])
+            .then_with(|| sccs[*left].iter().min().cmp(&sccs[*right].iter().min()))
+    });
+    ranked_sccs.truncate(limit);
 
-    for scc_idx in 0..scc_count {
+    let mut results: Vec<DepthChain> = Vec::with_capacity(ranked_sccs.len());
+    for scc_idx in ranked_sccs {
         let depth = dist[scc_idx];
-        if depth > max_depth {
-            max_depth = depth;
-        }
 
-        if results.len() < limit {
-            // Reconstruct the chain by walking predecessors
-            let mut chain_sccs: Vec<usize> = Vec::new();
-            let mut cur = scc_idx;
-            loop {
-                chain_sccs.push(cur);
-                let p = pred[cur];
-                if p == usize::MAX {
-                    break;
-                }
-                cur = p;
+        // Reconstruct the chain by walking predecessors.
+        let mut chain_sccs: Vec<usize> = Vec::new();
+        let mut cur = scc_idx;
+        loop {
+            chain_sccs.push(cur);
+            let p = pred[cur];
+            if p == usize::MAX {
+                break;
             }
-            chain_sccs.reverse();
-
-            // Map SCC indices back to representative file names
-            let chain: Vec<String> = chain_sccs.iter().map(|&si| sccs[si][0].clone()).collect();
-
-            let mut scc_files = sccs[scc_idx].clone();
-            scc_files.sort();
-            let representative = scc_files[0].clone();
-            results.push(DepthChain {
-                file: representative,
-                scc_files,
-                depth,
-                chain,
-            });
+            cur = p;
         }
-    }
+        chain_sccs.reverse();
 
-    results.sort_by_key(|ch| std::cmp::Reverse(ch.depth));
+        // Map SCC indices back to representative file names.
+        let chain: Vec<String> = chain_sccs.iter().map(|&si| sccs[si][0].clone()).collect();
+
+        let mut scc_files = sccs[scc_idx].clone();
+        scc_files.sort();
+        let representative = scc_files[0].clone();
+        results.push(DepthChain {
+            file: representative,
+            scc_files,
+            depth,
+            chain,
+        });
+    }
 
     DepthResult {
         max_depth,
@@ -615,6 +617,8 @@ pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::BuildHasherDefault;
     use std::hash::{BuildHasher, Hasher};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -689,6 +693,37 @@ mod tests {
         assert!(
             hash_lookups <= FILES * 4,
             "DSM clustering hashed adjacency probes {hash_lookups} times for {FILES} edges"
+        );
+    }
+
+    #[test]
+    fn dependency_depth_limits_after_ranking_all_components() {
+        let mut adjacency =
+            HashMap::<String, HashSet<String>, BuildHasherDefault<DefaultHasher>>::default();
+        adjacency.insert("isolated.rs".into(), HashSet::new());
+        adjacency.insert("root.rs".into(), HashSet::from(["middle.rs".into()]));
+        adjacency.insert("middle.rs".into(), HashSet::from(["deepest.rs".into()]));
+        adjacency.insert("deepest.rs".into(), HashSet::new());
+
+        let components = tarjan_scc(&adjacency);
+        let deepest_component = components
+            .iter()
+            .position(|component| component.iter().any(|file| file == "deepest.rs"))
+            .expect("deepest component");
+        assert!(
+            deepest_component > 0,
+            "fixture must place the deepest SCC beyond the former limit"
+        );
+
+        let result = dependency_depth(&adjacency, 1);
+
+        assert_eq!(result.max_depth, 2);
+        assert_eq!(result.chains.len(), 1);
+        assert_eq!(result.chains[0].depth, result.max_depth);
+        assert_eq!(result.chains[0].file, "deepest.rs");
+        assert_eq!(
+            result.chains[0].chain,
+            ["root.rs", "middle.rs", "deepest.rs"]
         );
     }
 }

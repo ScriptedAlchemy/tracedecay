@@ -160,6 +160,7 @@ impl TraceDecay {
             self.fallback_warning.clone(),
             self.db_path(),
             None,
+            false,
         )
     }
 

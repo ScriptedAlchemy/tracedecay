@@ -378,6 +378,95 @@ async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
 }
 
 #[tokio::test]
+async fn no_identity_successor_retains_exact_lifecycle_without_overwriting_explicit_identity() {
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let work_observed = Arc::clone(&observed);
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let work_first_started = Arc::clone(&first_started);
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let work_second_started = Arc::clone(&second_started);
+    let third_started = Arc::new(tokio::sync::Notify::new());
+    let work_third_started = Arc::clone(&third_started);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |request, cancellation| {
+        let observed = Arc::clone(&work_observed);
+        let first_started = Arc::clone(&work_first_started);
+        let second_started = Arc::clone(&work_second_started);
+        let third_started = Arc::clone(&work_third_started);
+        async move {
+            let event_id = request.hook.envelope().event_id;
+            observed.lock().unwrap().push((event_id, request.lifecycle));
+            if event_id == [1; 16] {
+                first_started.notify_one();
+            } else if event_id == [2; 16] {
+                second_started.notify_one();
+            } else if event_id == [3; 16] {
+                third_started.notify_one();
+            } else {
+                unreachable!("test event identity");
+            }
+            if event_id != [3; 16] {
+                cancellation.cancelled().await;
+            }
+        }
+    })
+    .unwrap();
+
+    let original_lifecycle = hook_lifecycle();
+    let first = HookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(original_lifecycle.clone()),
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
+    first_started.notified().await;
+
+    let mut second_envelope = hook_envelope(HookEventV2::SavedEdit {
+        file_id: [8; 16],
+        changed_range_count: 1,
+    });
+    second_envelope.event_id = [2; 16];
+    let second =
+        HookOrchestrationRequestV1::from_envelope(second_envelope, &hook_binding(), None, 1, false)
+            .unwrap();
+    assert_eq!(
+        runtime.admit(second),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    second_started.notified().await;
+
+    let explicit_lifecycle = ContextScoutLifecycleAddressV1 {
+        turn_id: tracedecay_domain::TurnId::new("turn.advisory-hook.explicit").unwrap(),
+        logical_message_id: tracedecay_domain::MessageId::new("message.advisory-hook.explicit")
+            .unwrap(),
+        ..hook_lifecycle()
+    };
+    let mut third_envelope = hook_envelope(HookEventV2::SessionBoundary {
+        boundary: HookBoundaryV1::TurnComplete,
+    });
+    third_envelope.event_id = [3; 16];
+    let third = HookOrchestrationRequestV1::from_envelope(
+        third_envelope,
+        &hook_binding(),
+        Some(explicit_lifecycle.clone()),
+        1,
+        false,
+    )
+    .unwrap();
+    assert_eq!(runtime.admit(third), HookOrchestrationAdmissionV1::Enqueued);
+    third_started.notified().await;
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed[1], ([2; 16], Some(original_lifecycle)));
+    assert_eq!(observed[2], ([3; 16], Some(explicit_lifecycle)));
+}
+
+#[tokio::test]
 async fn retryable_hook_work_does_not_acknowledge_the_durable_admission() {
     let attempted = Arc::new(tokio::sync::Notify::new());
     let observed_attempted = Arc::clone(&attempted);

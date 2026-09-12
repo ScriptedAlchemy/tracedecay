@@ -227,7 +227,6 @@ impl CallableCodeQueryPort for ExactOnlyPort {
     unused_callable_port_method!(facets, CodeFacetRequest, CodeFacetRecord);
     unused_callable_port_method!(timeline, CodeTimelineRequest, CodeTimelineRecord);
     unused_callable_port_method!(declaration, CodeNavigationRequest, SymbolPrimitiveRecord);
-    unused_callable_port_method!(definition, CodeNavigationRequest, SymbolPrimitiveRecord);
     unused_callable_port_method!(
         type_definition,
         CodeNavigationRequest,
@@ -592,7 +591,6 @@ fn callable_code_catalog_uses_the_requests_accepted_by_the_transport() {
             schemars::schema_for!(CodeTimelineSurfaceRequest),
         ),
         ("code_declaration", navigation.clone()),
-        ("code_definition", navigation.clone()),
         ("code_type_definition", navigation.clone()),
         ("code_references", navigation),
         (
@@ -679,7 +677,6 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
         ("facets", "code_facets"),
         ("timeline", "code_timeline"),
         ("declaration", "code_declaration"),
-        ("definition", "code_definition"),
         ("type_definition", "code_type_definition"),
         ("references", "code_references"),
     ];

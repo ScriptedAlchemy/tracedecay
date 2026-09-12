@@ -560,6 +560,14 @@ async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
                     match status["code_index_freshness"]["status"].as_str() {
                         Some("current") => return,
                         Some("warming") => tokio::time::sleep(Duration::from_millis(100)).await,
+                        Some("stale")
+                            if status["code_index_freshness"]["worktree"]["coverage"]
+                                == "partial_source_verification"
+                                && status["code_index_freshness"]["worktree"]["staleness_state"]
+                                    == "verifying" =>
+                        {
+                            tokio::time::sleep(Duration::from_millis(100)).await
+                        }
                         actual => panic!("{label} graph readiness became {actual:?}: {status}"),
                     }
                 }

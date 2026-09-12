@@ -957,16 +957,12 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         );
     }
 
-    // -- Product publication does not fabricate executor topology. -----------
-    // Product graph state and executor topology have distinct authorities. A
-    // committed task is readable through Work views, but cannot by itself mint
-    // a topology generation or an authorized empty attempts page — on either
-    // operation that reads the attempt page under that generation.
-    // `work_task_session.rs` grades the authority split the other way round:
-    // hydration answers a real product generation over a settled attempt, and
-    // both attempt reads refuse that generation as a stale cursor while still
-    // answering `absent` for the scope. No production path appends the
-    // executor journal, so a `listed` page has no producer to grade.
+    // -- Product publication binds an empty attempt page. --------------------
+    // Once a product task exists, the product graph supplies the canonical
+    // generation for every attempt-page reader. With no admitted attempts the
+    // truthful result is a complete zero-item page under that generation, not
+    // the `absent` state reserved above for a scope with no Work at all.
+    let mut list_generation = None;
     for operation in ["list-attempts", "execution-history"] {
         let daemon_route = fixture.external_url(&format!("/application/work/{operation}"));
         let dashboard_route = format!("{}/api/work/{operation}", dashboard.base_url);
@@ -987,9 +983,42 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
             assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
             let payload = &body["value"]["outcome"]["value"]["payload"];
             assert_eq!(
-                payload["state"], "absent",
-                "{label} must not alias product graph tasks into executor topology: {body}"
+                payload["state"], "listed",
+                "{label} must bind the existing product graph: {body}"
             );
+            if operation == "list-attempts" {
+                let generation = payload["topology"]["generation"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{label} must name the product generation: {body}"));
+                assert!(!generation.is_empty(), "{label}: {body}");
+                assert_eq!(payload["topology"]["task_count"], 1, "{label}: {body}");
+                assert_eq!(
+                    payload["attempts"],
+                    serde_json::json!([]),
+                    "{label}: {body}"
+                );
+                assert_eq!(
+                    payload["coverage"],
+                    serde_json::json!({ "coverage": "complete", "returned": 0 }),
+                    "{label}: {body}"
+                );
+                if let Some(expected) = &list_generation {
+                    assert_eq!(generation, expected, "both mounts must bind one generation");
+                } else {
+                    list_generation = Some(generation.to_owned());
+                }
+            } else {
+                assert_eq!(payload["spans"], serde_json::json!([]), "{label}: {body}");
+                assert_eq!(
+                    payload["attempt_coverage"],
+                    serde_json::json!({ "coverage": "complete", "returned": 0 }),
+                    "{label}: {body}"
+                );
+                assert_eq!(
+                    payload["timing_coverage"]["coverage"], "complete",
+                    "{label}: {body}"
+                );
+            }
         }
     }
 }
