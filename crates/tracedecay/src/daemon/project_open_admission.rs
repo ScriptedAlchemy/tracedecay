@@ -1107,7 +1107,7 @@ impl ProjectRouteKey {
 
 impl ProjectServerKey {
     pub(super) fn from_open_project(
-        cg: &crate::tracedecay::TraceDecay,
+        cg: &crate::project::TraceDecay,
         handshake: &DaemonHandshake,
     ) -> Result<Self> {
         let layout = cg.store_layout();

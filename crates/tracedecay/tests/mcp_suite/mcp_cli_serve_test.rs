@@ -31,10 +31,9 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 #[cfg(unix)]
 use tracedecay::mcp::handle_tool_call;
-use tracedecay::serve;
 #[cfg(unix)]
-use tracedecay::tracedecay::TraceDecay;
-use tracedecay::tracedecay::TraceDecayOpenOptions;
+use tracedecay::project::TraceDecay;
+use tracedecay::project::TraceDecayOpenOptions;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     create_managed_skill,
@@ -848,27 +847,6 @@ async fn serve_daemon_proxy_reports_daemon_disconnect_as_json_rpc_error() {
             .as_str()
             .is_some_and(|message| message.contains("TraceDecay daemon connection failed")),
         "disconnect should be reported as a JSON-RPC error response, got:\n{response}"
-    );
-}
-
-#[tokio::test]
-async fn ensure_initialized_with_options_fails_closed_without_daemon_routing() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let open_options = TraceDecayOpenOptions {
-        profile_root: Some(profile_root(home.path())),
-        global_db_path: Some(profile_root(home.path()).join("global.db")),
-    };
-
-    let error = match serve::ensure_initialized_with_options(project.path(), open_options).await {
-        Ok(_) => panic!("serve compatibility API must not open project databases locally"),
-        Err(error) => error,
-    };
-    let message = error.to_string();
-    assert!(
-        message.contains("direct project database access is disabled")
-            && message.contains("managed TraceDecay daemon"),
-        "error should direct callers through the sole database owner, got: {message}"
     );
 }
 

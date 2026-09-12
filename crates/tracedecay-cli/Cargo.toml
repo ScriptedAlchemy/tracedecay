@@ -164,6 +164,9 @@ tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+# Language tiers stay selected through `tracedecay/{lite,medium,full}` above;
+# the direct edge only names the parallelism status the runtime installs.
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }

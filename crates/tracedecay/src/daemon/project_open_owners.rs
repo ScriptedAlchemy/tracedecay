@@ -86,7 +86,7 @@ async fn install_project_open_source_edit_owners(
 
 pub(crate) async fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
-    graph: Arc<crate::tracedecay::TraceDecay>,
+    graph: Arc<crate::project::TraceDecay>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     project_root: &Path,
     project_id: &str,
@@ -814,7 +814,7 @@ async fn register_semantic_configuration_owners(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     server: &McpServer,
-    graph: &Arc<crate::tracedecay::TraceDecay>,
+    graph: &Arc<crate::project::TraceDecay>,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
     configuration: &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,

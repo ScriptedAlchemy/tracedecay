@@ -543,7 +543,7 @@ async fn resolve_branch_data_root(
     project_path: &Path,
 ) -> tracedecay_domain::errors::Result<PathBuf> {
     Ok(
-        tracedecay::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_path)
+        tracedecay::project::TraceDecay::resolve_store_layout_for_identity(project_path)
             .await?
             .data_root,
     )

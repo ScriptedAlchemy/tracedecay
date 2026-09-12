@@ -11,7 +11,7 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use super::dispatch_test_support::*;
 use super::*;
 use crate::config::lock_user_data_dir_test_env;
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 
 #[derive(Default)]
 struct UnavailableEffectExecutor {

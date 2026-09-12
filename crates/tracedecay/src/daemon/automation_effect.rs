@@ -20,7 +20,7 @@ use tracedecay_domain::ManifestDigest;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::Result;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 
 pub(crate) mod recovery_composition;
 

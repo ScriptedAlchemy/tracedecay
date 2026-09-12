@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::daemon::{DaemonHandshake, StoreAdministration};
 use crate::mcp::McpServer;
 use crate::mcp::server::McpServerConstructionContext;
-use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use crate::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_daemon_protocol::DaemonClientIdentity;
 
 static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -63,7 +63,7 @@ fn handshake(
         client_instance_id: "truthful-core-doctor-test".to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::tracedecay::MovedStoreAdoption::Never,
+        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
     }
 }
 

@@ -15,7 +15,7 @@ use tracedecay_domain::errors::Result;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory::MemoryApplication;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 
 pub(crate) async fn reconcile_reserved_automation_effects_for_project(
     project: &TraceDecay,

@@ -171,19 +171,19 @@ fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
 
 #[hotpath::measure(label = "daemon.engine.context_scout.ensure_owner")]
 pub(super) fn ensure_context_scout_owner_before_advertising(
-    project: &crate::tracedecay::TraceDecay,
+    project: &crate::project::TraceDecay,
 ) -> Result<()> {
     if project.store_layout().identity.project_id.is_none() {
         return Ok(());
     }
     let owner = match project.context_scout_owner_lookup() {
-        crate::tracedecay::ContextScoutOwnerLookupV1::Ready(owner) => owner,
-        crate::tracedecay::ContextScoutOwnerLookupV1::ReadOnly => {
+        crate::project::ContextScoutOwnerLookupV1::Ready(owner) => owner,
+        crate::project::ContextScoutOwnerLookupV1::ReadOnly => {
             return Err(TraceDecayError::Config {
                 message: "read-only project has no Context Scout owner".to_owned(),
             });
         }
-        crate::tracedecay::ContextScoutOwnerLookupV1::Unregistered => {
+        crate::project::ContextScoutOwnerLookupV1::Unregistered => {
             return Err(TraceDecayError::Config {
                 message: "project Context Scout owner did not start".to_owned(),
             });

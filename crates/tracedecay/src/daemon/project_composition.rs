@@ -439,7 +439,7 @@ enum GraphOpen {
 
 /// The opened graph and the route-wide choices resolved from its configuration.
 struct OpenedProjectGraph {
-    cg: Arc<crate::tracedecay::TraceDecay>,
+    cg: Arc<crate::project::TraceDecay>,
     key: ProjectServerKey,
     runtime_configuration: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     semantic: SemanticProjectRuntime,
@@ -494,7 +494,7 @@ impl ComposedCoreServer {
     fn publish_route_ports(
         &self,
         context: crate::mcp::server::McpServerConstructionContext,
-        cg: &Arc<crate::tracedecay::TraceDecay>,
+        cg: &Arc<crate::project::TraceDecay>,
         invocation: &DaemonInvocationState,
     ) -> crate::mcp::server::McpServerConstructionContext {
         let ports = &self.ports;
@@ -1111,7 +1111,7 @@ impl ProjectOpenInputs<'_> {
     #[hotpath::measure(label = "daemon.project.compose.admit_sessions", future = true)]
     async fn admit_session_databases(
         &self,
-        cg: &Arc<crate::tracedecay::TraceDecay>,
+        cg: &Arc<crate::project::TraceDecay>,
         project_id: &tracedecay_domain::ProjectId,
         project_database_is_read_only: bool,
     ) -> Result<AdmittedSessionDatabases> {
@@ -1929,7 +1929,7 @@ struct ProjectCodeIndexAuthorities {
 /// not the handshake path, so a relocated store still binds its own scope.
 fn project_code_index_authorities(
     invocation: &DaemonInvocationState,
-    cg: &Arc<crate::tracedecay::TraceDecay>,
+    cg: &Arc<crate::project::TraceDecay>,
     canonical_project_path: &Path,
     authoritative_project_id: &str,
     profile_identity: &profile_identity::LocalProfileIdentityAuthorityV1,
@@ -2049,7 +2049,7 @@ fn project_dashboard_pr_autotrack_reader()
 /// never fatal: telemetry must not fail an otherwise healthy project open.
 fn register_route_store_telemetry(
     sampling: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
-    cg: &Arc<crate::tracedecay::TraceDecay>,
+    cg: &Arc<crate::project::TraceDecay>,
     scope: &tracedecay_contracts::ResolvedScope,
     session_databases: [&tracedecay_global_db::RegisteredGlobalDb; 3],
 ) {

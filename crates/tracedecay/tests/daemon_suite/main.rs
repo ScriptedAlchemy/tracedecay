@@ -19,6 +19,7 @@ mod common;
 mod advanced_workflow_journey_test;
 #[cfg(unix)]
 mod authentication_refusal_test;
+mod code_index_ignored_dependencies_test;
 #[cfg(unix)]
 mod code_index_journey;
 #[cfg(unix)]

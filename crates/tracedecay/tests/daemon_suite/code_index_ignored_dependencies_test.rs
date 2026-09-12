@@ -18,13 +18,9 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
 };
 
-#[path = "ignored_dependencies_tests/branch_publication_tests.rs"]
 mod branch_publication_tests;
-#[path = "ignored_dependencies_tests/cancellation_tests.rs"]
 mod cancellation_tests;
-#[path = "ignored_dependencies_tests/flight_tests.rs"]
 mod flight_tests;
-#[path = "ignored_dependencies_tests/retained_roster_tests.rs"]
 mod retained_roster_tests;
 
 const PROJECT_ID: &str = "project.ignored-dependency-scheduler-tests";

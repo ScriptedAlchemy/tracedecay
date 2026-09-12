@@ -295,7 +295,7 @@ pub(super) async fn init_sibling_registered_fixture(
     let graph = sibling
         .initialize_project_graph_for_test(
             project_root,
-            crate::tracedecay::TraceDecayOpenOptions {
+            crate::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root),
                 global_db_path: None,
             },

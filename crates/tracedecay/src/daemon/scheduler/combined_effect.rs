@@ -21,7 +21,7 @@ use super::scheduler_automation_effect;
 use crate::daemon::DaemonEngine;
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, DeferredProblemSettlementRequest,
     DeferredRunSettlementRequest, DeferredSettlementOutcome, DeferredSettlementRequest,
@@ -857,7 +857,7 @@ mod tests {
             let memory = Arc::new(
                 TraceDecay::init_with_options(
                     &project_root,
-                    crate::tracedecay::TraceDecayOpenOptions {
+                    crate::project::TraceDecayOpenOptions {
                         profile_root: Some(profile_root.clone()),
                         global_db_path: Some(profile_root.join("global.db")),
                     },

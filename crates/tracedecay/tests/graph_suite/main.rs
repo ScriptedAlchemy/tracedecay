@@ -32,7 +32,7 @@ mod common;
 mod fixture_profile {
     use std::path::Path;
 
-    use tracedecay::tracedecay::TraceDecayOpenOptions;
+    use tracedecay::project::TraceDecayOpenOptions;
 
     pub(crate) fn open_options(project_root: &Path) -> TraceDecayOpenOptions {
         let profile_root = project_root.join(".tracedecay").join("fixture-profile");

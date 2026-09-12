@@ -27,7 +27,7 @@ use tracedecay_tool_catalog::EffectClass;
 use super::dispatch_test_support::SelectorEnv;
 use super::*;
 use crate::config::lock_user_data_dir_test_env;
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 
 fn digest(seed: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
