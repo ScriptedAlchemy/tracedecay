@@ -93,7 +93,6 @@ pub use git_index_transactions::{
     GitIndexTransactionTerminalWriteV1, MAX_GIT_INDEX_PREVIEW_INPUT_BYTES,
     MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
-pub use memory::ProjectMemoryAutomationRunReceiptsV1;
 pub use memory::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitConflict, FactCommitOutcome,
     FactCommitReceipt, FactContradictionStateV1, FactCurrentQuery, FactCurrentResponseV1,
@@ -105,6 +104,7 @@ pub use memory::{
     ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryAutomaticFactEffectV1,
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
     ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
+    ProjectMemoryAutomationRunReceiptsV1,
     ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactDetailQueryV1,
     ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardFactEntityLinkV1,
     ProjectMemoryDashboardFactSummaryV1, ProjectMemoryDashboardGrowthPointV1,
