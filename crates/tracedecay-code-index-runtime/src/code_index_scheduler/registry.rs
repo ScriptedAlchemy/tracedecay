@@ -143,9 +143,10 @@ const TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
 /// shared checkout with peers editing never offers: every pass published a new
 /// generation, so a complete sealed generation sat on disk with zero seat
 /// attempts and no log line, because a missing prepare is not a refusal. The
-/// gate is now the text owner, not the tree: a publication seats on its own
-/// pass once its lightweight text owner has reopened and finished, and an
-/// unchanged pass seats the retained owner's generation. Every skip names
+/// gate is now the text owner, not the tree: a publication prepares on its own
+/// pass once its lightweight text owner has reopened (its projection runs
+/// concurrently and is joined before the seat), and an unchanged pass seats
+/// the retained owner's generation once that owner is ready. Every skip names
 /// itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphSeatGateV1 {
@@ -157,10 +158,24 @@ pub enum GraphSeatGateV1 {
     ReconcileUnfinished,
     /// A retryable activation failure holds seating until its scheduled retry.
     ActivationDeferred,
-    /// A publication whose replacement text owner did not reopen or finish.
+    /// A publication whose replacement text owner did not reopen.
     PublishedTextOwnerUnavailable,
     /// An unchanged pass whose retained text owner is still projecting.
     RetainedTextOwnerWarming,
+}
+
+/// How a publication's replacement text owner finished the bounded
+/// projection this pass drove for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublishedTextProjectionOutcomeV1 {
+    /// Exact and lexical serving are ready for the publication.
+    Finished,
+    /// The projection stopped short of ready: the advance bound, a typed
+    /// contract violation (parked on the owner), a failure, or an abnormal
+    /// task exit. The owner carries the typed state; the pass seats nothing.
+    Unfinished,
+    /// Shutdown retired the text control mid-slice.
+    Shutdown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,7 +229,7 @@ impl GraphSeatGateV1 {
         reconcile_is_terminal: bool,
         published_pass: bool,
         retained_text_is_ready: bool,
-        published_text_is_ready: bool,
+        published_text_reopened: bool,
     ) -> Self {
         if !activation_enabled {
             return Self::Disabled;
@@ -227,9 +242,12 @@ impl GraphSeatGateV1 {
         }
         if published_pass {
             // The tree may have moved on already; what must hold is that this
-            // publication's own text owner reopened and finished, so exact and
-            // lexical serving never inherit graph activation latency.
-            if published_text_is_ready {
+            // publication's own text owner reopened. Its projection runs
+            // concurrently with the graph prepare and activation, and the
+            // seat joins it, so exact and lexical serving never inherit graph
+            // activation latency and graph readiness never inherits the text
+            // build.
+            if published_text_reopened {
                 return Self::Prepare;
             }
             return Self::PublishedTextOwnerUnavailable;
@@ -2589,6 +2607,116 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|scheduler| (pass, scheduler))
     }
 
+    /// Drive a publication's replacement text owner through its bounded
+    /// projection, one blocking advance at a time, until exact and lexical
+    /// serving are ready or the projection stops typed.
+    ///
+    /// Runs on its own task, concurrently with the same pass's graph prepare
+    /// and native activation: text and graph both consume the sealed
+    /// generation and neither depends on the other until the seat, which
+    /// joins this task. The advance itself is single-flight on the owner's
+    /// projection slot, so scheduler wakes that race it wait, never double
+    /// drive.
+    async fn drive_published_text_projection(
+        text: LatestCodeTextGenerationV1,
+        shutting_down: Arc<AtomicBool>,
+        convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
+    ) -> PublishedTextProjectionOutcomeV1 {
+        let mut advances = 0_usize;
+        while text.text_serving_needs_work() {
+            if shutting_down.load(Ordering::Acquire) {
+                return PublishedTextProjectionOutcomeV1::Shutdown;
+            }
+            advances += 1;
+            if advances > TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1 {
+                tracing::warn!(
+                    event = "code_index_text_projection_advance_bound_reached",
+                    advances = TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1,
+                    "published text projection did not complete within its bounded advance \
+                     budget; graph seating waits for a later pass"
+                );
+                break;
+            }
+            let advancing = text.clone();
+            match hotpath::future!(
+                tokio::task::spawn_blocking(
+                    move || advancing.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
+                ),
+                label = "daemon.code_index.text_projection"
+            )
+            .await
+            {
+                Ok(Ok(true)) => {
+                    clear_convergence_park(&convergence_park);
+                    break;
+                }
+                Ok(Ok(false)) => {
+                    clear_convergence_park(&convergence_park);
+                }
+                Ok(Err(error)) => {
+                    if error.is_deterministic_contract() {
+                        park_convergence(
+                            &convergence_park,
+                            error.to_string(),
+                            CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
+                            true,
+                        );
+                        tracing::warn!(
+                            event = "code_index_convergence_parked",
+                            path = "background_worker",
+                            error = %error,
+                            "published text projection parked on a deterministic contract \
+                             violation before graph seating; status reports it typed and every \
+                             wake re-checks"
+                        );
+                    } else if matches!(
+                        &error,
+                        tracedecay_query::retrieval::RetrievalPortError::Cancelled
+                    ) && shutting_down.load(Ordering::Acquire)
+                    {
+                        // Shutdown retired the text control mid-slice. The
+                        // slice stops typed; nothing failed.
+                        tracing::info!(
+                            event = "code_index_text_projection_interrupted",
+                            origin = "shutdown",
+                            "published text projection stopped before graph seating"
+                        );
+                        return PublishedTextProjectionOutcomeV1::Shutdown;
+                    } else {
+                        tracing::warn!(
+                            event = "code_index_text_projection_failed",
+                            error = %error,
+                            "published text projection failed before graph seating"
+                        );
+                    }
+                    break;
+                }
+                Err(error) => {
+                    text.mark_text_serving_failed();
+                    park_convergence(
+                        &convergence_park,
+                        format!("code text projection task failed abnormally: {error}"),
+                        CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                        false,
+                    );
+                    tracing::warn!(
+                        event = "code_index_text_projection_task_failed",
+                        error = %error,
+                        "published text projection task failed before graph seating"
+                    );
+                    break;
+                }
+            }
+        }
+        // Readiness, not "nothing left to advance": a latched failed owner
+        // also has no work left, and it must not seat.
+        if text.text_serving_is_ready() {
+            PublishedTextProjectionOutcomeV1::Finished
+        } else {
+            PublishedTextProjectionOutcomeV1::Unfinished
+        }
+    }
+
     /// Returns the pass's service time so the caller can attach the same
     /// measurement to the canonical index-lifecycle observation.
     /// Project one terminal source-reconcile outcome onto the installed
@@ -3468,8 +3596,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 // Cover wake claim through failed-arrival restoration so admission
                 // never misreads in-flight owner work as plain unavailability.
-                let _reconcile_pass =
-                    super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
+                let mut reconcile_pass = Some(super::ReconcilePassGuard::enter(
+                    &worker_reconcile_in_progress,
+                ));
                 let mut text_generation = worker_text_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3851,22 +3980,26 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 // Source reconciliation is complete: release the background
                 // admission permit before HeadOpening / graph work so sibling
-                // stores can start. Keep `_reconcile_pass` through seating —
-                // dropping it made `reconcile_in_progress` lie while this
-                // worker still owned graph try_lock, which deadlocked tests
-                // that hold the scheduler mutex and wait for that flag.
+                // stores can start. Keep `reconcile_pass` through text
+                // seating — dropping it made `reconcile_in_progress` lie while
+                // this worker still owned graph try_lock, which deadlocked
+                // tests that hold the scheduler mutex and wait for that flag.
                 drop(_background_reconcile_admission);
-                // A publication must first reopen and finish its own
-                // lightweight text owner: publication moved the durable
-                // pointer, so the prior owner is no longer authoritative even
-                // while the new lightweight handle is opening. Withdraw it
-                // first - a failed or delayed reopen must report warming, never
-                // keep serving the superseded generation indefinitely.
+                // A publication must first reopen its own lightweight text
+                // owner: publication moved the durable pointer, so the prior
+                // owner is no longer authoritative even while the new
+                // lightweight handle is opening. Withdraw it first - a failed
+                // or delayed reopen must report warming, never keep serving
+                // the superseded generation indefinitely.
                 let published_pass = matches!(
                     &source_result,
                     Ok(Ok(CodeIndexReconcileOutcomeV1::Published(_)))
                 );
                 let mut graph_text = retained_text.clone();
+                // The replacement owner's bounded projection, driven to
+                // completion concurrently with this pass's graph prepare and
+                // activation and joined before the seat.
+                let mut published_text_projection = None;
                 if published_pass {
                     *worker_text_generation
                         .write()
@@ -3896,114 +4029,31 @@ impl CodeIndexSchedulerRegistryV1 {
                         None
                     };
                     // The replacement text owner finishes its bounded
-                    // projection here, before the optional O(store) graph
-                    // decode: exact and lexical serving must never inherit
-                    // graph activation latency. Yielding back to the loop
-                    // instead would hand the next pass a checkout that has
-                    // already moved, and on a shared repository that pass
-                    // publishes again - which is exactly how a sealed
-                    // generation stayed unseated forever.
+                    // projection on its own task, concurrently with the
+                    // optional O(store) graph decode and native activation
+                    // below: both consume the sealed generation and neither
+                    // depends on the other until the seat, which joins the
+                    // projection first. Exact and lexical serving therefore
+                    // never inherit graph activation latency, and graph
+                    // readiness no longer waits behind the whole text build.
+                    // Yielding back to the loop instead would hand the next
+                    // pass a checkout that has already moved, and on a shared
+                    // repository that pass publishes again - which is exactly
+                    // how a sealed generation stayed unseated forever.
                     if graph_activation_enabled
                         && !graph_activation_deferred
                         && let Some(text) = graph_text.clone()
                     {
-                        let mut advances = 0_usize;
-                        while text.text_serving_needs_work() {
-                            if worker_shutting_down.load(Ordering::Acquire) {
-                                tracing::info!(
-                                    event = "code_index_worker_shutdown_observed",
-                                    phase = "text_projection_before_seat",
-                                    "code-index worker observed shutdown and stopped its pass"
-                                );
-                                return;
-                            }
-                            advances += 1;
-                            if advances > TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1 {
-                                tracing::warn!(
-                                    event = "code_index_text_projection_advance_bound_reached",
-                                    advances = TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1,
-                                    "published text projection did not complete within its \
-                                     bounded advance budget; graph seating waits for a later pass"
-                                );
-                                break;
-                            }
-                            let advancing = text.clone();
-                            match hotpath::future!(
-                                tokio::task::spawn_blocking(move || advancing
-                                    .advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)),
-                                label = "daemon.code_index.text_projection"
-                            )
-                            .await
-                            {
-                                Ok(Ok(true)) => {
-                                    clear_convergence_park(&worker_convergence_park);
-                                    break;
-                                }
-                                Ok(Ok(false)) => {
-                                    clear_convergence_park(&worker_convergence_park);
-                                }
-                                Ok(Err(error)) => {
-                                    if error.is_deterministic_contract() {
-                                        park_convergence(
-                                            &worker_convergence_park,
-                                            error.to_string(),
-                                            CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
-                                            true,
-                                        );
-                                        tracing::warn!(
-                                            event = "code_index_convergence_parked",
-                                            path = "background_worker",
-                                            error = %error,
-                                            "published text projection parked on a deterministic \
-                                             contract violation before graph seating; status \
-                                             reports it typed and every wake re-checks"
-                                        );
-                                    } else if matches!(
-                                        &error,
-                                        tracedecay_query::retrieval::RetrievalPortError::Cancelled
-                                    ) && worker_shutting_down.load(Ordering::Acquire)
-                                    {
-                                        // Shutdown retired the text control mid-slice.
-                                        // The slice stops typed; nothing failed.
-                                        tracing::info!(
-                                            event = "code_index_text_projection_interrupted",
-                                            origin = "shutdown",
-                                            "published text projection stopped before graph seating"
-                                        );
-                                        return;
-                                    } else {
-                                        tracing::warn!(
-                                            event = "code_index_text_projection_failed",
-                                            error = %error,
-                                            "published text projection failed before graph seating"
-                                        );
-                                    }
-                                    break;
-                                }
-                                Err(error) => {
-                                    text.mark_text_serving_failed();
-                                    park_convergence(
-                                        &worker_convergence_park,
-                                        format!(
-                                            "code text projection task failed abnormally: {error}"
-                                        ),
-                                        CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
-                                        false,
-                                    );
-                                    tracing::warn!(
-                                        event = "code_index_text_projection_task_failed",
-                                        error = %error,
-                                        "published text projection task failed before graph seating"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    let published_text_finished = graph_text
+                        published_text_projection =
+                            Some(tokio::spawn(Self::drive_published_text_projection(
+                                text,
+                                Arc::clone(&worker_shutting_down),
+                                Arc::clone(&worker_convergence_park),
+                            )));
+                    } else if graph_text
                         .as_ref()
-                        .is_some_and(|text| !text.text_serving_needs_work());
-                    if !published_text_finished {
+                        .is_none_or(LatestCodeTextGenerationV1::text_serving_needs_work)
+                    {
                         worker_wake.notify_one();
                     }
                 }
@@ -4014,29 +4064,31 @@ impl CodeIndexSchedulerRegistryV1 {
                 // three full seals produced zero seat attempts and every exact
                 // graph read answered "not ready" while a complete sealed
                 // generation sat on disk. A publication now seats on its own
-                // pass, once its lightweight text owner has reopened and
-                // finished; it is stale by construction and superseded by the
-                // next publication. An unchanged pass still seats the retained
-                // Ready text owner's generation. Source reconciliation is
-                // complete either way: release its public freshness guard
-                // before the optional O(store) full decode and native graph
-                // activation begin. Keep the pass through text seating so
-                // `reconcile_in_progress` stays truthful while this worker
-                // still owns source/text work; optional graph must not.
-                // Each graph step that must take the scheduler re-enters the
-                // pass around that acquisition (see
+                // pass, once its lightweight text owner has reopened and its
+                // concurrent projection has finished; it is stale by
+                // construction and superseded by the next publication. An
+                // unchanged pass still seats the retained Ready text owner's
+                // generation. Source reconciliation is complete either way:
+                // release its public freshness guard before the optional
+                // O(store) full decode and native graph activation begin,
+                // unless this pass still drives the publication's text
+                // projection — `reconcile_in_progress` stays truthful while
+                // this worker owns source/text work, and that guard falls
+                // when the projection is joined below. Optional graph must
+                // not hold it: each graph step that must take the scheduler
+                // re-enters the pass around that acquisition (see
                 // `lock_scheduler_for_graph_step`); only the unlocked decode
                 // and native activation run outside it.
-                drop(_reconcile_pass);
+                if published_text_projection.is_none() {
+                    drop(reconcile_pass.take());
+                }
                 let gate = GraphSeatGateV1::decide(
                     graph_activation_enabled,
                     graph_activation_deferred,
                     matches!(&source_result, Ok(Ok(_))),
                     published_pass,
                     text_serving_ready,
-                    graph_text
-                        .as_ref()
-                        .is_some_and(LatestCodeTextGenerationV1::text_serving_is_ready),
+                    graph_text.is_some(),
                 );
                 // An arrival that landed during this retained pass is
                 // exact/lexical work waiting for the worker. The optional
@@ -4498,6 +4550,60 @@ impl CodeIndexSchedulerRegistryV1 {
                                     );
                                 }
                             }
+                        }
+                    }
+                }
+                // The seat requires the publication's own text owner to be
+                // ready: join the concurrent projection here, after graph
+                // activation, so an unfinished owner refuses only the swap.
+                // Activation is durable and idempotent, so the pass that later
+                // finds the owner ready seats without repeating it.
+                if let Some(projection) = published_text_projection.take() {
+                    let outcome = match projection.await {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            if let Some(text) = graph_text.as_ref() {
+                                text.mark_text_serving_failed();
+                            }
+                            park_convergence(
+                                &worker_convergence_park,
+                                format!("code text projection task failed abnormally: {error}"),
+                                CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1,
+                                false,
+                            );
+                            tracing::warn!(
+                                event = "code_index_text_projection_task_failed",
+                                error = %error,
+                                "published text projection task failed before graph seating"
+                            );
+                            PublishedTextProjectionOutcomeV1::Unfinished
+                        }
+                    };
+                    // Source and text work are over for this pass either way.
+                    drop(reconcile_pass.take());
+                    match outcome {
+                        PublishedTextProjectionOutcomeV1::Finished => {}
+                        PublishedTextProjectionOutcomeV1::Shutdown => {
+                            tracing::info!(
+                                event = "code_index_worker_shutdown_observed",
+                                phase = "text_projection_before_seat",
+                                "code-index worker observed shutdown and stopped its pass"
+                            );
+                            return;
+                        }
+                        PublishedTextProjectionOutcomeV1::Unfinished => {
+                            if let Ok((_, latest, replay_binding)) = &mut result {
+                                *latest = None;
+                                *replay_binding = None;
+                            }
+                            tracing::debug!(
+                                event = "code_index_graph_seat_skipped",
+                                reason = "published_text_owner_unfinished",
+                                published_pass,
+                                "the publication's text owner did not finish its projection; \
+                                 the sealed generation stays unseated until it does"
+                            );
+                            worker_wake.notify_one();
                         }
                     }
                 }
