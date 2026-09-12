@@ -1268,12 +1268,17 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
     let orphan_pack = segment_root.join(format!("segment-{orphan_digest}.json"));
     std::fs::write(&orphan_pack, orphan_bytes).expect("write committed orphan evidence pack");
-    // A rollback reserve of one holds the single superseded generation; the
+    // A vector-readable mark holds the single superseded generation; the
     // pointer index it is still named by would not.
+    let first_generation = CodeGenerationId::new(
+        first_pointer["generation_id"]
+            .as_str()
+            .expect("first generation id"),
+    )
+    .expect("valid first generation id");
     let orphan_report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(),
-        &BTreeSet::new(),
-        1,
+        &BTreeSet::from([first_generation]),
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(8_000_000),
         None,
@@ -1281,7 +1286,7 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     .expect("sweep committed orphan without collecting a generation");
     assert!(
         orphan_report.deleted_generations.is_empty(),
-        "the rollback reserve must retain the superseded generation"
+        "the vector-readable mark must retain the superseded generation"
     );
     assert!(
         !orphan_pack.exists(),
@@ -1305,7 +1310,6 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(9_000_000),
         None,
@@ -1392,7 +1396,6 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     remove_historical_pointer_entries(store.path());
     let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(), &BTreeSet::new(),
-        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(9_000_000), None,
     ).expect("collect retired generation");
@@ -1892,7 +1895,6 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         failed_store.path(),
         &BTreeSet::new(),
-        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(8_100_000),
         Some(&graph_replay_pool),
@@ -1907,31 +1909,34 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
 
 /// Membership of the durable `generation_index` is a referential-integrity
 /// check, not a liveness mark: a published store keeps the active generation
-/// and the newest `rollback_floor` superseded generations, and everything older
-/// is collectable while the pointer still names it.
+/// and the vector-readable sources, and everything older is collectable while
+/// the pointer still names it.
 #[test]
-fn code_generation_retention_keeps_only_the_rollback_floor_reserve() {
+fn code_generation_retention_keeps_only_the_active_and_marked_generations() {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
 
-    const ROLLBACK_FLOOR: usize = 2;
+    const MARKED_SUPERSEDED: usize = 2;
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
     let store = TempDir::new().expect("store root");
     let generations = retention_generations(&fixture, store.path(), 5);
+    let (collected, reserved) = generations.split_at(generations.len() - MARKED_SUPERSEDED - 1);
+    let vector_readable_sources = reserved[..MARKED_SUPERSEDED]
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
     let report = run_code_generation_retention(
         store.path(),
-        &BTreeSet::new(),
-        ROLLBACK_FLOOR,
+        &vector_readable_sources,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(49),
         None,
     )
     .expect("apply retention");
 
-    let (collected, reserved) = generations.split_at(generations.len() - ROLLBACK_FLOOR - 1);
     assert_eq!(
         report
             .deleted_generations
@@ -1942,7 +1947,7 @@ fn code_generation_retention_keeps_only_the_rollback_floor_reserve() {
             .iter()
             .map(CodeGenerationId::as_str)
             .collect::<BTreeSet<_>>(),
-        "everything older than the active generation and its rollback reserve is collectable"
+        "everything older than the active generation and the marked sources is collectable"
     );
     let reserved = reserved
         .iter()
@@ -1961,7 +1966,7 @@ fn code_generation_retention_keeps_only_the_rollback_floor_reserve() {
                 .expect("read retained generation")
                 .is_some(),
             reserved.contains(generation.as_str()),
-            "only the active generation and the rollback reserve survive collection"
+            "only the active generation and the marked sources survive collection"
         );
     }
 }
@@ -2016,10 +2021,9 @@ fn sealed_replay_binding_resolves_an_exact_superseded_generation() {
 #[test]
 fn one_bounded_pass_collects_clean_and_dirty_superseded_generations() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
-        MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
+        MAX_CODE_GENERATION_RETENTION_BATCH_V1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
+        MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2059,7 +2063,6 @@ fn one_bounded_pass_collects_clean_and_dirty_superseded_generations() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(50),
         None,
@@ -2116,8 +2119,7 @@ fn one_bounded_pass_collects_clean_and_dirty_superseded_generations() {
 #[test]
 fn code_generation_retention_dry_run_reports_without_deleting() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2128,7 +2130,6 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::DryRun,
         UtcMicros(50),
         None,
@@ -2168,8 +2169,7 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
 #[test]
 fn code_generation_retention_never_sweeps_vector_readable_source() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2181,7 +2181,6 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
     let report = run_code_generation_retention(
         store.path(),
         &vector_readable,
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(60),
         None,
@@ -2225,8 +2224,7 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
 #[test]
 fn code_generation_retention_emits_durable_reclaim_receipt() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2237,7 +2235,6 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(70),
         None,
@@ -2620,8 +2617,7 @@ fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
 #[test]
 fn oversized_generations_still_produce_a_complete_retention_finding() {
     use tracedecay_code_index_retention::code_index_generations::{
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR, GenerationDigestVerificationV1,
-        plan_code_generation_retention_with_verification,
+        GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
     };
     use tracedecay_contracts::doctor::DoctorCoverageCompletenessV1;
     use tracedecay_contracts::storage::{
@@ -2672,7 +2668,6 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     let plan = plan_code_generation_retention_with_verification(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         GenerationDigestVerificationV1::MetadataOnly,
     )
     .expect("metadata-only census must not depend on re-hashing gigabytes");
@@ -4952,8 +4947,8 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     use std::thread;
 
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        execute_code_generation_retention, plan_code_generation_retention,
+        CodeGenerationRetentionModeV1, execute_code_generation_retention,
+        plan_code_generation_retention,
     };
 
     struct PauseAfterExistingArtifactRead {
@@ -5053,12 +5048,8 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     });
     control.wait_until_paused();
 
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan the orphan artifact observed before attachment");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan the orphan artifact observed before attachment");
     let retention_root = store.path().to_path_buf();
     let (retention_done_tx, retention_done_rx) = mpsc::sync_channel(1);
     let retention = thread::spawn(move || {
