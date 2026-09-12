@@ -7,9 +7,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeSourceIdentityV1, EvidenceAvailabilityV1,
-    MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES, ObservationScopeV1,
-    ProjectId, RepositoryId, RetrievalAnchorTargetV2, SessionId, WorktreeId,
+    EvidenceAvailabilityV1, MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
+    ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, ProjectId, RepositoryId, RetrievalAnchorTargetV2, SessionId,
+    WorktreeId,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
@@ -186,7 +187,7 @@ impl ObservationStore for FakeStore {
 
     async fn get_source_cursor(
         &self,
-        source: &ClaudeSourceIdentityV1,
+        source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
     ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
         Ok(self
@@ -294,14 +295,16 @@ fn request_at_for_session(
 ) -> CaptureClaudeObservationRequest {
     let encoded_frame = serde_json::to_vec(record).unwrap();
     let end = start + u64::try_from(encoded_frame.len()).unwrap();
-    let parsed_record =
-        parse_claude_record_v1(&encoded_frame, ClaudeByteRangeV1::new(start, end).unwrap())
-            .unwrap();
-    let source = ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
+    let parsed_record = parse_claude_record_v1(
+        &encoded_frame,
+        ObservationSourceRangeV1::new(start, end).unwrap(),
+    )
+    .unwrap();
+    let source = ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
     let scope = ObservationScopeV1::Project {
         project_id: ProjectId::new("project.application-test").unwrap(),
     };
-    let generation = ClaudeFileGenerationV1::new(1).unwrap();
+    let generation = ObservationSourceGenerationV1::new(1).unwrap();
     let expected_cursor = (start != 0).then(|| {
         ObservationSourceCursorV1::new(source.clone(), scope.clone(), generation, start).unwrap()
     });
@@ -309,7 +312,7 @@ fn request_at_for_session(
         source,
         scope,
         generation,
-        ClaudeByteRangeV1::new(start, end).unwrap(),
+        ObservationSourceRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
     CaptureClaudeObservationRequest::new(
@@ -393,13 +396,14 @@ fn mark_first_observation_not_queued(store: &FakeStore) {
 async fn non_durable_cursor_advance_stays_inside_application_boundary() {
     let application = application();
     let source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.cursor-advance").unwrap()).unwrap();
+        ObservationSourceIdentityV1::new(SessionId::new("session.cursor-advance").unwrap())
+            .unwrap();
     let advance = ObservationCursorAdvance::new(
         source,
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
+        ObservationSourceGenerationV1::new(1).unwrap(),
         None,
-        ClaudeByteRangeV1::new(0, 4).unwrap(),
+        ObservationSourceRangeV1::new(0, 4).unwrap(),
         NonDurableFrameReason::BlankFrame,
     )
     .unwrap();
@@ -415,7 +419,10 @@ async fn non_durable_cursor_advance_stays_inside_application_boundary() {
     assert_eq!(outcome, CursorAdvanceOutcome::Committed);
     let advances = application.store.cursor_advances.lock().unwrap();
     assert_eq!(advances.len(), 1);
-    assert_eq!(advances[0].covered(), ClaudeByteRangeV1::new(0, 4).unwrap());
+    assert_eq!(
+        advances[0].covered(),
+        ObservationSourceRangeV1::new(0, 4).unwrap()
+    );
     assert_eq!(advances[0].reason(), NonDurableFrameReason::BlankFrame);
 }
 
@@ -423,13 +430,13 @@ async fn non_durable_cursor_advance_stays_inside_application_boundary() {
 async fn non_durable_cursor_advance_honors_cancellation_before_and_after_commit() {
     let application = application();
     let source =
-        ClaudeSourceIdentityV1::new(SessionId::new("session.cursor-cancel").unwrap()).unwrap();
+        ObservationSourceIdentityV1::new(SessionId::new("session.cursor-cancel").unwrap()).unwrap();
     let advance = ObservationCursorAdvance::new(
         source,
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
+        ObservationSourceGenerationV1::new(1).unwrap(),
         None,
-        ClaudeByteRangeV1::new(0, 4).unwrap(),
+        ObservationSourceRangeV1::new(0, 4).unwrap(),
         NonDurableFrameReason::BlankFrame,
     )
     .unwrap();
@@ -608,10 +615,11 @@ async fn repository_provenance_context_refuses_cross_project_reuse() {
 fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
     let identity = |start, end| {
         ObservationIdentityMaterialV1::new(
-            ClaudeSourceIdentityV1::new(SessionId::new("session.frame-test").unwrap()).unwrap(),
+            ObservationSourceIdentityV1::new(SessionId::new("session.frame-test").unwrap())
+                .unwrap(),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(1).unwrap(),
-            ClaudeByteRangeV1::new(start, end).unwrap(),
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            ObservationSourceRangeV1::new(start, end).unwrap(),
         )
         .unwrap()
     };
@@ -620,7 +628,7 @@ fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
     let raw = b"{}";
     let parsed = parse_claude_record_v1(
         raw,
-        ClaudeByteRangeV1::new(10, 10 + u64::try_from(raw.len()).unwrap()).unwrap(),
+        ObservationSourceRangeV1::new(10, 10 + u64::try_from(raw.len()).unwrap()).unwrap(),
     )
     .unwrap();
     assert!(matches!(

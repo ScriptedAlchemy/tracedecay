@@ -6,11 +6,11 @@ use tracedecay_contracts::clock::now_micros;
 use tracing::Instrument;
 
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DurableObservationV1,
-    EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, ManifestDigest,
-    ObservationCollisionOutcomeV1, ObservationIdentityMaterialV1, ObservationScopeV1,
-    PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId, RetrievalAnchorId,
-    RetrievalAnchorRecordV2, SanitizationReceiptV1, canonical_json_bytes,
+    CanonicalObservationIdV1, DurableObservationV1, EvidenceAvailabilityV1,
+    GenerationBoundRepositoryProvenanceV1, ManifestDigest, ObservationCollisionOutcomeV1,
+    ObservationIdentityMaterialV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceIdentityV1, PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId,
+    RetrievalAnchorId, RetrievalAnchorRecordV2, SanitizationReceiptV1, canonical_json_bytes,
     canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
     cline_native_source_successor_id, cline_task_native_observation_id,
     is_canonical_payload_revision_replay, prove_cline_native_source_transition, sha256_hex_suffix,
@@ -88,7 +88,7 @@ impl GlobalDbObservationStore {
         &self,
         write: &AnchoredObservationWrite,
         retained_digest: &PayloadDigestV1,
-        actual_cursor: Option<&ClaudeSourceCursorV1>,
+        actual_cursor: Option<&ObservationSourceCursorV1>,
     ) -> ObservationStoreResult<RefusalCoverageOutcome> {
         const OPERATION: &str = "record refused admission terminal and coverage";
         let candidate = write.observation();
@@ -149,7 +149,7 @@ impl GlobalDbObservationStore {
                 let encoded = row
                     .get::<String>(0)
                     .map_err(|error| runtime_storage_error(OPERATION, error))?;
-                serde_json::from_str::<ClaudeSourceCursorV1>(&encoded)
+                serde_json::from_str::<ObservationSourceCursorV1>(&encoded)
                     .map_err(|error| runtime_storage_error(OPERATION, error))
             })
             .transpose()?;
@@ -315,7 +315,7 @@ impl GlobalDbObservationStore {
         write: AnchoredObservationWrite,
         preflight: &ObservationPreflightSnapshot,
         batch_state: &mut ObservationBatchState,
-        known_cursor: Option<Option<ClaudeSourceCursorV1>>,
+        known_cursor: Option<Option<ObservationSourceCursorV1>>,
     ) -> ObservationStoreResult<PreparedObservationPersist> {
         let observation = write.observation();
         let observation_id = observation.observation_id().clone();
@@ -625,7 +625,8 @@ struct ObservationPreflightSnapshot {
     stored_observations: HashMap<String, StoredObservation>,
     retrieval_aliases: HashMap<(String, String, String), RetrievalAnchorId>,
     cline_supersessions: HashMap<RetrievalAnchorId, RetrievalAnchorId>,
-    source_cursors: HashMap<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>,
+    source_cursors:
+        HashMap<(ObservationSourceIdentityV1, ObservationScopeV1), ObservationSourceCursorV1>,
 }
 
 #[inline(always)]
@@ -713,9 +714,9 @@ impl ObservationPreflightSnapshot {
 
     fn source_cursor(
         &self,
-        source: &ClaudeSourceIdentityV1,
+        source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
-    ) -> Option<ClaudeSourceCursorV1> {
+    ) -> Option<ObservationSourceCursorV1> {
         self.source_cursors
             .get(&(source.clone(), scope.clone()))
             .cloned()
@@ -1017,7 +1018,7 @@ async fn read_source_cursors_from_snapshot(
     writes: &[AnchoredObservationWrite],
     operation: &'static str,
 ) -> ObservationStoreResult<
-    HashMap<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>,
+    HashMap<(ObservationSourceIdentityV1, ObservationScopeV1), ObservationSourceCursorV1>,
 > {
     let mut requested = HashSet::with_capacity(writes.len());
     for write in writes {
@@ -1230,7 +1231,7 @@ async fn read_stored_observations_from_snapshot(
                 "observation row identity mismatch",
             ));
         }
-        let committed_cursor: ClaudeSourceCursorV1 = decode_json(
+        let committed_cursor: ObservationSourceCursorV1 = decode_json(
             row.get::<String>(3)
                 .map_err(|error| runtime_storage_error(operation, error))?,
             operation,
@@ -1389,9 +1390,10 @@ impl ObservationStore for GlobalDbObservationStore {
             crate::hotpath_observe::record_transaction_rows(1);
             let preflight = load_observation_preflight(&self.database, &writes).await?;
             let mut batch_state = ObservationBatchState::from_preflight(&preflight);
-            let mut published_cursors =
-                HashMap::<(ClaudeSourceIdentityV1, ObservationScopeV1), ClaudeSourceCursorV1>::new(
-                );
+            let mut published_cursors = HashMap::<
+                (ObservationSourceIdentityV1, ObservationScopeV1),
+                ObservationSourceCursorV1,
+            >::new();
             let mut prepared = Vec::with_capacity(writes.len());
             for write in writes {
                 let key = (
@@ -1459,9 +1461,9 @@ impl ObservationStore for GlobalDbObservationStore {
     #[hotpath::skip]
     async fn get_source_cursor(
         &self,
-        source: &ClaudeSourceIdentityV1,
+        source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
-    ) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
+    ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
         read_runtime_source_cursor(&self.runtime, source, scope)
     }
 
@@ -1728,9 +1730,9 @@ fn stored_observation_from_runtime_row(
 
 fn read_runtime_source_cursor(
     runtime: &DatabaseRuntimeClientV1,
-    source: &ClaudeSourceIdentityV1,
+    source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
-) -> ObservationStoreResult<Option<ClaudeSourceCursorV1>> {
+) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
     match dispatch_runtime_observation_read(
         runtime,
         ObservationReadOperationV1::SourceCursor {
@@ -1768,7 +1770,7 @@ enum RefusedScanFrontier {
 enum RefusalCoverageOutcome {
     Recorded,
     NotAtFrontier {
-        actual: Option<ClaudeSourceCursorV1>,
+        actual: Option<ObservationSourceCursorV1>,
     },
 }
 
@@ -1780,7 +1782,7 @@ enum RefusalCoverageOutcome {
 /// batch as scalar writes lets each earlier write land first, instead of
 /// refusing the whole window as a cursor conflict and wedging the frontier.
 fn durable_frontier_owned_by_batch(
-    known_cursor: &Option<Option<ClaudeSourceCursorV1>>,
+    known_cursor: &Option<Option<ObservationSourceCursorV1>>,
 ) -> Option<ObservationStoreError> {
     known_cursor
         .is_some()
@@ -1791,7 +1793,7 @@ fn durable_frontier_owned_by_batch(
 
 fn refused_scan_frontier(
     write: &AnchoredObservationWrite,
-    actual_cursor: Option<&ClaudeSourceCursorV1>,
+    actual_cursor: Option<&ObservationSourceCursorV1>,
 ) -> ObservationStoreResult<RefusedScanFrontier> {
     let identity = write.observation().identity();
     let candidate_covered = actual_cursor.is_some_and(|cursor| {
@@ -2045,7 +2047,7 @@ async fn submit_observation_write_batch(
 fn persist_outcome_from_submit(
     stored: &StoredObservation,
     candidate: &DurableObservationV1,
-    candidate_cursor: ClaudeSourceCursorV1,
+    candidate_cursor: ObservationSourceCursorV1,
     outcome: RuntimeSubmitOutcomeV1,
 ) -> ObservationStoreResult<ObservationPersistOutcome> {
     #[cfg(tracedecay_observation_fault_harness)]

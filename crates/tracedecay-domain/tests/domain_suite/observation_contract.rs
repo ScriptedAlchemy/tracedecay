@@ -8,22 +8,21 @@ use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationIdV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
-    CanonicalWorkflowSemanticKindV1, ClaudeByteRangeV1, ClaudeFileGenerationV1,
-    ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ClineTranscriptStream, ComponentVersion, DurableClaudeObservationV1, IdempotencyKeyV1,
-    MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
+    CanonicalWorkflowSemanticKindV1, ClineTranscriptStream, ComponentVersion,
+    DurableClaudeObservationV1, MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
     MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
     ObservationCollisionOutcomeV1, ObservationContractError, ObservationId,
-    ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProjectId, ProviderId, ProviderUsageContractDimensionV1, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
-    SensitivityV1, SessionId, classify_observation_collision, cline_native_source_successor_id,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
+    ProviderId, ProviderUsageContractDimensionV1, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, classify_observation_collision, cline_native_source_successor_id,
     cline_task_native_observation_id, prove_cline_native_source_transition,
 };
 
-fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
+fn source(session_id: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
 }
 
 fn provider_source(provider: &str, session_id: &str) -> ObservationSourceIdentityV1 {
@@ -34,12 +33,12 @@ fn provider_source(provider: &str, session_id: &str) -> ObservationSourceIdentit
     .unwrap()
 }
 
-fn profile_material() -> ClaudeObservationIdentityMaterialV1 {
-    ClaudeObservationIdentityMaterialV1::new(
+fn profile_material() -> ObservationIdentityMaterialV1 {
+    ObservationIdentityMaterialV1::new(
         source("session.fixture"),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(7).unwrap(),
-        ClaudeByteRangeV1::new(12, 34).unwrap(),
+        ObservationSourceGenerationV1::new(7).unwrap(),
+        ObservationSourceRangeV1::new(12, 34).unwrap(),
     )
     .unwrap()
 }
@@ -62,10 +61,7 @@ fn accepted_receipt(payload: &Value) -> SanitizationReceiptV1 {
     .unwrap()
 }
 
-fn durable(
-    material: ClaudeObservationIdentityMaterialV1,
-    payload: Value,
-) -> DurableClaudeObservationV1 {
+fn durable(material: ObservationIdentityMaterialV1, payload: Value) -> DurableClaudeObservationV1 {
     DurableClaudeObservationV1::new(
         material,
         accepted_receipt(&payload),
@@ -91,7 +87,7 @@ fn envelope_with_content(
         }],
         CanonicalObservationEvidenceV1::new(
             ObservationOrderingDomainV1::FileBytes,
-            ClaudeByteRangeV1::new(1, 2).unwrap(),
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
         ),
     )
 }
@@ -160,7 +156,7 @@ fn uncorrelated_usage_retains_native_evidence_and_requires_missing_dimensions() 
 fn observation_ids_are_stable_and_payload_objects_are_canonical() {
     let material = profile_material();
     let observation_id = CanonicalObservationIdV1::derive(&material).unwrap();
-    let idempotency_key = IdempotencyKeyV1::derive(&material).unwrap();
+    let idempotency_key = CanonicalObservationIdV1::derive(&material).unwrap();
 
     assert_eq!(
         observation_id.as_str(),
@@ -205,11 +201,11 @@ fn native_record_identity_is_independent_of_generation_and_ordering_position() {
     let source = provider_source("hermes", "session.fixture");
     let native_record_id = ObservationId::new("message.fixture").unwrap();
     let identity = |generation, start, end| {
-        ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationIdentityMaterialV1::for_native_record(
             source.clone(),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(generation).unwrap(),
-            ClaudeByteRangeV1::new(start, end).unwrap(),
+            ObservationSourceGenerationV1::new(generation).unwrap(),
+            ObservationSourceRangeV1::new(start, end).unwrap(),
             ObservationOrderingDomainV1::SqliteRowId,
             native_record_id.clone(),
         )
@@ -273,15 +269,15 @@ fn positional_occurrence_disambiguation_binds_base_identity_and_exact_range() {
 fn claude_native_identity_survives_transcript_relocation() {
     let native_record_id = ObservationId::new("message.fixture").unwrap();
     let identity = |source_key: &str, generation, start, end| {
-        ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationIdentityMaterialV1::for_native_record(
             ObservationSourceIdentityV1::for_source(
                 SessionId::new("session.fixture").unwrap(),
                 SessionId::new(source_key).unwrap(),
             )
             .unwrap(),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(generation).unwrap(),
-            ClaudeByteRangeV1::new(start, end).unwrap(),
+            ObservationSourceGenerationV1::new(generation).unwrap(),
+            ObservationSourceRangeV1::new(start, end).unwrap(),
             ObservationOrderingDomainV1::FileBytes,
             native_record_id.clone(),
         )
@@ -295,15 +291,15 @@ fn claude_native_identity_survives_transcript_relocation() {
         CanonicalObservationIdV1::derive(&relocated).unwrap()
     );
 
-    let other_session = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let other_session = ObservationIdentityMaterialV1::for_native_record(
         ObservationSourceIdentityV1::for_source(
             SessionId::new("session.other").unwrap(),
             SessionId::new("source.relocated").unwrap(),
         )
         .unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(2).unwrap(),
-        ClaudeByteRangeV1::new(40, 41).unwrap(),
+        ObservationSourceGenerationV1::new(2).unwrap(),
+        ObservationSourceRangeV1::new(40, 41).unwrap(),
         ObservationOrderingDomainV1::FileBytes,
         native_record_id,
     )
@@ -313,11 +309,11 @@ fn claude_native_identity_survives_transcript_relocation() {
         CanonicalObservationIdV1::derive(&other_session).unwrap()
     );
 
-    let other_record = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let other_record = ObservationIdentityMaterialV1::for_native_record(
         original.source().clone(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(2).unwrap(),
-        ClaudeByteRangeV1::new(40, 41).unwrap(),
+        ObservationSourceGenerationV1::new(2).unwrap(),
+        ObservationSourceRangeV1::new(40, 41).unwrap(),
         ObservationOrderingDomainV1::FileBytes,
         ObservationId::new("message.other").unwrap(),
     )
@@ -330,7 +326,7 @@ fn claude_native_identity_survives_transcript_relocation() {
 
 #[test]
 fn canonical_envelope_preserves_typed_facts_without_inventing_relations() {
-    let range = ClaudeByteRangeV1::new(4, 5).unwrap();
+    let range = ObservationSourceRangeV1::new(4, 5).unwrap();
     let envelope = CanonicalObservationEnvelopeV1::new(
         ProviderId::new("hermes").unwrap(),
         "message",
@@ -399,7 +395,7 @@ fn canonical_session_fact_keeps_project_identity_separate_from_native_location()
         ],
         CanonicalObservationEvidenceV1::new(
             ObservationOrderingDomainV1::SqliteRowId,
-            ClaudeByteRangeV1::new(1, 2).unwrap(),
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
         ),
     )
     .unwrap();
@@ -508,7 +504,7 @@ fn canonical_envelope_rejects_every_limit_overflow() {
         vec![fact; MAX_CANONICAL_OBSERVATION_FACTS_V1 + 1],
         CanonicalObservationEvidenceV1::new(
             ObservationOrderingDomainV1::FileBytes,
-            ClaudeByteRangeV1::new(1, 2).unwrap(),
+            ObservationSourceRangeV1::new(1, 2).unwrap(),
         ),
     )
     .unwrap_err();
@@ -517,7 +513,7 @@ fn canonical_envelope_rejects_every_limit_overflow() {
 
 #[test]
 fn workflow_lifecycle_facts_preserve_native_optional_evidence_and_legacy_wire() {
-    let range = ClaudeByteRangeV1::new(8, 9).unwrap();
+    let range = ObservationSourceRangeV1::new(8, 9).unwrap();
     let envelope = CanonicalObservationEnvelopeV1::new(
         ProviderId::new("fixture-provider").unwrap(),
         "workflow_event",
@@ -590,7 +586,7 @@ fn workflow_lifecycle_facts_preserve_native_optional_evidence_and_legacy_wire() 
 
 #[test]
 fn canonical_envelope_rejects_visible_reasoning_without_content() {
-    let range = ClaudeByteRangeV1::new(1, 2).unwrap();
+    let range = ObservationSourceRangeV1::new(1, 2).unwrap();
     let error = CanonicalObservationEnvelopeV1::new(
         ProviderId::new("codex").unwrap(),
         "reasoning",
@@ -631,11 +627,11 @@ fn receipt_derivation_is_canonical_and_generation_bound() {
     assert_eq!(SanitizerDispositionV1::Rejected.as_str(), "rejected");
     assert_eq!(SanitizerDispositionV1::Quarantined.as_str(), "quarantined");
 
-    let changed_generation = ClaudeObservationIdentityMaterialV1::new(
+    let changed_generation = ObservationIdentityMaterialV1::new(
         source("session.fixture"),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(8).unwrap(),
-        ClaudeByteRangeV1::new(12, 34).unwrap(),
+        ObservationSourceGenerationV1::new(8).unwrap(),
+        ObservationSourceRangeV1::new(12, 34).unwrap(),
     )
     .unwrap();
     let changed = CanonicalClaudeSanitizationReceiptMaterialV1::for_durable_payload(
@@ -688,13 +684,13 @@ fn idempotency_wire_field_is_a_canonical_identity_alias() {
 #[test]
 fn scope_participates_in_identity_and_invalid_positions_are_rejected() {
     let profile = profile_material();
-    let project = ClaudeObservationIdentityMaterialV1::new(
+    let project = ObservationIdentityMaterialV1::new(
         source("session.fixture"),
         ObservationScopeV1::Project {
             project_id: ProjectId::new("project.fixture").unwrap(),
         },
-        ClaudeFileGenerationV1::new(7).unwrap(),
-        ClaudeByteRangeV1::new(12, 34).unwrap(),
+        ObservationSourceGenerationV1::new(7).unwrap(),
+        ObservationSourceRangeV1::new(12, 34).unwrap(),
     )
     .unwrap();
 
@@ -703,19 +699,19 @@ fn scope_participates_in_identity_and_invalid_positions_are_rejected() {
         CanonicalObservationIdV1::derive(&project).unwrap()
     );
     assert_ne!(
-        IdempotencyKeyV1::derive(&profile).unwrap(),
-        IdempotencyKeyV1::derive(&project).unwrap()
+        CanonicalObservationIdV1::derive(&profile).unwrap(),
+        CanonicalObservationIdV1::derive(&project).unwrap()
     );
-    assert!(ClaudeFileGenerationV1::new(0).is_err());
-    assert!(ClaudeByteRangeV1::new(5, 5).is_err());
-    assert!(ClaudeByteRangeV1::new(6, 5).is_err());
+    assert!(ObservationSourceGenerationV1::new(0).is_err());
+    assert!(ObservationSourceRangeV1::new(5, 5).is_err());
+    assert!(ObservationSourceRangeV1::new(6, 5).is_err());
 }
 
 #[test]
 fn source_cursors_enforce_their_comparison_domain() {
-    let generation = ClaudeFileGenerationV1::new(2).unwrap();
+    let generation = ObservationSourceGenerationV1::new(2).unwrap();
     let byte_cursor = |session: &str, scope, generation, offset| {
-        ClaudeSourceCursorV1::new(source(session), scope, generation, offset).unwrap()
+        ObservationSourceCursorV1::new(source(session), scope, generation, offset).unwrap()
     };
     let first = byte_cursor(
         "session.fixture",
@@ -770,7 +766,7 @@ fn source_cursors_enforce_their_comparison_domain() {
             .checked_cmp(&byte_cursor(
                 "session.fixture",
                 ObservationScopeV1::Profile,
-                ClaudeFileGenerationV1::new(3).unwrap(),
+                ObservationSourceGenerationV1::new(3).unwrap(),
                 20,
             ))
             .is_err()
@@ -779,17 +775,17 @@ fn source_cursors_enforce_their_comparison_domain() {
 
 #[test]
 fn source_cursor_resume_checkpoints_round_trip_without_breaking_legacy_json() {
-    let legacy = ClaudeSourceCursorV1::new(
+    let legacy = ObservationSourceCursorV1::new(
         source("session.fixture"),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(2).unwrap(),
+        ObservationSourceGenerationV1::new(2).unwrap(),
         20,
     )
     .unwrap();
     let legacy_json = serde_json::to_value(&legacy).unwrap();
     assert!(legacy_json.get("file_identity").is_none());
     assert!(legacy_json.get("resume_fingerprint").is_none());
-    let legacy_round_trip: ClaudeSourceCursorV1 = serde_json::from_value(legacy_json).unwrap();
+    let legacy_round_trip: ObservationSourceCursorV1 = serde_json::from_value(legacy_json).unwrap();
     assert_eq!(legacy_round_trip.file_identity(), None);
     assert_eq!(legacy_round_trip.resume_fingerprint(), None);
 
@@ -797,7 +793,7 @@ fn source_cursor_resume_checkpoints_round_trip_without_breaking_legacy_json() {
     let checkpoint_json = serde_json::to_value(&checkpoint).unwrap();
     assert_eq!(checkpoint_json["file_identity"], 41);
     assert_eq!(checkpoint_json["resume_fingerprint"], 73);
-    let round_trip: ClaudeSourceCursorV1 = serde_json::from_value(checkpoint_json).unwrap();
+    let round_trip: ObservationSourceCursorV1 = serde_json::from_value(checkpoint_json).unwrap();
     assert_eq!(round_trip, checkpoint);
 }
 
@@ -911,11 +907,11 @@ fn collision_classification_distinguishes_duplicates_collisions_and_new_identity
     let exact_retry = durable(material.clone(), reordered_payload);
     let collision = durable(material, json!({"a": 1, "b": 3}));
     let distinct = durable(
-        ClaudeObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::new(
             source("session.fixture"),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(7).unwrap(),
-            ClaudeByteRangeV1::new(34, 56).unwrap(),
+            ObservationSourceGenerationV1::new(7).unwrap(),
+            ObservationSourceRangeV1::new(34, 56).unwrap(),
         )
         .unwrap(),
         json!({"a": 1, "b": 2}),
@@ -960,7 +956,7 @@ fn workflow_lifecycle_payload_dedupe_and_conflict_remain_deterministic() {
                 }],
                 CanonicalObservationEvidenceV1::new(
                     ObservationOrderingDomainV1::FileBytes,
-                    ClaudeByteRangeV1::new(12, 34).unwrap(),
+                    ObservationSourceRangeV1::new(12, 34).unwrap(),
                 ),
             )
             .unwrap(),
@@ -1005,15 +1001,15 @@ fn workflow_lifecycle_payload_dedupe_and_conflict_remain_deterministic() {
 /// quarantine an undecodable observation.
 #[test]
 fn durable_observations_written_before_native_identity_still_decode() {
-    let material = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let material = ObservationIdentityMaterialV1::for_native_record(
         ObservationSourceIdentityV1::for_source(
             SessionId::new("session.fixture").unwrap(),
             SessionId::new("source.fixture").unwrap(),
         )
         .unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(3).unwrap(),
-        ClaudeByteRangeV1::new(10, 11).unwrap(),
+        ObservationSourceGenerationV1::new(3).unwrap(),
+        ObservationSourceRangeV1::new(10, 11).unwrap(),
         ObservationOrderingDomainV1::FileBytes,
         ObservationId::new("message.fixture").unwrap(),
     )
@@ -1108,16 +1104,16 @@ fn the_live_observation_derivation_is_pinned() {
     );
 }
 
-fn native_identity_fixture() -> ClaudeObservationIdentityMaterialV1 {
-    ClaudeObservationIdentityMaterialV1::for_native_record(
+fn native_identity_fixture() -> ObservationIdentityMaterialV1 {
+    ObservationIdentityMaterialV1::for_native_record(
         ObservationSourceIdentityV1::for_source(
             SessionId::new("session.fixture").unwrap(),
             SessionId::new("source.fixture").unwrap(),
         )
         .unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(3).unwrap(),
-        ClaudeByteRangeV1::new(10, 11).unwrap(),
+        ObservationSourceGenerationV1::new(3).unwrap(),
+        ObservationSourceRangeV1::new(10, 11).unwrap(),
         ObservationOrderingDomainV1::FileBytes,
         ObservationId::new("message.fixture").unwrap(),
     )
@@ -1170,7 +1166,7 @@ fn decoded_observations_report_the_identity_they_are_stored_under() {
     }
 }
 
-fn domain_digest_id(domain: &[u8], material: &ClaudeObservationIdentityMaterialV1) -> String {
+fn domain_digest_id(domain: &[u8], material: &ObservationIdentityMaterialV1) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     hasher.update(tracedecay_domain::canonical_json_bytes(material).unwrap());
@@ -1249,10 +1245,10 @@ fn cline_transition_observation(
     )
     .unwrap();
     durable(
-        ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationIdentityMaterialV1::for_native_record(
             source,
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(if native_source { 9 } else { 3 }).unwrap(),
+            ObservationSourceGenerationV1::new(if native_source { 9 } else { 3 }).unwrap(),
             range,
             ObservationOrderingDomainV1::SnapshotOrder,
             native_id,
@@ -1307,10 +1303,10 @@ fn cline_native_transition_proofs_bind_exact_records_and_stable_lookup_ids() {
             Some(new.observation_id())
         );
         let relocated = durable(
-            ClaudeObservationIdentityMaterialV1::for_native_record(
+            ObservationIdentityMaterialV1::for_native_record(
                 new.source().clone(),
                 new.scope().clone(),
-                ClaudeFileGenerationV1::new(27).unwrap(),
+                ObservationSourceGenerationV1::new(27).unwrap(),
                 ObservationSourceRangeV1::new(40, 41).unwrap(),
                 ObservationOrderingDomainV1::SnapshotOrder,
                 new.identity().native_record_id().unwrap().clone(),
@@ -1338,7 +1334,7 @@ fn cline_native_transition_rejects_source_scope_and_native_identity_mismatches()
     let new = cline_transition_observation("cline", ClineTranscriptStream::ApiHistory, true, range);
     let reidentify = |source, scope, native_id| {
         durable(
-            ClaudeObservationIdentityMaterialV1::for_native_record(
+            ObservationIdentityMaterialV1::for_native_record(
                 source,
                 scope,
                 new.identity().generation(),

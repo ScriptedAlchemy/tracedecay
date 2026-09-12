@@ -183,7 +183,7 @@ pub fn transcript_cwd(path: &Path) -> Option<PathBuf> {
             offset = end_offset;
             continue;
         }
-        let range = tracedecay_domain::ClaudeByteRangeV1::new(offset, end_offset).ok()?;
+        let range = tracedecay_domain::ObservationSourceRangeV1::new(offset, end_offset).ok()?;
         if let Ok(parsed) = parse_claude_record_v1(record, range)
             && let Some(cwd) = parsed.value().get("cwd").and_then(Value::as_str)
             && !cwd.is_empty()

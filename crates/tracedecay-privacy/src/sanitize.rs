@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
-    CanonicalClaudeSanitizationReceiptMaterialV1, ClaudeObservationIdentityMaterialV1,
-    ComponentVersion, DurableClaudeObservationV1, ObservationContractError, ObservationId,
+    CanonicalClaudeSanitizationReceiptMaterialV1, ComponentVersion, DurableClaudeObservationV1,
+    ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationSourceIdentityV1, PayloadReferenceV1, RetentionClass,
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
 };
@@ -230,7 +230,7 @@ impl ClaudeRecordSanitizerV1 {
     pub fn sanitize_parsed(
         &self,
         parsed: ParsedClaudeRecordV1,
-        mut identity: ClaudeObservationIdentityMaterialV1,
+        mut identity: ObservationIdentityMaterialV1,
         retention_class: RetentionClass,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
         if !self.policy.valid {
@@ -351,7 +351,7 @@ impl ClaudeRecordSanitizerV1 {
         &self,
         kind: ParsedPolicyLimitViolation,
         raw_digest: &[u8; 32],
-        identity: &ClaudeObservationIdentityMaterialV1,
+        identity: &ObservationIdentityMaterialV1,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
         let (disposition, detector, action, boundary) = match kind {
             ParsedPolicyLimitViolation::NestingDepth => (
@@ -409,7 +409,7 @@ impl ClaudeRecordSanitizerV1 {
     fn quarantined_outcome_from_digest(
         &self,
         raw_digest: &[u8; 32],
-        identity: &ClaudeObservationIdentityMaterialV1,
+        identity: &ObservationIdentityMaterialV1,
         findings: Vec<SanitizationFindingV1>,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
         let disposition = SanitizerDispositionV1::Quarantined;
@@ -437,8 +437,8 @@ impl ClaudeRecordSanitizerV1 {
 }
 
 fn protect_observation_identity(
-    identity: &ClaudeObservationIdentityMaterialV1,
-) -> Result<(ClaudeObservationIdentityMaterialV1, bool), PrivacySanitizerError> {
+    identity: &ObservationIdentityMaterialV1,
+) -> Result<(ObservationIdentityMaterialV1, bool), PrivacySanitizerError> {
     let provider = identity.source().provider().clone();
     let (session_id, session_changed) =
         protected_session_id(identity.source().session_id().as_str())?;
@@ -459,7 +459,7 @@ fn protect_observation_identity(
         Some(native_record_id) => {
             let (native_record_id, changed) = protected_observation_id(native_record_id.as_str())?;
             (
-                ClaudeObservationIdentityMaterialV1::for_native_record(
+                ObservationIdentityMaterialV1::for_native_record(
                     source,
                     scope,
                     generation,
@@ -471,7 +471,7 @@ fn protect_observation_identity(
             )
         }
         None if ordering_domain == ObservationOrderingDomainV1::FileBytes => (
-            ClaudeObservationIdentityMaterialV1::new(source, scope, generation, position)?,
+            ObservationIdentityMaterialV1::new(source, scope, generation, position)?,
             false,
         ),
         None => {
@@ -564,7 +564,7 @@ fn protect_canonical_payload_structural_ids(
 
 fn validate_canonical_structural_identity(
     payload: &Value,
-    identity: &ClaudeObservationIdentityMaterialV1,
+    identity: &ObservationIdentityMaterialV1,
 ) -> Result<(), PrivacySanitizerError> {
     let invalid =
         || PrivacySanitizerError::DomainContract(ObservationContractError::InvalidCanonicalPayload);
