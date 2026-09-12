@@ -467,9 +467,15 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     _run_checked(["git", "add", "."], root, "fixture git add")
     _run_checked(["git", "commit", "--quiet", "-m", "test: seed catalog sweep fixture"], root, "fixture git commit")
     cleanup_branch = "tool-sweep-cleanup"
+    integration_branch = "tool-sweep-integration-target"
     commit = _run_checked(
         ["git", "rev-parse", "HEAD"], root, "fixture git revision"
     ).stdout.strip()
+    _run_checked(
+        ["git", "branch", integration_branch, commit],
+        root,
+        "fixture integration target branch",
+    )
     cleanup_root = parent / "cleanup-worktree"
     _run_checked(
         ["git", "worktree", "add", "--quiet", "-b", cleanup_branch, str(cleanup_root)],
@@ -573,6 +579,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         "root": str(root),
         "cleanup_root": str(cleanup_root),
         "cleanup_branch": cleanup_branch,
+        "integration_branch": integration_branch,
         "glob": "Cargo.toml",
         "key": "package.name",
         "from_ref": "HEAD",

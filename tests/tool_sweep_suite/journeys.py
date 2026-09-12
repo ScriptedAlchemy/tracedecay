@@ -1988,6 +1988,24 @@ def _recreate_cleanup_worktree(fixture: dict[str, Any]) -> None:
         )
 
 
+def _suspend_fixture_hunk(fixture: dict[str, Any]) -> None:
+    path = Path(fixture["root"]) / "docs/large.md"
+    suffix = "catalog sweep uncommitted hunk line\n"
+    content = path.read_text()
+    if not content.endswith(suffix):
+        raise JourneyError("native integration fixture omitted its owned working-tree hunk")
+    path.write_text(content[: -len(suffix)])
+    fixture["native_suspended_hunk"] = content
+
+
+def _restore_fixture_hunk(fixture: dict[str, Any]) -> None:
+    content = fixture.pop("native_suspended_hunk", None)
+    if not isinstance(content, str):
+        return
+    path = Path(fixture["root"]) / "docs/large.md"
+    path.write_text(content)
+
+
 def prime_native_admin_lifecycle(
     fixture: dict[str, Any],
     call: Call,
@@ -2031,7 +2049,7 @@ def prime_native_admin_lifecycle(
         "scope_set_digest": scope_set["digest"],
         "operation": {
             "kind": "git",
-            "request": {"operation": "git_status", "request": {"format": "json"}},
+            "request": {"operation": "git_status", "request": {}},
         },
         "page": 0,
         "continuation": None,
@@ -2051,6 +2069,12 @@ def prime_native_admin_lifecycle(
     }
     if len(exact_scopes) != 2:
         raise JourneyError("multi-root execute did not return exact Git status for both roots")
+
+    # Native apply intentionally refuses a dirty destination. The sweep owns
+    # exactly one working-tree hunk for the Git preview journey, so remove it
+    # while the native lifecycle runs and restore the byte-exact fixture state
+    # once the integration effect no longer needs a clean destination.
+    _suspend_fixture_hunk(fixture)
 
     source_scope = _root_scope(scope_set, fixture["cleanup_root"])
     destination_scope = _root_scope(scope_set, fixture["root"])
@@ -2147,9 +2171,43 @@ def prime_native_admin_lifecycle(
         preflight_arguments,
         deadline("tracedecay_preflight_native_integration"),
     )
-    preview = _native_preview(preflight)
-    if preview["ordered_commit_count"] < 1:
+    declared_preview = _native_preview(preflight)
+    if declared_preview["ordered_commit_count"] < 1:
         raise JourneyError("native preflight found no source commit to integrate")
+
+    # A declared edge into the active checkout is the authentic stack-signal
+    # producer, but native apply correctly refuses to mutate an occupied ref.
+    # Freeze the same returned repository/inventory authority as an independent
+    # integration into an unoccupied fixture branch for the effect lifecycle.
+    integration_snapshot_arguments = {
+        **snapshot_arguments,
+        "selection": {
+            "kind": "independent_branch",
+            "binding": {
+                "proposal_digest": scope_set["digest"],
+                "source_ref": source_scope["reference"],
+                "destination_ref": f"refs/heads/{fixture['integration_branch']}",
+            },
+        },
+    }
+    integration_stack = call(
+        "tracedecay_stack_snapshot",
+        integration_snapshot_arguments,
+        deadline("tracedecay_stack_snapshot"),
+    )
+    integration_preflight_arguments = {
+        "snapshot": _object_field(integration_stack, "sealed_snapshot"),
+        "preferred_mode": "fast_forward",
+        "format": "json",
+    }
+    integration_preflight = call(
+        "tracedecay_preflight_native_integration",
+        integration_preflight_arguments,
+        deadline("tracedecay_preflight_native_integration"),
+    )
+    preview = _native_preview(integration_preflight)
+    if preview["ordered_commit_count"] < 1:
+        raise JourneyError("native integration preflight found no source commit to integrate")
     approve_arguments = {
         "preview_id": preview["preview_id"],
         "preview_digest": preview["preview_digest"],
@@ -2209,6 +2267,9 @@ def prime_native_admin_lifecycle(
                     "native_cancel_arguments": cancel_arguments,
                 }
             )
+
+    if effect_target != "tracedecay_apply_native_integration":
+        _restore_fixture_hunk(fixture)
 
     cleanup_target = {
         "kind": "worktree",
@@ -3135,6 +3196,7 @@ def _native_effect(
                 status_arguments,
                 deadline("tracedecay_cancel_native_integration"),
             )
+            _restore_fixture_hunk(fixture)
             return "inventory/snapshot/preflight/approve/apply/status/cancel verified"
         if name == "tracedecay_cancel_native_integration":
             status = call(
