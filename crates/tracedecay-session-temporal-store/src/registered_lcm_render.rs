@@ -44,7 +44,9 @@ pub(super) async fn describe_relation_summary_ids(
 pub(super) fn expand_relation_summary_ids(request: &LcmExpandRequest) -> Vec<String> {
     match &request.target {
         LcmExpandTarget::SummaryNode { node_id } => vec![node_id.clone()],
-        LcmExpandTarget::RawMessage { .. } | LcmExpandTarget::ExternalPayload { .. } => Vec::new(),
+        LcmExpandTarget::CanonicalOccurrence { .. }
+        | LcmExpandTarget::RawMessage { .. }
+        | LcmExpandTarget::ExternalPayload { .. } => Vec::new(),
     }
 }
 
@@ -143,6 +145,28 @@ pub(super) async fn expand(
         limit: usize::MAX,
     });
     let expansion = match request.target {
+        LcmExpandTarget::CanonicalOccurrence { message_id } => {
+            let raw = load_raw_message_by_identity(
+                snapshot,
+                &request.provider,
+                &request.session_id,
+                &message_id,
+            )
+            .await?;
+            LcmExpandResponse {
+                kind: "raw_message".to_string(),
+                content: String::new(),
+                content_range: empty_content_range(slice),
+                raw_message: None,
+                raw_message_metadata: Some(raw),
+                summary_node: None,
+                summary_sources: Vec::new(),
+                payload_ref: None,
+                from_current_session: Some(true),
+                externalized_note: None,
+                source_pagination: None,
+            }
+        }
         LcmExpandTarget::RawMessage { store_id } => {
             let raw = load_raw_message(snapshot, store_id).await?;
             if raw.provider != request.provider {
@@ -490,6 +514,31 @@ async fn load_raw_message(
     find_raw_message(snapshot, store_id)
         .await?
         .ok_or(LcmError::SummarySourceNotOwnedBySession)
+}
+
+async fn load_raw_message_by_identity(
+    snapshot: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+) -> Result<LcmRawMessageMetadata, LcmError> {
+    let sql = format!(
+        "SELECT {RAW_MESSAGE_METADATA_SELECT_COLUMNS}
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
+         ORDER BY store_id
+         LIMIT 2"
+    );
+    let mut rows = query(snapshot, &sql, params![provider, session_id, message_id]).await?;
+    let row = next_row(&mut rows)
+        .await?
+        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+    if next_row(&mut rows).await?.is_some() {
+        return Err(LcmError::Db(
+            "duplicate raw messages for exact provider/session/message identity".to_string(),
+        ));
+    }
+    raw_message_metadata_from_row(&row)
 }
 
 /// Reads one raw row by `store_id` alone, so a row belonging to another session
