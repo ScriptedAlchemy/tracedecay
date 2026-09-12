@@ -79,6 +79,20 @@ pub struct CodeGenerationRetentionRecordV1 {
     pub stranded_scope_count: u64,
     #[serde(default = "zero_storage_bytes")]
     pub stranded_scope_bytes: StorageByteSizeV1,
+    /// Sealed graph generation artifacts in the project graph store whose
+    /// generation is no longer any projection's verified head. They are
+    /// retired when a newer head installs; a count here means that
+    /// retirement has not run since the last publication.
+    #[serde(default)]
+    pub superseded_sealed_generation_count: u64,
+    #[serde(default = "zero_storage_bytes")]
+    pub superseded_sealed_generation_bytes: StorageByteSizeV1,
+    /// `.staging-*` directories a seal left under the sealed root: a build
+    /// that never installed. Swept on the next store open.
+    #[serde(default)]
+    pub abandoned_sealed_staging_count: u64,
+    #[serde(default = "zero_storage_bytes")]
+    pub abandoned_sealed_staging_bytes: StorageByteSizeV1,
 }
 
 /// `serde(default)` needs a value, and `StorageByteSizeV1` deliberately has no
@@ -97,6 +111,10 @@ impl CodeGenerationRetentionRecordV1 {
             // Same invariant one level up: bytes are never reported without the
             // scopes that hold them.
             || (self.stranded_scope_count == 0 && self.stranded_scope_bytes.get() > 0)
+            || (self.superseded_sealed_generation_count == 0
+                && self.superseded_sealed_generation_bytes.get() > 0)
+            || (self.abandoned_sealed_staging_count == 0
+                && self.abandoned_sealed_staging_bytes.get() > 0)
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "code generation retention totals",
@@ -116,6 +134,14 @@ impl CodeGenerationRetentionRecordV1 {
     #[must_use]
     pub fn has_stranded_scopes(&self) -> bool {
         self.stranded_scope_count > 0
+    }
+
+    /// True when the graph store holds sealed artifacts nothing serves: a
+    /// superseded generation whose retirement has not run, or staging an
+    /// interrupted seal left behind.
+    #[must_use]
+    pub fn has_dead_sealed_artifacts(&self) -> bool {
+        self.superseded_sealed_generation_count > 0 || self.abandoned_sealed_staging_count > 0
     }
 }
 
@@ -238,6 +264,10 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(2_000),
             stranded_scope_count: 0,
             stranded_scope_bytes: StorageByteSizeV1(0),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
         };
 
         assert!(record.validate().is_err());
@@ -253,6 +283,10 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(1),
             stranded_scope_count: 0,
             stranded_scope_bytes: StorageByteSizeV1(0),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
         };
 
         assert!(record.validate().is_err());
@@ -268,6 +302,10 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(0),
             stranded_scope_count: 0,
             stranded_scope_bytes: StorageByteSizeV1(7_730_941_132),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
         };
 
         assert!(record.validate().is_err());
@@ -283,6 +321,10 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(0),
             stranded_scope_count: 2,
             stranded_scope_bytes: StorageByteSizeV1(7_730_941_132),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
         };
 
         assert!(record.validate().is_ok());
