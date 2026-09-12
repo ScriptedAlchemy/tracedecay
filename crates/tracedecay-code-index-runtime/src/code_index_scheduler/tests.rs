@@ -13436,7 +13436,6 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .worktree
         .clone()
         .expect("worktree identity");
-    let cold_privacy_domain = latest.generation.manifest().privacy_domain.clone();
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted
@@ -13469,18 +13468,35 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .hold_active_decode();
+    let cursor_profile = TempDir::new().expect("cursor profile");
+    let cursor_runtime =
+        tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            cursor_profile.path(),
+        )
+        .await
+        .expect("cursor key runtime");
+    let cursor_keys = cursor_runtime
+        .profile_database()
+        .load_session_cursor_key_provider_result()
+        .await
+        .expect("cursor keys");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        super::query_runtime::mount_core_query_authority_on_project_open(
+            &registry,
+            fixture.path(),
+            graph_context.scope(),
+            &cursor_keys,
+        ),
+    )
+    .await
+    .expect("core query authority mount must not wait on lexical decode")
+    .expect("mount core query authority from retained metadata");
     macro_rules! assert_graph_only_query {
         ($kind:expr, $method:ident, $request:expr) => {{
             let operation = callable_code_operation($kind).expect("operation");
             let context =
                 application_context(&operation, cold_repository.clone(), cold_worktree.clone());
-            mount_query_authority(
-                &registry,
-                fixture.path(),
-                &context,
-                cold_privacy_domain.clone(),
-            )
-            .await;
             let outcome = tokio::time::timeout(
                 Duration::from_secs(2),
                 registry.$method(

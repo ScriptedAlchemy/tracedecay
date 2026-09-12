@@ -515,9 +515,9 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
     let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         if registry
-            .latest_text_fresh_for_scope(&scope)
+            .retained_text_owner_freshness_for_scope(&scope)
             .await
-            .is_some_and(|latest| latest.interactive_graph_store().is_ok())
+            .is_some_and(|(latest, current)| current && latest.interactive_graph_store().is_ok())
         {
             break;
         }
@@ -587,7 +587,9 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
     );
     git(fixture.path(), &["commit", "-qam", "publish generation B"]);
     let (generation_b, hub_b) = loop {
-        if let Some(latest) = registry.latest_text_fresh_for_scope(&scope).await
+        if let Some((latest, true)) = registry
+            .retained_text_owner_freshness_for_scope(&scope)
+            .await
             && latest.metadata().manifest().generation_id != generation_a
             && let Ok(store) = latest.interactive_graph_store()
             && let Ok(reader) = store.interactive_reader_with_cancellation(
