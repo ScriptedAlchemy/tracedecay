@@ -112,10 +112,14 @@ def response_handle(response: dict[str, Any]) -> str | None:
     return None
 
 
-def fact_id_with_content(response: dict[str, Any], content: str) -> int | None:
+def fact_id_with_content(response: dict[str, Any], content: str) -> str | int | None:
     for value in objects(response):
         fact_id = value.get("fact_id")
-        if isinstance(fact_id, int) and not isinstance(fact_id, bool) and fact_id > 0 and value.get("content") == content:
+        valid_id = (
+            isinstance(fact_id, str) and bool(fact_id)
+            or isinstance(fact_id, int) and not isinstance(fact_id, bool) and fact_id > 0
+        )
+        if valid_id and value.get("content") == content:
             return fact_id
     for text in text_blocks(response):
         matched = re.search(rf"^\s*-\s*#(\d+).*:\s*{re.escape(content)}\s*$", text, re.MULTILINE)

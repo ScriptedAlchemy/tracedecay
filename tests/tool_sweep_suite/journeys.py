@@ -33,7 +33,7 @@ class PreparedJourney:
     cleanup: Callable[[dict[str, Any]], str]
 
 
-def _fact_trust(response: dict[str, Any], fact_id: int) -> float | None:
+def _fact_trust(response: dict[str, Any], fact_id: str | int) -> float | None:
     """Read the exact fact's trust score from a fact-store get response."""
     for value in objects(response):
         if value.get("fact_id") != fact_id:
@@ -41,10 +41,13 @@ def _fact_trust(response: dict[str, Any], fact_id: int) -> float | None:
         trust = value.get("trust_score")
         if isinstance(trust, (int, float)) and not isinstance(trust, bool):
             return float(trust)
+        millionths = value.get("trust_score_millionths")
+        if isinstance(millionths, int) and not isinstance(millionths, bool):
+            return millionths / 1_000_000
     return None
 
 
-def _seeded_fact(call: Call, deadline: Deadline, content: str) -> int:
+def _seeded_fact(call: Call, deadline: Deadline, content: str) -> str | int:
     """Produce one real isolated fact and return its structured identity."""
     added = call(
         "tracedecay_fact_store_add",
@@ -52,7 +55,7 @@ def _seeded_fact(call: Call, deadline: Deadline, content: str) -> int:
             "content": content,
             "category": "tool",
             "trust": 0.5,
-            "source": "catalog_sweep",
+            "source_label": "catalog_sweep",
             "format": "json",
         },
         deadline("tracedecay_fact_store_add"),
@@ -63,7 +66,7 @@ def _seeded_fact(call: Call, deadline: Deadline, content: str) -> int:
     return fact_id
 
 
-def _remove_seeded_fact(call: Call, deadline: Deadline, fact_id: int) -> None:
+def _remove_seeded_fact(call: Call, deadline: Deadline, fact_id: str | int) -> None:
     removed = call(
         "tracedecay_fact_store_remove",
         {"fact_id": fact_id, "format": "json"},
@@ -114,9 +117,50 @@ def _require_snapshot(fixture: dict[str, str], expected: dict[str, str], stage: 
         raise JourneyError(f"{stage} did not restore the exact source preimage")
 
 
+def _effect_rollback_arguments(
+    response: dict[str, Any], original_idempotency_key: str,
+) -> dict[str, Any]:
+    effect_id = first_value(response, {"effect_id"})
+    input_digest = first_value(response, {"input_digest"})
+    committed_state = first_value(response, {"committed_state"})
+    if not all(
+        isinstance(value, str) and value
+        for value in (effect_id, input_digest, committed_state)
+    ):
+        raise JourneyError("source-edit receipt omitted the identities rollback consumes")
+    return {
+        "effect_id": effect_id,
+        "original_idempotency_key": original_idempotency_key,
+        "idempotency_key": f"tool-sweep-source-edit-rollback-{time.monotonic_ns()}",
+        "original_input_digest": input_digest,
+        "expected_state": committed_state,
+        "confirm": True,
+        "format": "json",
+    }
+
+
+def _rollback_effect(
+    call: Call,
+    deadline: Deadline,
+    response: dict[str, Any],
+    original_idempotency_key: str,
+) -> None:
+    effect_id = first_value(response, {"effect_id"})
+    rolled_back = call(
+        "tracedecay_source_edit_rollback",
+        _effect_rollback_arguments(response, original_idempotency_key),
+        deadline("tracedecay_source_edit_rollback"),
+    )
+    if not has_true(rolled_back, "success") or not has_true(rolled_back, "reconciled"):
+        raise JourneyError("journaled rollback omitted its reconciled success receipt")
+    rollback_effect = first_value(rolled_back, {"effect_id"})
+    if not isinstance(rollback_effect, str) or not rollback_effect or rollback_effect == effect_id:
+        raise JourneyError("journaled rollback did not mint its own durable effect identity")
+
+
 def _rename_identity(
     call: Call, deadline: Deadline, node_id: str, new_name: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Mint the exact rename identity from the read-only preview producer."""
     preview = call(
         "tracedecay_rename_preview",
@@ -129,13 +173,25 @@ def _rename_identity(
             isinstance(node.get(key), str) and node.get(key)
             for key in ("id", "qualified_name", "kind", "file", "name")
         ):
-            return {
+            identity: dict[str, Any] = {
                 "node_id": node["id"],
                 "qualified_name": node["qualified_name"],
                 "kind": node["kind"],
                 "file": node["file"],
                 "old_name": node["name"],
             }
+            accepted_preview = next(
+                (
+                    candidate["accepted_preview"]
+                    for candidate in objects(preview)
+                    if isinstance(candidate.get("accepted_preview"), dict)
+                ),
+                None,
+            )
+            if accepted_preview is None:
+                raise JourneyError("rename preview omitted its accepted_preview capability")
+            identity["accepted_preview"] = accepted_preview
+            return identity
     raise JourneyError("rename preview did not publish the exact symbol identity")
 
 
@@ -246,33 +302,11 @@ def _source_edit(
             raise JourneyError(f"{name} idempotent retry did not replay its durable receipt")
         if first_value(replayed, {"effect_id"}) != effect_id:
             raise JourneyError(f"{name} idempotent retry changed its durable effect identity")
+        if name in {"tracedecay_move_symbol", "tracedecay_rename_symbol"}:
+            _rollback_effect(call, deadline, response, apply["idempotency_key"])
+            _require_snapshot(fixture, original, f"{name} rollback")
+            return "preview/apply/consumer/journaled rollback verified"
         rollback_arguments = inverse
-        if name == "tracedecay_move_symbol":
-            # Moving changes the owning file, so resolve the post-move identity
-            # from the real qualified-name producer before asking it to move back.
-            moved = call(
-                "tracedecay_by_qualified_name", {"qualified_name": fixture["symbol"]},
-                deadline("tracedecay_by_qualified_name"),
-            )
-            moved_symbol = first_value(moved, {"qualified_name"})
-            if not isinstance(moved_symbol, str) or not moved_symbol:
-                raise JourneyError("move consumer did not publish the moved symbol identity")
-            rollback_arguments = {**inverse, "symbol": moved_symbol}
-        elif name == "tracedecay_rename_symbol":
-            # Renaming re-keys the node, so resolve the post-rename identity
-            # from the live graph producer before renaming back.
-            renamed_node = call(
-                "tracedecay_by_qualified_name",
-                {"qualified_name": f"{fixture['symbol']}_renamed"},
-                deadline("tracedecay_by_qualified_name"),
-            )
-            renamed_id = first_value(renamed_node, {"node_id"})
-            if not isinstance(renamed_id, str) or not renamed_id:
-                raise JourneyError("rename consumer did not publish the renamed symbol identity")
-            rollback_arguments = {
-                **_rename_identity(call, deadline, renamed_id, fixture["symbol"]),
-                "new_name": fixture["symbol"],
-            }
         _source_rollback(call, inverse_tool, rollback_arguments, deadline)
         _require_snapshot(fixture, original, f"{name} rollback")
         return "preview/apply/consumer/rollback verified"
@@ -300,14 +334,8 @@ def _journaled_rollback(
         raise JourneyError("rollback producer move did not complete successfully")
     if _source_snapshot(fixture, tuple(original)) == original:
         raise JourneyError("rollback producer move did not change fixture source")
-    effect_id = first_value(applied, {"effect_id"})
-    input_digest = first_value(applied, {"input_digest"})
-    committed_state = first_value(applied, {"committed_state"})
-    if not all(
-        isinstance(value, str) and value
-        for value in (effect_id, input_digest, committed_state)
-    ):
-        raise JourneyError("move receipt omitted the identities rollback consumes")
+    rollback_arguments = _effect_rollback_arguments(applied, apply["idempotency_key"])
+    effect_id = rollback_arguments["effect_id"]
 
     def cleanup(response: dict[str, Any]) -> str:
         if not has_true(response, "success") or not has_true(response, "reconciled"):
@@ -319,15 +347,7 @@ def _journaled_rollback(
         return "move producer/journaled inverse/preimage restoration verified"
 
     return PreparedJourney(
-        {
-            "effect_id": effect_id,
-            "original_idempotency_key": apply["idempotency_key"],
-            "idempotency_key": f"tool-sweep-source-edit-rollback-{time.monotonic_ns()}",
-            "original_input_digest": input_digest,
-            "expected_state": committed_state,
-            "confirm": True,
-            "format": "json",
-        },
+        rollback_arguments,
         cleanup,
     )
 
@@ -556,7 +576,7 @@ def prepare(
                 "content": content,
                 "category": "tool",
                 "trust": 0.5,
-                "source": "catalog_sweep",
+                "source_label": "catalog_sweep",
                 "format": "json",
             },
             cleanup,
@@ -605,8 +625,20 @@ def prepare(
         fact_id = _seeded_fact(call, deadline, content)
 
         def cleanup(response: dict[str, Any]) -> str:
-            if not has_status(response, "recorded"):
-                raise JourneyError("fact feedback did not confirm a recorded receipt")
+            feedback = next(
+                (
+                    value["feedback"]
+                    for value in objects(response)
+                    if isinstance(value.get("feedback"), dict)
+                ),
+                None,
+            )
+            if (
+                first_value(response, {"outcome"}) != "effect"
+                or not isinstance(feedback, dict)
+                or feedback.get("action") != "helpful"
+            ):
+                raise JourneyError("fact feedback omitted its tagged helpful effect receipt")
             fetched = call(
                 "tracedecay_fact_store_get",
                 {"fact_id": fact_id, "format": "json"},
@@ -621,7 +653,7 @@ def prepare(
             return "helpful feedback raised the seeded fact's trust; producer fact removed"
 
         return PreparedJourney(
-            {"fact_id": fact_id, "action": "helpful", "source": "catalog_sweep", "format": "json"},
+            {"fact_id": fact_id, "action": "helpful", "source_label": "catalog_sweep", "format": "json"},
             cleanup,
         )
     if name == "tracedecay_memory_status":
