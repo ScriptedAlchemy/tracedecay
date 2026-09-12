@@ -6,11 +6,11 @@
       "query_execution": "serial_exact_workload_order",
       "query_workers": 1
     },
-    "exact_corpus_bytes": 147447,
+    "exact_corpus_bytes": 149745,
     "exact_eligible_chunks_10x": 19650,
     "exact_eligible_chunks_current": 1965,
-    "exact_file_count": 13,
-    "exact_query_count": 28,
+    "exact_file_count": 15,
+    "exact_query_count": 32,
     "fusion_revision": "CompositionKernel::compose",
     "model_revision": "JinaEmbeddingsV2BaseCode@516f4baf13dec4ddddda8631e019b5737c8bc250",
     "projection_revision": "retriever.semantic-flat.evaluation.v1",
@@ -95,11 +95,27 @@
       "scope": "context_eval"
     },
     {
+      "document_id": "auth_session",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/context_eval_project/src/auth/session.rs",
+      "source_path": "tests/fixtures/context_eval_project/src/auth/session.rs",
+      "scope": "context_eval"
+    },
+    {
       "document_id": "config_store",
       "eligibility": "searchable",
       "language": "rust",
       "path": "tests/fixtures/context_eval_project/src/storage/config_store.rs",
       "source_path": "tests/fixtures/context_eval_project/src/storage/config_store.rs",
+      "scope": "context_eval"
+    },
+    {
+      "document_id": "net_retry",
+      "eligibility": "searchable",
+      "language": "rust",
+      "path": "tests/fixtures/context_eval_project/src/net/retry.rs",
+      "source_path": "tests/fixtures/context_eval_project/src/net/retry.rs",
       "scope": "context_eval"
     },
     {
@@ -429,6 +445,43 @@
       ],
       "label": {
         "anchors": [
+          "canonical::write_canonical"
+        ],
+        "document_id": "canonical",
+        "literal": "fn write_canonical"
+      },
+      "partition": "train",
+      "query": "where is structured data made byte-stable before it is fingerprinted",
+      "query_id": "train-015",
+      "strata": [
+        "natural_language"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "coverage::VerifiedCacheGrantSnapshotV1::proves_current_access",
+          "coverage::RemoteCoverageV1::is_complete_for_requested_consistency"
+        ],
+        "document_id": "coverage",
+        "literal": "fn proves_current_access"
+      },
+      "partition": "train",
+      "query": "what proves an offline replica is still permitted to answer",
+      "query_id": "train-016",
+      "strata": [
+        "natural_language"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
           "watermark::VectorWatermark"
         ],
         "document_id": "watermark",
@@ -677,6 +730,42 @@
       "query_id": "validation-014",
       "strata": [
         "exact_error"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "auth_session::validate_session"
+        ],
+        "document_id": "auth_session",
+        "literal": "pub fn validate_session"
+      },
+      "partition": "validation",
+      "query": "what stops an old login token from authorizing another request",
+      "query_id": "validation-015",
+      "strata": [
+        "natural_language"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "context_eval"
+      ],
+      "label": {
+        "anchors": [
+          "net_retry::RetryPolicy::delay_for_attempt"
+        ],
+        "document_id": "net_retry",
+        "literal": "pub fn delay_for_attempt"
+      },
+      "partition": "validation",
+      "query": "what computes the pause before another failed web call",
+      "query_id": "validation-016",
+      "strata": [
+        "natural_language"
       ]
     }
   ],
