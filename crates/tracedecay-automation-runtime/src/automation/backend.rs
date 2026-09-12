@@ -5,13 +5,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tracedecay_automation::backend as leaf_backend;
-use tracedecay_automation::{AutomationError, Result};
+use tracedecay_automation::AutomationError;
 pub use tracedecay_automation::backend::{
     AgentBackendAvailability, AgentTaskBackend, AgentTaskContract, AgentTaskError,
     AgentTaskFailureClass, AgentTaskFailureDisposition, AgentTaskKind, AgentTaskRequest,
     AgentTaskResponse, agent_task_contract, agent_task_failure_disposition,
     classify_agent_task_error_message, prompt_version, task_key,
 };
+use tracedecay_domain::errors::Result;
 
 use crate::ports::codex_app_server::{
     SummaryConfig as CodexAppServerSummaryConfig, run_prompt as run_prompt_with_codex_app_server,
@@ -187,7 +188,7 @@ pub async fn run_agent_task_with_retry_report(
                     },
                 });
                 if !should_retry {
-                    return Err(AutomationError::config(error.to_string()));
+                    return Err(AutomationError::config(error.to_string()).into());
                 }
                 if !backoff.is_zero() {
                     tokio::time::sleep(backoff).await;
@@ -199,7 +200,7 @@ pub async fn run_agent_task_with_retry_report(
 }
 
 pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
-    leaf_backend::extract_json_object_prefix(text)
+    leaf_backend::extract_json_object_prefix(text).map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]
