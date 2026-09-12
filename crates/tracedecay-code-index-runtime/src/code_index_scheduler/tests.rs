@@ -12709,6 +12709,10 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
          impl Processor for Doubler {\n\
              fn process(&self, input: u32) -> u32 { input * 2 }\n\
          }\n\
+         pub struct Tripler;\n\
+         impl Processor for Tripler {\n\
+             fn process(&self, input: u32) -> u32 { input * 3 }\n\
+         }\n\
          pub fn via_trait(processor: &Doubler, input: u32) -> u32 {\n\
              Processor::process(processor, input)\n\
          }\n\
@@ -12909,10 +12913,10 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             assert_eq!(callee.edge_kind, "calls");
             assert_eq!(callee.symbol.name, "callee");
             assert_eq!(callee.symbol.file, "src/lib.rs");
-            assert_eq!(callee.symbol.start_line_zero_based, 9);
-            assert_eq!(callee.symbol.end_line_zero_based, 9);
-            assert_eq!(callee.symbol.line, 10);
-            assert_eq!(callee.symbol.end_line, 10);
+            assert_eq!(callee.symbol.start_line_zero_based, 13);
+            assert_eq!(callee.symbol.end_line_zero_based, 13);
+            assert_eq!(callee.symbol.line, 14);
+            assert_eq!(callee.symbol.end_line, 14);
         }
         outcome => panic!("expected completed graph operation, got {outcome:?}"),
     }
@@ -12952,6 +12956,20 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
                 && record.kind == "method"
         })
         .expect("implementation method symbol")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let second_implementation_method = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| {
+            record.simple_name == "process"
+                && record.qualified_name.contains("Tripler")
+                && record.kind == "method"
+        })
+        .expect("second implementation method symbol")
         .occurrence
         .as_str()
         .to_owned();
@@ -13010,7 +13028,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         panic!("expected completed resolved trait call");
     };
     let resolved_dispatch = resolved_dispatch.payload.expect("resolved trait call page");
-    assert_eq!(resolved_dispatch.total, Some(2));
+    assert_eq!(resolved_dispatch.total, Some(3));
     assert_eq!(resolved_dispatch.items.len(), 1);
     assert_eq!(resolved_dispatch.items[0].symbol.node_id, trait_method);
     assert!(!resolved_dispatch.items[0].dispatch_via_trait);
@@ -13042,15 +13060,60 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .payload
         .expect("resolved trait continuation page");
     assert_eq!(continuation.items.len(), 1);
-    let implementation = &continuation.items[0];
-    assert_eq!(implementation.symbol.node_id, implementation_method);
-    assert!(implementation.dispatch_via_trait);
+    let second_cursor = continuation
+        .next_cursor
+        .clone()
+        .expect("second resolved dispatch continuation");
+    let mut second_continuation_meta = query_meta();
+    second_continuation_meta.page =
+        PageRequest::new(1, Some(second_cursor)).expect("second dispatch continuation");
+    let second_continuation_request = CodeRelationRequest {
+        node_id: continuation_request.node_id.clone(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: true,
+        scope: scope.clone(),
+        meta: second_continuation_meta,
+    };
+    let second_continuation = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &second_continuation_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Completed(second_continuation) = second_continuation else {
+        panic!("expected second completed resolved trait continuation");
+    };
+    let second_continuation = second_continuation
+        .payload
+        .expect("second resolved trait continuation page");
+    assert_eq!(second_continuation.items.len(), 1);
     assert_eq!(
-        implementation.dispatch_from.as_deref(),
-        Some(trait_method.as_str())
+        continuation
+            .items
+            .iter()
+            .chain(&second_continuation.items)
+            .map(|item| item.symbol.node_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            implementation_method.as_str(),
+            second_implementation_method.as_str(),
+        ])
     );
-    assert_eq!(implementation.depth, Some(1));
-    assert!(continuation.next_cursor.is_none());
+    assert!(
+        continuation
+            .items
+            .iter()
+            .chain(&second_continuation.items)
+            .all(|implementation| {
+                implementation.dispatch_via_trait
+                    && implementation.dispatch_from.as_deref() == Some(trait_method.as_str())
+                    && implementation.depth == Some(1)
+            })
+    );
+    assert!(second_continuation.next_cursor.is_none());
 
     registry
         .mount_query_authority(
@@ -13058,7 +13121,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             graph_context.scope(),
             query_authority_with_candidate_cap(
                 latest.generation.manifest().privacy_domain.clone(),
-                1,
+                2,
             ),
         )
         .await
@@ -13085,8 +13148,16 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     let capped_page = capped_dispatch
         .payload
         .expect("candidate-capped trait dispatch page");
-    assert_eq!(capped_page.items.len(), 1);
+    assert_eq!(capped_page.items.len(), 2);
     assert_eq!(capped_page.items[0].symbol.node_id, trait_method);
+    assert!(capped_page.items[1].dispatch_via_trait);
+    assert!(
+        [
+            implementation_method.as_str(),
+            second_implementation_method.as_str(),
+        ]
+        .contains(&capped_page.items[1].symbol.node_id.as_str())
+    );
     assert!(
         capped_dispatch
             .omissions
