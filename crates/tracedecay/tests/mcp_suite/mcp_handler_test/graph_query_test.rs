@@ -1153,7 +1153,12 @@ async fn affected_follows_public_wrapper_to_nested_unit_test_file() {
         .call_tool(
             &project,
             "tracedecay_test_risk",
-            json!({"path": "src/execute.rs", "limit": 10, "include_tested": true}),
+            json!({
+                "path": "src/execute.rs",
+                "limit": 10,
+                "include_tested": true,
+                "format": "json"
+            }),
         )
         .await;
     let result = response
