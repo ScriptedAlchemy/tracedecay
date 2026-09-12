@@ -728,7 +728,16 @@ fn malicious_producer_cannot_underreport_or_cross_prework_allocation_contract() 
         )
         .await;
 
-        assert_eq!(result, Err(TemporalKernelError::BudgetExceeded));
+        // The kernel forwards the port's own resource name so a caller can tell
+        // a candidate read cap from a record read cap or a work-unit ceiling.
+        assert_eq!(
+            result,
+            Err(TemporalKernelError::Port(
+                TemporalPortError::BudgetExceeded {
+                    resource: "candidate stable id bytes",
+                }
+            ))
+        );
         assert_eq!(port.max_candidate_page_items.load(Ordering::SeqCst), 1);
         assert_eq!(port.observed_candidate_field_cap.load(Ordering::SeqCst), 8);
         assert_eq!(
