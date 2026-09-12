@@ -674,11 +674,23 @@ fn merge_evidence(
     existing: &mut LexicalLaneEvidence,
     incoming: &LexicalLaneEvidence,
 ) -> Result<(), RetrievalPortError> {
-    if existing.binding != incoming.binding {
+    if existing.binding.candidate_anchor != incoming.binding.candidate_anchor
+        || existing.binding.occurrence != incoming.binding.occurrence
+        || existing.binding.language_descriptor_revision
+            != incoming.binding.language_descriptor_revision
+        || existing.binding.source_occurrence != incoming.binding.source_occurrence
+    {
         return Err(RetrievalPortError::Contract(
             "lexical routes disagree on the binding of one source occurrence".to_owned(),
         ));
     }
+    // Match kinds describe each query route, not the identity of its source.
+    existing
+        .binding
+        .matched_term_kinds
+        .extend_from_slice(&incoming.binding.matched_term_kinds);
+    existing.binding.matched_term_kinds.sort();
+    existing.binding.matched_term_kinds.dedup();
     for (field, score) in &incoming.field_scores_micros {
         match existing
             .field_scores_micros

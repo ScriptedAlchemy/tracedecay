@@ -640,11 +640,7 @@ fn fold_health_aggregates(
 }
 
 pub fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolRecordV1) -> bool {
-    record.kind == "annotation_usage"
-        && matches!(
-            record.simple_name.as_str(),
-            "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-        )
+    tracedecay_code_index::is_test_marker(record)
 }
 
 fn unavailable(detail: &str) -> TraceDecayError {

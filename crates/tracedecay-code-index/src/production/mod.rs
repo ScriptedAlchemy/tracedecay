@@ -16,8 +16,8 @@ use tracedecay_domain::{
     CoverageSummaryV1, ExtractorRevision, FileOccurrenceId, GenerationTestAttributionV1,
     ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
-    RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
+    RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
     TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
@@ -966,14 +966,31 @@ impl CodeIndexPublishedGenerationV1 {
             })
             .map(|symbol| symbol.occurrence.clone())
             .collect::<BTreeSet<_>>();
+        let test_markers = self
+            .symbols
+            .symbols
+            .iter()
+            .filter(|symbol| crate::is_test_marker(symbol))
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<BTreeSet<_>>();
+        let annotated_test_occurrences = self
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == RelationEdgeKindV1::Annotates
+                    && test_markers.contains(&edge.from_occurrence)
+            })
+            .map(|edge| edge.to_occurrence.clone())
+            .collect::<BTreeSet<_>>();
         let test_occurrences = occurrence_files
             .iter()
             .filter_map(|(occurrence, (file, _))| {
                 callable_occurrences.contains(occurrence).then_some(())?;
-                file_by_occurrence
-                    .get(file)
-                    .filter(|(path, _)| crate::is_test_file(path))
-                    .map(|_| occurrence.clone())
+                (annotated_test_occurrences.contains(occurrence)
+                    || file_by_occurrence
+                        .get(file)
+                        .is_some_and(|(path, _)| crate::is_test_file(path)))
+                .then(|| occurrence.clone())
             })
             .collect::<Vec<_>>();
         let mut outgoing: BTreeMap<SymbolOccurrenceId, Vec<SymbolOccurrenceId>> = BTreeMap::new();
