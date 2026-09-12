@@ -20,6 +20,7 @@ use tracedecay_contracts::{
     RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
     SourceMetadataRequest, callable_code_operation,
 };
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     ActorId, AuthorizationRevision, CalibrationProfileId, ChunkerRevision, CodeGenerationId,
     CommitId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
@@ -30,7 +31,7 @@ use tracedecay_domain::{
     RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
     RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
     SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
-    encode_lowercase_hex, sha256_hex_suffix,
+    sha256_hex_suffix,
 };
 
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
@@ -101,6 +102,13 @@ mod noop_reconcile_tests;
 mod search_permit_release;
 mod semantic_schedule_order_tests;
 
+fn decode_hex(encoded: &str) -> Vec<u8> {
+    (0..encoded.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).expect("hex byte"))
+        .collect()
+}
+
 /// Base directory for fixture temporary roots, resolved through every symlink.
 ///
 /// macOS puts `TempDir` under `/var/folders/...`, and `/var` is a symlink to
@@ -110,13 +118,6 @@ mod semantic_schedule_order_tests;
 /// different scope than the one the scheduler writes and reads. Create the
 /// fixture inside the canonical temporary directory so every path taken from
 /// it is already canonical.
-fn decode_hex(encoded: &str) -> Vec<u8> {
-    (0..encoded.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).expect("hex byte"))
-        .collect()
-}
-
 fn canonical_temp_root() -> std::path::PathBuf {
     let base = std::env::temp_dir();
     base.canonicalize().unwrap_or(base)
