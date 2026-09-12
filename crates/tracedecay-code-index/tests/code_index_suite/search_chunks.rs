@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use tracedecay_code_index::capabilities::{
-    BaseCapabilityEmitter, BaseCapabilityValidator, CodeIndexCapabilityEmitter,
-    CodeIndexCapabilityValidator, capability_manifest_digest, expected_seal_digest,
+    BaseCapabilityEmitter, BaseCapabilityValidator, capability_manifest_digest,
+    expected_seal_digest,
 };
 use tracedecay_code_index::chunks::{CodeChunker, DeterministicCodeChunker};
 use tracedecay_code_index::extract::{
