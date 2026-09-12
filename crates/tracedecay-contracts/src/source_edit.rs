@@ -1,16 +1,17 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
+    AvailabilityContract, BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
     CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
     DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
-    IdempotencyContract, LifecycleClass, PrivacyClass, ProfileId, ReceiptContract,
-    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, TerminalState,
-    TerminalStateContract, UseCaseId,
+    LifecycleClass, PrivacyClass, ProfileId, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
+    TerminalState, TerminalStateContract, UseCaseId,
 };
 
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
@@ -455,7 +456,8 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         let (kind_bindings, binding_ids) =
             current_bindings(&capability_id, operation_name, SOURCE_EDIT_SURFACES)?;
         bindings.extend(kind_bindings);
-        capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
+        capabilities.push(application_capability_manifest(
+            ApplicationCapabilityManifestInput {
             capability_id,
             use_case_id: UseCaseId::new(format!(
                 "use-case.application.source-edit.{}",
@@ -475,7 +477,6 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
                 ScopeDimension::Repository,
                 ScopeDimension::Worktree,
             ])?,
-            authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
             denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
             privacy: PrivacyClass::Sensitive,
             lifecycle: LifecycleClass::Resumable,
@@ -488,8 +489,7 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
             ])?,
             deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
             pagination: None,
-            idempotency: IdempotencyContract::Required,
-            inverse: if kind == SourceEditKind::MoveSymbol {
+            inverse: Some(if kind == SourceEditKind::MoveSymbol {
                 tracedecay_tool_catalog::InverseContract::Capability {
                     capability_id: rollback_capability_id.clone(),
                 }
@@ -497,7 +497,7 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
                 tracedecay_tool_catalog::InverseContract::Unavailable {
                     reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
                 }
-            },
+            }),
             authority_revalidation: RevalidationContract::required(vec![
                 RevalidationPoint::Authority,
                 RevalidationPoint::Scope,
@@ -505,8 +505,6 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
                 RevalidationPoint::Configuration,
                 RevalidationPoint::ExpectedState,
             ])?,
-            reconciliation: ReconciliationContract::Required,
-            receipt: ReceiptContract::DurableEffect,
             terminal_states: TerminalStateContract::new(vec![
                 TerminalState::Completed,
                 TerminalState::Cancelled,
@@ -519,7 +517,8 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
             binding_ids,
             profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
             required_features: Vec::new(),
-        })?);
+        },
+        )?);
     }
     let reconciliation_operation = source_edit_reconciliation_operation()?;
     let (reconciliation_bindings, reconciliation_binding_ids) = current_bindings_with_slug(
@@ -529,7 +528,8 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         SOURCE_EDIT_SURFACES,
     )?;
     bindings.extend(reconciliation_bindings);
-    capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
+    capabilities.push(application_capability_manifest(
+        ApplicationCapabilityManifestInput {
         capability_id: reconciliation_operation.capability_id().clone(),
         use_case_id: reconciliation_operation.use_case_id().clone(),
         routing: RoutingContractV1::new(
@@ -546,7 +546,6 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
             ScopeDimension::Repository,
             ScopeDimension::Worktree,
         ])?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::Sensitive,
         lifecycle: LifecycleClass::Resumable,
@@ -559,10 +558,7 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         ])?,
         deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
         pagination: None,
-        idempotency: IdempotencyContract::Required,
-        inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
-            reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
-        },
+        inverse: None,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
@@ -570,8 +566,6 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
             RevalidationPoint::Configuration,
             RevalidationPoint::ExpectedState,
         ])?,
-        reconciliation: ReconciliationContract::Required,
-        receipt: ReceiptContract::DurableEffect,
         terminal_states: TerminalStateContract::new(vec![
             TerminalState::Completed,
             TerminalState::Failed,
@@ -584,7 +578,8 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         binding_ids: reconciliation_binding_ids,
         profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
         required_features: Vec::new(),
-    })?);
+    },
+    )?);
     let (rollback_bindings, rollback_binding_ids) = current_bindings_with_slug(
         rollback_operation.capability_id(),
         "source_edit_rollback",
@@ -592,62 +587,58 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         SOURCE_EDIT_SURFACES,
     )?;
     bindings.extend(rollback_bindings);
-    capabilities.push(CapabilityManifestV1::new(CapabilityManifestInputV1 {
-        capability_id: rollback_operation.capability_id().clone(),
-        use_case_id: rollback_operation.use_case_id().clone(),
-        routing: RoutingContractV1::new(
-            1,
-            "Roll back a completed source edit",
-            "Restore the exact retained preimages of one completed source-edit effect.",
-            vec!["Roll back this completed source edit effect".to_owned()],
-        )?,
-        request_schema: source_edit_rollback_schema("request")?,
-        result_schema: source_edit_rollback_schema("result")?,
-        effect: EffectClass::SourceEdit,
-        scope: ScopeRequirement::new(vec![
-            ScopeDimension::Project,
-            ScopeDimension::Repository,
-            ScopeDimension::Worktree,
-        ])?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
-        denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
-        privacy: PrivacyClass::Sensitive,
-        lifecycle: LifecycleClass::Resumable,
-        streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(vec![
-            CancellationPoint::BeforeAdmission,
-            CancellationPoint::BeforeEffect,
-            CancellationPoint::EffectInFlight,
-            CancellationPoint::AfterCommit,
-        ])?,
-        deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
-        pagination: None,
-        idempotency: IdempotencyContract::Required,
-        inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
-            reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+    capabilities.push(application_capability_manifest(
+        ApplicationCapabilityManifestInput {
+            capability_id: rollback_operation.capability_id().clone(),
+            use_case_id: rollback_operation.use_case_id().clone(),
+            routing: RoutingContractV1::new(
+                1,
+                "Roll back a completed source edit",
+                "Restore the exact retained preimages of one completed source-edit effect.",
+                vec!["Roll back this completed source edit effect".to_owned()],
+            )?,
+            request_schema: source_edit_rollback_schema("request")?,
+            result_schema: source_edit_rollback_schema("result")?,
+            effect: EffectClass::SourceEdit,
+            scope: ScopeRequirement::new(vec![
+                ScopeDimension::Project,
+                ScopeDimension::Repository,
+                ScopeDimension::Worktree,
+            ])?,
+            denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+            privacy: PrivacyClass::Sensitive,
+            lifecycle: LifecycleClass::Resumable,
+            streaming: StreamingContract::Unsupported,
+            cancellation: CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeEffect,
+                CancellationPoint::EffectInFlight,
+                CancellationPoint::AfterCommit,
+            ])?,
+            deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
+            pagination: None,
+            inverse: None,
+            authority_revalidation: RevalidationContract::required(vec![
+                RevalidationPoint::Authority,
+                RevalidationPoint::Scope,
+                RevalidationPoint::Policy,
+                RevalidationPoint::Configuration,
+                RevalidationPoint::ExpectedState,
+            ])?,
+            terminal_states: TerminalStateContract::new(vec![
+                TerminalState::Completed,
+                TerminalState::Failed,
+                TerminalState::Cancelled,
+                TerminalState::TimedOut,
+                TerminalState::EffectUnknown,
+                TerminalState::Partial,
+            ])?,
+            availability: AvailabilityContract::Available,
+            binding_ids: rollback_binding_ids,
+            profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+            required_features: Vec::new(),
         },
-        authority_revalidation: RevalidationContract::required(vec![
-            RevalidationPoint::Authority,
-            RevalidationPoint::Scope,
-            RevalidationPoint::Policy,
-            RevalidationPoint::Configuration,
-            RevalidationPoint::ExpectedState,
-        ])?,
-        reconciliation: ReconciliationContract::Required,
-        receipt: ReceiptContract::DurableEffect,
-        terminal_states: TerminalStateContract::new(vec![
-            TerminalState::Completed,
-            TerminalState::Failed,
-            TerminalState::Cancelled,
-            TerminalState::TimedOut,
-            TerminalState::EffectUnknown,
-            TerminalState::Partial,
-        ])?,
-        availability: AvailabilityContract::Available,
-        binding_ids: rollback_binding_ids,
-        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
-        required_features: Vec::new(),
-    })?);
+    )?);
     let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
         ContributionId::new("contribution.application.source-edit")?,
         Vec::new(),
