@@ -847,13 +847,19 @@ impl DaemonSessionSyncService {
         let SessionSyncTerminalMaterial {
             termination,
             stats,
-            coverage,
+            mut coverage,
             source_frontiers,
             failure_codes,
         } = material;
         self.update_journal(context, key, |journal| {
             if journal.status == SessionSyncJournalStatusV1::Complete {
                 return;
+            }
+            if coverage.is_empty()
+                && termination != OperationTermination::Completed
+                && matches!(journal.source, SessionSyncCommandV1::ImportTranscripts(_))
+            {
+                coverage = transcript_import_requested_coverage();
             }
             let completed_at = now_micros();
             journal.status = SessionSyncJournalStatusV1::Complete;
@@ -1283,6 +1289,19 @@ impl DaemonSessionSyncService {
             () = sleep_until_deadline(deadline) => work::SessionSyncInterruption::TimedOut,
         }
     }
+}
+
+fn transcript_import_requested_coverage() -> Vec<SessionSyncSourceCoverageV1> {
+    // One transcript import requests the complete provider set for each
+    // registered store scope. Before discovery starts, each aggregate scope
+    // is therefore one wholly deferred work unit.
+    ["project", "profile"]
+        .into_iter()
+        .map(|store_scope| SessionSyncSourceCoverageV1 {
+            store_scope: store_scope.to_owned(),
+            coverage: SessionSyncCoverageV1::Partial { deferred_units: 1 },
+        })
+        .collect()
 }
 
 fn sleep_until_deadline(deadline: &tracedecay_contracts::Deadline) -> impl Future<Output = ()> {
