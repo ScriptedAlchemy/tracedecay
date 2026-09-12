@@ -505,21 +505,12 @@ impl SessionSyncProjectContext {
             let stats = import_transcript_stats(
                 history.map_or_else(Default::default, |progress| progress.stats),
             );
-            let transcript_coverage = if history.is_some() {
-                SessionSyncCoverageV1::Complete
-            } else {
-                SessionSyncCoverageV1::Partial { deferred_units: 1 }
-            };
-            let coverage = vec![
-                SessionSyncSourceCoverageV1 {
-                    store_scope: "project".to_owned(),
-                    coverage: transcript_coverage.clone(),
-                },
-                SessionSyncSourceCoverageV1 {
-                    store_scope: "profile".to_owned(),
-                    coverage: transcript_coverage,
-                },
-            ];
+            let mut coverage = super::transcript_import_requested_coverage();
+            if history.is_some() {
+                for source in &mut coverage {
+                    source.coverage = SessionSyncCoverageV1::Complete;
+                }
+            }
             let source_frontiers = hotpath::future!(
                 service.persist_progress(
                     self,
