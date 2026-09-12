@@ -13137,10 +13137,14 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         1,
         &scope,
     );
-    let expected = super::queries::hydrate_relation_records(&latest, &expected_keys)
-        .expect("hydrate all keys");
+    let expected = super::queries::hydrate_relation_records(
+        &latest,
+        &expected_keys,
+        &registry.relation_symbol_hydrations,
+    )
+    .expect("hydrate all keys");
     assert_eq!(expected.len(), CALLER_STAR);
-    let _ = super::queries::take_relation_symbol_hydrations();
+    let _ = registry.take_relation_symbol_hydrations();
 
     let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
     let context = application_context(&operation, repository, worktree);
@@ -13178,7 +13182,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         expected[..CALLER_PAGE as usize],
         "page 1 must match the pre-change (depth, node_id) order"
     );
-    let page1_hydrations = super::queries::take_relation_symbol_hydrations();
+    let page1_hydrations = registry.take_relation_symbol_hydrations();
     assert_eq!(
         page1_hydrations,
         u64::from(CALLER_PAGE),
@@ -13218,7 +13222,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
             .all(|item| !first_page.items.contains(item)),
         "page 2 must return a disjoint slice"
     );
-    let page2_hydrations = super::queries::take_relation_symbol_hydrations();
+    let page2_hydrations = registry.take_relation_symbol_hydrations();
     assert_eq!(
         page2_hydrations,
         u64::from(CALLER_PAGE),
@@ -13252,7 +13256,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         collected.extend(page.items);
         cursor = page.next_cursor;
     }
-    let _ = super::queries::take_relation_symbol_hydrations();
+    let _ = registry.take_relation_symbol_hydrations();
     assert_eq!(
         collected, expected,
         "concatenated pages must equal the full (depth, occurrence) neighborhood"
@@ -13360,7 +13364,7 @@ async fn callers_candidate_cursor_continues_on_its_immutable_generation() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let _ = super::queries::take_relation_symbol_hydrations();
+    let _ = registry.take_relation_symbol_hydrations();
     let continuation = registry
         .callers(
             RetrievalPortContext {
@@ -13394,7 +13398,7 @@ async fn callers_candidate_cursor_continues_on_its_immutable_generation() {
         "page 2 must be the remaining generation-A caller"
     );
     assert_eq!(
-        super::queries::take_relation_symbol_hydrations(),
+        registry.take_relation_symbol_hydrations(),
         1,
         "the continuation must hydrate only its own slice"
     );
