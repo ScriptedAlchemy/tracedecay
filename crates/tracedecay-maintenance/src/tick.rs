@@ -133,6 +133,22 @@ impl MaintenanceCadence {
     pub fn retry_delay(&self) -> Duration {
         self.retry_delay
     }
+
+    /// Pull the next admission forward to at most one retry delay from `now`
+    /// for work that just became collectable. An in-flight tick is left
+    /// alone (its `finish` sets the next deadline); a deadline already
+    /// nearer than that stays where it is.
+    #[must_use]
+    pub fn pull_forward(&mut self, now: CadenceInstant, deadline: CadenceInstant) -> CadenceInstant {
+        if self.in_flight {
+            return deadline;
+        }
+        let pulled = deadline.min(now + self.retry_delay);
+        if self.not_before.is_some_and(|not_before| not_before > pulled) {
+            self.not_before = Some(pulled);
+        }
+        pulled
+    }
 }
 
 /// Pure round-robin window selection over stably-sorted store keys.

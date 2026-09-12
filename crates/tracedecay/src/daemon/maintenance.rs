@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracedecay_maintenance::compaction_receipt::record_live_compaction_outcome;
 use tracedecay_maintenance::generation::run_project_generation_maintenance;
 use tracedecay_maintenance::lease::ProjectStoreMaintenanceLeaseV1;
-use tracedecay_maintenance::loop_run::run_maintenance_loop;
+use tracedecay_maintenance::loop_run::{MaintenanceWake, run_maintenance_loop};
 use tracedecay_maintenance::telemetry::StoreTelemetrySamplingOutcome;
 use tracedecay_maintenance::tick::{
     MaintenanceContinuation, MaintenanceTickOutcome, cursor_after_attempted_units,
@@ -235,7 +235,7 @@ const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_hours(24);
 #[derive(Clone)]
 pub(super) struct MaintenanceCoordinator {
     cancellation: tracedecay_session_memory::context::CancellationToken,
-    wake: Arc<Notify>,
+    wake: Arc<MaintenanceWake>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
     metrics: Arc<Mutex<MaintenanceMetricsV1>>,
     /// Round-robin fairness cursor over mounted stores: the sort key of the
@@ -257,7 +257,7 @@ impl Default for MaintenanceCoordinator {
     fn default() -> Self {
         Self {
             cancellation: tracedecay_session_memory::context::CancellationToken::new(),
-            wake: Arc::new(Notify::new()),
+            wake: Arc::new(MaintenanceWake::default()),
             task: Arc::new(Mutex::new(None)),
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
             store_cursor: Arc::new(Mutex::new(None)),
@@ -335,6 +335,29 @@ impl MaintenanceCoordinator {
         if !retention_maintenance_enabled(&retention) {
             return coordinator;
         }
+        // A sealed code generation supersedes its predecessor, whose sealed
+        // artifact, read bundle, and segments only the retention tick
+        // reclaims. Pull that tick forward on each publication instead of
+        // letting a day of publications pile up behind the daily cadence.
+        let publication_owner = coordinator.clone();
+        let mut publications = code_index_schedulers.subscribe_generation_publications();
+        tokio::spawn(hotpath::future!(
+            async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = publication_owner.cancellation.cancelled() => break,
+                        received = publications.recv() => match received {
+                            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                publication_owner.request_due();
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        },
+                    }
+                }
+            },
+            label = "daemon.maintenance.publication_due_requests"
+        ));
         let task_owner = coordinator.clone();
         let interval = Duration::from_secs(retention.interval_hours.max(1).saturating_mul(3_600));
         let handle = tokio::spawn(hotpath::future!(
@@ -359,7 +382,13 @@ impl MaintenanceCoordinator {
 
     #[cfg(unix)]
     pub(super) fn wake(&self) {
-        self.wake.notify_one();
+        self.wake.wake();
+    }
+
+    /// A code generation was sealed: its predecessor's sealed artifact, read
+    /// bundle, and segments are collectable now, not at the next daily tick.
+    pub(super) fn request_due(&self) {
+        self.wake.request_due();
     }
 
     /// Stop the maintenance loop from starting another pass, synchronously.
@@ -883,7 +912,9 @@ mod tests {
     use super::{
         MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCoordinator, run_resident_memory_sampler_loop,
     };
-    use tracedecay_maintenance::loop_run::{maintenance_futures_active, run_maintenance_loop};
+    use tracedecay_maintenance::loop_run::{
+        MaintenanceWake, maintenance_futures_active, run_maintenance_loop,
+    };
     use tracedecay_maintenance::telemetry::{
         RetentionOperatorLogLaneV1, SemanticVectorRetentionCensusOutcome,
         SemanticVectorRetentionReadV1, StoreTelemetrySamplingRegistry, TableGrowthObservation,
@@ -1174,7 +1205,7 @@ mod tests {
     async fn repeated_wakes_do_not_move_the_maintenance_due_deadline() {
         let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
         let cancellation = tracedecay_session_memory::context::CancellationToken::new();
-        let wake = Arc::new(Notify::new());
+        let wake = Arc::new(MaintenanceWake::default());
         let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let baseline = maintenance_futures_active();
         let task_cancellation = cancellation.clone();
@@ -1203,7 +1234,7 @@ mod tests {
         );
 
         for _ in 0..3 {
-            wake.notify_one();
+            wake.wake();
             tokio::task::yield_now().await;
             assert_eq!(ticks.load(Ordering::SeqCst), 0);
         }
@@ -1229,11 +1260,81 @@ mod tests {
         );
     }
 
+    /// A due request is the publication signal: it pulls the next tick to at
+    /// most one retry delay away, coalesces with other requests inside that
+    /// window, and never runs a tick while one is in flight.
+    #[tokio::test(start_paused = true)]
+    async fn due_request_pulls_the_next_tick_forward_without_busy_looping() {
+        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
+        let cancellation = tracedecay_session_memory::context::CancellationToken::new();
+        let wake = Arc::new(MaintenanceWake::default());
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_cancellation = cancellation.clone();
+        let task_wake = Arc::clone(&wake);
+        let task_ticks = Arc::clone(&ticks);
+        let task = tokio::spawn(async move {
+            run_maintenance_loop(
+                &task_cancellation,
+                &task_wake,
+                Duration::from_hours(24),
+                move |_| {
+                    let ticks = Arc::clone(&task_ticks);
+                    async move {
+                        ticks.fetch_add(1, Ordering::SeqCst);
+                        MaintenanceTickOutcome::Complete
+                    }
+                },
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+        // The first tick runs one retry delay after start, then the daily
+        // cadence applies.
+        tokio::time::advance(Duration::from_mins(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(ticks.load(Ordering::SeqCst), 1);
+
+        // A plain wake leaves the daily deadline alone.
+        tokio::time::advance(Duration::from_hours(1)).await;
+        wake.wake();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_mins(5)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(ticks.load(Ordering::SeqCst), 1);
+
+        // Three publications inside one retry delay make exactly one tick due
+        // one retry delay after the first request, not after 24 hours.
+        for _ in 0..3 {
+            wake.request_due();
+            tokio::task::yield_now().await;
+            assert_eq!(ticks.load(Ordering::SeqCst), 1, "a due request never runs early");
+        }
+        tokio::time::advance(Duration::from_secs(59)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(ticks.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            2,
+            "coalesced due requests run one tick after one retry delay"
+        );
+
+        // After that tick the daily cadence is back in force.
+        tokio::time::advance(Duration::from_hours(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(ticks.load(Ordering::SeqCst), 2);
+
+        cancellation.cancel();
+        task.await
+            .expect("maintenance loop joins after cancellation");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn progress_continuation_reenters_only_the_owning_phase() {
         let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
         let cancellation = tracedecay_session_memory::context::CancellationToken::new();
-        let wake = Arc::new(Notify::new());
+        let wake = Arc::new(MaintenanceWake::default());
         let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
         let task_cancellation = cancellation.clone();
         let task_wake = Arc::clone(&wake);
