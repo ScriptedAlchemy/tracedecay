@@ -30,6 +30,7 @@ from journeys import (
     api_migration_plan_arguments,
     prepare as prepare_journey,
     prime_fact_read_lifecycle,
+    prime_native_admin_lifecycle,
     prime_work_lifecycle,
     prime_workflow_lifecycle,
     profile_refresh_selectors,
@@ -466,23 +467,22 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     _run_checked(["git", "add", "."], root, "fixture git add")
     _run_checked(["git", "commit", "--quiet", "-m", "test: seed catalog sweep fixture"], root, "fixture git commit")
     cleanup_branch = "tool-sweep-cleanup"
-    _run_checked(["git", "branch", cleanup_branch], root, "fixture cleanup branch")
-    with (root / "src/lib.rs").open("a") as source:
-        source.write("pub fn sweep_integration_marker() -> i32 { 9 }\n")
-    _run_checked(["git", "add", "src/lib.rs"], root, "fixture integration add")
-    _run_checked(
-        ["git", "commit", "--quiet", "-m", "test: add integration source commit"],
-        root,
-        "fixture integration commit",
-    )
     commit = _run_checked(
         ["git", "rev-parse", "HEAD"], root, "fixture git revision"
     ).stdout.strip()
     cleanup_root = parent / "cleanup-worktree"
     _run_checked(
-        ["git", "worktree", "add", "--quiet", str(cleanup_root), cleanup_branch],
+        ["git", "worktree", "add", "--quiet", "-b", cleanup_branch, str(cleanup_root)],
         root,
         "fixture cleanup worktree",
+    )
+    with (cleanup_root / "src/lib.rs").open("a") as source:
+        source.write("pub fn sweep_integration_marker() -> i32 { 9 }\n")
+    _run_checked(["git", "add", "src/lib.rs"], cleanup_root, "fixture integration add")
+    _run_checked(
+        ["git", "commit", "--quiet", "-m", "test: add integration source commit"],
+        cleanup_root,
+        "fixture integration commit",
     )
     # One uncommitted modification on top of the committed baseline: the
     # git_hunks producer mints its expiring preview input from real
@@ -1037,6 +1037,15 @@ def prime_fixture_values(
             deadline,
             effect_target,
         )
+    if "tracedecay_multi_root_scope_set_compare_and_swap" in policies:
+        prime_native_admin_lifecycle(
+            fixture,
+            lambda tool, arguments, deadline_ms: _producer_call(
+                client, tool, arguments, deadline_ms
+            ),
+            deadline,
+            effect_target,
+        )
 
     with prime_group("workflow"):
         if "tracedecay_workflow_validate_definition" in policies:
@@ -1170,11 +1179,7 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(CODE_NAVIGATION_NODE_NAMES)
 # - test_results reads daemon-retained managed test results that only a
 #   covered run_affected_tests execution retains; the fixture has no covered
 #   tests, and its zero-coverage journey verifies nothing is retained.
-# - multi_root mutations are daemon-owned and fail closed on every direct MCP
-#   transport: the multi-root invocation owner is only composed into
-#   daemon-internal project servers, so the hermetic stdio server has no
-#   executor and the typed daemon_unavailable denial is the complete
-#   hermetic contract (45-attempt/90s mount probe evidence).
+
 # An entry is falsifiable in both directions: a different problem stays FAIL,
 # and a hermetic success FAILs with expected_denial_superseded until the entry
 # is removed.
@@ -1195,8 +1200,7 @@ EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
     "tracedecay_automation_run_artifact_view": ("failed", "not_found"),
     "tracedecay_skill_view": ("failed", "not_found"),
     "tracedecay_test_results": ("unavailable", "application.retrieval.unavailable"),
-    "tracedecay_multi_root_scope_set_compare_and_swap": ("unavailable", "multi_root.daemon_unavailable"),
-    "tracedecay_multi_root_execute": ("unavailable", "multi_root.daemon_unavailable"),
+
 }
 
 # Opaque probe inputs are permitted ONLY for tools carrying an expected
@@ -1223,26 +1227,6 @@ _SCOUT_CONTROL_PROBE = {
     "expected_revision": "tool-sweep-unknown-revision.v1",
     "idempotency_key": "tool-sweep-denial-probe.v1",
 }
-# Structurally valid multi-root requests: every typed field deserializes so
-# the probe reaches the daemon-availability gate instead of parse-failing.
-# The mutation identities are sweep-minted; the daemon owner (absent
-# hermetically) is the only authority that could resolve them. The read probe
-# is an ordinary lookup key and now exercises its successful absence result.
-_MULTI_ROOT_SCOPE_SET_ID = "tool-sweep-scope-set.v1"
-_MULTI_ROOT_READ_PROBE = {"scope_set_id": _MULTI_ROOT_SCOPE_SET_ID}
-_MULTI_ROOT_CAS_PROBE = {
-    "scope_set_id": _MULTI_ROOT_SCOPE_SET_ID,
-    "expected_revision": None,
-    "roots": [{"project_id": "tool-sweep-project", "root": "/tool-sweep/root"}],
-}
-_MULTI_ROOT_EXECUTE_PROBE = {
-    "scope_set_id": _MULTI_ROOT_SCOPE_SET_ID,
-    "scope_set_revision": 1,
-    "scope_set_digest": "sha256:" + "0" * 64,
-    "operation": {"kind": "query", "request": {}},
-    "page": 0,
-    "continuation": None,
-}
 HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "tracedecay_affected_tests": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_feedback_diagnostics": _UNKNOWN_REQUEST_HANDLE_PROBE,
@@ -1252,11 +1236,6 @@ HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "tracedecay_feedback_list": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_context_scout_pause": _SCOUT_CONTROL_PROBE,
     "tracedecay_context_scout_resume": _SCOUT_CONTROL_PROBE,
-    # The real fixture branch and query: this probe would succeed the moment
-    # the branch serving path activates, flipping the expected denial.
-    "tracedecay_branch_search": {"query": "sweep_anchor", "branch": "main", "format": "json"},
-    "tracedecay_multi_root_scope_set_compare_and_swap": _MULTI_ROOT_CAS_PROBE,
-    "tracedecay_multi_root_execute": _MULTI_ROOT_EXECUTE_PROBE,
 }
 
 
@@ -1410,8 +1389,8 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
             "run_id": fixture["work_run_id"],
             "format": "json",
         }
-    if name == "tracedecay_multi_root_scope_set_read":
-        return dict(_MULTI_ROOT_READ_PROBE)
+    if isinstance(name, str) and name in fixture.get("native_read_arguments", {}):
+        return dict(fixture["native_read_arguments"][name])
     probe = HERMETIC_DENIAL_PROBE_ARGUMENTS.get(name) if isinstance(name, str) else None
     if probe is not None:
         if name not in EXPECTED_HERMETIC_DENIALS:
