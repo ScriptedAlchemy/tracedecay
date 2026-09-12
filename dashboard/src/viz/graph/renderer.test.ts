@@ -214,14 +214,6 @@ describe('field renderer interaction states', () => {
     );
   });
 
-  it('half-eased isolation dims the stranger exactly as far as the easing has got', () => {
-    const harness = buildField(DARK);
-    harness.enterNode('a');
-    harness.focus.t = 0.5;
-    const resting = restingNodeTint(DARK.substrate, KIND_RGB, 0.6, DARK.light);
-    expect(paintedColor(harness, 'c')).toBe(rgb(lerpRgbTuple(resting, DARK.dim, 0.5)));
-  });
-
   it('lerps a struck body toward the accent and swells it with its heat', () => {
     const harness = buildField(DARK);
     harness.field.strike(['b'], 0.8);

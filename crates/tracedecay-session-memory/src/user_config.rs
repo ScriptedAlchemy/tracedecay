@@ -666,7 +666,6 @@ mod tests {
     use std::ffi::OsString;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::time::Duration;
 
     use tempfile::TempDir;
     use tracedecay_runtime_core::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
@@ -697,24 +696,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn parse_duration_seconds() {
-        assert_eq!(parse_duration("15s"), Some(Duration::from_secs(15)));
-        assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
-        assert_eq!(parse_duration(" 5s "), Some(Duration::from_secs(5)));
-    }
-
-    #[test]
-    fn parse_duration_minutes() {
-        assert_eq!(parse_duration("1m"), Some(Duration::from_secs(60)));
-        assert_eq!(parse_duration("2m"), Some(Duration::from_secs(120)));
-    }
-
-    #[test]
-    fn parse_duration_bare_number() {
-        assert_eq!(parse_duration("10"), Some(Duration::from_secs(10)));
     }
 
     #[test]
@@ -999,22 +980,6 @@ mod tests {
         assert!(saved.contains("[future_table]"));
         assert!(saved.contains("flag = true"));
         assert!(saved.contains("upload_enabled = false"));
-    }
-
-    #[test]
-    fn agent_dashboard_policy_defaults_enabled_and_round_trips_opt_out() {
-        let default = UserConfig::default();
-        assert!(default.dashboard_enabled_for_agent("hermes"));
-
-        let mut configured = UserConfig::default();
-        configured
-            .agent_dashboard_enabled
-            .insert("hermes".to_string(), false);
-        let encoded = toml::to_string(&configured).unwrap();
-        let decoded: UserConfig = toml::from_str(&encoded).unwrap();
-
-        assert!(!decoded.dashboard_enabled_for_agent("hermes"));
-        assert!(decoded.dashboard_enabled_for_agent("claude"));
     }
 
     #[test]

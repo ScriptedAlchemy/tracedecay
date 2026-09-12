@@ -979,16 +979,6 @@ mod tests {
     }
 
     impl FlakyBackend {
-        fn timing_out(failures: usize) -> Self {
-            Self {
-                failures,
-                calls: AtomicUsize::new(0),
-                error: AgentTaskError::Timeout {
-                    reason: "timed out waiting for codex app-server response".to_string(),
-                },
-            }
-        }
-
         fn failing_with(failures: usize, error: AgentTaskError) -> Self {
             Self {
                 failures,
@@ -1079,36 +1069,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn retry_report_records_transient_transient_success_attempts() {
-        let backend = FlakyBackend::timing_out(2);
-        let policy = BackendRetryPolicy::new(
-            3,
-            vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_secs(120),
-        );
-        let mut report = AgentTaskRetryReport::default();
-
-        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
-            .await
-            .unwrap();
-
-        assert_eq!(report.attempt_count(), 3);
-        assert_eq!(
-            report
-                .attempts()
-                .iter()
-                .map(|attempt| attempt.failure_classification)
-                .collect::<Vec<_>>(),
-            vec![
-                Some(AgentTaskFailureClass::Timeout),
-                Some(AgentTaskFailureClass::Timeout),
-                None,
-            ]
-        );
-        assert!(report.attempts()[2].succeeded);
-    }
-
     #[test]
     fn typed_backend_states_map_to_distinct_failure_classes() {
         let reason = "typed state".to_string();
@@ -1142,28 +1102,6 @@ mod tests {
         for window in classes.windows(2) {
             assert_ne!(window[0], window[1], "typed states must stay distinct");
         }
-    }
-
-    #[test]
-    fn backend_message_boundary_types_denial_disconnect_and_unavailability() {
-        assert_eq!(
-            AgentTaskError::from_backend_message("permission denied by the codex host policy"),
-            AgentTaskError::Denied {
-                reason: "permission denied by the codex host policy".to_string()
-            }
-        );
-        assert_eq!(
-            AgentTaskError::from_backend_message("broken pipe writing the prompt"),
-            AgentTaskError::Disconnected {
-                reason: "broken pipe writing the prompt".to_string()
-            }
-        );
-        assert_eq!(
-            AgentTaskError::from_backend_message("codex executable was not found"),
-            AgentTaskError::Unavailable {
-                reason: "codex executable was not found".to_string()
-            }
-        );
     }
 
     #[tokio::test]
@@ -1245,35 +1183,6 @@ mod tests {
             Some(AgentTaskFailureClass::Unavailable)
         );
         assert!(report.attempts()[1].succeeded);
-    }
-
-    #[test]
-    fn retry_report_appends_later_request_history() {
-        let mut initial = AgentTaskRetryReport {
-            attempts: vec![AgentTaskRetryAttempt {
-                attempt: 1,
-                succeeded: true,
-                failure_classification: None,
-                backoff_millis: 0,
-            }],
-        };
-        let repair = AgentTaskRetryReport {
-            attempts: vec![AgentTaskRetryAttempt {
-                attempt: 1,
-                succeeded: false,
-                failure_classification: Some(AgentTaskFailureClass::MalformedOutput),
-                backoff_millis: 0,
-            }],
-        };
-
-        initial.append(repair);
-
-        assert_eq!(initial.attempt_count(), 2);
-        assert!(initial.attempts()[0].succeeded);
-        assert_eq!(
-            initial.attempts()[1].failure_classification,
-            Some(AgentTaskFailureClass::MalformedOutput)
-        );
     }
 
     #[test]

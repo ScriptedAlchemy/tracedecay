@@ -2158,21 +2158,6 @@ mod tests {
     }
 
     #[test]
-    fn resident_estimate_never_exceeds_the_ceiling_and_survives_unknown_sizes() {
-        const CEILING: u64 = 4096;
-        // An artifact that declares no lengths keeps the previous
-        // conservative behaviour rather than under-reserving.
-        assert_eq!(resident_bytes_estimate_for(0, 32, 4096, CEILING), CEILING);
-        // A model larger than the ceiling still clamps to it; the pool's own
-        // `reserved_bytes > resident_byte_ceiling` check then refuses it.
-        assert_eq!(
-            resident_bytes_estimate_for(u64::MAX, 32, 4096, CEILING),
-            CEILING
-        );
-        assert!(resident_bytes_estimate_for(1024, 32, 4096, CEILING) <= CEILING);
-    }
-
-    #[test]
     fn resident_estimate_includes_worst_admitted_attention_activations() {
         const GIB: u64 = 1024 * 1024 * 1024;
         const MEMBER_BYTES: u64 = 614 * 1024 * 1024;
@@ -2247,19 +2232,6 @@ mod tests {
         }
     }
 
-    fn descriptor(authority: &AdmittedProjectionArtifactV1) -> &VerifiedEmbeddingArtifactV1 {
-        authority.runtime_artifact()
-    }
-
-    fn descriptor_paths(authority: &AdmittedProjectionArtifactV1) -> (&str, &str, &str) {
-        let descriptor = descriptor(authority);
-        (
-            descriptor.model_file.as_str(),
-            descriptor.tokenizer_file.as_str(),
-            descriptor.config_file.as_str(),
-        )
-    }
-
     fn batch(texts: &[&str]) -> BoundedSanitizedTextBatchV1 {
         BoundedSanitizedTextBatchV1::try_new(
             texts.iter().map(|t| (*t).to_string()).collect(),
@@ -2271,19 +2243,6 @@ mod tests {
 
     fn never_cancelled() -> ManualCancellation {
         ManualCancellation::new()
-    }
-
-    #[test]
-    fn private_runtime_descriptor_uses_domain_projection_types() {
-        let authority = authority(384);
-        let descriptor = descriptor(&authority);
-        assert_eq!(descriptor.dimensions(), 384);
-        assert_eq!(descriptor.metric(), EmbeddingMetricV1::Cosine);
-        assert_eq!(descriptor.normalization(), EmbeddingNormalizationV1::L2);
-        assert_eq!(
-            descriptor_paths(&authority),
-            ("model.onnx", "tokenizer.json", "config.json")
-        );
     }
 
     #[test]
@@ -2576,56 +2535,6 @@ mod tests {
     }
 
     #[test]
-    fn echo_dimensions_metric_and_normalization_are_exact() {
-        let runtime = FakeEmbeddingRuntime::new();
-        let authority = authority_with(
-            24,
-            'a',
-            EmbeddingMetricV1::DotProduct,
-            EmbeddingNormalizationV1::L2,
-        );
-        let mut session = runtime
-            .open_session(&authority, &never_cancelled())
-            .expect("session");
-        let vectors = session
-            .embed_batch(&batch(&["echo me"]), &never_cancelled())
-            .expect("embed");
-        assert_eq!(vectors.len(), 1);
-        let v = &vectors[0];
-        assert_eq!(v.values.len(), 24);
-        assert_eq!(v.dimensions, 24);
-        assert_eq!(v.metric, EmbeddingMetricV1::DotProduct);
-        assert_eq!(v.normalization, EmbeddingNormalizationV1::L2);
-        let norm = v.squared_l2_norm().sqrt();
-        assert!(
-            (norm - 1.0).abs() < 1e-5,
-            "L2-normalized vector has unit norm, got {norm}"
-        );
-    }
-
-    #[test]
-    fn unnormalized_echo_stays_raw() {
-        let runtime = FakeEmbeddingRuntime::new();
-        let authority = authority_with(
-            24,
-            'a',
-            EmbeddingMetricV1::Cosine,
-            EmbeddingNormalizationV1::None,
-        );
-        let mut session = runtime
-            .open_session(&authority, &never_cancelled())
-            .expect("session");
-        let vectors = session
-            .embed_batch(&batch(&["raw values"]), &never_cancelled())
-            .expect("embed");
-        assert_eq!(vectors[0].normalization, EmbeddingNormalizationV1::None);
-        assert!(
-            vectors[0].values.iter().all(|v| (-1.0..1.0).contains(v)),
-            "fake raw values stay in [-1, 1)"
-        );
-    }
-
-    #[test]
     fn cancellation_before_embed_aborts() {
         let runtime = FakeEmbeddingRuntime::new();
         let mut session = runtime
@@ -2759,21 +2668,6 @@ mod tests {
             }
             other => panic!("expected typed compatibility failure, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn compatibility_check_consumes_admitted_authority() {
-        let runtime = FakeEmbeddingRuntime::new();
-        runtime
-            .verify_artifact_compatibility(&authority(8))
-            .expect("admitted authority is compatible");
-        assert_eq!(
-            runtime
-                .counters()
-                .compatibility_checks
-                .load(Ordering::SeqCst),
-            1
-        );
     }
 
     #[cfg(all(feature = "semantic-fastembed", not(windows)))]

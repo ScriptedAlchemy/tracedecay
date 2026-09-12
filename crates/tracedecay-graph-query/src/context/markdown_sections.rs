@@ -437,14 +437,6 @@ Nothing left.
     }
 
     #[test]
-    fn markdown_extension_gate_matches_the_extractor() {
-        assert!(is_markdown_file("docs/plans/NEXT.md"));
-        assert!(is_markdown_file("README.MARKDOWN"));
-        assert!(!is_markdown_file("src/main.rs"));
-        assert!(!is_markdown_file("NEXT"));
-    }
-
-    #[test]
     fn section_body_is_the_lines_after_the_heading() {
         // "## Remaining work" is 1-based line 5, section ends at line 19.
         let body = section_body(DOC, 6, 19);

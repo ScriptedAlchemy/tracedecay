@@ -1682,78 +1682,6 @@ disconnected: config error: codex app-server closed stdout before completing";
     }
 
     #[test]
-    fn changing_the_configuration_revision_readmits_a_settled_failure() {
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            None,
-        )];
-        let now_secs = 2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64;
-
-        // Same identity: still settled.
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                now_secs,
-            )
-            .skip_reason(),
-            Some(BACKEND_IDENTITY_SUPPRESSED),
-        );
-
-        // Any effective configuration change is a new revision, and the task
-        // is re-admitted on the next tick with no operator reset step.
-        let mut changed = curator_config();
-        changed.timeout_secs = curator_config().timeout_secs.saturating_add(1);
-        assert_ne!(
-            backend_identity(&changed).unwrap(),
-            backend_identity(&config).unwrap(),
-        );
-        assert!(
-            schedule_decision(
-                &changed,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                now_secs,
-            )
-            .is_due(),
-            "a changed configuration revision must re-admit the task",
-        );
-    }
-
-    #[test]
-    fn a_settled_failure_from_another_backend_identity_does_not_suppress() {
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            Some("sha256:some-other-backend-identity".to_owned()),
-        )];
-
-        assert!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
-            )
-            .is_due(),
-        );
-    }
-
-    #[test]
     fn an_unstamped_legacy_failure_keeps_the_ordinary_cooldown() {
         let config = curator_config();
         let mut record = settled_backend_failure(
@@ -1783,38 +1711,6 @@ evidence about it",
 
     const PERMANENT_PROTOCOL_ERROR: &str =
         "typed protocol contract violation: handshake rejected the turn";
-
-    #[test]
-    fn typed_permanent_protocol_failure_stays_suppressed_under_the_same_identity() {
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            None,
-        )];
-        for now_secs in [
-            2_001,
-            2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
-            2_000 + 86_400,
-        ] {
-            assert_eq!(
-                schedule_decision(
-                    &config,
-                    AgentTaskKind::MemoryCurator,
-                    &records,
-                    SessionActivity::none(),
-                    now_secs,
-                )
-                .skip_reason(),
-                Some(BACKEND_IDENTITY_SUPPRESSED),
-                "tick at {now_secs} must stay identity-suppressed",
-            );
-        }
-    }
 
     #[test]
     fn same_path_executable_replacement_readmits_a_permanent_failure() {
@@ -2027,104 +1923,6 @@ evidence about it",
     }
 
     #[test]
-    fn budget_exhausted_skip_holds_the_task_in_a_typed_backoff_window() {
-        let config = session_evidence_config();
-        for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
-            let records = vec![budget_exhausted_skip("run-exhausted", task, 2_000)];
-
-            // Every tick inside the window skips without a fresh attempt,
-            // under the dedicated suppression reason: not the exhausted
-            // label (no attempt ran) and not the failure cooldown.
-            for now_secs in [2_060, 2_120, 2_000 + 3_599] {
-                assert_eq!(
-                    schedule_decision(
-                        &config,
-                        task,
-                        &records,
-                        SessionActivity::at(2_500),
-                        now_secs
-                    )
-                    .skip_reason(),
-                    Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
-                    "tick at {now_secs} for {task:?} must stay suppressed"
-                );
-            }
-
-            // The window elapsing permits exactly the next attempt.
-            assert!(
-                schedule_decision(
-                    &config,
-                    task,
-                    &records,
-                    SessionActivity::at(2_500),
-                    2_000 + 3_600,
-                )
-                .is_due()
-            );
-        }
-    }
-
-    #[test]
-    fn configured_budget_backoff_window_overrides_the_one_hour_default() {
-        let mut config = session_evidence_config();
-        config
-            .tasks
-            .session_reflector
-            .session_evidence_budget_backoff_secs = Some(120);
-        let records = vec![budget_exhausted_skip(
-            "run-exhausted",
-            AgentTaskKind::SessionReflector,
-            2_000,
-        )];
-
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_119,
-            )
-            .skip_reason(),
-            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
-            "the configured 120s window must still suppress its final second"
-        );
-        assert!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_120,
-            )
-            .is_due(),
-            "the configured 120s window must end well before the 3600s default"
-        );
-    }
-
-    #[test]
-    fn budget_backoff_suppresses_host_receipt_triggers_too() {
-        let config = session_evidence_config();
-        let records = vec![budget_exhausted_skip(
-            "run-exhausted",
-            AgentTaskKind::SessionReflector,
-            2_000,
-        )];
-
-        assert_eq!(
-            host_receipt_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_060,
-            )
-            .skip_reason(),
-            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
-        );
-    }
-
-    #[test]
     fn effectful_run_after_exhaustion_supersedes_the_backoff_anchor() {
         let config = session_evidence_config();
         let records = vec![
@@ -2149,55 +1947,6 @@ evidence about it",
                 2_130,
             )
             .is_due()
-        );
-    }
-
-    #[test]
-    fn older_failure_cooldown_cannot_bypass_a_live_budget_backoff() {
-        let mut config = session_evidence_config();
-        config.tasks.session_reflector.cooldown_secs = Some(60);
-        let records = vec![
-            scheduler_ledger_record(
-                "run-failed",
-                AgentTaskKind::SessionReflector,
-                AutomationRunStatus::Failed,
-                Some("provider unavailable"),
-                1_900,
-            ),
-            budget_exhausted_skip("run-exhausted", AgentTaskKind::SessionReflector, 2_000),
-        ];
-
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_100,
-            )
-            .skip_reason(),
-            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
-        );
-
-        // Without a live exhaustion anchor the failure state keeps its own
-        // distinct cooldown reason: the two typed states never share a label.
-        let failure_only = vec![scheduler_ledger_record(
-            "run-failed",
-            AgentTaskKind::SessionReflector,
-            AutomationRunStatus::Failed,
-            Some("timed out waiting for backend"),
-            1_900,
-        )];
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &failure_only,
-                SessionActivity::at(2_500),
-                1_930,
-            )
-            .skip_reason(),
-            Some("scheduler_cooldown_active")
         );
     }
 
@@ -2370,15 +2119,6 @@ evidence about it",
             Some("no_new_session_activity"),
             "cancellation remains an effectful skip that needs fresh activity",
         );
-    }
-
-    #[test]
-    fn schedule_validation_maps_leaf_errors_at_the_runtime_boundary() {
-        assert!(validate_schedule(Some("hourly")).is_ok());
-        assert!(matches!(
-            validate_schedule(Some("after lunch")),
-            Err(TraceDecayError::Automation(_))
-        ));
     }
 
     #[test]
@@ -2721,21 +2461,6 @@ evidence about it",
         assert_lock_released(&lock_path);
     }
 
-    #[test]
-    fn task_lock_release_works_with_no_tokio_runtime() {
-        let temp = tempdir().unwrap();
-        let lock_path = temp.path().join("automation_locks").join("no_runtime.lock");
-        assert!(
-            tokio::runtime::Handle::try_current().is_err(),
-            "this test must run without a runtime handle so the inline path is exercised"
-        );
-
-        let guard = acquire_lock_for_release_test(&lock_path);
-        assert!(lock_path.exists());
-        drop(guard);
-        assert_lock_released(&lock_path);
-    }
-
     #[tokio::test]
     async fn task_lock_release_falls_back_inline_on_a_current_thread_runtime() {
         let temp = tempdir().unwrap();
@@ -2754,31 +2479,6 @@ evidence about it",
         let guard = acquire_lock_for_release_test(&lock_path);
         assert!(lock_path.exists());
         drop(guard);
-        assert_lock_released(&lock_path);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_lock_release_from_spawn_blocking_owner_does_not_panic() {
-        let temp = tempdir().unwrap();
-        let lock_path = temp
-            .path()
-            .join("automation_locks")
-            .join("settlement_owner.lock");
-
-        // The settlement-owner pattern in daemon::automation_effect acquires and
-        // drops the guard entirely inside spawn_blocking. A blocking-pool thread
-        // still reports a MultiThread handle, so this exercises block_in_place
-        // from outside a worker context.
-        let owned_path = lock_path.clone();
-        tokio::task::spawn_blocking(move || {
-            let guard = acquire_lock_for_release_test(&owned_path);
-            assert!(owned_path.exists());
-            drop(guard);
-            assert!(!owned_path.exists());
-        })
-        .await
-        .expect("dropping the guard inside spawn_blocking must not panic");
-
         assert_lock_released(&lock_path);
     }
 

@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 
 use serde_json::json;
@@ -21,7 +20,7 @@ use tracedecay_store::{
     SessionRefreshBeginOrJoinPermit, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancelPermit,
     SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
-    SessionRefreshCompletionRequestV1, SessionRefreshDispositionV1, SessionRefreshFailPermit,
+    SessionRefreshCompletionRequestV1, SessionRefreshFailPermit,
     SessionRefreshFailureCodeInvalidReasonV1, SessionRefreshFailureCodeV1,
     SessionRefreshFailureRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressPersistPermit,
     SessionRefreshProgressReadPermit, SessionRefreshProgressRequestV1, SessionRefreshProgressV1,
@@ -31,10 +30,9 @@ use tracedecay_store::{
     SessionStoreResult, SessionSummaryPublicationRequestV1, SessionTemporalCapabilitiesV1,
     SessionTemporalCapabilityProvider, SessionTemporalCapabilityV1,
     SessionTemporalDigestInvalidReasonV1, SessionTemporalDigestV1,
-    SessionTemporalPageRetrievePermit, SessionTemporalProjectionBatchDispositionV1,
-    SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
-    SessionTemporalProjectionStore, SessionTemporalRetrievalRequestV1,
-    SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
+    SessionTemporalPageRetrievePermit, SessionTemporalProjectionBatchReceiptV1,
+    SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore,
+    SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 
 #[path = "session_contract/capabilities.rs"]

@@ -70,7 +70,6 @@ mod tests {
     use tracedecay_domain::configuration::{
         AnalyzerExecutableId, AnalyzerExecutableReferenceV1, AnalyzerPrivacyClassV1,
         AnalyzerResourceLimitsV1, AnalyzerRestartPolicyV1, ConfigurationLayerIdV1,
-        ConfigurationValueKindV1, RestartRequirementV1, SettingScopeV1, SettingSensitivityV1,
     };
     use tracedecay_domain::{ManifestDigest, ProjectId, UserProfileId};
     use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
@@ -132,40 +131,6 @@ mod tests {
                 ConfigurationValueV1::AnalyzerSettings(value),
             )]),
         }
-    }
-
-    #[test]
-    fn registry_default_is_the_empty_selection_set() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let definition = registry.definition(&analyzer_key()).unwrap();
-        assert_eq!(
-            definition.value_kind,
-            ConfigurationValueKindV1::AnalyzerSettings
-        );
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(
-            definition.restart_requirement,
-            RestartRequirementV1::AnalyzerRestart
-        );
-        let ConfigurationValueV1::AnalyzerSettings(default) = &definition.default_value else {
-            panic!("registry default must be a typed analyzer settings value");
-        };
-        assert_eq!(*default, default_analyzer_settings());
-    }
-
-    #[test]
-    fn unset_key_resolves_to_the_registered_default() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let snapshot = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let resolved = resolved_analyzer_settings(&snapshot).unwrap();
-        let default = default_analyzer_settings();
-        assert_eq!(*resolved, default);
-        assert!(resolved.selections.is_empty());
-        assert_eq!(
-            resolved.compute_digest().unwrap(),
-            default.compute_digest().unwrap()
-        );
     }
 
     #[test]

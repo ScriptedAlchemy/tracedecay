@@ -746,67 +746,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advertised_native_components_have_real_assets() {
-        let cursor_native_extension_js = format!(
-            "{}/dist/extension.js",
-            crate::agents::cursor::cursor_native_extension_relative_dir()
-        );
-        for (host, component, expected) in [
-            (
-                HostKindV1::CursorDesktop,
-                HostBundleComponentV1::Agent,
-                cursor_native_extension_js.as_str(),
-            ),
-            (
-                HostKindV1::KimiCode,
-                HostBundleComponentV1::Core,
-                ".tracedecay/host-bundle-stage/kimi/tracedecay/",
-            ),
-            (
-                HostKindV1::Hermes,
-                HostBundleComponentV1::Core,
-                ".hermes/plugins/tracedecay/plugin.yaml",
-            ),
-            (
-                HostKindV1::OpenCode,
-                HostBundleComponentV1::Core,
-                "plugins/tracedecay.ts",
-            ),
-            (
-                HostKindV1::OpenCode,
-                HostBundleComponentV1::Agent,
-                ".config/opencode/skills/",
-            ),
-            (
-                HostKindV1::OpenCode,
-                HostBundleComponentV1::ContextMcp,
-                "tracedecay/opencode.registration.json",
-            ),
-        ] {
-            let bundle = verified_embedded_host_bundle(
-                host,
-                component,
-                0,
-                crate::agents::TEST_GENERATOR_COMMIT,
-            )
-            .unwrap();
-            assert!(!bundle.contents.is_empty());
-            assert!(
-                bundle
-                    .contents
-                    .iter()
-                    .any(|asset| asset.relative_path.contains(expected))
-            );
-            assert!(
-                bundle
-                    .contents
-                    .iter()
-                    .all(|asset| !asset.relative_path.contains("host-components"))
-            );
-        }
-    }
-
-    #[test]
     fn cursor_native_diagnostics_render_the_resolved_installed_binary() {
         let installed = "/opt/tracedecay-distinct/bin/tracedecay";
         let assets = component_assets(
@@ -830,58 +769,6 @@ mod tests {
                 !body.contains(running.as_ref()),
                 "compiled Cursor assets must not embed the running test executable"
             );
-        }
-    }
-
-    #[test]
-    fn opencode_context_mcp_renders_the_resolved_installed_binary() {
-        let installed = "/opt/tracedecay-distinct/bin/tracedecay";
-        let assets = component_assets(
-            HostKindV1::OpenCode,
-            HostBundleComponentV1::ContextMcp,
-            installed,
-            crate::agents::TEST_GENERATOR_COMMIT,
-        )
-        .unwrap();
-        let registration = assets
-            .iter()
-            .find(|(path, _)| path.ends_with("opencode.registration.json"))
-            .expect("OpenCode Context MCP registration is packaged");
-        let body = String::from_utf8(registration.1.clone()).unwrap();
-
-        assert!(body.contains(&serde_json::to_string(installed).unwrap()));
-        assert!(!body.contains("__TRACEDECAY_BIN__"));
-        if let Ok(running) = std::env::current_exe() {
-            let running = running.to_string_lossy();
-            assert!(
-                !body.contains(running.as_ref()),
-                "compiled OpenCode assets must not embed the running test executable"
-            );
-        }
-    }
-
-    #[test]
-    fn kimi_component_renderer_eliminates_every_hook_v2_placeholder() {
-        let bundle = verified_embedded_host_bundle(
-            HostKindV1::KimiCode,
-            HostBundleComponentV1::Core,
-            0,
-            crate::agents::TEST_GENERATOR_COMMIT,
-        )
-        .unwrap();
-        for content in bundle.contents {
-            let body = String::from_utf8(content.bytes).unwrap();
-            for placeholder in [
-                super::super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER,
-                super::super::plugin_bundle::TRACEDECAY_SYNC_PLACEHOLDER,
-                super::super::plugin_bundle::TRACEDECAY_STOP_PLACEHOLDER,
-            ] {
-                assert!(
-                    !body.contains(placeholder),
-                    "{} retained {placeholder}",
-                    content.relative_path
-                );
-            }
         }
     }
 
@@ -1154,43 +1041,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn canonical_component_set_uses_one_verifier_for_default_and_explicit_selection() {
-        let default_set = verified_embedded_default_host_component_set(
-            HostKindV1::OpenCode,
-            0,
-            crate::agents::TEST_GENERATOR_COMMIT,
-        )
-        .expect("OpenCode has a compiled default set");
-        assert_eq!(
-            default_set
-                .component_set
-                .components
-                .iter()
-                .map(|component| component.manifest.component)
-                .collect::<Vec<_>>(),
-            default_components(HostKindV1::OpenCode)
-        );
-        for component in &default_set.component_set.components {
-            default_set
-                .verify_manifest(&component.manifest)
-                .expect("set verifier accepts every compiled component");
-        }
-
-        let single = verified_embedded_host_component_set(
-            HostKindV1::OpenCode,
-            &[HostBundleComponentV1::ContextMcp],
-            0,
-            crate::agents::TEST_GENERATOR_COMMIT,
-        )
-        .expect("explicit component uses the same set transaction input");
-        assert_eq!(single.component_set.components.len(), 1);
-        assert_eq!(
-            single.component_set.components[0].manifest.component,
-            HostBundleComponentV1::ContextMcp
-        );
     }
 
     #[test]

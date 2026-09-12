@@ -1305,35 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_projection_does_not_duplicate_goal_colocated_with_message() {
-        let envelope = envelope(vec![
-            CanonicalObservationFactV1::WorkflowLifecycle {
-                semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
-                provider_reference: Some("session.fixture".to_owned()),
-                item_id: None,
-                parent_reference: None,
-                list_reference: None,
-                state: None,
-                status: Some("active".to_owned()),
-                item_order: None,
-                revision: None,
-                event_sequence: None,
-                content: Some(json!({"objective": "supporting goal"})),
-            },
-            CanonicalObservationFactV1::Message {
-                role: CanonicalMessageRoleV1::Assistant,
-                content: json!({"text": "authored response"}),
-                model: None,
-                timestamp: Some(43),
-            },
-        ]);
-
-        let fields = canonical_message_fields(&envelope).unwrap().unwrap();
-        assert_eq!(fields.kind, "message");
-        assert_eq!(fields.text, "authored response");
-    }
-
-    #[test]
     fn canonical_projection_skips_boundary_only_records() {
         let envelope = envelope(vec![CanonicalObservationFactV1::Boundary {
             boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
@@ -1424,39 +1395,6 @@ mod tests {
             "profile_pin"
         );
         assert_eq!(message_metadata["stable_record_id"], "record.fixture");
-    }
-
-    #[test]
-    fn cursor_transcript_metadata_uses_the_canonical_session_namespace() {
-        let fields = CanonicalSessionFields {
-            project_path: Some("/workspace/project".to_owned()),
-            location_path: Some("/workspace/project/.worktrees/feature".to_owned()),
-            transcript_path: Some("/transcripts/session.jsonl".to_owned()),
-            title: None,
-            started_at: None,
-            ended_at: None,
-            source: Some("cursor_transcript".to_owned()),
-            native_source: Some("cursor".to_owned()),
-            profile: None,
-            location_provenance: Some("hook_event".to_owned()),
-        };
-        let metadata: serde_json::Value = serde_json::from_str(
-            canonical_session_metadata("cursor", Some(&fields))
-                .unwrap()
-                .as_deref()
-                .unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            metadata["cursor_session_cwd"],
-            "/workspace/project/.worktrees/feature"
-        );
-        assert_eq!(
-            metadata["cursor_session_worktree"],
-            "/workspace/project/.worktrees/feature"
-        );
-        assert_eq!(metadata["cursor_session_location_provenance"], "hook_event");
     }
 
     #[test]

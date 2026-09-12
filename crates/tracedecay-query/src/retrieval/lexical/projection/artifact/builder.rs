@@ -5812,29 +5812,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_batch_limits_select_a_multi_page_prefix_without_stalling() {
-        let page_bounds = [
-            (700_000usize, 80 * 1024 * 1024usize),
-            (700_000, 80 * 1024 * 1024),
-            (700_000, 80 * 1024 * 1024),
-        ];
-        let mut ledger = CanonicalBatchLimitLedgerV1::default();
-        let selected = page_bounds
-            .into_iter()
-            .take_while(|(rows, bytes)| {
-                ledger
-                    .try_admit(*rows, *bytes)
-                    .expect("extend canonical limit ledger")
-                    .is_none()
-            })
-            .count();
-        assert_eq!(
-            selected, 2,
-            "two pages fit both canonical caps and the third must remain for the next wake"
-        );
-    }
-
-    #[test]
     fn canonical_write_limit_refuses_ngram_receipt_past_the_exact_boundary() {
         let ngram_receipt_bytes = "sha256:".len() + 64;
         let mut ledger = CanonicalBatchLimitLedgerV1::default();

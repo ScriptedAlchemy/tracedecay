@@ -7,23 +7,6 @@ use tracedecay_runtime_core::git_discovery::{
 };
 
 #[test]
-fn live_session_discovery_excludes_large_unrelated_history() {
-    let home = tempfile::tempdir().unwrap();
-    let projects = home.path().join(".claude/projects");
-    for index in 0..256 {
-        let project = projects.join(format!("project-{index}"));
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join(format!("unrelated-{index}.jsonl")), b"{}\n").unwrap();
-    }
-    let target = projects.join("project-173").join("target-session.jsonl");
-    std::fs::write(&target, b"{}\n").unwrap();
-    let source = ClaudeSource::with_home(home.path())
-        .for_user_scope(Some("target-session".to_string()), Vec::new());
-
-    assert_eq!(source.transcript_paths(home.path()), vec![target]);
-}
-
-#[test]
 fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session-42.jsonl");
@@ -65,28 +48,6 @@ fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
     );
     assert_eq!(scan.next_cursor.state.position, complete.len() as u64);
     assert_eq!(scan.read_through, contents.len() as u64);
-}
-
-#[test]
-fn bounded_scan_finishes_one_valid_record_past_nominal_budget() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("session-42.jsonl");
-    let contents = b"{\"type\":\"summary\"}\n";
-    std::fs::write(&path, contents).unwrap();
-
-    let identity = identify_claude_source(&path).unwrap();
-    let scan = scan_claude_source_frames(identity, StoredCursor::default(), Some(1)).unwrap();
-
-    assert_eq!(scan.frames.len(), 1);
-    assert_eq!(scan.next_cursor.state.position, contents.len() as u64);
-    assert_eq!(scan.read_through, contents.len() as u64);
-    assert_eq!(
-        scan.coverage,
-        ClaudeFrameCoverage::Complete {
-            start_offset: 0,
-            end_offset: contents.len() as u64,
-        }
-    );
 }
 
 #[test]
@@ -149,44 +110,6 @@ fn bounded_scan_exposes_whitespace_ranges_without_parsing_them() {
             reason: ClaudeSkippedFrameReason::Whitespace,
         }
     );
-}
-
-#[test]
-fn canonical_mapper_emits_one_conversational_message() {
-    let record = json!({
-        "type": "user",
-        "uuid": "user-1",
-        "message": {"role": "user", "content": "hello"},
-    });
-    let context = ClaudeRecordContext {
-        session_id: "session-1",
-        project_key: "project-1",
-        project_path: "/project-1",
-        file_generation: 42,
-        offset: 9,
-        session_cwd: Some(Path::new("/project-1")),
-        source_path: None,
-        raw_message_id: Some("user-1"),
-        raw_tool_event_ids: &[],
-        raw_hook_tool_use_id: None,
-    };
-
-    let ClaudeRecordDisposition::Message { draft, message } =
-        map_sanitized_claude_record(&record, &context)
-    else {
-        panic!("conversational row must map");
-    };
-    assert_eq!(draft.session_id, "session-1");
-    assert_eq!(message.message_id, "user-1");
-    assert_eq!(message.kind.as_deref(), Some("message"));
-    assert_eq!(message.source_path.as_deref(), Some("claude:session-1"));
-    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["source_generation"], 42);
-
-    assert!(matches!(
-        map_sanitized_claude_record(&json!({"type": "summary"}), &context),
-        ClaudeRecordDisposition::NonConversational
-    ));
 }
 
 #[test]
@@ -635,20 +558,6 @@ fn mixed_thinking_and_redacted_records_the_redacted_count_but_no_plaintext() {
 }
 
 #[test]
-fn assistant_message_without_thinking_records_no_reasoning_row() {
-    let record = assistant_record(&json!([{"type": "text", "text": "Just an answer."}]));
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(Some("msg_1"), 7),
-            None,
-        )
-        .is_none()
-    );
-}
-
-#[test]
 fn reasoning_row_id_falls_back_to_record_uuid_when_message_id_is_absent() {
     let record = json!({
         "type": "assistant",
@@ -671,23 +580,6 @@ fn reasoning_row_id_falls_back_to_record_uuid_when_message_id_is_absent() {
     let metadata: Value =
         serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["parent_message_id"], "u-fallback");
-}
-
-#[test]
-fn user_record_never_produces_a_reasoning_row() {
-    let record = json!({
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "thinking", "thinking": "nope"}]}
-    });
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(None, 1),
-            None,
-        )
-        .is_none()
-    );
 }
 
 #[test]

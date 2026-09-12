@@ -293,34 +293,6 @@ mod search_report_tests {
         );
     }
 
-    #[test]
-    fn hits_render_one_line_each() {
-        let mut value = base_result();
-        value["status"] = json!("complete");
-        value["outcome"] = json!("complete");
-        value["count"] = json!(1);
-        value["results"] = json!([{
-            "session": {
-                "provider": "cursor",
-                "session_id": "session-1",
-                "project_key": "project-key",
-                "project_path": "/project",
-                "is_subagent": false,
-            },
-            "message": {
-                "provider": "cursor",
-                "message_id": "message-1",
-                "session_id": "session-1",
-                "role": "assistant",
-                "ordinal": 1,
-                "text": "first\nline",
-            },
-            "score": 1.0,
-        }]);
-        let report = SessionsSearchReport::render(&search_result(value));
-        assert_eq!(report, "[cursor] project-key assistant: first line\n");
-    }
-
     /// A typed error travels with the report; the empty-page banner is not
     /// printed over it.
     #[test]

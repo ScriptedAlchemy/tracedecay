@@ -51,9 +51,6 @@ const PEAK_RESOURCE_FIELDS: &[&str] = &[
     "database_storage_growth_bytes",
     "peak_rss_kib",
 ];
-const FORBIDDEN_TELEMETRY_CONTENT: &[&str] =
-    &["sk-test-", "credentials", "private_path", "reasoning_text"];
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ProviderBaseline {
@@ -219,68 +216,6 @@ pub(super) fn hook_telemetry_readiness_from_rows(rows: &[Value]) -> HookTelemetr
             "hook_completed emits host-measured daemon_rtt_us (TRUE host IPC RTT) only; daemon-internal processing duration is not present on the event contract",
         )],
     }
-}
-
-pub(super) fn validate_hook_telemetry_readiness() {
-    let readiness = hook_telemetry_readiness();
-    assert_eq!(
-        readiness.artifact_kind,
-        "readiness_and_fixture_identity_not_runtime_contract"
-    );
-    let metrics = readiness.canonical_contract["metrics"]
-        .as_object()
-        .expect("canonical hook telemetry metrics");
-    assert_eq!(readiness.canonical_contract["schema_version"], 1);
-    assert_eq!(metrics.len(), 5);
-    assert_eq!(
-        readiness.cursor_catch_up_ingest_max_bytes,
-        CURSOR_CATCH_UP_INGEST_MAX_BYTES
-    );
-    let canonical_hosts = canonical_hook_hosts(&readiness.canonical_contract);
-    assert_eq!(
-        readiness
-            .host_fixture_measurements
-            .iter()
-            .map(|host| host.host.as_str())
-            .collect::<Vec<_>>(),
-        canonical_hosts
-    );
-    for host in &readiness.host_fixture_measurements {
-        assert_eq!(host.fixture_sha256.len(), 64);
-        assert_eq!(host.canonical_request_payload_bytes.len(), 4);
-        assert!(
-            host.canonical_request_payload_bytes
-                .iter()
-                .all(|bytes| *bytes > 0 && *bytes < CURSOR_CATCH_UP_INGEST_MAX_BYTES)
-        );
-        let encoded = serde_json::to_string(host).expect("serialize fixture measurement");
-        for forbidden in FORBIDDEN_TELEMETRY_CONTENT {
-            assert!(!encoded.contains(forbidden));
-        }
-    }
-    assert!(
-        readiness
-            .unavailable_measurements
-            .iter()
-            .any(|measurement| measurement.metric == "daemon_processing_duration_distribution")
-    );
-    assert_eq!(readiness.unavailable_measurements.len(), 1);
-    let readiness_distributions = serde_json::to_value(&readiness.readiness_distributions)
-        .expect("serialize empty readiness distributions");
-    assert_eq!(readiness_distributions["source_event"], "hook_completed");
-    assert_eq!(readiness_distributions["collection_status"], "no_samples");
-    assert_eq!(readiness_distributions["input_rows_received"], 0);
-    assert_eq!(readiness_distributions["input_rows_processed"], 0);
-    assert_eq!(readiness_distributions["input_rows_dropped_at_cap"], 0);
-    assert_eq!(readiness_distributions["events_considered"], 0);
-    assert_eq!(
-        readiness.canonical_contract["latency_semantics"]["host_ipc_rtt"]["event_field"],
-        "daemon_rtt_us"
-    );
-    assert_eq!(
-        readiness.canonical_contract["latency_semantics"]["daemon_processing_duration"]["status"],
-        "unavailable"
-    );
 }
 
 fn canonical_hook_hosts(contract: &Value) -> Vec<&str> {

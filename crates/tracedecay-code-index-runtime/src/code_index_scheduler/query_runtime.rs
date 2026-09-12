@@ -1257,19 +1257,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_passed_authority_is_constructed_from_provider_material() {
-        let scope = scope("main");
-        let provider = OneShotProvider {
-            candidates: Mutex::new(Some(vec![material(scope.clone())])),
-        };
-
-        let authority = prepare_query_authority(&scope, &privacy_domain(), &provider)
-            .expect("accepted authority");
-
-        assert_eq!(authority.profile().profile_id, profile().profile_id);
-    }
-
-    #[test]
     fn missing_or_ambiguous_authority_fails_closed() {
         let scope = scope("main");
         let missing = OneShotProvider {

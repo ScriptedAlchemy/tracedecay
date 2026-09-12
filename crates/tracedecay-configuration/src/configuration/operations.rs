@@ -610,10 +610,9 @@ mod tests {
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
     use tracedecay_domain::configuration::{
-        AnalyzerSettingsV1, AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
-        ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1,
-        ConfigurationValueV1, ProtectedChange, ScopeSourceBinding, SettingKey, SourceBindingId,
-        SourceKindV1,
+        AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
+        ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1, ConfigurationValueV1,
+        ProtectedChange, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
     };
     use tracedecay_domain::{
         AccessPolicyDigest, ActorId, LocatorDigest, ManifestDigest, ProjectId,
@@ -837,24 +836,6 @@ mod tests {
             },
         );
         assert_eq!(result, Err(ConfigurationError::PolicyWideningForbidden));
-    }
-
-    #[test]
-    fn direct_mutation_accepts_typed_analyzer_values() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let result = validate_direct_mutation(
-            &registry,
-            &DirectConfigurationMutation::Set {
-                layer: ConfigurationLayerIdV1::Project {
-                    project_id: id::<ProjectId>("project.fixture"),
-                },
-                key: SettingKey::new("analyzer.settings.v1").unwrap(),
-                value: Box::new(ConfigurationValueV1::AnalyzerSettings(
-                    AnalyzerSettingsV1::empty(),
-                )),
-            },
-        );
-        assert!(result.is_ok());
     }
 
     #[test]

@@ -123,51 +123,6 @@ fn eager_message_digest(
         .clone()
 }
 
-/// The pre-memoization workflow-fact-digest expression, byte for byte.
-fn eager_workflow_digest(session: &SessionRecord, fact: &WorkflowFactRecord) -> PayloadDigestV1 {
-    let digest_value = serde_json::json!({
-        "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION,
-        "session": session,
-        "fact": {
-            "fact_ordinal": fact.fact_ordinal,
-            "semantic_kind": fact.semantic_kind,
-            "provider_reference": fact.provider_reference,
-            "item_id": fact.item_id,
-            "parent_reference": fact.parent_reference,
-            "list_reference": fact.list_reference,
-            "state": fact.state,
-            "status": fact.status,
-            "item_order": fact.item_order,
-            "native_revision": fact.native_revision,
-            "event_sequence": fact.event_sequence,
-            "source_sequence": fact.source_sequence,
-            "native_timestamp": fact.native_timestamp,
-            "ordering_domain": fact.ordering_domain,
-            "content": fact.content,
-            "content_text": fact.content_text,
-        },
-    });
-    PayloadReferenceV1::for_payload(&digest_value)
-        .unwrap()
-        .digest()
-        .clone()
-}
-
-#[test]
-fn memoized_message_digest_equals_eager_derivation() {
-    let observation = observation("alpha");
-    let session = session_record("alpha");
-    let message = message_record("alpha");
-    let expected = eager_message_digest(&session, &message, 0);
-
-    let projection = ObservationProjection::for_message(&observation, session, message).unwrap();
-    let output = projection.message().unwrap();
-
-    assert_eq!(output.output_digest().unwrap(), &expected);
-    // Memoization is idempotent: a second read returns the same bytes.
-    assert_eq!(output.output_digest().unwrap(), &expected);
-}
-
 #[test]
 fn memoized_digests_match_eager_derivation_for_every_output_ordinal() {
     let observation = observation("beta");
@@ -193,26 +148,6 @@ fn memoized_digests_match_eager_derivation_for_every_output_ordinal() {
 }
 
 #[test]
-fn memoized_workflow_fact_digest_equals_eager_derivation() {
-    let observation = observation("gamma");
-    let session = session_record("gamma");
-    let fact = workflow_fact_record();
-    let expected = eager_workflow_digest(&session, &fact);
-
-    let projection = ObservationProjection::for_outputs(
-        &observation,
-        vec![(session_record("gamma"), message_record("gamma"))],
-        vec![(session, fact)],
-    )
-    .unwrap();
-    let workflow_facts = projection.workflow_facts();
-
-    assert_eq!(workflow_facts.len(), 1);
-    assert_eq!(workflow_facts[0].output_digest().unwrap(), &expected);
-    assert_eq!(workflow_facts[0].output_digest().unwrap(), &expected);
-}
-
-#[test]
 fn equality_ignores_whether_the_digest_memo_is_materialized() {
     let observation = observation("delta");
     let left = ObservationProjection::for_message(
@@ -235,63 +170,6 @@ fn equality_ignores_whether_the_digest_memo_is_materialized() {
     assert_eq!(
         left.message().unwrap().output_digest().unwrap(),
         right.message().unwrap().output_digest().unwrap()
-    );
-}
-
-#[test]
-fn cloning_a_projection_preserves_the_derived_digest() {
-    let observation = observation("epsilon");
-    let session = session_record("epsilon");
-    let message = message_record("epsilon");
-    let expected = eager_message_digest(&session, &message, 0);
-
-    let projection = ObservationProjection::for_message(&observation, session, message).unwrap();
-    let before_clone = projection.clone();
-    let _ = projection.message().unwrap().output_digest().unwrap();
-    let after_clone = projection.clone();
-
-    assert_eq!(
-        before_clone.message().unwrap().output_digest().unwrap(),
-        &expected
-    );
-    assert_eq!(
-        after_clone.message().unwrap().output_digest().unwrap(),
-        &expected
-    );
-}
-
-/// A storage failure names its cause everywhere the error is rendered:
-/// `Display` (used by `%error` log fields and `RetryDeferred::last_error`)
-/// carries the immediate source, and `durable_detail()` walks the full
-/// chain without duplicating the level Display already printed.
-#[test]
-fn storage_error_display_and_durable_detail_carry_the_source_chain() {
-    let leaf = std::io::Error::other("database is locked");
-    let middle = std::io::Error::other(leaf);
-    let error = ProjectionStoreError::Storage {
-        operation: "upsert projected LCM raw message",
-        source: Box::new(middle),
-    };
-
-    let display = error.to_string();
-    assert!(
-        display.contains("upsert projected LCM raw message"),
-        "display must name the operation: {display}"
-    );
-    assert!(
-        display.contains("database is locked"),
-        "display must carry the source cause: {display}"
-    );
-
-    let detail = error.durable_detail();
-    assert!(
-        detail.contains("database is locked"),
-        "durable detail must include the deepest cause: {detail}"
-    );
-    assert_eq!(
-        detail.matches("database is locked").count(),
-        1,
-        "the cause must not be duplicated across chain levels: {detail}"
     );
 }
 

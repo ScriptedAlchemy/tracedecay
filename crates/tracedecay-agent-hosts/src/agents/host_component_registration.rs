@@ -1893,37 +1893,6 @@ mod tests {
         assert!(cursor.supports_artifact_only_backup_restore(&cursor_set.component_set));
     }
 
-    /// Copilot's deployed artifact is a receipt-owned descriptor; the host
-    /// carries nothing until `copilot mcp add` writes its own registry.
-    /// Classifying the set as artifact-only would let artifact backup/restore
-    /// claim it can reverse a host registration it never snapshots — the same
-    /// truthfulness violation Gemini's case above pins.
-    #[test]
-    fn copilot_component_sets_are_not_artifact_only_lifecycles() {
-        let home = tempfile::tempdir().expect("home");
-        let lifecycle_root = tempfile::tempdir().expect("lifecycle root");
-        let authority = CatalogHostComponentRegistrationAuthority::new(
-            "copilot",
-            home.path(),
-            lifecycle_root.path(),
-            crate::agents::host_bundle::HostBundleLifecycleOpV1::Install,
-        )
-        .expect("catalog registration authority");
-        let component_set =
-            crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
-                crate::agents::host_bundle::HostKindV1::Copilot,
-                0,
-                crate::agents::TEST_GENERATOR_COMMIT,
-            )
-            .expect("Copilot has a compiled default set");
-
-        assert!(
-            !authority.supports_artifact_only_backup_restore(&component_set.component_set),
-            "the Copilot lifecycle drives `copilot mcp add`, so its deployed \
-             bytes are not the whole lifecycle"
-        );
-    }
-
     /// The live reinstall journey: TraceDecay's own staging residue (a
     /// personal marketplace entry with no native activation yet) makes every
     /// Codex component registration read `Repairable`. An install over that

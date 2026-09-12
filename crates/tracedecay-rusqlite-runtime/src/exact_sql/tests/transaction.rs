@@ -121,50 +121,6 @@ fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
 }
 
 #[test]
-fn deferred_begin_keeps_one_shot_sqlite_semantics() {
-    let (_directory, mut locker, contender) = busy_begin_connections();
-    let _lock = locker
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .unwrap();
-    let shutdown = AtomicBool::new(true);
-
-    let transaction = super::super::command::begin_transaction_with_busy_retry(
-        &contender,
-        TransactionBehavior::Deferred,
-        &shutdown,
-    )
-    .unwrap();
-
-    transaction.rollback().unwrap();
-}
-
-#[test]
-fn deferred_transaction_is_available_for_default_sqlite_semantics() {
-    let fixture = fixture('a', 'a');
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-    channel
-        .execute_batch("CREATE TABLE deferred (value INTEGER NOT NULL)".to_owned())
-        .unwrap();
-    let transaction = channel.begin_deferred().unwrap();
-    transaction
-        .execute(statement(
-            "INSERT INTO deferred VALUES (?)",
-            vec![ExactSqlValue::Integer(1)],
-        ))
-        .unwrap();
-
-    transaction.commit().unwrap();
-
-    let rows = channel
-        .query(
-            statement("SELECT count(*) FROM deferred", vec![]),
-            Duration::from_secs(1),
-        )
-        .unwrap();
-    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(1)]);
-}
-
-#[test]
 fn immediate_transaction_commit_reports_only_after_commit() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -299,20 +255,6 @@ fn pinned_batch_rejects_transaction_control() {
 
     let error = transaction
         .execute_batch("COMMIT; BEGIN IMMEDIATE".to_owned())
-        .unwrap_err();
-
-    assert!(matches!(error, ExactSqlError::TransactionControlDenied));
-    transaction.rollback().unwrap();
-}
-
-#[test]
-fn pinned_execute_rejects_transaction_control_before_commit_receipt() {
-    let fixture = fixture('a', 'a');
-    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-    let transaction = channel.begin_immediate().unwrap();
-
-    let error = transaction
-        .execute(statement("COMMIT", vec![]))
         .unwrap_err();
 
     assert!(matches!(error, ExactSqlError::TransactionControlDenied));

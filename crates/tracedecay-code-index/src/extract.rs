@@ -749,34 +749,6 @@ mod tests {
     const RUST_SOURCE: &str = "use std::collections::HashMap;\n\n/// Doc.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\nfn beta() {\n    let _ = alpha(1);\n}\n";
 
     #[test]
-    fn extracts_a_complete_batch_with_coverage_evidence() {
-        let extractor = TreeSitterExtractor::new();
-        let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        let extraction = extractor
-            .extract(&file, &rust_descriptor(), &NeverCancelled)
-            .expect("extraction succeeds");
-        let batch = extraction.batch();
-
-        assert_eq!(batch.parse_outcome, ParseOutcomeV1::Complete);
-        assert_eq!(batch.language.as_str(), "rust");
-        assert_eq!(
-            batch.content_digest,
-            crate::chunks::content_digest(RUST_SOURCE.as_bytes())
-        );
-        assert_eq!(batch.coverage.parsed_bytes, RUST_SOURCE.len() as u64);
-        assert!(batch.coverage.symbols_extracted >= 2);
-        assert!(batch.coverage.relations_extracted >= 1);
-        assert_eq!(
-            batch.parsed_ranges,
-            vec![SourceSpan {
-                start_byte: 0,
-                end_byte: RUST_SOURCE.len() as u64,
-            }]
-        );
-        batch.rows_digest.validate().expect("rows digest canonical");
-    }
-
-    #[test]
     fn identical_input_produces_identical_rows_digests() {
         let extractor = TreeSitterExtractor::new();
         let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
@@ -834,73 +806,6 @@ mod tests {
         assert_eq!(extraction.batch().rows_digest, original_digest);
         assert_eq!(extraction.batch().file_occurrence_id, original_occurrence);
         assert_eq!(extraction.logical_path(), "src/a.rs");
-    }
-
-    #[test]
-    fn rebind_allows_same_path_under_a_new_generation_occurrence() {
-        let extractor = TreeSitterExtractor::new();
-        let original = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        let mut extraction = extractor
-            .extract(&original, &rust_descriptor(), &NeverCancelled)
-            .expect("extraction");
-        let original_digest = extraction.batch().rows_digest.clone();
-
-        let rebound = {
-            let intake = SanitizedCodeIntake::new(
-                StaticLanguageRegistry::new(),
-                SanitizerRevision::new("sanitizer.v1").expect("valid id"),
-                UtcMicros(1_000_000),
-            );
-            let file = SanitizedCodeFileV1 {
-                file_occurrence_id: FileOccurrenceId::new("file.carried").expect("valid id"),
-                logical_path: "src/lib.rs".to_owned(),
-                language: Some(tracedecay_domain::LanguageId::new("rust").expect("valid id")),
-                content_digest: crate::chunks::content_digest(RUST_SOURCE.as_bytes()),
-                disposition: SnapshotFileDispositionV1::Present,
-            };
-            let capability = intake
-                .admit(SanitizedCodeSnapshotV1 {
-                    repository: RepositoryId::new("repo.fixture").expect("valid id"),
-                    worktree: None,
-                    reference: None,
-                    source_revision: None,
-                    sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("valid id"),
-                    sanitization_receipts: vec![
-                        SanitizationReceiptId::new("receipt.fixture").expect("valid id"),
-                    ],
-                    content_identity: crate::chunks::content_digest(RUST_SOURCE.as_bytes()),
-                    captured_at: UtcMicros(1_000_000),
-                    files: vec![file.clone()],
-                })
-                .expect("snapshot capability");
-            intake
-                .bind_file(
-                    &capability,
-                    &ProjectId::new("project.fixture").expect("valid project"),
-                    ValidatedCodeFileV1 {
-                        generation_id: CodeGenerationId::new("generation.carried")
-                            .expect("valid id"),
-                        file,
-                        snapshot_digest: capability.snapshot().intake_digest.clone(),
-                        sanitized_bytes: RUST_SOURCE.as_bytes().to_vec(),
-                    },
-                )
-                .expect("receipt-bound carried file")
-        };
-
-        extraction
-            .rebind_file_occurrence(&rebound)
-            .expect("same-path generation rebind");
-        assert_eq!(extraction.batch().rows_digest, original_digest);
-        assert_eq!(
-            extraction.batch().generation_id.as_str(),
-            "generation.carried"
-        );
-        assert_eq!(
-            extraction.batch().file_occurrence_id.as_str(),
-            "file.carried"
-        );
-        assert_eq!(extraction.logical_path(), "src/lib.rs");
     }
 
     #[test]

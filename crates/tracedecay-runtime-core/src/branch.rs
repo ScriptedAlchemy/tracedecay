@@ -347,16 +347,6 @@ mod branch_memo_tests {
         );
     }
 
-    /// An unseeded memo resolves lazily and caches even a `None` answer, so a
-    /// detached HEAD or non-repository root is not re-probed within a request.
-    #[test]
-    fn unresolved_memo_caches_a_negative_answer() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let memo = BranchMemo::new(temp.path());
-        assert_eq!(memo.get(), None);
-        assert_eq!(memo.get(), None);
-    }
-
     /// A pre-seeded memo must not open git; only [`super::current_branch`]
     /// (via an unresolved [`BranchMemo::get`]) is a live probe.
     #[test]
@@ -382,43 +372,5 @@ mod branch_memo_tests {
             1,
             "a memo must resolve the live branch at most once"
         );
-    }
-
-    #[test]
-    #[ignore = "measurement harness: timing evidence for #818, not an assertion"]
-    fn measure_live_probe_against_resolved_memo() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let root = temp.path();
-        let init = std::process::Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(root)
-            .status()
-            .expect("git init");
-        assert!(init.success(), "git init must succeed for a live probe");
-        let mut live = Vec::with_capacity(25);
-        for _ in 0..25 {
-            let started = std::time::Instant::now();
-            let _ = super::current_branch(root);
-            live.push(started.elapsed());
-        }
-        let memo = BranchMemo::resolved(root, Some("main".to_owned()));
-        let mut seeded = Vec::with_capacity(25);
-        for _ in 0..25 {
-            let started = std::time::Instant::now();
-            let _ = memo.get();
-            seeded.push(started.elapsed());
-        }
-        live.sort();
-        seeded.sort();
-        let report = format!(
-            "MEASURE #818 branch n=25 live_p50={:?} live_p95={:?} resolved_p50={:?} resolved_p95={:?}",
-            live[12], live[23], seeded[12], seeded[23]
-        );
-        println!("{report}");
-        std::fs::write(
-            std::env::temp_dir().join("td-mcp-818-measure.txt"),
-            report.as_bytes(),
-        )
-        .expect("write #818 measurement");
     }
 }

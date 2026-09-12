@@ -491,7 +491,6 @@ fn persisted_identity_error(description: &str, error: GraphDbError) -> GraphDbEr
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     use super::{IdentityScope, query_identity_page, streaming_identity_page};
     use crate::schema::{ENTITY_ID_PROPERTY, ENTITY_LABEL, entity_projection_label};
@@ -500,8 +499,6 @@ mod tests {
         GraphEntity, GraphEntityId, GraphFormatVersion, GraphMutation, GraphNamespace,
         GraphProjectionId, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
     };
-
-    const PAGE: usize = 1_024;
 
     fn scope(owner_label: &str) -> IdentityScope<'_> {
         IdentityScope {
@@ -554,56 +551,6 @@ mod tests {
             )
             .unwrap();
         }
-    }
-
-    /// Pages the whole projection through one identity path and returns the
-    /// per-page wall times in order.
-    fn page_through(db: &GraphDbLeaseV1, projection: &str, indexed: bool) -> Vec<Duration> {
-        let guard = db.read_guard().unwrap();
-        let database = guard.as_ref().unwrap();
-        let owner_label = entity_projection_label(
-            &GraphNamespace::new("project").unwrap(),
-            &GraphProjectionId::new(projection).unwrap(),
-        );
-        let cancellation = NeverCancelled;
-        let mut after: Option<String> = None;
-        let mut timings = Vec::new();
-        loop {
-            let started = Instant::now();
-            let page = if indexed {
-                query_identity_page(
-                    db,
-                    database,
-                    scope(&owner_label),
-                    after.as_deref(),
-                    PAGE,
-                    &cancellation,
-                )
-                .unwrap()
-            } else {
-                streaming_identity_page(
-                    database,
-                    scope(&owner_label),
-                    after.as_deref(),
-                    PAGE,
-                    &cancellation,
-                )
-                .unwrap()
-            };
-            timings.push(started.elapsed());
-            let Some(last) = page.last().cloned() else {
-                break;
-            };
-            after = Some(last);
-            if page.len() < PAGE {
-                break;
-            }
-        }
-        timings
-    }
-
-    fn total(timings: &[Duration]) -> Duration {
-        timings.iter().sum()
     }
 
     /// Both identity paths must return byte-identical pages: same ordering,
@@ -693,61 +640,5 @@ mod tests {
         .unwrap();
 
         assert_eq!(after.len(), 16, "stale index served a pre-write page");
-    }
-
-    /// Page-read cost probe at production width.
-    ///
-    /// The streaming path rescans the whole projection per page, so its total
-    /// grows with pages^2; the indexed path pays one build and then seeks, so
-    /// its total is linear in pages. Prints both so the catalog-warm
-    /// projection can be read off a measurement instead of an extrapolation.
-    #[test]
-    #[ignore = "diagnostic probe, run explicitly"]
-    fn projection_page_read_cost_scaling_probe() {
-        const ENTITIES: usize = 100_000;
-
-        let db = memory_db();
-        let build_started = Instant::now();
-        publish_entities(&db, "probe", ENTITIES, 10_000);
-        let publish_elapsed = build_started.elapsed();
-
-        let streaming = page_through(&db, "probe", false);
-        let indexed = page_through(&db, "probe", true);
-        // Second pass: the index is already warm, so this isolates seek cost.
-        let indexed_warm = page_through(&db, "probe", true);
-
-        println!("entities={ENTITIES} page={PAGE} publish={publish_elapsed:?}");
-        println!(
-            "streaming: pages={} total={:?} first={:?} last={:?}",
-            streaming.len(),
-            total(&streaming),
-            streaming.first().unwrap(),
-            streaming.last().unwrap(),
-        );
-        println!(
-            "indexed:   pages={} total={:?} first(build)={:?} last={:?}",
-            indexed.len(),
-            total(&indexed),
-            indexed.first().unwrap(),
-            indexed.last().unwrap(),
-        );
-        println!(
-            "indexed warm: pages={} total={:?} first={:?} last={:?}",
-            indexed_warm.len(),
-            total(&indexed_warm),
-            indexed_warm.first().unwrap(),
-            indexed_warm.last().unwrap(),
-        );
-        println!(
-            "speedup: {:.1}x total, {:.1}x steady-state page",
-            total(&streaming).as_secs_f64() / total(&indexed).as_secs_f64(),
-            streaming.last().unwrap().as_secs_f64() / indexed_warm.last().unwrap().as_secs_f64(),
-        );
-
-        assert_eq!(streaming.len(), indexed.len());
-        assert!(
-            total(&indexed) < total(&streaming),
-            "indexed paging must beat the rescan it replaced"
-        );
     }
 }

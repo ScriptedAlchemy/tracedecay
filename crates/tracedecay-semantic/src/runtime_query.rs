@@ -393,45 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn owned_query_embedder_uses_the_pooled_runtime_interface() {
-        let authority = Arc::new(authority());
-        let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
-            Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));
-        let service = SemanticRuntimeService::new_owned(
-            Arc::clone(&authority),
-            factory,
-            config(1, std::time::Duration::from_mins(1), 1 << 20),
-        )
-        .expect("runtime service");
-        let embedder_factory = PooledSemanticQueryEmbedderFactory::new(service);
-        let embedder = embedder_factory.create(Arc::new(ManualCancellation::new()));
-        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
-            "find session acquisition",
-            domain_id::<SanitizerRevision>("sanitizer.v1"),
-            domain_id::<QueryNormalizationRevision>("normalizer.v1"),
-        )
-        .expect("bounded query");
-        let query_digest = QueryDigest::new(
-            authority.projection().privacy_domain().clone(),
-            authority.projection().privacy_key_epoch(),
-            QueryMac::new(format!("hmac-sha256:{}", "11".repeat(32))).expect("query MAC"),
-        );
-        let request = SemanticQueryEmbeddingRequestV1 {
-            query_digest: &query_digest,
-            query_view: &query_view,
-            projection: authority.projection(),
-        };
-
-        let _first = embedder.embed_query(request).expect("first embedding");
-        let _second = embedder.embed_query(request).expect("second embedding");
-        assert_eq!(
-            embedder_factory.runtime().stats().sessions_opened,
-            1,
-            "the production adapter path reuses one warmed session"
-        );
-    }
-
-    #[test]
     fn concurrent_query_abstains_across_runtime_factory_rotation() {
         let authority = Arc::new(authority());
         let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =

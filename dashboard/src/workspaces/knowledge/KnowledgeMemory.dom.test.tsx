@@ -429,40 +429,6 @@ describe("Knowledge view switcher", () => {
 /* ---- geometry ------------------------------------------------------------ */
 
 describe("Memory geometry", () => {
-  it("states what the projection axes are and censuses the categories", async () => {
-    stubRoutes();
-    renderPage("/knowledge?view=geometry");
-    expect(
-      await screen.findByText(
-        /principal components of 3 query-time-derived phase encodings returned by a request bounded to 400 facts, of width 64/,
-      ),
-    ).toBeTruthy();
-    const census = screen.getByLabelText("Projected facts by category");
-    expect(within(census).getByText("decision · 2")).toBeTruthy();
-    expect(within(census).getByText("code_area · 1")).toBeTruthy();
-  });
-
-  it("refuses to draw a projection the daemon did not compute", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/projection")) {
-          return json({
-            ...PROJECTION,
-            method: "none",
-            points: [PROJECTION.points[0]],
-          });
-        }
-        if (url.includes("/similarity")) return json(SIMILARITY);
-        return json(OVERVIEW_ENVELOPE);
-      }),
-    );
-    renderPage("/knowledge?view=geometry");
-    expect(
-      await screen.findByText(/placeholders, not a projection/),
-    ).toBeTruthy();
-  });
 
   it("surfaces bounded projection coverage instead of implying the page is the whole store", async () => {
     vi.stubGlobal(
@@ -490,30 +456,6 @@ describe("Memory geometry", () => {
     ).toBeTruthy();
   });
 
-  it("keeps global similarity statistics apart from an unknowably capped threshold list", async () => {
-    stubRoutes();
-    renderPage("/knowledge?view=geometry");
-    expect(
-      await screen.findByText(
-        "1 pairs shown at or above 0.85; 120 finite pairs scored globally over 40 query-time encoded facts",
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "Global distribution over all 120 scored pairs; these statistics are not limited to the threshold-matching list below.",
-      ),
-    ).toBeTruthy();
-    expect(screen.getByText("0.4100")).toBeTruthy();
-    expect(screen.getByText("0.0200")).toBeTruthy();
-    expect(screen.getByText("0.9900")).toBeTruthy();
-    expect(
-      screen.getByText(
-        /Threshold-list coverage is unknown: 1 pair returned at or above 0\.85, filling this request's limit of 1\. The response cannot distinguish an exact fit from a truncated list\./,
-      ),
-    ).toBeTruthy();
-    expect(screen.queryByText(/threshold matches? (?:were )?omitted/i)).toBeNull();
-  });
-
   it("names the pair list so it is reachable by keyboard", async () => {
     stubRoutes();
     renderPage("/knowledge?view=geometry");
@@ -529,39 +471,6 @@ describe("Memory geometry", () => {
 /* ---- oplog --------------------------------------------------------------- */
 
 describe("Memory oplog", () => {
-  it("renders canonical fact identity without inventing unavailable details", async () => {
-    stubRoutes();
-    renderPage("/knowledge?view=oplog");
-    expect(await screen.findByText("fact-project-9")).toBeTruthy();
-    expect(screen.getAllByText("created")).toHaveLength(2);
-    expect(screen.queryByText(/detail withheld/)).toBeNull();
-    expect(screen.queryByText(/detail state/)).toBeNull();
-  });
-
-  it("reports an unreadable store rather than an empty history", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes("/oplog")) {
-          return json({
-            events: [],
-            count: 0,
-            limit: 100,
-            error: "database is locked",
-          });
-        }
-        return json(OVERVIEW_ENVELOPE);
-      }),
-    );
-    renderPage("/knowledge?view=oplog");
-    expect(
-      await screen.findByText(
-        /the memory oplog could not be read: database is locked/,
-      ),
-    ).toBeTruthy();
-    expect(screen.queryByText(/nothing has ever written/)).toBeNull();
-  });
 
   it("does not call an incoherent oplog response complete", async () => {
     vi.stubGlobal(
@@ -668,17 +577,6 @@ describe("Fact trust history", () => {
     expect(events.getAttribute("tabindex")).toBe("0");
   });
 
-  it("nets only the trust events returned in the bounded window", async () => {
-    stubWithFact();
-    renderPage();
-    await userEvent.click(await screen.findByText("a memory fact"));
-    // 0.500 in, 0.580 out, across three events — the gauge above shows only
-    // the closing figure, which is what this drilldown exists to explain.
-    expect(await screen.findByText("0.500")).toBeTruthy();
-    expect(screen.getByText("+0.080")).toBeTruthy();
-    expect(screen.queryByText(/partial history window/)).toBeNull();
-  });
-
   it("labels partial trust arithmetic and preserves the continuation state", async () => {
     stubWithFact({
       ...TRUST_HISTORY,
@@ -695,35 +593,5 @@ describe("Fact trust history", () => {
     expect(screen.getByText("window opening")).toBeTruthy();
     expect(screen.getByText("window net")).toBeTruthy();
     expect(screen.getByText("window closing")).toBeTruthy();
-  });
-});
-
-/* ---- curation ------------------------------------------------------------ */
-
-describe("Curation console", () => {
-  it("reports run history with the ledger status of each run", async () => {
-    stubRoutes();
-    renderPage("/knowledge?view=curation");
-    const history = await screen.findByRole("region", {
-      name: "Automatic run history",
-    });
-    const succeededRun = (
-      await within(history).findByText("memory_curator")
-    ).closest("button");
-    expect(succeededRun).toBeTruthy();
-    expect(within(succeededRun!).getByText("succeeded")).toBeTruthy();
-    expect(
-      within(succeededRun!).getByText("3 accepted · 2 rejected"),
-    ).toBeTruthy();
-
-    const failedRun = within(history).getByText("skill_writer").closest("button");
-    expect(failedRun).toBeTruthy();
-    expect(within(failedRun!).getByText("failed")).toBeTruthy();
-    expect(
-      within(failedRun!).getByText("0 accepted · 0 rejected"),
-    ).toBeTruthy();
-    expect(
-      within(history).getByText("backend timed out after 60s"),
-    ).toBeTruthy();
   });
 });

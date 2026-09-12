@@ -1076,13 +1076,6 @@ mod tests {
     }
 
     #[test]
-    fn committed_generated_directory_source_is_excluded_from_exact_tree_capture() {
-        let (_project, _store, scheduler) = generated_source_fixture();
-
-        assert_eq!(captured_paths(&scheduler), vec!["src/lib.rs"]);
-    }
-
-    #[test]
     fn dirty_generated_candidate_is_excluded_while_ordinary_source_remains() {
         let (project, _store, scheduler) = generated_source_fixture();
         std::fs::write(

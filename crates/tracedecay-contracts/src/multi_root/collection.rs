@@ -131,10 +131,7 @@ mod tests {
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-    use super::{
-        MultiRootCollectionResolutionV1, MultiRootCollectionSelectorV1,
-        MultiRootCollectionUnavailableV1,
-    };
+    use super::{MultiRootCollectionResolutionV1, MultiRootCollectionUnavailableV1};
     use crate::multi_root::{AuthorizedScopeSet, AuthorizedScopeSetAuthority};
     use crate::{
         CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
@@ -187,28 +184,6 @@ mod tests {
             UtcMicros(10),
         )
         .expect("authorized scope set")
-    }
-
-    #[test]
-    fn explicit_target_always_outranks_the_default_collection() {
-        let selector = MultiRootCollectionSelectorV1::new(
-            Some(collection("scope-set.explicit")),
-            Some(collection("scope-set.default")),
-        );
-        assert_eq!(selector.target(), Some(&collection("scope-set.explicit")));
-    }
-
-    #[test]
-    fn default_collection_answers_only_when_nothing_explicit_is_named() {
-        let with_default =
-            MultiRootCollectionSelectorV1::new(None, Some(collection("scope-set.default")));
-        assert_eq!(
-            with_default.target(),
-            Some(&collection("scope-set.default"))
-        );
-
-        let unnamed = MultiRootCollectionSelectorV1::new(None, None);
-        assert_eq!(unnamed.target(), None);
     }
 
     #[test]

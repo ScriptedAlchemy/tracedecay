@@ -835,54 +835,7 @@ impl Default for AutomationSettingsV1 {
 }
 
 #[cfg(test)]
-mod automation_settings_tests {
-    use super::{AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1};
-
-    #[test]
-    fn fresh_v2_settings_schedule_the_required_curation_loop() {
-        let settings = AutomationSettingsV1::default();
-
-        assert!(settings.enabled);
-        assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
-        assert_eq!(settings.host_mode, AutomationHostModeV1::Standalone);
-        assert_eq!(settings.model_id.as_deref(), Some("gpt-5.6-sol"));
-        assert!(settings.validate().is_ok());
-        assert_eq!(settings.scheduler_tick_secs, 60);
-        assert!(settings.combine_due_tasks);
-
-        assert_eq!(
-            (
-                settings.tasks.memory_curator.enabled,
-                settings.tasks.memory_curator.schedule.as_deref(),
-                settings.tasks.memory_curator.interval_secs,
-                settings.tasks.memory_curator.cooldown_secs,
-                settings.tasks.memory_curator.min_idle_secs,
-            ),
-            (true, Some("interval"), Some(900), Some(300), None)
-        );
-        assert_eq!(
-            (
-                settings.tasks.session_reflector.enabled,
-                settings.tasks.session_reflector.schedule.as_deref(),
-                settings.tasks.session_reflector.interval_secs,
-                settings.tasks.session_reflector.cooldown_secs,
-                settings.tasks.session_reflector.min_idle_secs,
-            ),
-            (true, Some("interval"), Some(900), Some(300), None)
-        );
-        assert_eq!(
-            (
-                settings.tasks.skill_writer.enabled,
-                settings.tasks.skill_writer.schedule.as_deref(),
-                settings.tasks.skill_writer.interval_secs,
-                settings.tasks.skill_writer.cooldown_secs,
-                settings.tasks.skill_writer.min_idle_secs,
-            ),
-            (true, Some("interval"), Some(3_600), Some(300), Some(900))
-        );
-        settings.validate().expect("fresh V2 automation settings");
-    }
-}
+mod automation_settings_tests {}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

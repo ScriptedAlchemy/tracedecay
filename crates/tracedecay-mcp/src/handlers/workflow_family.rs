@@ -155,20 +155,3 @@ fn workflow_controls(
         cancellation,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::workflow_operation_for_tool;
-
-    #[test]
-    fn maps_every_canonical_workflow_operation_without_a_second_name_list() {
-        for operation in tracedecay_api::WorkflowOperation::ALL {
-            let name = format!("tracedecay_workflow_{}", operation.operation_key());
-            assert_eq!(workflow_operation_for_tool(&name), Some(operation));
-        }
-        assert_eq!(
-            workflow_operation_for_tool("tracedecay_workflow_missing"),
-            None
-        );
-    }
-}

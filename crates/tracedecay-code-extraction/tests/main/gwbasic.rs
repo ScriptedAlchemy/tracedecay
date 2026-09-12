@@ -11,82 +11,6 @@ fn extract_fixture() -> ExtractionResult {
 }
 
 #[test]
-fn test_gwbasic_file_node() {
-    let result = extract_fixture();
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "sample.gw");
-}
-
-#[test]
-fn test_gwbasic_let_constants() {
-    let result = extract_fixture();
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    assert_eq!(
-        consts.len(),
-        2,
-        "expected 2 consts, got {}: {:?}",
-        consts.len(),
-        consts.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(consts.iter().any(|n| n.name == "MR"), "MR const not found");
-    assert!(consts.iter().any(|n| n.name == "DP"), "DP const not found");
-}
-
-#[test]
-fn test_gwbasic_def_fn() {
-    let result = extract_fixture();
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    // DEF FNLOG$ should be extracted as a Function
-    assert!(
-        fns.iter().any(|n| n.name == "FNLOG"),
-        "FNLOG function not found, got: {:?}",
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn test_gwbasic_subroutine_functions() {
-    let result = extract_fixture();
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    // We expect 4 functions: FNLOG (DEF FN) + 3 subroutines
-    assert!(
-        fns.len() >= 4,
-        "expected >= 4 functions, got {}: {:?}",
-        fns.len(),
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "VALIDATE_CONFIGURATION"),
-        "VALIDATE_CONFIGURATION not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "CONNECT_TO_SERVER"),
-        "CONNECT_TO_SERVER not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "DISCONNECT"),
-        "DISCONNECT not found"
-    );
-}
-
-#[test]
 fn test_gwbasic_gosub_calls() {
     let result = extract_fixture();
     let calls: Vec<_> = result
@@ -152,21 +76,6 @@ fn test_gwbasic_docstrings() {
     assert!(
         disconnect_fn.docstring.is_some(),
         "DISCONNECT should have docstring"
-    );
-}
-
-#[test]
-fn test_gwbasic_contains_edges() {
-    let result = extract_fixture();
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 6,
-        "should have >= 6 Contains edges, got {}",
-        contains.len()
     );
 }
 

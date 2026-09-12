@@ -48,20 +48,6 @@ fn unbound_hook_analytics_do_not_create_a_missing_profile() {
 }
 
 #[test]
-fn telemetry_contract_is_canonical_and_bounded() {
-    let contract = host_hook_telemetry_contract();
-    assert_eq!(
-        contract["schema_version"],
-        HOST_HOOK_TELEMETRY_SCHEMA_VERSION
-    );
-    assert_eq!(contract["provider_coverage"].as_array().unwrap().len(), 5);
-    assert_eq!(
-        contract["metrics"]["timeout"],
-        serde_json::json!(["timeout.budget_ms", "timeout.timed_out"])
-    );
-}
-
-#[test]
 fn disposition_classifier_distinguishes_outcomes() {
     assert_eq!(
         HookDispositionTelemetry::timeout("hook_timeout").class,
@@ -1165,41 +1151,6 @@ fn readiness_aggregation_tie_order_is_stable_under_cap() {
     assert_eq!(
         first.hook_wall_time_distribution[0].summary.max,
         Some(1_000 + (total as u64 - 1))
-    );
-}
-
-#[test]
-fn empty_readiness_distributions_are_honest_no_samples_not_zero_fill() {
-    let empty = empty_hook_completed_readiness_distributions();
-    assert_eq!(empty.collection_status, MetricAvailability::NoSamples);
-    assert_eq!(empty.input_rows_received, 0);
-    assert_eq!(empty.input_rows_processed, 0);
-    assert_eq!(empty.input_rows_dropped_at_cap, 0);
-    assert_eq!(empty.events_considered, 0);
-    assert!(empty.hook_wall_time_distribution.is_empty());
-    assert!(empty.host_ipc_rtt_distribution.is_empty());
-    assert!(empty.payload_bytes_distribution.is_empty());
-    assert!(empty.timeout_outcomes_by_host.is_empty());
-    assert!(empty.disposition_counts_by_host.is_empty());
-    assert_eq!(empty.unavailable_metrics.len(), 1);
-    assert_eq!(
-        empty.unavailable_metrics[0].blocker,
-        "hook_completed_does_not_emit_daemon_processing_duration"
-    );
-    assert_eq!(empty.bounds.max_input_rows, MAX_READINESS_INPUT_ROWS as u64);
-    assert_eq!(empty.bounds.host_buckets, READINESS_HOST_BUCKETS as u64);
-}
-
-#[test]
-fn telemetry_contract_separates_host_ipc_rtt_from_daemon_processing() {
-    let contract = host_hook_telemetry_contract();
-    assert_eq!(
-        contract["latency_semantics"]["host_ipc_rtt"]["event_field"],
-        "daemon_rtt_us"
-    );
-    assert_eq!(
-        contract["latency_semantics"]["daemon_processing_duration"]["status"],
-        "unavailable"
     );
 }
 

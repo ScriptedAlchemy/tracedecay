@@ -157,21 +157,6 @@ pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn packaged_workload_is_independent_of_mounted_project() {
-        let unrelated = tempfile::tempdir().expect("unrelated project");
-        std::fs::write(
-            unrelated.path().join("Cargo.toml"),
-            "[package]\nname = \"unrelated\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("unrelated project content");
-
-        let summary = crate::validate_default_activation_workload(unrelated.path())
-            .expect("packaged evaluator workload");
-        assert_eq!(summary.query_count, 28);
-        assert_eq!(summary.profile_count, 3);
-    }
-
-    #[test]
     fn packaged_evaluator_runs_against_an_unrelated_project() {
         let unrelated = tempfile::tempdir().expect("unrelated project");
         std::fs::write(

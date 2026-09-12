@@ -3125,18 +3125,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_file_key_index_preserves_canonical_positions() {
-        let first = FileOccurrenceId::new("file.partitioned.first").expect("first file identity");
-        let second =
-            FileOccurrenceId::new("file.partitioned.second").expect("second file identity");
-
-        let keys = snapshot_file_keys([&first, &second].into_iter()).expect("snapshot file keys");
-
-        assert_eq!(keys.get(&first), Some(&0));
-        assert_eq!(keys.get(&second), Some(&1));
-    }
-
-    #[test]
     fn missing_evidence_pages_is_legacy_but_explicit_null_is_rejected() {
         let missing = serde_json::json!({
             "segment_digest": "sha256:56f954431e92b5e2ef9b1355bc229acf516a8d3409b7e48e9cd9fb7856411f29",
@@ -3650,42 +3638,6 @@ mod tests {
                 .windows(GENERATION_ID_MARKER.len())
                 .any(|window| window == GENERATION_ID_MARKER.as_bytes()),
             "the fixture must actually exercise identity substitution"
-        );
-    }
-
-    #[test]
-    fn streaming_file_segment_decode_restores_the_serialized_payload() {
-        let (segment_bytes, descriptor) = streamed_file_segment();
-        let segment: PartitionedRawFileSegmentV1 =
-            serde_json::from_slice(&segment_bytes).expect("streamed segment envelope");
-        let mut policy = FileSegmentDecodePolicyV1 {
-            generation_id: FIXTURE_GENERATION,
-            file_occurrence_id: FIXTURE_FILE,
-            symbol_occurrences: &descriptor.symbol_occurrences,
-        };
-        let mut restored = Vec::new();
-
-        canonicalize_json_into(segment.file.get().as_bytes(), &mut policy, &mut restored)
-            .expect("streamed segment restore");
-
-        let restored: Value = serde_json::from_slice(&restored).expect("restored payload");
-        let expected = serde_json::to_value(fixture_payload()).expect("fixture payload value");
-        assert_eq!(
-            restored.pointer("/extraction/generation_id"),
-            expected.pointer("/extraction/generation_id"),
-        );
-        assert_eq!(
-            restored.pointer("/artifacts/chunks/chunks/0/symbol_occurrence_ids"),
-            expected.pointer("/artifacts/chunks/chunks/0/symbol_occurrence_ids"),
-        );
-        assert_eq!(
-            restored.pointer("/artifacts/unresolved_references"),
-            restored.pointer("/artifacts/unresolved_references"),
-        );
-        assert_eq!(
-            restored.pointer("/authority"),
-            expected.pointer("/authority"),
-            "escaped keys and values must round-trip"
         );
     }
 

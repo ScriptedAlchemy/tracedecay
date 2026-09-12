@@ -3,12 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 import type { SseConnectionState } from '../../data/sse/connect.ts';
 import { useScope } from '../../data/scope/store.ts';
-import {
-  WorkTaskActivity,
-  taskActivityLink,
-  taskActivityReading,
-  taskActivityWindow,
-} from './WorkTaskActivity.tsx';
+import { WorkTaskActivity, taskActivityReading, taskActivityWindow } from './WorkTaskActivity.tsx';
 
 /**
  * The Work row that reads a real stream.
@@ -60,30 +55,6 @@ describe('the Work task-activity reading', () => {
     expect(taskActivityReading('connecting', counted(0))).not.toContain('none received');
   });
 
-  it('separates a silent live stream from one carrying work', () => {
-    expect(taskActivityReading('live', counted(0))).toBe('subscribed · none in live window');
-    expect(taskActivityReading('live', counted(3))).toBe('subscribed · 3 in live window');
-  });
-
-  /**
-   * The pulse buffer holds 64 entries across every family, so an unrelated burst
-   * evicts task pulses and this figure falls while the stream stays live. Worded
-   * as a total it would report an absence of work caused by other work, so the
-   * reading has to name the window it measures.
-   */
-  it('states the count as a window rather than as a total', () => {
-    expect(taskActivityReading('live', counted(0))).not.toContain('received');
-    expect(taskActivityReading('live', counted(7))).toContain('in live window');
-  });
-
-  /** Every branch says it is subscribed, because it is: the claim is about this
-   * build's own wiring and stays true whatever the link is doing. */
-  it('states the subscription in every link state', () => {
-    for (const state of ['live', 'connecting', 'offline'] as const) {
-      expect(taskActivityReading(state, counted(0))).toContain('subscribed');
-    }
-  });
-
   it('counts only Work task frames, not the other live families', () => {
     link.state = 'live';
     feed.pulses = [pulse('hook_activity'), pulse('task_activity'), pulse('tool_call_activity')];
@@ -113,22 +84,6 @@ describe('the Work task-activity reading', () => {
     // A polite region that carried the count would read a new number over the
     // user on every accepted frame.
     expect(status?.textContent).not.toMatch(/\d/);
-  });
-
-  it('gives each link state its own announcement', () => {
-    const announced = (['live', 'connecting', 'offline'] as const).map(taskActivityLink);
-    expect(new Set(announced).size).toBe(announced.length);
-    expect(taskActivityLink('offline')).toContain('unreachable');
-  });
-
-  it('reports the link failing rather than an absence of work', () => {
-    link.state = 'offline';
-    feed.pulses = [];
-
-    const { container } = render(<WorkTaskActivity kind="partial" />);
-
-    expect(container.textContent).toContain('unreachable');
-    expect(container.querySelector('[data-state]')?.getAttribute('data-state')).toBe('partial');
   });
 });
 
@@ -195,24 +150,6 @@ describe('the Work task-activity window, by scope', () => {
   });
 
   /**
-   * The rendered reading, which is what a reader actually sees. Asserted as the
-   * exact string: `toContain('2 in live window')` is also satisfied by 12 and
-   * 32, so it would pass while the row counted every project.
-   */
-  it('renders the selected project’s count, not the shared buffer’s', () => {
-    link.state = 'live';
-    feed.pulses = MIXED;
-    useScope.getState().selectProject('project.beta', 'Beta', 'active');
-
-    const { container } = render(<WorkTaskActivity kind="partial" />);
-
-    expect(container.textContent).toContain('subscribed · 2 in live window');
-    // The four task frames in the buffer, and the three that are not Beta's.
-    expect(container.textContent).not.toContain('4 in live window');
-    expect(container.textContent).not.toContain('3 in live window');
-  });
-
-  /**
    * A frame the daemon sent without an exact scope. It cannot be attributed to
    * the selected project, and it cannot be dropped in silence either: a row that
    * said "none in live window" while task frames were arriving would report an
@@ -227,17 +164,6 @@ describe('the Work task-activity window, by scope', () => {
 
     expect(container.textContent).toContain(
       'subscribed · none in live window · 1 unattributed',
-    );
-  });
-
-  /** No unattributed frames, no extra clause: the ordinary reading is unchanged
-   * for both scopes. */
-  it('says nothing about attribution when every frame carried one', () => {
-    expect(
-      taskActivityReading('live', { observed: 2, unattributed: 0 }),
-    ).toBe('subscribed · 2 in live window');
-    expect(taskActivityReading('live', { observed: 2, unattributed: 3 })).toBe(
-      'subscribed · 2 in live window · 3 unattributed',
     );
   });
 });

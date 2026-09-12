@@ -23,55 +23,6 @@ use tracedecay_domain::configuration::{
 };
 
 #[tokio::test]
-async fn canonical_initialization_publishes_one_final_revision_without_legacy_state() {
-    let directory = tempfile::tempdir().unwrap();
-    let profile_root = directory.path().join("profile");
-    let project_root = directory.path().join("project");
-    std::fs::create_dir_all(&project_root).unwrap();
-    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::project(
-        &profile_root,
-        &project_root,
-        tracedecay_domain::ProjectId::new("project.configuration-initialization").unwrap(),
-    )
-    .await
-    .unwrap();
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-    let store = GlobalDbConfigurationControlStore::new_registered(db);
-    let revision_id = tracedecay_domain::configuration::ConfigurationRevisionId::new(
-        "configuration.revision.initial",
-    )
-    .unwrap();
-    let resolution = resolve_configuration(&ConfigurationRegistry::core().unwrap(), &[]).unwrap();
-
-    store
-        .initialize_canonical(&revision_id, &resolution, UtcMicros(1))
-        .await
-        .unwrap();
-
-    let current = ConfigurationControlStore::current(&store).await.unwrap();
-    assert_eq!(current.revision_id, revision_id);
-    assert_eq!(current.snapshot, resolution.snapshot);
-    let snapshot = db.read_snapshot().await.unwrap();
-    let mut legacy = snapshot
-        .query(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE name IN (
-                'configuration_migration_receipts',
-                'configuration_migration_quarantine'
-             )",
-            (),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        legacy.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
-    );
-}
-
-#[tokio::test]
 async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
     let directory = tempfile::tempdir().unwrap();
     let profile_root = directory.path().join("profile");

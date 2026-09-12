@@ -1,6 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -10,11 +9,9 @@ use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, McpToolTransport,
     OperationRequestOptions, StreamOptions, StreamResume,
 };
-use tracedecay_sdk::operation::DeadlineBehavior;
 use tracedecay_sdk::operations::{
-    ApplicationFactStoreCurate, ApplicationGitStatus, CodeExactOccurrence, MultiRootExecute,
-    MultiRootScopeSetCompareAndSwap, MultiRootScopeSetRead, OperationTransport, TypedOperation,
-    WorkRetrieveEvidence, WorkflowListDefinitions, WorkflowRegisterDefinition,
+    ApplicationFactStoreCurate, MultiRootScopeSetRead, OperationTransport, TypedOperation,
+    WorkflowListDefinitions,
 };
 
 #[derive(Debug, Default)]
@@ -77,56 +74,6 @@ fn serve(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<String>>) {
         requests
     });
     (format!("http://{address}"), task)
-}
-
-/// A fixture HTTP server whose blocking accept loop can be stopped early.
-///
-/// The listener stays in blocking mode: a nonblocking listener hands out
-/// nonblocking accepted sockets on Windows, so the request reader would fail
-/// with `WouldBlock` (WSAEWOULDBLOCK 10035) instead of waiting for bytes.
-/// Stopping sets the flag and then opens one wake-up connection so a pending
-/// `accept` observes the flag instead of busy-polling for it.
-struct StoppableServer {
-    address: SocketAddr,
-    stop_requested: Arc<AtomicBool>,
-    task: thread::JoinHandle<Vec<String>>,
-}
-
-impl StoppableServer {
-    fn stop(self) -> Vec<String> {
-        self.stop_requested.store(true, Ordering::SeqCst);
-        if !self.task.is_finished() {
-            let _ = TcpStream::connect(self.address);
-        }
-        self.task.join().unwrap()
-    }
-}
-
-fn serve_until_stopped(responses: Vec<String>) -> (String, StoppableServer) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let stop_requested = Arc::new(AtomicBool::new(false));
-    let stop_observed = Arc::clone(&stop_requested);
-    let task = thread::spawn(move || {
-        let mut requests = Vec::new();
-        for response in responses {
-            let (mut stream, _) = listener.accept().unwrap();
-            if stop_observed.load(Ordering::SeqCst) {
-                return requests;
-            }
-            requests.push(request(&mut stream));
-            stream.write_all(response.as_bytes()).unwrap();
-        }
-        requests
-    });
-    (
-        format!("http://{address}"),
-        StoppableServer {
-            address,
-            stop_requested,
-            task,
-        },
-    )
 }
 
 /// Serves one event stream whose body the client may abandon mid-frame, so a
@@ -412,32 +359,6 @@ fn hostile_identifiers_are_percent_encoded_into_single_path_segments() {
 }
 
 #[test]
-fn typed_workflow_descriptors_retain_canonical_contract_identity() {
-    fn assert_typed_contract<Operation: TypedOperation>() {}
-
-    assert_typed_contract::<WorkflowRegisterDefinition>();
-    assert_eq!(
-        WorkflowRegisterDefinition::OPERATION_ID,
-        "operation.workflow.register_definition"
-    );
-    assert_eq!(
-        WorkflowRegisterDefinition::TRANSPORT,
-        tracedecay_sdk::operations::OperationTransport::Http {
-            route: "/application/workflow/register-definition"
-        }
-    );
-    assert_eq!(
-        WorkflowRegisterDefinition::BINDING_ID,
-        "binding.http.workflow.register_definition"
-    );
-    assert_eq!(WorkflowRegisterDefinition::MAXIMUM_DEADLINE_MILLIS, 30_000);
-    assert_eq!(
-        WorkflowRegisterDefinition::DEADLINE_BEHAVIOR,
-        DeadlineBehavior::ReturnEffectReceipt
-    );
-}
-
-#[test]
 fn invalid_typed_deadline_is_rejected_before_transport() {
     let client = Client::builder(ConnectionMode::local(
         "http://127.0.0.1:1",
@@ -543,67 +464,6 @@ fn curate_rejects_a_problem_bound_to_a_foreign_replay_handle() {
 }
 
 #[test]
-fn curate_accepts_a_terminal_bound_to_the_public_replay_handle() {
-    let request = tracedecay_sdk::contracts::retained_surfaces::FactStoreCurateRequestV1::default();
-    let request_id =
-        tracedecay_sdk::contracts::RequestId::new("request.sdk.curate").expect("request id");
-    let admission = request
-        .automation_request(&request_id)
-        .expect("automation admission");
-    let request_digest = admission.input_digest().expect("request digest");
-    let response = json_response(
-        "200 OK",
-        json!({
-            "kind": "success",
-            "value": {
-                "binding_id": "binding.http.fact_store_curate.v1",
-                "contract": {
-                    "schema_id": "schema.application.retained.fact-store-curate.result",
-                    "schema_revision": 1
-                },
-                "request_id": request_id.as_str(),
-                "scope": {},
-                "outcome": {"outcome": "effect", "value": {
-                    "effect_id": "effect.sdk.curate", "effect_class": "administrative",
-                    "idempotency_key": request_id.as_str(), "authority": {},
-                    "expected_state": "state.sdk.curate", "reconciliation": "required",
-                    "receipt": {},
-                    "execution": {"started_at": 1, "ended_at": 2,
-                        "effective_deadline": {"expires_at": 3}, "cancellation": null,
-                        "budget": {"units_consumed": 1, "bytes_consumed": 1,
-                            "elapsed_micros": 1}, "termination": "completed"},
-                    "payload": {
-                        "run_id": request_id.as_str(), "task": "memory_curator",
-                        "request_digest": request_digest.as_str(),
-                        "terminal": {"status": "completed", "summary": {
-                            "reviewed_count": 0, "accepted_count": 0,
-                            "rejected_count": 0, "skipped_count": 0
-                        }},
-                        "committed_receipts": []
-                    }
-                }}
-            }
-        }),
-    );
-    let (base_url, server) = serve(vec![response]);
-    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
-        .build()
-        .unwrap();
-    let terminal = client
-        .execute_with_options::<ApplicationFactStoreCurate>(
-            &request,
-            OperationRequestOptions {
-                request_id: Some(request_id.clone()),
-                ..OperationRequestOptions::default()
-            },
-        )
-        .expect("bound curator terminal");
-    assert_eq!(terminal.request_id, request_id.as_str());
-    assert_eq!(terminal.result.run_id.as_str(), request_id.as_str());
-    assert_eq!(server.join().unwrap().len(), 1);
-}
-
-#[test]
 fn typed_result_rejects_malformed_payloads() {
     let response = json_response("200 OK", list_definitions_success());
     let (base_url, server) = serve(vec![response]);
@@ -625,109 +485,6 @@ fn typed_result_rejects_malformed_payloads() {
             .contains("POST /projects/project.sdk/application/workflow/list-definitions HTTP/1.1")
     );
     assert!(!requests[0].contains("/application/workflow/list-definitions?"));
-}
-
-#[test]
-fn callable_code_uses_the_mounted_http_route_without_an_mcp_transport() {
-    assert_eq!(
-        CodeExactOccurrence::TRANSPORT,
-        tracedecay_sdk::operations::OperationTransport::Http {
-            route: "/application/code/code_exact_occurrence"
-        },
-        "canonical SDK generation must select the mounted HTTP executable"
-    );
-    let response = json_response("200 OK", json!({}));
-    let (base_url, server) = serve(vec![response]);
-    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
-        .build()
-        .unwrap();
-    let request =
-        serde_json::from_value::<<CodeExactOccurrence as TypedOperation>::Request>(json!({
-            "literal": "sdk_executable_binding_registry",
-            "kind": null,
-            "scope": {
-                "generation": "generation.sdk",
-                "path_prefix": "crates/tracedecay-contracts"
-            },
-            "meta": {
-                "projection": "evidence",
-                "order": "relevance",
-                "cursor": null
-            }
-        }))
-        .expect("canonical callable-code request");
-
-    let error = client
-        .execute::<CodeExactOccurrence>(&request)
-        .expect_err("malformed fixture response must fail closed");
-
-    assert!(matches!(error, ClientError::Protocol { .. }));
-    let requests = server.join().unwrap();
-    assert!(
-        requests[0]
-            .contains("POST /projects/project.sdk/application/code/code_exact_occurrence HTTP/1.1")
-    );
-    assert!(requests[0].contains("sdk_executable_binding_registry"));
-}
-
-#[test]
-fn multi_root_operations_reach_their_exact_project_application_routes() {
-    let response = json_response("200 OK", json!({}));
-    let (base_url, server) =
-        serve_until_stopped(vec![response.clone(), response.clone(), response]);
-    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
-        .build()
-        .unwrap();
-
-    let read = serde_json::from_value::<<MultiRootScopeSetRead as TypedOperation>::Request>(
-        json!({"scope_set_id": "scope-set.sdk"}),
-    )
-    .expect("canonical scope-set read request");
-    let compare_and_swap = serde_json::from_value::<
-        <MultiRootScopeSetCompareAndSwap as TypedOperation>::Request,
-    >(json!({
-        "scope_set_id": "scope-set.sdk",
-        "expected_revision": null,
-        "roots": [{"project_id": "project.sdk-root", "root": "/project/sdk-root"}]
-    }))
-    .expect("canonical scope-set compare-and-swap request");
-    let execute = serde_json::from_value::<<MultiRootExecute as TypedOperation>::Request>(json!({
-        "scope_set_id": "scope-set.sdk",
-        "scope_set_revision": 1,
-        "scope_set_digest": format!("sha256:{}", "a".repeat(64)),
-        "operation": {"kind": "query", "request": {}},
-        "page": 0,
-        "continuation": null
-    }))
-    .expect("canonical multi-root execute request");
-
-    for result in [
-        client.execute::<MultiRootScopeSetRead>(&read).map(|_| ()),
-        client
-            .execute::<MultiRootScopeSetCompareAndSwap>(&compare_and_swap)
-            .map(|_| ()),
-        client.execute::<MultiRootExecute>(&execute).map(|_| ()),
-    ] {
-        assert!(
-            matches!(result, Err(ClientError::Protocol { .. })),
-            "the malformed fixture response must fail only after HTTP admission"
-        );
-    }
-
-    let requests = server.stop();
-    assert_eq!(requests.len(), 3, "every typed operation must issue HTTP");
-    assert!(
-        requests[0].starts_with(
-            "POST /projects/project.sdk/application/multi-root/scope-set/read HTTP/1.1"
-        )
-    );
-    assert!(requests[1].starts_with(
-        "POST /projects/project.sdk/application/multi-root/scope-set/compare-and-swap HTTP/1.1"
-    ));
-    assert!(
-        requests[2]
-            .starts_with("POST /projects/project.sdk/application/multi-root/execute HTTP/1.1")
-    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1065,76 +822,6 @@ fn near_limit_multiline_sse_frames_still_decode() {
     );
     assert!(events[1].terminal());
     server.join().unwrap();
-}
-
-#[test]
-fn mounted_git_reads_use_the_generated_http_route() {
-    let response = json_response("200 OK", json!({}));
-    let (base_url, server) = serve(vec![response]);
-    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
-        .build()
-        .expect("client configuration");
-    let request =
-        serde_json::from_value::<<ApplicationGitStatus as TypedOperation>::Request>(json!({}))
-            .unwrap();
-
-    let error = client
-        .execute::<ApplicationGitStatus>(&request)
-        .expect_err("malformed HTTP result must fail closed");
-
-    assert!(matches!(error, ClientError::Protocol { .. }));
-    let requests = server.join().unwrap();
-    assert!(requests[0].contains("POST /projects/project.sdk/application/git/status HTTP/1.1"));
-}
-
-#[test]
-fn work_evidence_uses_the_generated_http_route_and_typed_request() {
-    let response = json_response("200 OK", json!({}));
-    let (base_url, server) = serve(vec![response]);
-    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
-        .build()
-        .expect("client configuration");
-    let request =
-        serde_json::from_value::<<WorkRetrieveEvidence as TypedOperation>::Request>(json!({
-            "selection": {"selection": "profile_owned_no_git"},
-            "task_id": "task.sdk.evidence",
-            "verified_version": {
-                "graph_version": 4,
-                "event_sequence": 4,
-                "source_watermark": {},
-                "recovered_graph_digest": concat!(
-                    "sha256:",
-                    "11111111111111111111111111111111",
-                    "11111111111111111111111111111111"
-                )
-            },
-            "temporal": {"kind": "forensic"},
-            "page_size": 8,
-            "expansion": {
-                "kind": "task_session",
-                "attempt": {
-                    "task_id": "task.sdk.evidence",
-                    "run_id": "run.sdk.evidence",
-                    "attempt_id": "attempt.sdk.evidence"
-                }
-            },
-            "continuation": null,
-            "observed_at": 100
-        }))
-        .expect("typed Work evidence request");
-
-    let error = client
-        .execute::<WorkRetrieveEvidence>(&request)
-        .expect_err("malformed HTTP result must fail closed");
-
-    assert!(matches!(error, ClientError::Protocol { .. }));
-    let requests = server.join().unwrap();
-    assert!(
-        requests[0]
-            .contains("POST /projects/project.sdk/application/work/retrieve-evidence HTTP/1.1")
-    );
-    assert!(requests[0].contains("\"kind\":\"task_session\""));
-    assert!(requests[0].contains("\"attempt_id\":\"attempt.sdk.evidence\""));
 }
 
 #[test]

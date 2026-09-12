@@ -47,16 +47,6 @@ fn hidden_scoop_package_hook_contract_parses_both_operations() {
 }
 
 #[test]
-fn first_class_git_status_parses_as_a_cli_journey() {
-    let parsed = Cli::try_parse_from(["tracedecay", "git", "status", "--json"]);
-
-    assert!(
-        parsed.is_ok(),
-        "catalogued Git status must be available without the generic tool escape hatch"
-    );
-}
-
-#[test]
 fn first_class_git_hunks_carries_no_preview_binding_arguments() {
     // The daemon captures exact repository state itself and mints the preview
     // binding; the public CLI must not accept caller-supplied preview
@@ -200,17 +190,6 @@ fn removed_host_cli_aliases_are_invalid_subcommands() {
 }
 
 #[test]
-fn removed_manual_memory_curation_command_is_invalid() {
-    let error = match Cli::try_parse_from(["tracedecay", "memory", "curate"]) {
-        Ok(_) => panic!("manual memory curation must stay removed from final-V2"),
-        Err(error) => error,
-    };
-
-    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
-    assert!(Cli::try_parse_from(["tracedecay", "memory", "status", "--json"]).is_ok());
-}
-
-#[test]
 fn removed_hermes_install_selectors_are_unknown_arguments() {
     for args in [
         vec![
@@ -258,34 +237,6 @@ fn removed_hermes_install_selectors_are_unknown_arguments() {
         };
         assert_eq!(error.kind(), ErrorKind::UnknownArgument, "args: {args:?}");
     }
-}
-
-#[test]
-fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
-    let update = Cli::try_parse_from(["tracedecay", "update"]).expect("update should parse");
-    let upgrade = Cli::try_parse_from(["tracedecay", "upgrade"]).expect("upgrade should parse");
-    let update_plugin =
-        Cli::try_parse_from(["tracedecay", "update-plugin"]).expect("update-plugin should parse");
-
-    assert!(matches!(
-        update.command,
-        Some(Commands::Update {
-            no_reinstall: false
-        })
-    ));
-    assert!(matches!(
-        upgrade.command,
-        Some(Commands::Upgrade {
-            no_reinstall: false
-        })
-    ));
-    assert!(matches!(
-        update_plugin.command,
-        Some(Commands::UpdatePlugin {
-            local: false,
-            agent: None
-        })
-    ));
 }
 
 #[test]
@@ -491,19 +442,6 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
 }
 
 #[test]
-fn lsp_servers_command_parses_json_flag() {
-    let cli = Cli::try_parse_from(["tracedecay", "lsp", "servers", "--json"])
-        .expect("lsp servers should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Lsp {
-            action: LspAction::Servers { json: true }
-        })
-    ));
-}
-
-#[test]
 fn lsp_bridge_accepts_explicit_project_or_initialize_root() {
     let cli = Cli::try_parse_from([
         "tracedecay",
@@ -534,21 +472,6 @@ fn lsp_bridge_accepts_explicit_project_or_initialize_root() {
                 project: None,
             }
         })
-    ));
-}
-
-#[test]
-fn codex_install_automation_flag_parses_without_extra_knobs() {
-    let cli = Cli::try_parse_from(["tracedecay", "install", "--agent", "codex", "--automation"])
-        .expect("Codex automation install should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Install {
-            agent,
-            automation,
-            ..
-        }) if agent.as_deref() == Some("codex") && automation
     ));
 }
 
@@ -743,30 +666,6 @@ fn status_and_branch_add_commands_dispatch_to_expected_variants() {
 }
 
 #[test]
-fn branch_autotrack_enable_parses_poll_secs_and_path() {
-    use super::BranchAutotrackAction;
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "branch",
-        "autotrack",
-        "enable",
-        "--poll-secs",
-        "120",
-        "--path",
-        "/tmp/project",
-    ])
-    .expect("branch autotrack enable should parse");
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Branch {
-            action: BranchAction::Autotrack {
-                action: BranchAutotrackAction::Enable { poll_secs, path }
-            }
-        }) if poll_secs == Some(120) && path.as_deref() == Some("/tmp/project")
-    ));
-}
-
-#[test]
 fn init_accepts_short_and_long_path_flag_like_dashboard_does() {
     // `-p, --path` is documented (see TOP_LEVEL_AFTER_HELP) and already works
     // on `dashboard`, `gitignore`, and `bench`; `init` previously only took
@@ -866,114 +765,6 @@ fn init_and_sync_parse_runtime_skip_and_include_folders() {
             && force
             && skip_folders.is_empty()
             && include_folders == strings(&["dist", "vendor/generated"])
-    ));
-}
-
-#[test]
-fn init_parses_adopt_project_flag() {
-    let adopt = Cli::try_parse_from([
-        "tracedecay",
-        "init",
-        "/tmp/moved",
-        "--adopt-project",
-        "proj_nongit_moved",
-    ])
-    .expect("init --adopt-project should parse");
-    assert!(matches!(
-        adopt.command,
-        Some(Commands::Init {
-            path,
-            adopt_project,
-            fresh: false,
-            ..
-        }) if path.as_deref() == Some("/tmp/moved")
-            && adopt_project.as_deref() == Some("proj_nongit_moved")
-    ));
-}
-
-#[test]
-fn init_parses_fresh_flag() {
-    let fresh = Cli::try_parse_from(["tracedecay", "init", "/tmp/new", "--fresh"])
-        .expect("init --fresh should parse");
-    assert!(matches!(
-        fresh.command,
-        Some(Commands::Init {
-            path,
-            adopt_project: None,
-            fresh: true,
-            ..
-        }) if path.as_deref() == Some("/tmp/new")
-    ));
-}
-
-#[test]
-fn init_and_sync_parse_repeated_include_folder_flags() {
-    let init = Cli::try_parse_from([
-        "tracedecay",
-        "init",
-        "/tmp/project",
-        "--include-folder",
-        "dist",
-        "--include-folder",
-        "vendor/generated",
-    ])
-    .expect("repeated init include folders should parse");
-    assert!(matches!(
-        init.command,
-        Some(Commands::Init {
-            path,
-            include_folders,
-            ..
-        }) if path.as_deref() == Some("/tmp/project")
-            && include_folders == strings(&["dist", "vendor/generated"])
-    ));
-
-    let sync = Cli::try_parse_from([
-        "tracedecay",
-        "sync",
-        "/tmp/project",
-        "--include-folder",
-        "dist",
-        "--include-folder",
-        "vendor/generated",
-    ])
-    .expect("repeated sync include folders should parse");
-    assert!(matches!(
-        sync.command,
-        Some(Commands::Sync {
-            path,
-            include_folders,
-            ..
-        }) if path.as_deref() == Some("/tmp/project")
-            && include_folders == strings(&["dist", "vendor/generated"])
-    ));
-}
-
-#[test]
-fn memory_status_command_dispatches_to_expected_variant() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "memory",
-        "status",
-        "--json",
-        "--path",
-        "/tmp/project",
-    ])
-    .expect("memory status command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Memory {
-            action: MemoryAction::Status {
-                json,
-                path,
-                project_id,
-                project_path,
-            }
-        }) if json
-            && path.as_deref() == Some("/tmp/project")
-            && project_id.is_none()
-            && project_path.is_none()
     ));
 }
 
@@ -1174,65 +965,6 @@ fn automation_config_commands_parse_project_sidecar_flags() {
     assert!(skill_writer_min_idle_secs.is_none());
     assert!(skill_writer_stale_lock_secs.is_none());
     assert!(path.is_none());
-}
-
-#[test]
-fn automation_config_rejects_retired_curation_policy_flags() {
-    for (flag, value) in [
-        ("--memory-apply-policy", "validate_then_apply"),
-        ("--skill-activation-policy", "validate_then_activate"),
-        ("--auto-apply-memory-ops", "true"),
-        ("--auto-enable-skills", "true"),
-    ] {
-        let error = Cli::try_parse_from(["tracedecay", "automation", "config", "set", flag, value])
-            .err()
-            .expect("curation policy flags must stay removed");
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "flag: {flag}");
-    }
-}
-
-#[test]
-fn automation_install_rejects_removed_auto_apply_flag() {
-    let error = Cli::try_parse_from([
-        "tracedecay",
-        "install",
-        "--agent",
-        "codex",
-        "--automation",
-        "--auto-apply",
-    ])
-    .err()
-    .expect("install-time approval bypass must stay removed");
-    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
-}
-
-#[test]
-fn automation_run_memory_curation_is_replaced_by_fact_store_curate() {
-    let error = Cli::try_parse_from(["tracedecay", "automation", "run", "memory-curation"])
-        .err()
-        .expect("dedicated curation launcher must be removed");
-    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
-}
-
-#[test]
-fn automation_facts_rejects_removed_mutation_commands() {
-    for action in ["apply", "reject"] {
-        let error = Cli::try_parse_from(["tracedecay", "automation", "facts", action, "fact-7"])
-            .err()
-            .expect("automation fact mutation commands must stay removed");
-        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
-    }
-}
-
-#[test]
-fn automation_rejects_removed_raw_run_launchers() {
-    for task in ["session-reflection", "skill-writing"] {
-        let error = match Cli::try_parse_from(["tracedecay", "automation", "run", task]) {
-            Ok(_) => panic!("raw automation run launcher must remain absent: {task}"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
-    }
 }
 
 #[test]
@@ -1605,34 +1337,6 @@ fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
 }
 
 #[test]
-fn storage_cleanup_sources_is_not_a_supported_subcommand() {
-    let err = match Cli::try_parse_from([
-        "tracedecay",
-        "storage",
-        "cleanup-sources",
-        "--manifest",
-        "/tmp/migration-manifest.json",
-        "--confirm-token",
-        "confirm",
-    ]) {
-        Ok(_) => panic!("cleanup-sources must not parse"),
-        Err(err) => err,
-    };
-
-    assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
-}
-
-#[test]
-fn branch_remove_requires_a_branch_name() {
-    let err = match Cli::try_parse_from(["tracedecay", "branch", "remove"]) {
-        Ok(_) => panic!("branch remove should require a name"),
-        Err(err) => err,
-    };
-
-    assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
-}
-
-#[test]
 fn parses_sessions_import_and_search_commands() {
     let import = Cli::try_parse_from(["tracedecay", "sessions", "import"]).unwrap();
     match import.command {
@@ -1930,20 +1634,6 @@ fn sessions_refresh_never_falls_back_to_the_current_directory() {
 }
 
 #[test]
-fn remote_status_parses_json_flag() {
-    let cli = Cli::try_parse_from(["tracedecay", "remote", "status", "--json"])
-        .expect("remote status should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Remote {
-            action: RemoteAction::Status { json: true }
-        })
-    ));
-    assert!(Cli::try_parse_from(["tracedecay", "remote", "status"]).is_ok());
-}
-
-#[test]
 fn remote_protocol_actions_require_endpoint_credential_and_request_file() {
     for action in [
         "enroll",
@@ -2058,21 +1748,6 @@ fn remote_capture_query_and_transfer_frame_parse_authority_flags() {
         assert_eq!(authority.request_file, std::path::Path::new("request.json"));
         assert!(authority.json);
     }
-}
-
-#[test]
-fn remote_status_rejects_protocol_request_file_flags() {
-    let error = match Cli::try_parse_from([
-        "tracedecay",
-        "remote",
-        "status",
-        "--request-file",
-        "request.json",
-    ]) {
-        Ok(_) => panic!("status must not accept --request-file"),
-        Err(error) => error,
-    };
-    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]

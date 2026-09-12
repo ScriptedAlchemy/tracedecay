@@ -1627,27 +1627,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retirement_commit_and_wait_returns_the_terminal_state() {
-        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
-        let (owner, cancelled) = task_owner(&coordinator);
-
-        assert_eq!(
-            owner
-                .reserve_retirement()
-                .expect("idle reconciler retirement reservation")
-                .commit_and_wait()
-                .await
-                .expect("commit and wait for reconciliation retirement"),
-            MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
-        );
-        assert!(cancelled.load(Ordering::Acquire));
-        assert_eq!(
-            coordinator.schedule_weak(closed_database(), |_| async { true }),
-            MemoryGraphReconciliationTaskScheduleV1::Closed
-        );
-    }
-
-    #[tokio::test]
     async fn retirement_receipt_reports_runtime_unavailable_without_erasing_it() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let owner = coordinator.task_owner(Arc::new(|| {

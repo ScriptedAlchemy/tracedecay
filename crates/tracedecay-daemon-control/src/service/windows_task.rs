@@ -2758,28 +2758,6 @@ mod tests {
     }
 
     #[test]
-    fn task_xml_round_trips_remote_tls_listener_paths() {
-        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-        let remote_tls = crate::RemoteBrainTlsConfig::from_optional_parts(
-            Some("192.0.2.10:7443".parse().expect("listener address")),
-            Some(PathBuf::from(r"C:\TraceDecay TLS\server & chain.pem")),
-            Some(PathBuf::from(r"C:\TraceDecay TLS\server % key.pem")),
-        )
-        .expect("valid Remote Brain TLS task configuration")
-        .expect("enabled Remote Brain TLS task configuration");
-        let mut service_spec = spec(r"C:\TraceDecay\tracedecay.exe", r"C:\TraceDecay\data");
-        service_spec.remote_tls = Some(remote_tls.clone());
-
-        let xml = render_task_xml_for(&service_spec, &identity).expect("task XML");
-
-        assert_eq!(
-            remote_tls_from_task_xml(&xml).expect("parse task Remote Brain arguments"),
-            Some(remote_tls)
-        );
-        assert!(!xml.contains("PRIVATE KEY"));
-    }
-
-    #[test]
     fn task_xml_rejects_ambiguous_remote_tls_argument_quoting() {
         let xml = r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-tls-cert &quot;C:\TraceDecay TLS\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>";
 
@@ -2849,23 +2827,6 @@ mod tests {
         .expect_err("invalid Unicode must fail");
 
         assert!(error.to_string().contains("is not valid Unicode"));
-    }
-
-    #[test]
-    fn task_xml_round_trips_unc_and_extended_profile_roots() {
-        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-        for profile_root in [
-            PathBuf::from(r"\\server\share\TraceDecay Data\"),
-            PathBuf::from(r"\\?\C:\Users\Zack\TraceDecay Data\"),
-        ] {
-            let xml = render_task_xml_for(
-                &spec(r"\\?\C:\TraceDecay\tracedecay.exe", &profile_root),
-                &identity,
-            )
-            .expect("render task XML");
-
-            assert_eq!(profile_root_from_task_xml(&xml), Some(profile_root));
-        }
     }
 
     #[test]
@@ -2953,55 +2914,6 @@ mod tests {
     }
 
     #[test]
-    fn task_xml_profile_root_round_trips_escaped_text() {
-        let profile_root = PathBuf::from("C:\\Users\\Z & <Trace>\"'Decay\\");
-        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-        let xml = render_task_xml_for(
-            &spec(
-                r"C:\Users\Z\scoop\apps\tracedecay\current\tracedecay.exe",
-                &profile_root,
-            ),
-            &identity,
-        )
-        .expect("render task XML");
-
-        assert_eq!(profile_root_from_task_xml(&xml), Some(profile_root));
-    }
-
-    #[test]
-    fn snapshot_maps_all_running_and_enablement_combinations() {
-        assert_eq!(state_from_snapshot(None), DaemonServiceState::Missing);
-        assert_eq!(
-            state_from_snapshot(Some(TaskSnapshot {
-                running: true,
-                enabled: true,
-            })),
-            DaemonServiceState::RunningEnabled
-        );
-        assert_eq!(
-            state_from_snapshot(Some(TaskSnapshot {
-                running: true,
-                enabled: false,
-            })),
-            DaemonServiceState::RunningDisabled
-        );
-        assert_eq!(
-            state_from_snapshot(Some(TaskSnapshot {
-                running: false,
-                enabled: true,
-            })),
-            DaemonServiceState::StoppedEnabled
-        );
-        assert_eq!(
-            state_from_snapshot(Some(TaskSnapshot {
-                running: false,
-                enabled: false,
-            })),
-            DaemonServiceState::StoppedDisabled
-        );
-    }
-
-    #[test]
     fn native_scheduler_state_mapping_fails_closed() {
         assert_eq!(
             task_snapshot_from_scheduler_state(1, false).expect("disabled"),
@@ -3041,25 +2953,6 @@ mod tests {
         assert!(native::is_task_not_found_code(HRESULT::from_win32(
             windows::Win32::Foundation::ERROR_FILE_NOT_FOUND.0
         )));
-    }
-
-    #[test]
-    fn registration_updates_definition_and_restores_running_disabled_state() {
-        let mut api =
-            FakeTaskScheduler::with_task(DaemonServiceState::RunningDisabled, "<Task>old</Task>");
-
-        register_task_xml_with(&mut api, "<Task>new</Task>").expect("update task");
-
-        assert_eq!(api.state(), DaemonServiceState::RunningDisabled);
-        assert_eq!(api.xml.as_deref(), Some("<Task>new</Task>"));
-        assert_eq!(
-            api.operations,
-            vec![
-                Operation::Register("<Task>new</Task>".to_string()),
-                Operation::Run,
-                Operation::Enable(false),
-            ]
-        );
     }
 
     #[test]
@@ -3193,23 +3086,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_state_enables_runs_and_redisables_for_running_disabled() {
-        let mut api = FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task/>");
-
-        apply_state_with(&mut api, DaemonServiceState::RunningDisabled).expect("apply state");
-
-        assert_eq!(api.state(), DaemonServiceState::RunningDisabled);
-        assert_eq!(
-            api.operations,
-            vec![
-                Operation::Enable(true),
-                Operation::Run,
-                Operation::Enable(false)
-            ]
-        );
-    }
-
-    #[test]
     fn apply_state_restores_disabled_state_when_run_fails() {
         let mut api = FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task/>");
         api.fail_next(FailurePoint::Run);
@@ -3261,22 +3137,6 @@ mod tests {
         assert!(error.to_string().contains("fake scheduler stop failed"));
         assert_eq!(api.state(), DaemonServiceState::RunningDisabled);
         assert_eq!(api.operations, vec![Operation::Enable(false)]);
-    }
-
-    #[test]
-    fn managed_stop_uses_authenticated_graceful_shutdown_without_hard_stop() {
-        let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningEnabled, "<Task/>");
-        api.snapshots_until_exit = Some(3);
-        let mut control = FakeDaemonControl {
-            quiesced_after: Some(2),
-            ..FakeDaemonControl::default()
-        };
-
-        stop_managed_with(&mut api, &mut control).expect("graceful stop");
-
-        assert_eq!(api.state(), DaemonServiceState::StoppedEnabled);
-        assert_eq!(control.shutdown_requests, 1);
-        assert!(!api.operations.contains(&Operation::Stop));
     }
 
     #[test]

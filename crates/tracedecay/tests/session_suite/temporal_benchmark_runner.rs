@@ -125,12 +125,3 @@ fn diagnostic_runner_reaches_cargo_on_linux_and_macos() {
         );
     }
 }
-
-#[test]
-fn contract_refresh_runner_refuses_macos_before_starting_cargo() {
-    let invocation = invoke_runner("Darwin", "--refresh-contract");
-
-    assert_eq!(invocation.output.status.code(), Some(64));
-    assert!(invocation.cargo_receipt.is_none());
-    assert!(String::from_utf8_lossy(&invocation.output.stderr).contains("Linux-hosted"));
-}

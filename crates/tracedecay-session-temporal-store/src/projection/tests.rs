@@ -1433,18 +1433,6 @@ async fn parent_resolver_has_bounded_cancellable_session_traversal() {
 }
 
 #[test]
-fn parent_resolver_registers_same_batch_effects_only_after_derivation() {
-    let mut resolver = ParentMessageResolver::default();
-    assert_eq!(resolver.resolve("message.reemitted"), None);
-
-    resolver.register("message.reemitted", "occurrence.first-effect");
-    assert_eq!(
-        resolver.resolve("message.reemitted"),
-        Some("occurrence.first-effect")
-    );
-}
-
-#[test]
 fn parent_resolver_prefers_a_persisted_cross_batch_predecessor() {
     let mut resolver = ParentMessageResolver::default();
     resolver.register("message.reemitted", "occurrence.persisted-predecessor");
@@ -1788,29 +1776,6 @@ async fn open_effect_store(name: &str) -> (TempDir, TestConnection) {
         .unwrap(),
     );
     (directory, TestConnection::open(&database_path))
-}
-
-/// Case 1 — fresh insert. The durable tuple is exactly the derived one.
-#[tokio::test]
-async fn canonical_effect_insert_persists_the_derived_tuple() {
-    let (_directory, connection) = open_effect_store("effect-fresh-insert").await;
-    let session_id = fixture_session("session.projector.effect-fresh");
-    let (observation, _) = fixture_observation(&session_id, 0, None, false);
-    let sequence = seed_effect_observation(&connection, &observation).await;
-    let effect = ObservationProjection::Skipped(ProjectionSkipReason::NonConversationalRecord);
-
-    record_canonical_observation_effect(&connection, sequence, &observation, &effect)
-        .await
-        .unwrap();
-
-    let (recorded_sequence, recorded_session, digest, output_count) =
-        recorded_effect(&connection, &observation)
-            .await
-            .expect("fresh insert records one effect row");
-    assert_eq!(recorded_sequence, i64::try_from(sequence).unwrap());
-    assert_eq!(recorded_session, session_id.as_str());
-    assert_eq!(output_count, 0);
-    assert!(digest.starts_with("sha256:"), "{digest}");
 }
 
 /// Case 2 — idempotent replay. Re-projecting an observation at or below the

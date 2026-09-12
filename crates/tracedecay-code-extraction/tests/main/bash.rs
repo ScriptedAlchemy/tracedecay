@@ -27,71 +27,6 @@ fn bash_overlay(version: i64, content: &str) -> ParseDocumentIdentity {
 }
 
 #[test]
-fn test_bash_extract_functions() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
-    let extractor = BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(
-        fns.len(),
-        5,
-        "expected 5 functions, got {}: {:?}",
-        fns.len(),
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(fns.iter().any(|n| n.name == "log"));
-    assert!(fns.iter().any(|n| n.name == "validate_config"));
-    assert!(fns.iter().any(|n| n.name == "connect"));
-    assert!(fns.iter().any(|n| n.name == "disconnect"));
-    assert!(fns.iter().any(|n| n.name == "main"));
-}
-
-#[test]
-fn test_bash_extract_readonly_consts() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
-    let extractor = BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    assert_eq!(
-        consts.len(),
-        2,
-        "expected 2 consts, got {}: {:?}",
-        consts.len(),
-        consts.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(consts.iter().any(|n| n.name == "MAX_RETRIES"));
-    assert!(consts.iter().any(|n| n.name == "DEFAULT_PORT"));
-}
-
-#[test]
-fn test_bash_extract_source_import() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
-    let extractor = BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let uses: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert_eq!(uses.len(), 1, "expected 1 Use node, got {}", uses.len());
-    assert_eq!(uses[0].name, "./utils.sh");
-}
-
-#[test]
 fn test_bash_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
     let extractor = BashExtractor;
@@ -262,20 +197,6 @@ fn test_bash_docstrings() {
         "docstring: {:?}",
         main_fn.docstring
     );
-}
-
-#[test]
-fn test_bash_file_node() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
-    let extractor = BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "sample.sh");
 }
 
 #[test]

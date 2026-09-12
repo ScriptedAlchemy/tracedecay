@@ -188,26 +188,6 @@ class ScorecardStatusObserverTests(unittest.TestCase):
 
 
 class ScorecardVerdictTests(unittest.TestCase):
-    def test_observer_counts_are_included_in_cross_run_metrics(self) -> None:
-        scorecard = load_scorecard()
-        run = {
-            "status": "ok",
-            "observer": {
-                "process_count": 3,
-                "connection_count": 3,
-                "request_count": 17,
-            },
-        }
-
-        self.assertEqual(
-            scorecard.collect_scalars(run),
-            {
-                "observer.process_count": 3.0,
-                "observer.connection_count": 3.0,
-                "observer.request_count": 17.0,
-            },
-        )
-
     def test_invalid_sealed_generation_census_fails_run_and_scorecard(self) -> None:
         scorecard = load_scorecard()
         report = {

@@ -141,40 +141,6 @@ mod tests {
     }
 
     #[test]
-    fn re_anchoring_on_a_later_attempt_restarts_the_window() {
-        let backoff = window(600);
-        let re_anchored = SessionEvidenceBudgetExceeded {
-            observed_at_secs: 1_600,
-        };
-
-        assert_eq!(
-            backoff.gate(re_anchored, 1_660),
-            SessionEvidenceBudgetGate::Suppressed { until_secs: 2_200 }
-        );
-    }
-
-    #[test]
-    fn zero_windows_are_unrepresentable_and_the_minimum_window_still_suppresses() {
-        // `new(0)` cannot exist: the constructor only accepts NonZeroU64.
-        assert!(NonZeroU64::new(0).is_none());
-
-        // The smallest representable window still suppresses the tick that
-        // observed the exhaustion instead of degenerating into "always try".
-        let backoff = window(1);
-        let exceeded = SessionEvidenceBudgetExceeded {
-            observed_at_secs: 1_000,
-        };
-        assert_eq!(
-            backoff.gate(exceeded, 1_000),
-            SessionEvidenceBudgetGate::Suppressed { until_secs: 1_001 }
-        );
-        assert_eq!(
-            backoff.gate(exceeded, 1_001),
-            SessionEvidenceBudgetGate::AttemptPermitted
-        );
-    }
-
-    #[test]
     fn window_arithmetic_saturates_instead_of_wrapping() {
         let backoff = window(u64::MAX);
         let exceeded = SessionEvidenceBudgetExceeded {

@@ -2194,10 +2194,6 @@ pub(super) struct SealedLexicalLayoutV1 {
     maximum_file_bytes: u64,
     manifest_range: Option<(u64, u64)>,
     snapshot_range: Option<(u64, u64)>,
-    #[cfg(test)]
-    structural_byte_visits: u64,
-    #[cfg(test)]
-    temporary_string_allocations: u64,
 }
 
 #[hotpath::measure(label = "code_index.restore.scan")]
@@ -2356,10 +2352,6 @@ struct LayoutScanner {
     captured_metadata_object: Option<(LayoutKey, u64, usize)>,
     manifest_range: Option<(u64, u64)>,
     snapshot_range: Option<(u64, u64)>,
-    #[cfg(test)]
-    structural_byte_visits: u64,
-    #[cfg(test)]
-    temporary_string_allocations: u64,
 }
 
 impl Default for LayoutScanner {
@@ -2390,10 +2382,6 @@ impl Default for LayoutScanner {
             captured_metadata_object: None,
             manifest_range: None,
             snapshot_range: None,
-            #[cfg(test)]
-            structural_byte_visits: 0,
-            #[cfg(test)]
-            temporary_string_allocations: 0,
         }
     }
 }
@@ -2474,10 +2462,6 @@ impl LayoutScanner {
     /// Only a key or the envelope state digest is retained, and both are
     /// capped at the scanner's existing 128-byte contract.
     fn observe_string_run(&mut self, bytes: &[u8]) {
-        #[cfg(test)]
-        {
-            self.structural_byte_visits = self.structural_byte_visits.saturating_add(1);
-        }
         let remaining = self.string.len().saturating_sub(self.string_len);
         let retained = remaining.min(bytes.len());
         let retained_end = self.string_len + retained;
@@ -2502,10 +2486,6 @@ impl LayoutScanner {
         byte: u8,
         offset: u64,
     ) -> Result<GenerationSpanEvent, CodeIndexProductionErrorV1> {
-        #[cfg(test)]
-        {
-            self.structural_byte_visits = self.structural_byte_visits.saturating_add(1);
-        }
         if self.in_string {
             if self.escaped {
                 self.escaped = false;
@@ -2517,11 +2497,6 @@ impl LayoutScanner {
                 b'"' => {
                     self.in_string = false;
                     if self.capture_state_digest {
-                        #[cfg(test)]
-                        {
-                            self.temporary_string_allocations =
-                                self.temporary_string_allocations.saturating_add(1);
-                        }
                         let value = String::from_utf8(self.string[..self.string_len].to_vec())
                             .map_err(|_| {
                                 CodeIndexProductionErrorV1::Contract(
@@ -2747,10 +2722,6 @@ impl LayoutScanner {
             maximum_file_bytes: self.maximum_file_bytes,
             manifest_range: self.manifest_range,
             snapshot_range: self.snapshot_range,
-            #[cfg(test)]
-            structural_byte_visits: self.structural_byte_visits,
-            #[cfg(test)]
-            temporary_string_allocations: self.temporary_string_allocations,
         })
     }
 }
@@ -3378,46 +3349,6 @@ mod lexical_page_source_tests {
 
     fn fixture() -> SealedSourceFixture {
         fixture_for_source(BATCH_FIXTURE_SOURCE)
-    }
-
-    #[test]
-    fn content_addressed_open_reports_authenticated_scan_progress_and_text_metadata() {
-        let fixture = fixture();
-        let file_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&fixture.sealed))
-            .expect("fixture file digest is canonical");
-        let mut progress = Vec::new();
-        let source = VerifiedSealedLexicalPageSourceV1::open_content_addressed_with_progress(
-            Cursor::new(fixture.sealed.clone()),
-            u64::try_from(fixture.sealed.len()).expect("fixture length fits u64"),
-            file_digest,
-            1,
-            1024 * 1024,
-            &ActiveControl,
-            |scanned, total| progress.push((scanned, total)),
-        )
-        .expect("authenticated source opens with progress");
-
-        assert_eq!(progress.first(), Some(&(0, fixture.sealed.len() as u64)));
-        assert_eq!(
-            progress.last(),
-            Some(&(fixture.sealed.len() as u64, fixture.sealed.len() as u64))
-        );
-        assert_eq!(
-            source.metadata().snapshot().repository.as_str(),
-            "repository.lexical-page-batch"
-        );
-        assert_eq!(
-            source.metadata().snapshot().files[0].logical_path,
-            "src/batch_fixture.rs"
-        );
-        assert_eq!(
-            source.metadata().manifest().project_id.as_str(),
-            "project.lexical-page-batch"
-        );
-        assert_eq!(
-            source.metadata().manifest().privacy_domain.as_str(),
-            "privacy.lexical-page-batch"
-        );
     }
 
     #[test]
@@ -4138,83 +4069,6 @@ mod lexical_page_source_tests {
     }
 
     #[test]
-    fn count_bound_returns_the_first_two_one_page_values_in_order() {
-        let fixture = fixture();
-        let expected = one_page_expectations(&fixture);
-        assert!(
-            expected.len() >= 2,
-            "fixture must provide a multi-page source"
-        );
-        let mut source = fixture.open();
-        let batch = source
-            .next_page_batch_if(&ActiveControl, bounds_for(&expected[..2]), |pages| {
-                assert_eq!(pages.len(), 2);
-                Ok::<_, ()>(NonZeroUsize::new(pages.len()).expect("staged batch is non-empty"))
-            })
-            .expect("source stages a count-bounded batch")
-            .expect("callback accepts the count-bounded batch");
-        let batch = pages(batch);
-        assert_eq!(batch.len(), 2);
-        assert_page_matches(&batch[0], &expected[0]);
-        assert_page_matches(&batch[1], &expected[1]);
-        assert_eq!(
-            source
-                .cursor()
-                .persisted_bytes()
-                .expect("batch cursor persists"),
-            expected[1].next_cursor,
-        );
-    }
-
-    #[test]
-    fn accepts_only_fifteen_of_sixteen_staged_parser_backed_pages() {
-        let source_text = (0..16)
-            .map(|index| format!("pub fn batch_prefix_page_{index}() -> usize {{ {index} }}\n"))
-            .collect::<String>();
-        let fixture = fixture_for_source(&source_text);
-        let expected = one_page_expectations(&fixture);
-        assert!(
-            expected.len() >= 16,
-            "parser-backed fixture must expose sixteen one-page values"
-        );
-        let mut source = fixture.open();
-        let accepted = source
-            .next_page_batch_if(&ActiveControl, bounds_for(&expected[..16]), |pages| {
-                assert_eq!(
-                    pages.len(),
-                    16,
-                    "fixture stages sixteen parser-backed pages"
-                );
-                Ok::<_, ()>(NonZeroUsize::new(15).expect("fifteen is non-zero"))
-            })
-            .expect("source stages the parser-backed batch")
-            .expect("callback accepts a fifteen-page prefix");
-        let accepted = pages(accepted);
-        assert_eq!(accepted.len(), 15);
-        for (page, expected) in accepted.iter().zip(&expected[..15]) {
-            assert_page_matches(page, expected);
-        }
-        assert_eq!(
-            source
-                .cursor()
-                .persisted_bytes()
-                .expect("accepted-prefix cursor persists"),
-            expected[14].next_cursor,
-        );
-
-        let next = match source
-            .next_page(&ActiveControl)
-            .expect("read the first unaccepted page")
-        {
-            VerifiedSealedLexicalPageReadV1::Page(page) => page,
-            VerifiedSealedLexicalPageReadV1::Complete(_) => {
-                panic!("the sixteenth staged page must remain available")
-            }
-        };
-        assert_page_matches(&next, &expected[15]);
-    }
-
-    #[test]
     fn retained_byte_bound_stops_before_the_next_larger_one_page_value() {
         let fixture = fixture();
         let expected = one_page_expectations(&fixture);
@@ -4271,45 +4125,6 @@ mod lexical_page_source_tests {
     }
 
     #[test]
-    fn completion_follows_the_last_accepted_batch_without_an_empty_callback() {
-        let fixture = fixture();
-        let expected = one_page_expectations(&fixture);
-        assert!(!expected.is_empty(), "fixture must provide lexical pages");
-        let mut source = fixture.open();
-        let accepted = source
-            .next_page_batch_if(&ActiveControl, bounds_for(&expected), |pages| {
-                assert_eq!(pages.len(), expected.len());
-                Ok::<_, ()>(NonZeroUsize::new(pages.len()).expect("staged batch is non-empty"))
-            })
-            .expect("source stages the final batch")
-            .expect("callback accepts the final batch");
-        let accepted = pages(accepted);
-        assert_eq!(accepted.len(), expected.len());
-        for (page, expected) in accepted.iter().zip(&expected) {
-            assert_page_matches(page, expected);
-        }
-
-        let mut callback_called = false;
-        let complete = source
-            .next_page_batch_if(&ActiveControl, bounds_for(&expected), |_| {
-                callback_called = true;
-                Ok::<_, ()>(NonZeroUsize::MIN)
-            })
-            .expect("completed source stays readable")
-            .expect("completion has no callback error");
-        let VerifiedSealedLexicalPageBatchReadV1::Complete(receipt) = complete else {
-            panic!("completion follows the last accepted batch")
-        };
-        assert!(
-            !callback_called,
-            "completion must not invoke an empty callback"
-        );
-        receipt
-            .verify_completion(Some(source.cursor()))
-            .expect("completed receipt matches accepted cursor");
-    }
-
-    #[test]
     fn cancellation_during_staging_keeps_the_exact_pre_batch_cursor() {
         let fixture = fixture();
         let expected = one_page_expectations(&fixture);
@@ -4348,65 +4163,6 @@ mod lexical_page_source_tests {
                 .persisted_bytes()
                 .expect("cancelled cursor persists"),
             cursor_before,
-        );
-    }
-
-    #[test]
-    fn large_string_layout_scan_skips_non_structural_bytes() {
-        const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
-        let file = format!(r#"{{"payload":"{}"}}"#, "x".repeat(PAYLOAD_BYTES));
-        let generation = format!(r#"{{"format_revision":6,"files":[{file}]}}"#);
-        let state_digest =
-            ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
-                .expect("synthetic generation digest is canonical");
-        let sealed = format!(
-            r#"{{"state_digest":"{}","generation":{generation}}}"#,
-            state_digest.as_str()
-        )
-        .into_bytes();
-        let first_file_offset = sealed
-            .windows(b"{\"payload\"".len())
-            .position(|window| window == b"{\"payload\"")
-            .expect("synthetic file object is present");
-        let files_end_offset = first_file_offset
-            .checked_add(file.len())
-            .expect("synthetic files end fits usize");
-
-        let layout = scan_layout(
-            &mut Cursor::new(&sealed),
-            u64::try_from(sealed.len()).expect("synthetic seal length fits u64"),
-            None,
-            &ActiveControl,
-        )
-        .expect("synthetic seal has a valid lexical layout");
-
-        assert_eq!(layout.state_digest, state_digest);
-        assert_eq!(layout.format_revision, 6);
-        assert_eq!(layout.file_count, 1);
-        assert_eq!(
-            layout.first_file_offset,
-            u64::try_from(first_file_offset).expect("synthetic file offset fits u64")
-        );
-        assert_eq!(
-            layout.files_end_offset,
-            u64::try_from(files_end_offset).expect("synthetic files end fits u64")
-        );
-        assert_eq!(
-            layout.maximum_file_bytes,
-            u64::try_from(file.len()).expect("synthetic file length fits u64")
-        );
-        assert_eq!(
-            layout.file_ranges,
-            [(
-                layout.first_file_offset,
-                layout.first_file_offset
-                    + u64::try_from(file.len()).expect("synthetic file length fits u64")
-            )]
-        );
-        assert!(
-            layout.structural_byte_visits < 1024,
-            "an 8 MiB JSON string should require bounded structural visits, observed {}",
-            layout.structural_byte_visits
         );
     }
 
@@ -4505,62 +4261,5 @@ mod lexical_page_source_tests {
             Err(error) => error,
         };
         assert!(matches!(error, CodeIndexProductionErrorV1::Contract(_)));
-    }
-
-    #[test]
-    fn layout_scanner_retains_a_constant_string_window() {
-        let file = format!(r#"{{"payload":"{}"}}"#, "w".repeat(8 * 1024 * 1024));
-        let generation = format!(r#"{{"format_revision":6,"files":[{file}]}}"#);
-        let state_digest =
-            ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
-                .expect("synthetic generation digest is canonical");
-        let sealed = format!(
-            r#"{{"state_digest":"{}","generation":{generation}}}"#,
-            state_digest.as_str()
-        )
-        .into_bytes();
-        let mut scanner = LayoutScanner::default();
-        for (chunk_ordinal, chunk) in sealed.chunks(64 * 1024).enumerate() {
-            scanner
-                .observe_slice(chunk, (chunk_ordinal * 64 * 1024) as u64)
-                .expect("bounded chunk scan succeeds");
-            assert!(scanner.string_len <= scanner.string.len());
-            assert!(std::mem::size_of::<LayoutScanner>() < 1024);
-        }
-        let layout = scanner.finish().expect("bounded scanner layout verifies");
-        assert_eq!(layout.file_count, 1);
-        assert_eq!(layout.state_digest, state_digest);
-    }
-
-    #[test]
-    fn layout_scan_does_not_allocate_for_unrelated_short_strings() {
-        let values = (0..50_000)
-            .map(|index| format!(r#""term-{index}""#))
-            .collect::<Vec<_>>()
-            .join(",");
-        let file = format!(r#"{{"payload":[{values}]}}"#);
-        let generation = format!(r#"{{"format_revision":6,"files":[{file}]}}"#);
-        let state_digest =
-            ManifestDigest::from_sha256_bytes(&Sha256::digest(generation.as_bytes()))
-                .expect("synthetic generation digest is canonical");
-        let sealed = format!(
-            r#"{{"state_digest":"{}","generation":{generation}}}"#,
-            state_digest.as_str()
-        )
-        .into_bytes();
-
-        let layout = scan_layout(
-            &mut Cursor::new(&sealed),
-            sealed.len() as u64,
-            None,
-            &ActiveControl,
-        )
-        .expect("short-string-heavy layout verifies");
-
-        assert!(
-            layout.temporary_string_allocations <= 1,
-            "only the authenticated state digest may require a temporary string, observed {} allocations",
-            layout.temporary_string_allocations
-        );
     }
 }

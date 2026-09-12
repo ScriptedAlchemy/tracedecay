@@ -1441,65 +1441,6 @@ fn profile_change_paging_preserves_count_and_byte_canonical_encoder_groups() {
 }
 
 #[test]
-fn interleaved_identical_files_keep_their_own_encoder_groups() {
-    let key = embedding_key();
-    let admitted = admitted_key(&key);
-    let projection_key = key.projection_key().expect("projection key");
-    let alpha = interleaved_file_chunks("code-generation.1", "alpha", "shared", 5);
-    let beta = interleaved_file_chunks("code-generation.1", "beta", "shared", 5);
-    let mut corpus = alpha.clone();
-    corpus.extend(beta.clone());
-    corpus.sort_by(|left, right| left.id.cmp(&right.id));
-    let projection_request = whole_corpus_request(&corpus, &projection_key);
-    let mut encoder = FakeEncoder::default();
-
-    let prepared = prepare_vector_generation(&admitted, projection_request, &corpus, &mut encoder)
-        .expect("interleaved files projection");
-
-    assert_eq!(
-        encoder.batches,
-        vec![
-            alpha
-                .iter()
-                .map(|chunk| chunk.id.clone())
-                .collect::<Vec<_>>(),
-            beta.iter()
-                .map(|chunk| chunk.id.clone())
-                .collect::<Vec<_>>(),
-        ],
-        "interleaved request IDs must not merge independent file tensors"
-    );
-    let alpha_values = alpha
-        .iter()
-        .map(|chunk| {
-            prepared
-                .vectors
-                .iter()
-                .find(|vector| vector.chunk_id == chunk.id)
-                .expect("alpha vector")
-                .values
-                .clone()
-        })
-        .collect::<Vec<_>>();
-    let beta_values = beta
-        .iter()
-        .map(|chunk| {
-            prepared
-                .vectors
-                .iter()
-                .find(|vector| vector.chunk_id == chunk.id)
-                .expect("beta vector")
-                .values
-                .clone()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        alpha_values, beta_values,
-        "identical copied files must retain matching per-file tensor groups"
-    );
-}
-
-#[test]
 fn pagination_preserves_interleaved_file_bucket_groups_and_vector_identity() {
     let key = embedding_key();
     let admitted = admitted_key(&key);

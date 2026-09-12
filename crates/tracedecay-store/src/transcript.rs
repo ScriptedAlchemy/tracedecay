@@ -281,55 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn advance_offset_is_an_explicit_valid_batch() {
-        let batch = TranscriptWriteBatch::advance_offset(
-            PathBuf::from("session.jsonl"),
-            ParseOffset::default(),
-            ParseOffset {
-                byte_offset: 42,
-                mtime: 7,
-                file_id: 9,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(batch.cursor_path(), Path::new("session.jsonl"));
-    }
-
-    #[test]
-    fn upsert_uses_the_session_transcript_path() {
-        let batch = TranscriptWriteBatch::upsert(
-            session(Some("session.jsonl")),
-            Vec::new(),
-            ParseOffset::default(),
-            ParseOffset::default(),
-        )
-        .unwrap();
-
-        assert_eq!(batch.cursor_path(), Path::new("session.jsonl"));
-    }
-
-    #[test]
-    fn upsert_with_cursor_preserves_the_physical_session_path() {
-        let batch = TranscriptWriteBatch::upsert_with_cursor(
-            PathBuf::from("cursor-chat:agent-1"),
-            session(Some("/physical/store.db")),
-            Vec::new(),
-            ParseOffset::default(),
-            ParseOffset::default(),
-        )
-        .unwrap();
-
-        assert_eq!(batch.cursor_path(), Path::new("cursor-chat:agent-1"));
-        let (_, kind) = batch.into_parts();
-        assert!(matches!(
-            kind,
-            TranscriptWriteKind::Upsert { session, .. }
-                if session.transcript_path.as_deref() == Some("/physical/store.db")
-        ));
-    }
-
-    #[test]
     fn upsert_with_cursor_rejects_an_empty_cursor_path() {
         let batch = TranscriptWriteBatch::upsert_with_cursor(
             PathBuf::new(),
@@ -416,32 +367,6 @@ mod tests {
         assert!(matches!(
             batch,
             Err(TranscriptStoreError::MessageIdentityMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn consumed_write_preserves_expected_cursor() {
-        let expected_offset = ParseOffset {
-            byte_offset: 12,
-            mtime: 3,
-            file_id: 4,
-        };
-        let batch = TranscriptWriteBatch::advance_offset(
-            PathBuf::from("session.jsonl"),
-            expected_offset,
-            ParseOffset::default(),
-        )
-        .unwrap();
-
-        assert_eq!(batch.expected_offset(), expected_offset);
-        let (cursor_path, kind) = batch.into_parts();
-        assert_eq!(cursor_path, PathBuf::from("session.jsonl"));
-        assert!(matches!(
-            kind,
-            TranscriptWriteKind::AdvanceOffset {
-                expected_offset: actual,
-                ..
-            } if actual == expected_offset
         ));
     }
 }

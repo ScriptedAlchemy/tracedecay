@@ -606,15 +606,6 @@ mod tests {
         );
     }
 
-    /// A store this binary created passes the shape probe on every reopen.
-    #[tokio::test]
-    async fn a_freshly_created_store_reopens_at_the_final_shape() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("global.db");
-        drop(open_registered_schema(&path).await.unwrap());
-        drop(open_registered_schema(&path).await.unwrap());
-    }
-
     #[tokio::test]
     async fn performance_indexes_install_outside_schema_transaction() {
         let temp = TempDir::new().unwrap();

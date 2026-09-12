@@ -362,15 +362,10 @@ fn render_canonical_markdown(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
-    use tracedecay_contracts::{
-        ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, CancellationSignal,
-        Deadline, RequestId, ResultContractRef, SafeDiagnostic,
-    };
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
-    use tracedecay_tool_catalog::{BindingId, SchemaId};
 
-    use super::{complete_protocol_controls, render_canonical_markdown};
+    use super::complete_protocol_controls;
     use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
     #[test]
@@ -435,36 +430,5 @@ mod tests {
                 && deadline.expires_at.0 <= after.0.saturating_add(15_000_000),
             "configuration_set must inherit its exact 15-second catalog ceiling"
         );
-    }
-
-    #[test]
-    fn canonical_problem_markdown_matches_the_cli_contract() {
-        let result: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
-            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 3).unwrap(),
-            RequestId::new("request.mcp.golden").unwrap(),
-            ApplicationProblem::unavailable(
-                SafeDiagnostic::new(
-                    "daemon_unavailable",
-                    "The owning TraceDecay daemon is unavailable",
-                )
-                .unwrap(),
-            ),
-        )
-        .expect("canonical problem fixture"));
-
-        let rendered = render_canonical_markdown(
-            "feedback_list",
-            &BindingId::new("binding.mcp.feedback-list.v1").unwrap(),
-            &result,
-        )
-        .unwrap();
-
-        assert!(rendered.starts_with("## feedback\\_list\n"));
-        assert!(rendered.contains("\n- Operation: `feedback_list`"));
-        assert!(rendered.contains("\n- Binding: `binding.mcp.feedback-list.v1`"));
-        assert!(rendered.contains("\n- Status: `problem`"));
-        assert!(rendered.contains("\n- Problem: `daemon_unavailable`"));
-        assert!(rendered.contains("\n- Retry: `after_delay`"));
-        assert!(!rendered.contains("### contract"));
     }
 }

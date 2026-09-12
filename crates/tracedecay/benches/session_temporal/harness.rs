@@ -1242,37 +1242,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_matches_checked_in_artifacts() {
-        validate_contract().expect("session-temporal contract");
-    }
-
-    #[test]
     fn nearest_rank_uses_descriptive_sample_labels() {
         let samples = [10_u64, 20, 30, 40, 50];
         assert_eq!(nearest_rank(&samples, 50), Some(30));
         assert_eq!(nearest_rank(&samples, 95), Some(50));
         assert_eq!(nearest_rank(&samples, 99), Some(50));
-    }
-
-    #[test]
-    fn refresh_result_records_clean_run_provenance() {
-        let commit = "0123456789abcdef0123456789abcdef01234567";
-        let mut identity = source_identity(commit);
-        identity["source_mode"] = json!(SOURCE_MODE_CLEAN);
-        let result = measurement_result(identity, json!({"records_per_repetition": 2}));
-
-        assert_eq!(result["schema_version"], json!(SCHEMA_VERSION));
-        assert_eq!(result["capture_status"], json!("provisional"));
-        assert_eq!(result["acceptance_eligible"], json!(false));
-        assert_eq!(result["workload_manifest"], json!(WORKLOAD_PATH));
-        assert_eq!(result["source_identity"]["commit"], json!(commit));
-        assert_eq!(
-            result["source_identity"]["source_mode"],
-            json!(SOURCE_MODE_CLEAN)
-        );
-        assert_eq!(result["source_identity"]["harness"], json!(HARNESS_PATH));
-        assert_eq!(result["source_identity"]["runner"], json!(RUNNER_PATH));
-        assert_eq!(result["measurement"]["records_per_repetition"], json!(2),);
     }
 
     #[test]

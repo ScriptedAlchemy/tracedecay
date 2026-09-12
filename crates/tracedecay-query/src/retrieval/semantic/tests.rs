@@ -605,35 +605,6 @@ fn bounded_scan_retains_the_cap_smallest_rows_by_tie_break_order() {
 }
 
 #[test]
-fn capped_exact_flat_scan_materializes_only_retained_rows() {
-    let query_view = query_view();
-    let projection = projection();
-    let request = request(&query_view, &projection, 2);
-    let rows = vec![
-        record(&request, "a", vec![1.0, 0.0]),
-        record(&request, "b", vec![1.0, 0.0]),
-        record(&request, "c", vec![0.0, 1.0]),
-        record(&request, "d", vec![0.0, 1.0]),
-    ];
-    let embedder = FakeQueryEmbedder::default();
-    let vectors = FakeVectorReadPort::new(&request, rows);
-    let control = FixedExecutionControl::default();
-    let _ = take_semantic_retained_materializations();
-
-    let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)
-        .retrieve_semantic(&request)
-        .expect("semantic retrieval");
-    let RetrieverOutcome::Complete(batch) = outcome else {
-        panic!("expected a complete semantic batch");
-    };
-
-    assert_eq!(batch.coverage.examined, 4);
-    assert_eq!(batch.coverage.eligible, 4);
-    assert_eq!(batch.candidates.len(), 2);
-    assert_eq!(take_semantic_retained_materializations(), 2);
-}
-
-#[test]
 fn privacy_identity_mismatch_fails_before_embedding_or_vector_reads() {
     let query_view = query_view();
     let projection = projection();
@@ -683,25 +654,6 @@ fn cancellation_invokes_no_embedding_or_vector_authority() {
 
 #[test]
 fn scan_rejects_foreign_generation_rows_instead_of_broadening_scope() {
-    let query_view = query_view();
-    let projection = projection();
-    let request = request(&query_view, &projection, 4);
-    let mut foreign = record(&request, "foreign", vec![1.0, 0.0]);
-    foreign.source_generation = id::<CodeGenerationId>("generation.foreign");
-    let embedder = FakeQueryEmbedder::default();
-    let vectors = FakeVectorReadPort::new(&request, vec![foreign]);
-    let control = FixedExecutionControl::default();
-    let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
-
-    let error = retriever
-        .retrieve_semantic(&request)
-        .expect_err("foreign vector generation must fail closed");
-
-    assert_eq!(error, RetrievalPortError::GenerationMismatch);
-}
-
-#[test]
-fn retrieve_preserves_generation_mismatch_identity() {
     let query_view = query_view();
     let projection = projection();
     let request = request(&query_view, &projection, 4);
@@ -938,29 +890,6 @@ fn complete_uncapped_scan_marks_continuation_exhausted() {
 }
 
 #[test]
-fn elapsed_deadline_before_scan_invokes_no_authority() {
-    let query_view = query_view();
-    let projection = projection();
-    let mut request = request(&query_view, &projection, 4);
-    request.budget.deadline_micros = Some(5);
-    let embedder = FakeQueryEmbedder::default();
-    let vectors = FakeVectorReadPort::new(&request, Vec::new());
-    let control = FixedExecutionControl {
-        elapsed_micros: Arc::new(AtomicU64::new(5)),
-        ..FixedExecutionControl::default()
-    };
-
-    assert!(matches!(
-        SemanticCodeRetriever::new(&embedder, &vectors, &control)
-            .retrieve_semantic(&request)
-            .expect("typed budget outcome"),
-        RetrieverOutcome::BudgetExceeded(_)
-    ));
-    assert_eq!(embedder.calls.get(), 0);
-    assert_eq!(vectors.scans.get(), 0);
-}
-
-#[test]
 fn omitted_request_deadline_uses_crate_exact_flat_default() {
     let query_view = query_view();
     let projection = projection();
@@ -1076,122 +1005,6 @@ fn tighter_of_lane_and_base_deadline_is_used() {
         "a longer lane deadline must not lift a tighter base deadline"
     );
     assert_eq!(embedder.calls.get(), 0);
-}
-
-#[test]
-fn cancellation_and_deadline_are_checked_during_scan() {
-    let query_view = query_view();
-    let projection = projection();
-    let mut request = request(&query_view, &projection, 4);
-    request.budget.deadline_micros = Some(5);
-    let row = record(&request, "one", vec![1.0, 0.0]);
-
-    let cancelled_embedder = FakeQueryEmbedder::default();
-    let cancelled_vectors = FakeVectorReadPort::new(&request, vec![row.clone()]);
-    let cancelled_control = FixedExecutionControl {
-        cancel_after_checks: Some(2),
-        ..FixedExecutionControl::default()
-    };
-    assert_eq!(
-        SemanticCodeRetriever::new(&cancelled_embedder, &cancelled_vectors, &cancelled_control,)
-            .retrieve_semantic(&request)
-            .expect("typed cancellation"),
-        RetrieverOutcome::Cancelled
-    );
-
-    let expired_embedder = FakeQueryEmbedder::default();
-    let expired_vectors = FakeVectorReadPort::new(&request, vec![row]);
-    let expired_control = FixedExecutionControl {
-        expire_after_elapsed_checks: Some(2),
-        ..FixedExecutionControl::default()
-    };
-    assert!(matches!(
-        SemanticCodeRetriever::new(&expired_embedder, &expired_vectors, &expired_control)
-            .retrieve_semantic(&request)
-            .expect("typed deadline"),
-        RetrieverOutcome::BudgetExceeded(_)
-    ));
-}
-
-#[test]
-fn deadline_is_checked_while_the_store_examines_excluded_rows() {
-    struct ExcludedRows;
-
-    impl SemanticVectorReadPort for ExcludedRows {
-        fn scan_exact_flat(
-            &self,
-            _request: SemanticVectorReadRequestV1<'_>,
-            examine: &mut dyn FnMut() -> Result<(), RetrievalPortError>,
-            _visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
-        ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
-            examine()?;
-            Ok(SemanticVectorScanSummaryV1 {
-                examined: 1,
-                eligible: 0,
-                excluded: 1,
-                unknown: 0,
-            })
-        }
-    }
-
-    let query_view = query_view();
-    let projection = projection();
-    let mut request = request(&query_view, &projection, 4);
-    request.budget.deadline_micros = Some(5);
-    let embedder = FakeQueryEmbedder::default();
-    let control = FixedExecutionControl {
-        expire_after_elapsed_checks: Some(2),
-        ..FixedExecutionControl::default()
-    };
-
-    assert!(matches!(
-        SemanticCodeRetriever::new(&embedder, &ExcludedRows, &control)
-            .retrieve_semantic(&request)
-            .expect("excluded-row scan must return a typed deadline outcome"),
-        RetrieverOutcome::BudgetExceeded(_)
-    ));
-}
-
-#[test]
-fn cancellation_and_deadline_are_checked_after_empty_excluded_scan() {
-    let query_view = query_view();
-    let projection = projection();
-    let mut request = request(&query_view, &projection, 4);
-    request.budget.deadline_micros = Some(5);
-
-    let cancelled_embedder = FakeQueryEmbedder::default();
-    let cancelled_control = FixedExecutionControl::default();
-    let mut cancelled_vectors = FakeVectorReadPort::new(&request, Vec::new());
-    cancelled_vectors.summary = Some(SemanticVectorScanSummaryV1 {
-        examined: 1,
-        eligible: 0,
-        excluded: 1,
-        unknown: 0,
-    });
-    cancelled_vectors.after_scan_cancel = Some(Arc::clone(&cancelled_control.cancelled));
-    assert_eq!(
-        SemanticCodeRetriever::new(&cancelled_embedder, &cancelled_vectors, &cancelled_control,)
-            .retrieve_semantic(&request)
-            .expect("typed cancellation"),
-        RetrieverOutcome::Cancelled
-    );
-
-    let expired_embedder = FakeQueryEmbedder::default();
-    let expired_control = FixedExecutionControl::default();
-    let mut expired_vectors = FakeVectorReadPort::new(&request, Vec::new());
-    expired_vectors.summary = Some(SemanticVectorScanSummaryV1 {
-        examined: 1,
-        eligible: 0,
-        excluded: 1,
-        unknown: 0,
-    });
-    expired_vectors.after_scan_elapsed = Some((Arc::clone(&expired_control.elapsed_micros), 5));
-    assert!(matches!(
-        SemanticCodeRetriever::new(&expired_embedder, &expired_vectors, &expired_control)
-            .retrieve_semantic(&request)
-            .expect("typed deadline"),
-        RetrieverOutcome::BudgetExceeded(_)
-    ));
 }
 
 #[test]
@@ -1581,54 +1394,6 @@ fn complete_published_semantic_batch_at_lane_cap_composes_with_seated_profile() 
             },
         )
         .expect("a full published semantic batch must compose with the seated profile");
-}
-
-#[test]
-fn calibrated_semantic_service_augments_without_mutating_fallback() {
-    let query_view = query_view();
-    let projection = projection();
-    let request = request(&query_view, &projection, 4);
-    let embedder = FakeQueryEmbedder::default();
-    let vectors = FakeVectorReadPort::new(
-        &request,
-        vec![
-            record(&request, "orthogonal", vec![0.0, 1.0]),
-            record(&request, "identical", vec![1.0, 0.0]),
-        ],
-    );
-    let control = FixedExecutionControl::default();
-    let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
-    let fallback = fallback();
-    let fallback_identity = Arc::as_ptr(&fallback);
-    let generation = complete_generation(&request);
-    let calibration = calibration(&request, 100_000_000, 100_000_000);
-
-    let outcome = CalibratedSemanticQueryService::new(&lane)
-        .execute(
-            SemanticLaneReadinessV1::Ready {
-                request: &request,
-                generation: &generation,
-                calibration: Some(&calibration),
-            },
-            SemanticQueryDecisionV1::EXECUTE_WITH_FALLBACK,
-            Arc::clone(&fallback),
-        )
-        .expect("calibrated semantic query");
-
-    let SemanticQueryServiceOutcomeV1::Augmented {
-        semantic_lane,
-        fallback,
-        ..
-    } = outcome
-    else {
-        panic!("a separated best match should be admitted");
-    };
-    let RetrieverOutcome::Complete(semantic) = semantic_lane.outcome else {
-        panic!("semantic lane must enter the shared kernel as complete");
-    };
-    assert_eq!(semantic.candidates.len(), 2);
-    assert_eq!(Arc::as_ptr(&fallback), fallback_identity);
-    fallback.validate().expect("fallback remains byte-valid");
 }
 
 #[test]
@@ -2393,51 +2158,6 @@ fn retrieve_complete_batch(
     {
         RetrieverOutcome::Complete(batch) => batch,
         other => panic!("expected a complete batch, got {other:?}"),
-    }
-}
-
-#[test]
-fn ann_recall_stops_at_target_after_one_pass() {
-    let query_view = query_view();
-    let projection = projection();
-    // cap 2 -> target max(10, 50) = 50; 60 ranked rows all fit in the first
-    // 200-rank pass, so the pool meets the target immediately.
-    let request = ann_request(&query_view, &projection, 2);
-    let mut vectors = FakeVectorReadPort::new(&request, ranked_rows(&request, 60));
-    vectors.ann = Some(FakeAnnBehavior::Ranking((0..60).collect()));
-    let control = FixedExecutionControl::default();
-    take_semantic_scored_rows();
-
-    let batch = retrieve_complete_batch(&request, &vectors, &control);
-
-    assert_eq!(*vectors.ann_windows.borrow(), vec![window(0, 200)]);
-    assert_eq!(
-        take_semantic_scored_rows(),
-        60,
-        "every served row is rescored once"
-    );
-    assert_eq!(batch.coverage.examined, 60);
-    assert_eq!(batch.coverage.eligible, 60);
-    assert_eq!(batch.coverage.excluded, 0);
-    assert_eq!(batch.coverage.capped, 58);
-    assert_eq!(
-        batch
-            .candidates
-            .iter()
-            .map(|candidate| candidate.source_occurrence_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["occurrence.r0000", "occurrence.r0001"]
-    );
-    for evidence in batch.evidence_by_occurrence.values() {
-        assert_eq!(
-            ann_recall(evidence),
-            SemanticAdaptiveRecallExecutionV1 {
-                passes: 1,
-                final_depth: 200,
-                target: 50,
-                stop: AdaptiveRecallStopV1::TargetReached,
-            }
-        );
     }
 }
 

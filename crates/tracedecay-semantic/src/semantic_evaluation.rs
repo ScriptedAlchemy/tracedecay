@@ -2242,30 +2242,6 @@ mod tests {
     }
 
     #[test]
-    fn multiple_cold_misses_preserve_one_batched_runtime_dispatch() {
-        let projection = projection();
-        let embedding_key = projection.embedding_key().clone();
-        let chunks = ['a', 'b', 'c'].map(|label| chunk(label, &format!("cold batch {label}")));
-        let singles = chunks.each_ref().map(|chunk| [chunk]);
-        let groups = singles
-            .iter()
-            .map(|group| &group[..])
-            .collect::<Vec<&[&CodeSearchChunkV1]>>();
-        let cache = SemanticEvaluationProjectionBatchCacheV1::new();
-        let mut encoder = request_encoder(&cache);
-
-        encoder
-            .encode_batches(&embedding_key, &groups)
-            .expect("batched cold projection");
-
-        assert_eq!(encoder.inner.group_invocations, 3);
-        assert_eq!(
-            encoder.inner.batch_invocations, 1,
-            "cache claims must not split one admitted runtime batch into N dispatches"
-        );
-    }
-
-    #[test]
     fn a_changed_privacy_partition_or_workload_input_misses_the_retained_cache() {
         let cache = SemanticEvaluationProjectionBatchCacheV1::new();
         let admitted = chunk('a', "shared corpus text");

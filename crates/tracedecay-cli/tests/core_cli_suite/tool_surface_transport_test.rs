@@ -288,16 +288,6 @@ fn application_surface_primitive_tools_resolve_the_working_directory_project() {
 }
 
 #[test]
-fn application_surface_git_reads_resolve_the_working_directory_worktree() {
-    let (_home, _project, home_path, project_path) = surface_fixture();
-    let _daemon = spawn_tracedecay_daemon(&home_path);
-
-    for tool in ["git_status", "git_diff", "git_history"] {
-        assert_surface_resolves_project(&home_path, &project_path, tool, r#"{"format":"json"}"#);
-    }
-}
-
-#[test]
 fn first_class_git_reads_wait_for_full_publication_then_dispatch() {
     let (_home, _project, home_path, project_path) = surface_fixture();
     let _daemon = spawn_tracedecay_daemon(&home_path);

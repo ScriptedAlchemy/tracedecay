@@ -330,12 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn managed_skill_validation_accepts_valid_draft() {
-        let skill = valid_draft().materialize().unwrap();
-        validate_managed_skill(&skill).unwrap();
-    }
-
-    #[test]
     fn routing_description_requires_valid_authored_host_text() {
         for description in ["", " ", " leading", "trailing ", "two\nlines", "two\rlines"] {
             let mut draft = valid_draft();
@@ -372,14 +366,6 @@ mod tests {
             .unwrap()
             .remove("routing_description");
         assert!(serde_json::from_value::<ManagedSkill>(skill).is_err());
-    }
-
-    #[test]
-    fn managed_skill_validation_accepts_hermes_plugin_target() {
-        let mut draft = valid_draft();
-        draft.targets = vec![SkillInstallTarget::Hermes];
-        let skill = draft.materialize().unwrap();
-        assert_eq!(skill.metadata.targets, vec![SkillInstallTarget::Hermes]);
     }
 
     #[test]

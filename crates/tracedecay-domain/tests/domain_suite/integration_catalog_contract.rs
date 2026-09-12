@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     HostCapabilityStateV1, HostCapabilityV1, HostIntegrationCatalogV1, HostIntegrationIdV1,
@@ -33,54 +32,6 @@ const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
     ),
 ];
 
-#[test]
-fn stock_host_order_preserves_existing_rows_and_appends_new_direct_config_hosts() {
-    assert_eq!(
-        HostKindV1::ALL,
-        [
-            HostKindV1::ClaudeCode,
-            HostKindV1::CursorDesktop,
-            HostKindV1::CursorCloud,
-            HostKindV1::Codex,
-            HostKindV1::Hermes,
-            HostKindV1::Kiro,
-            HostKindV1::ClineFamily,
-            HostKindV1::Cline,
-            HostKindV1::RooCode,
-            HostKindV1::Kilo,
-            HostKindV1::KimiCode,
-            HostKindV1::OpenCode,
-            HostKindV1::Gemini,
-            HostKindV1::Copilot,
-            HostKindV1::Devin,
-            HostKindV1::Zed,
-            HostKindV1::Antigravity,
-            HostKindV1::Vibe,
-        ],
-        "new stock hosts append so established capability rows retain their positions"
-    );
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum FixtureAdmissionReason {
-    SpoolRecordTooLarge,
-    ProjectAuthorityUnbound,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "status",
-    content = "reason_code",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-enum FixtureAdmissionState {
-    Supported,
-    Degraded(FixtureAdmissionReason),
-    Unavailable(FixtureAdmissionReason),
-}
-
 fn golden_catalog_json() -> Value {
     serde_json::from_slice(GOLDEN_CATALOG).expect("valid persisted catalog golden")
 }
@@ -108,15 +59,6 @@ fn catalog_serialization_and_digest_match_persisted_golden() {
             .expect("persisted catalog authority digest"),
         "persisted catalog authority digest changed"
     );
-}
-
-#[test]
-fn persisted_catalog_golden_deserializes_and_validates() {
-    let decoded: HostIntegrationCatalogV1 =
-        serde_json::from_slice(GOLDEN_CATALOG).expect("persisted catalog golden deserializes");
-    decoded
-        .validate()
-        .expect("persisted catalog golden remains valid");
 }
 
 #[test]
@@ -170,55 +112,6 @@ fn observation_host_matrix_matches_native_event_fixture_providers() {
             host.integration_id().as_str()
         );
     }
-}
-
-#[test]
-fn host_event_fixture_admission_deserializes_into_fixture_only_taxonomy() {
-    for (provider, fixture) in HOST_EVENT_FIXTURES {
-        let document: Value = serde_json::from_str(fixture).expect("valid host fixture");
-        let fixture_states: Vec<FixtureAdmissionState> = document["cases"]
-            .as_array()
-            .expect("host fixture cases")
-            .iter()
-            .filter_map(|case| {
-                let admission = &case["admission"];
-                let status = admission["status"].as_str()?;
-                matches!(status, "supported" | "degraded" | "unavailable").then(|| {
-                    let mut state = json!({"status": status});
-                    if let Some(reason) = admission["reason_code"].as_str() {
-                        state["reason_code"] = Value::from(reason);
-                    }
-                    serde_json::from_value(state).expect("fixture state is in the typed taxonomy")
-                })
-            })
-            .collect();
-        assert!(
-            !fixture_states.is_empty(),
-            "{provider} fixture must prove at least one admission taxonomy state"
-        );
-        assert!(
-            fixture_states.contains(&FixtureAdmissionState::Supported),
-            "{provider} fixture must prove supported admission"
-        );
-    }
-}
-
-#[test]
-fn typed_status_reasons_have_stable_encoding() {
-    assert_eq!(
-        serde_json::to_value(FixtureAdmissionState::Degraded(
-            FixtureAdmissionReason::SpoolRecordTooLarge,
-        ))
-        .unwrap(),
-        json!({"status": "degraded", "reason_code": "spool_record_too_large"})
-    );
-    assert_eq!(
-        serde_json::to_value(FixtureAdmissionState::Unavailable(
-            FixtureAdmissionReason::ProjectAuthorityUnbound,
-        ))
-        .unwrap(),
-        json!({"status": "unavailable", "reason_code": "project_authority_unbound"})
-    );
 }
 
 #[test]

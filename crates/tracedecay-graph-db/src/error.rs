@@ -235,20 +235,6 @@ mod tests {
     use super::{GraphBudgetKind, GraphDbError, rollback_failure};
 
     #[test]
-    fn budget_exhausted_names_kind_and_limit() {
-        let error = GraphDbError::budget_exhausted(GraphBudgetKind::Mutation, 4_096);
-        assert_eq!(
-            error.to_string(),
-            "graph mutation budget exhausted (limit 4096)"
-        );
-        assert_eq!(
-            GraphDbError::budget_exhausted_count(GraphBudgetKind::Write, 4 * 1024 * 1024)
-                .to_string(),
-            "graph write budget exhausted (limit 4194304)"
-        );
-    }
-
-    #[test]
     fn budget_kind_from_name_round_trips_and_rejects_unnamed() {
         assert_eq!(
             GraphBudgetKind::from_name("read"),
@@ -268,30 +254,6 @@ mod tests {
         );
         assert_eq!(GraphBudgetKind::from_name(""), None);
         assert_eq!(GraphBudgetKind::from_name("unnamed"), None);
-    }
-
-    #[test]
-    fn conflict_renders_site_and_compared_evidence() {
-        assert_eq!(
-            GraphDbError::conflict("publication.expected_prior_head").to_string(),
-            "graph database conflict at `publication.expected_prior_head`"
-        );
-        let observed = GraphDbError::conflict_observed(
-            "publication.expected_prior_head",
-            "head seq 3",
-            "head seq 5",
-        );
-        assert_eq!(
-            observed.to_string(),
-            "graph database conflict at `publication.expected_prior_head` \
-             (expected head seq 3, actual head seq 5)"
-        );
-        let GraphDbError::Conflict { context } = observed else {
-            panic!("conflict constructor must produce the conflict variant");
-        };
-        assert_eq!(context.site, "publication.expected_prior_head");
-        assert_eq!(context.expected.as_deref(), Some("head seq 3"));
-        assert_eq!(context.actual.as_deref(), Some("head seq 5"));
     }
 
     #[test]

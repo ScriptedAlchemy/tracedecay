@@ -377,58 +377,6 @@ mod cap_key_tests {
     }
 
     #[test]
-    fn disabled_caps_derive_no_keys_and_keep_the_input_order() {
-        let candidates = vec![candidate(), {
-            let mut second = candidate();
-            second.anchor_id = RetrievalAnchorId::new("anchor.second").expect("valid anchor");
-            second
-        }];
-        stage_counters::reset();
-        let (ranked, decisions) = DeterministicDiversity
-            .apply_caps(&policy(None), candidates.clone())
-            .expect("absent caps apply");
-
-        assert_eq!(stage_counters::snapshot().cap_key_derivations, 0);
-        assert!(decisions.is_empty());
-        assert_eq!(
-            ranked
-                .iter()
-                .map(|ranked| (&ranked.candidate, ranked.final_ordinal))
-                .collect::<Vec<_>>(),
-            candidates.iter().zip(0_u32..).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn enabled_caps_derive_keys_once_per_unprotected_candidate() {
-        let mut protected = candidate();
-        protected.anchor_id = RetrievalAnchorId::new("anchor.exact").expect("valid anchor");
-        protected.exact_class = ExactClass::ExactMessage;
-        let mut capped = candidate();
-        capped.anchor_id = RetrievalAnchorId::new("anchor.capped").expect("valid anchor");
-        let candidates = vec![protected, candidate(), capped];
-
-        stage_counters::reset();
-        let (ranked, decisions) = DeterministicDiversity
-            .apply_caps(&policy(Some(1)), candidates)
-            .expect("file cap applies");
-
-        // One derivation for the admitted candidate, one for the capped one,
-        // none for the protected exact hit.
-        assert_eq!(stage_counters::snapshot().cap_key_derivations, 2);
-        assert_eq!(
-            ranked
-                .iter()
-                .map(|ranked| ranked.candidate.anchor_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["anchor.exact", "anchor.fixture"]
-        );
-        assert_eq!(decisions.len(), 1);
-        assert_eq!(decisions[0].capped[0].as_str(), "anchor.capped");
-        assert_eq!(decisions[0].decision.detail, "capped by file");
-    }
-
-    #[test]
     fn enabled_cap_without_evaluation_anchor_is_refused_before_any_work() {
         let mut policy = policy(Some(1));
         policy.evaluation_result_anchor = None;

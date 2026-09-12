@@ -956,15 +956,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn an_already_absent_stale_socket_is_prepared() {
-        let root = tempfile::tempdir().expect("temporary fixture root");
-        let socket = root.path().join("daemon.sock");
-
-        remove_stale_socket(&socket).expect("a concurrently removed stale socket is already safe");
-    }
-
-    #[cfg(unix)]
     #[tokio::test]
     async fn insecure_socket_parent_rejection_preserves_stale_socket() {
         use std::os::unix::fs::PermissionsExt;

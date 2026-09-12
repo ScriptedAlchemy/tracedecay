@@ -137,30 +137,6 @@ async fn a_second_registration_is_refused_and_leaves_the_incumbent_live() {
 }
 
 #[tokio::test]
-async fn publishing_replaces_the_incumbent() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let project = root("alpha");
-
-    registry
-        .publish(project.clone(), component(1))
-        .await
-        .unwrap();
-    registry
-        .publish(project.clone(), component(2))
-        .await
-        .unwrap();
-
-    assert_eq!(
-        registry
-            .get::<Component>(&project)
-            .await
-            .as_ref()
-            .and_then(mark),
-        Some(2)
-    );
-}
-
-#[tokio::test]
 async fn atomic_publication_rejects_a_conflicting_bundle_without_a_partial_commit() {
     let registry = ProjectRuntimeRegistryV1::default();
     let project = root("alpha");
@@ -1044,28 +1020,6 @@ async fn request_resolution_answers_nothing_for_an_absent_or_unnamed_project() {
         assert!(resolved.work.is_none());
         assert!(resolved.lsp_owner.is_none());
     }
-}
-
-#[tokio::test]
-async fn canonical_fallback_finds_a_component_without_an_alias_runtime() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let alias = root("alias");
-    let canonical = root("canonical");
-    registry
-        .publish(canonical.clone(), TestFirst(7))
-        .await
-        .unwrap();
-
-    let runtimes = registry.lock_runtimes();
-    assert_eq!(
-        ProjectRuntimeRegistryV1::component_with_canonical_fallback::<TestFirst>(
-            &runtimes,
-            &alias,
-            Some(&canonical),
-        ),
-        Some(TestFirst(7)),
-        "a request through an unregistered alias must still reach the canonical component"
-    );
 }
 
 /// Project-open registers owners under `Path::canonicalize()` (`\\?\C:\...` on

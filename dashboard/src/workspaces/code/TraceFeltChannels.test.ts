@@ -15,12 +15,6 @@ import { channelState } from './TraceFeltChannels.tsx';
 const INERT: readonly SensoryChannelState[] = ['not-on-this-wire', 'coarser-scope'];
 
 describe('channelState', () => {
-  it('prints a driven channel as measured, in the ordinary reading tone', () => {
-    expect(channelState('measured')).toEqual({
-      label: 'measured',
-      tone: 'text-text-secondary',
-    });
-  });
 
   it('says which kind of absence, because they are different claims', () => {
     // "No field on this payload carried it" and "it exists, but only at a

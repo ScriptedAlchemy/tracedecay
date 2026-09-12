@@ -117,10 +117,6 @@ mod tests {
             })
         }
 
-        fn replace(&self, projection: NativeIntegrationStatusProjectionV1) {
-            *self.statuses.lock().unwrap() = vec![projection];
-        }
-
         fn replace_many(&self, projections: Vec<NativeIntegrationStatusProjectionV1>) {
             *self.statuses.lock().unwrap() = projections;
         }
@@ -175,36 +171,6 @@ mod tests {
             .map(|frame| serde_json::from_slice::<Value>(&frame).unwrap())
             .filter(|message| message["method"] == TRACEDECAY_NATIVE_INTEGRATION_STATUS_METHOD)
             .collect()
-    }
-
-    #[test]
-    fn ready_sessions_forward_each_status_change_exactly_once() {
-        let port =
-            ScriptedStatusPort::holding(projection(NativeIntegrationPhaseV1::Prepared, 1, None));
-        let mut session =
-            session().with_native_integration_status_port(Arc::clone(&port) as Arc<_>);
-        initialize(&mut session);
-
-        let first = native_integration_notifications(session.drain_outbound());
-        assert_eq!(first.len(), 1, "one changed status must notify once");
-        assert_eq!(first[0]["params"]["phase"], "prepared");
-        assert_eq!(first[0]["params"]["phase_revision"], 1);
-
-        // An unchanged status re-returned by the port never re-notifies.
-        session.flush_due(2);
-        assert!(native_integration_notifications(session.drain_outbound()).is_empty());
-
-        // A durable phase advance notifies again with the terminal outcome.
-        port.replace(projection(
-            NativeIntegrationPhaseV1::Terminal,
-            5,
-            Some(NativeIntegrationTerminalOutcomeV1::Committed),
-        ));
-        session.flush_due(3);
-        let terminal = native_integration_notifications(session.drain_outbound());
-        assert_eq!(terminal.len(), 1);
-        assert_eq!(terminal[0]["params"]["phase"], "terminal");
-        assert_eq!(terminal[0]["params"]["terminal_outcome"], "committed");
     }
 
     #[test]

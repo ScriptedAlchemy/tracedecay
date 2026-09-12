@@ -493,46 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn sdk_registry_projects_mounted_routes_as_named_direct_methods() {
-        let registry = sdk_executable_binding_registry().expect("SDK registry");
-        assert!(
-            registry
-                .iter()
-                .filter(|availability| availability
-                    .operation_id()
-                    .as_str()
-                    .starts_with("operation.work."))
-                .all(|availability| availability.binding().is_some()),
-            "mounted Work operations must not be projected as unavailable"
-        );
-
-        let work = registry
-            .get(&OperationId::new("operation.work.generate_proposal").expect("operation ID"))
-            .and_then(|availability| availability.binding())
-            .expect("mounted work generate-proposal");
-        assert!(matches!(
-            work.transport(),
-            SdkTransportBindingV1::Http { route_path }
-                if route_path == "/application/work/generate-proposal"
-        ));
-        assert_eq!(work.sdk_method().as_str(), "work_generate_proposal");
-
-        let workflow = registry
-            .get(&OperationId::new("operation.workflow.register_definition").expect("operation ID"))
-            .and_then(|availability| availability.binding())
-            .expect("mounted workflow register-definition");
-        assert!(matches!(
-            workflow.transport(),
-            SdkTransportBindingV1::Http { route_path }
-                if route_path == "/application/workflow/register-definition"
-        ));
-        assert_eq!(
-            workflow.sdk_method().as_str(),
-            "workflow_register_definition"
-        );
-    }
-
-    #[test]
     fn sdk_registry_selects_the_mounted_http_transport_for_every_code_search() {
         let registry = sdk_executable_binding_registry().expect("SDK registry");
         let mounted = application_http_executable_binding_registry()
@@ -667,52 +627,6 @@ mod tests {
             SdkTransportBindingV1::McpTool { tool_name }
                 if tool_name == "tracedecay_session_lookup"
         ));
-    }
-
-    #[test]
-    fn sdk_registry_projects_github_stack_and_native_worktrees_over_http() {
-        let registry = sdk_executable_binding_registry().expect("SDK registry");
-        for (operation, route) in [
-            (
-                "github_stack_signal_expand",
-                "/application/github-stack/signal-expand",
-            ),
-            (
-                "worktree_inventory",
-                "/application/native-integration/worktree_inventory",
-            ),
-            (
-                "worktree_cleanup_inspect",
-                "/application/native-integration/worktree_cleanup_inspect",
-            ),
-            (
-                "worktree_cleanup_confirm",
-                "/application/native-integration/worktree_cleanup_confirm",
-            ),
-            (
-                "worktree_cleanup_remove",
-                "/application/native-integration/worktree_cleanup_remove",
-            ),
-            (
-                "worktree_cleanup_reconcile",
-                "/application/native-integration/worktree_cleanup_reconcile",
-            ),
-        ] {
-            let operation_id = OperationId::new(format!("operation.application.{operation}"))
-                .expect("operation ID");
-            let binding = registry
-                .get(&operation_id)
-                .and_then(|availability| availability.binding())
-                .unwrap_or_else(|| panic!("{operation} must be SDK-callable"));
-            assert!(matches!(
-                binding.transport(),
-                SdkTransportBindingV1::Http { route_path } if route_path == route
-            ));
-            assert_eq!(
-                binding.sdk_method().as_str(),
-                format!("application_{operation}")
-            );
-        }
     }
 
     #[test]

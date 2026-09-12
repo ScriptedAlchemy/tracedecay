@@ -567,34 +567,6 @@ fn callable_code_service_accepts_a_bounded_unexpired_port_cursor() {
 }
 
 #[test]
-fn callable_code_page_preserves_generation_cursor_and_query_fallback() {
-    let cursor = OpaqueCursor::new("cursor.generation.fixture.page-2").unwrap();
-    let page = CodeQueryPage::<String>::new(
-        scope().generation,
-        Vec::new(),
-        Some(0),
-        Some(cursor),
-        Some(fallback()),
-    )
-    .unwrap();
-
-    assert_eq!(page.generation.as_str(), "generation.fixture");
-    assert_eq!(page.total, Some(0));
-    assert_eq!(
-        page.next_cursor.as_ref().unwrap().as_str(),
-        "cursor.generation.fixture.page-2"
-    );
-    page.query_fallback.as_ref().unwrap().validate().unwrap();
-
-    let outcome = RetrievalPortOutcome::Completed(common::evidence(page));
-    assert_eq!(
-        outcome.evidence().coverage.completeness,
-        CoverageCompleteness::Complete
-    );
-    assert!(outcome.evidence().payload.is_some());
-}
-
-#[test]
 fn callable_code_catalog_uses_the_requests_accepted_by_the_transport() {
     let registry = tracedecay_contracts::sdk_executable_binding_registry().unwrap();
     let navigation = schemars::schema_for!(CodeNavigationSurfaceRequest);

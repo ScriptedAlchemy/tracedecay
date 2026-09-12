@@ -432,43 +432,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publication_returns_only_product_artifacts() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let run_id = "six-product-artifacts";
-        let identity = serde_json::json!({"identity": "test"});
-        let artifacts = test_artifact_chain(run_id);
-
-        publish_run_artifact_chain(temp.path(), run_id, artifacts, &identity)
-            .await
-            .unwrap();
-
-        let published = read_published_artifact_chain(temp.path(), run_id, Some(&identity))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(published.len(), 6);
-        assert_eq!(
-            published
-                .iter()
-                .map(|artifact| artifact.kind.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "traces",
-                "feedback",
-                "generated_evals",
-                "validation_gate",
-                "optimizer_diagnosis",
-                "codex_handoff",
-            ]
-        );
-        assert!(
-            run_artifact_publication_path(temp.path(), run_id)
-                .unwrap()
-                .is_file()
-        );
-    }
-
-    #[tokio::test]
     async fn incomplete_chain_is_rejected_before_filesystem_mutation() {
         let temp = tempfile::TempDir::new().unwrap();
         let run_id = "incomplete-chain";

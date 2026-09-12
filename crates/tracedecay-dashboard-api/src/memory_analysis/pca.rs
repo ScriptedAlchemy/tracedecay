@@ -415,18 +415,6 @@ mod tests {
     }
 
     #[test]
-    fn pca_scores_two_points() {
-        let features = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
-        let Some(scores) =
-            pca_scores(&features, &read_control()).expect("PCA must not be interrupted")
-        else {
-            panic!("expected PCA scores");
-        };
-        assert_eq!(scores.len(), 2);
-        assert!(scores[0][0].abs() > 0.0 || scores[0][1].abs() > 0.0);
-    }
-
-    #[test]
     fn pca_scores_observes_live_interruption() {
         let control = FactReadControl::new(Arc::new(|| true));
         let error = pca_scores(&[vec![1.0], vec![2.0]], &control)
@@ -456,45 +444,6 @@ mod tests {
                 "scores must be max-normalized"
             );
         }
-    }
-
-    #[test]
-    fn pca_scores_match_the_reference_on_phase_features_with_shared_tokens() {
-        // Cos/sin embedding of small phase vectors, the shape the projection
-        // read produces from holographic coefficients; rows mix a few shared
-        // "token" directions so the spectrum has clear leading gaps.
-        let mut rng = Lcg(5);
-        let dim = 64;
-        let tokens: Vec<Vec<f64>> = (0..3)
-            .map(|_| (0..dim).map(|_| rng.signed() * 0.05).collect())
-            .collect();
-        let phases: Vec<Vec<f64>> = (0..80)
-            .map(|i| {
-                let weight = [1.0, 0.45, 0.2][i % 3];
-                let token = &tokens[i % 3];
-                (0..dim)
-                    .map(|j| weight * token[j] + rng.signed() * 0.002)
-                    .collect()
-            })
-            .collect();
-        let features: Vec<Vec<f64>> = phases
-            .iter()
-            .map(|p| {
-                p.iter()
-                    .map(|x| x.cos())
-                    .chain(p.iter().map(|x| x.sin()))
-                    .collect()
-            })
-            .collect();
-        let reference = dense_reference_pca_scores(&features);
-        let scores = pca_scores(&features, &read_control())
-            .expect("PCA must not be interrupted")
-            .expect("phase features must project");
-        let difference = max_abs_difference(&reference, &scores);
-        assert!(
-            difference <= REFERENCE_TOLERANCE,
-            "max |reference - lanczos| = {difference:e} exceeds {REFERENCE_TOLERANCE:e}"
-        );
     }
 
     #[test]

@@ -305,30 +305,6 @@ fn active_multi_tool_transaction() -> Vec<Value> {
     ]
 }
 
-// Characterization fixture for `compress_in_transaction` seam extractions.
-// Keep this intentionally table-like: follow-on refactors can move internals
-// behind smaller seams and re-run this single fixture to prove the externally
-// visible decisions, response reasons, replay assembly, and DB writes stayed
-// stable across the main branches.
-#[derive(Clone, Copy)]
-enum CompressBaselineCase {
-    FrontierChanged,
-    BelowLeafThreshold,
-    AuxiliarySummaryRequest,
-    FakeSummaryWrite,
-}
-
-impl CompressBaselineCase {
-    fn name(self) -> &'static str {
-        match self {
-            CompressBaselineCase::FrontierChanged => "frontier_changed",
-            CompressBaselineCase::BelowLeafThreshold => "below_leaf_threshold",
-            CompressBaselineCase::AuxiliarySummaryRequest => "auxiliary_summary_request",
-            CompressBaselineCase::FakeSummaryWrite => "fake_summary_write",
-        }
-    }
-}
-
 fn boundary_request(
     session_id: &str,
     old_session_id: &str,
@@ -392,7 +368,6 @@ fn summary_draft_with_times(
 mod boundary;
 mod compaction;
 mod condensation;
-mod decision_baseline;
 mod frontier;
 mod overflow;
 mod patterns;

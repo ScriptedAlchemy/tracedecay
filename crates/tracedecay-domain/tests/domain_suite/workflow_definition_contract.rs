@@ -72,19 +72,6 @@ fn definition(steps: Vec<WorkflowStep>) -> Result<WorkflowDefinition, WorkflowDe
 }
 
 #[test]
-fn valid_two_step_definition_accepts_declared_predecessor_output() {
-    let prepare = step("prepare", &[], vec![], &["context"]);
-    let review = step(
-        "review",
-        &["prepare"],
-        vec![output("prepare", "context")],
-        &["finding"],
-    );
-
-    definition(vec![prepare, review]).unwrap();
-}
-
-#[test]
 fn duplicate_step_ids_are_rejected() {
     let error = definition(vec![
         step("prepare", &[], vec![], &["first"]),

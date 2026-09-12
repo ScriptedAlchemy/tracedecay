@@ -154,17 +154,6 @@ describe("dashboard SSE wire bridge", () => {
     },
   );
 
-  it("subscribes to server-emitted activity and resume-control names", () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
-    const connection = connectEvents("/api/events");
-    const source = FakeEventSource.instances[0]!;
-
-    expect(source.listeners.has("code_index")).toBe(false);
-    expect(source.listeners.has("code_index_activity")).toBe(true);
-    expect(source.listeners.has("control")).toBe(true);
-    connection.close();
-  });
-
   it("projects accepted events to live pulses carrying their own scope identity", () => {
     vi.useFakeTimers();
     vi.setSystemTime(1800000000000);

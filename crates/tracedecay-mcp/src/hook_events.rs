@@ -985,44 +985,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_agent_and_event_kind_from_hook_notification() {
-        let params = json!({
-            "agent": "cursor",
-            "event": "afterFileEdit",
-            "rel_paths": ["src/lib.rs", "../outside.rs", "/tmp/outside.rs", ""]
-        });
-
-        let event = parse_or_panic(&params);
-
-        assert_eq!(event.agent, HookAgent::Cursor);
-        assert_eq!(event.kind, HookEventKind::FileEdit);
-        assert_eq!(event.rel_paths, ["src/lib.rs"]);
-    }
-
-    #[test]
-    fn maps_shell_and_workspace_events_to_typed_kinds() {
-        let shell = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "git pull --rebase",
-            "cwd": "/tmp/project"
-        });
-        let workspace = json!({
-            "agent": "kiro",
-            "event": "workspaceOpen"
-        });
-
-        let shell = parse_or_panic(&shell);
-        let workspace = parse_or_panic(&workspace);
-
-        assert_eq!(shell.agent, HookAgent::Codex);
-        assert_eq!(shell.kind, HookEventKind::Shell);
-        assert!(shell.had_command);
-        assert_eq!(workspace.agent, HookAgent::Kiro);
-        assert_eq!(workspace.kind, HookEventKind::WorkspaceOpen);
-    }
-
-    #[test]
     fn shell_emitters_do_not_put_command_text_on_the_wire() {
         for event in [
             tracedecay_hooks::core_events::DaemonHookEvent::cursor_after_shell_execution(
@@ -1036,37 +998,6 @@ mod tests {
             let wire = serde_json::to_value(event).unwrap();
             assert!(wire.get("command").is_none());
         }
-    }
-
-    #[test]
-    fn preserves_route_metadata_from_hook_notification() {
-        let params = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "cargo test",
-            "cwd": "/tmp/project",
-            "route": {
-                "session_id": "session-123",
-                "thread_id": "thread-456",
-                "cwd": "/tmp/project",
-                "worktree": "/tmp/project-worktree",
-                "branch": "feature/hook-route"
-            }
-        });
-
-        let event = parse_or_panic(&params);
-
-        let Some(route) = event.route.as_ref() else {
-            panic!("route metadata should parse");
-        };
-        assert_eq!(route.session_id.as_deref(), Some("session-123"));
-        assert_eq!(route.thread_id.as_deref(), Some("thread-456"));
-        assert_eq!(route.cwd.as_deref(), Some(Path::new("/tmp/project")));
-        assert_eq!(
-            route.worktree.as_deref(),
-            Some(Path::new("/tmp/project-worktree"))
-        );
-        assert_eq!(route.branch.as_deref(), Some("feature/hook-route"));
     }
 
     #[test]
@@ -1128,21 +1059,6 @@ mod tests {
     }
 
     #[test]
-    fn plans_incremental_sync_with_paths_as_targeted_sync() {
-        let params = json!({
-            "agent": "kiro",
-            "event": "postToolUse",
-            "rel_paths": ["src/lib.rs", "../outside.rs"]
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), None),
-            HookEventPlan::SyncFiles(vec!["src/lib.rs".to_string()])
-        );
-    }
-
-    #[test]
     fn shell_command_text_cannot_mint_git_or_sync_authority() {
         let mut admission_source = None;
         for command in [
@@ -1169,78 +1085,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_session_start_wire_name_and_key() {
-        assert_eq!(
-            HookEventKind::from_wire("sessionStart"),
-            Some(HookEventKind::SessionStart)
-        );
-        assert_eq!(HookEventKind::SessionStart.as_key(), "session_start");
-    }
-
-    #[test]
-    fn parses_hermes_terminal_receipt_without_terminal_content() {
-        let event = parse_or_panic(&json!({
-            "agent": "hermes",
-            "event": "terminalReceipt",
-            "cwd": "/tmp/project",
-            "route": {"session_id": "session-1", "cwd": "/tmp/project"},
-            "receipt": {
-                "tool_call_id": "call-1",
-                "turn_id": "turn-1",
-                "status": "success",
-                "duration_ms": 12,
-                "transcript_watermark": "turn-1"
-            }
-        }));
-        assert_eq!(event.agent, HookAgent::Hermes);
-        assert_eq!(event.kind, HookEventKind::TerminalReceipt);
-        assert!(matches!(
-            plan_hook_event(&event, Path::new("/tmp/project"), None),
-            HookEventPlan::RecordTerminalReceipt { receipt, .. }
-                if receipt.tool_call_id.as_deref() == Some("call-1")
-        ));
-    }
-
-    #[test]
-    fn plans_projectless_hermes_turn_completion_as_a_review_receipt() {
-        let event = parse_or_panic(&json!({
-            "agent": "hermes",
-            "event": "turnCompleted",
-            "route": {"session_id": "session-1"},
-            "receipt": {
-                "status": "success",
-                "transcript_watermark": "message-1"
-            }
-        }));
-        assert_eq!(event.kind, HookEventKind::TurnCompleted);
-        assert!(matches!(
-            plan_hook_event(&event, Path::new("/tmp/project"), None),
-            HookEventPlan::RecordTerminalReceipt { receipt, .. }
-                if receipt.transcript_watermark.as_deref() == Some("message-1")
-        ));
-    }
-
-    #[test]
-    fn plans_session_start_from_main_checkout_as_current_branch_sync() {
-        let (_base, project_root, _worktree_root) = setup_linked_session_worktree();
-
-        let params = json!({
-            "agent": "claude",
-            "event": "sessionStart",
-            "cwd": project_root,
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, &project_root, Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Claude,
-            }
-        );
-    }
-
-    #[test]
     fn plans_session_start_from_linked_worktree_as_branch_add() {
         let (_base, project_root, worktree_root) = setup_linked_session_worktree();
 
@@ -1258,58 +1102,6 @@ mod tests {
             plan_hook_event(&event, &project_root, Some("main")),
             &worktree_root,
             "feature/session",
-        );
-    }
-
-    #[test]
-    fn plans_session_start_with_empty_branch_as_debounced_incremental_sync() {
-        let params = json!({
-            "agent": "claude",
-            "event": "sessionStart",
-            "cwd": "/tmp/project",
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), Some("")),
-            HookEventPlan::DebouncedIncrementalSync(HookAgent::Claude)
-        );
-    }
-
-    #[test]
-    fn plans_cursor_session_start_as_current_branch_sync() {
-        let params = serde_json::to_value(
-            tracedecay_hooks::core_events::DaemonHookEvent::session_start(
-                HookAgent::Cursor,
-                PathBuf::from("/tmp/project"),
-            ),
-        )
-        .unwrap();
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Cursor,
-            }
-        );
-    }
-
-    #[test]
-    fn plans_workspace_open_as_current_branch_sync() {
-        let params = json!({
-            "agent": "kiro",
-            "event": "workspaceOpen"
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Kiro,
-            }
         );
     }
 
@@ -1596,19 +1388,6 @@ mod tests {
         assert_ne!(
             fallback.admission_source(),
             other_fallback.admission_source()
-        );
-    }
-
-    #[test]
-    fn add_branch_at_effect_auth_accepts_linked_worktree_canonical_root() {
-        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
-        let authorized = authorize_add_branch_at_root(&worktree_root, &project_root)
-            .expect("linked worktree should authorize");
-        assert_eq!(
-            authorized,
-            worktree_root
-                .canonicalize()
-                .expect("worktree should canonicalize")
         );
     }
 

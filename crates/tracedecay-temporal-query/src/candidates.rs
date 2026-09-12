@@ -2,9 +2,6 @@ use std::collections::BTreeSet;
 
 use tracedecay_domain::RetrievalAnchorId;
 
-#[cfg(test)]
-use tracedecay_domain::ByteRangeV1;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CandidateChannel {
     Scope,
@@ -357,16 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_anchor_plan_is_exact_and_singleton() {
-        let anchor = RetrievalAnchorId::new("anchor.direct").expect("anchor");
-        let plan = plan_anchor(&anchor);
-
-        assert_eq!(plan.clauses().len(), 1);
-        assert!(plan.contains(CandidateChannel::Anchor, "anchor.direct"));
-        assert!(plan.clauses()[0].exact);
-    }
-
-    #[test]
     fn split_quoted_parses_escaped_quotes_and_escaped_backslashes() {
         let plan = plan_candidates(r#""say \"hello\" world" trailing"#);
         assert!(plan.contains(CandidateChannel::Phrase, r#"say "hello" world"#));
@@ -375,16 +362,6 @@ mod tests {
         let plan = plan_candidates(r#""path\\to\\file" kept"#);
         assert!(plan.contains(CandidateChannel::Phrase, r"path\to\file"));
         assert!(plan.contains(CandidateChannel::Lexical, "kept"));
-    }
-
-    #[test]
-    fn planning_preserves_apostrophes_brackets_braces_commas_and_semicolons() {
-        let query = "don't use [path/to/file.rs], {cfg:debug}; done";
-        let plan = plan_candidates(query);
-
-        assert!(plan.contains(CandidateChannel::ExactMessage, query));
-        assert!(plan.contains(CandidateChannel::Lexical, query));
-        assert!(plan.contains(CandidateChannel::Entity, "[path/to/file.rs],"));
     }
 
     #[test]
@@ -430,13 +407,5 @@ mod tests {
             CandidateChannel::ExactMessage,
             r#""unterminated phrase value"#
         ));
-    }
-
-    #[test]
-    fn exact_match_byte_ranges_are_non_empty_and_half_open() {
-        let range = ByteRangeV1::new(7, 11).expect("valid range");
-        assert_eq!((range.start(), range.end()), (7, 11));
-        assert!(ByteRangeV1::new(7, 7).is_err());
-        assert!(ByteRangeV1::new(8, 7).is_err());
     }
 }

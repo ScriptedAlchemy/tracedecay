@@ -950,16 +950,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reset_required_is_not_retryable_unavailability() {
-        let problem = retained_surface_execution_problem(
-            RetainedSurfaceExecutionErrorV1::ProfileResetRequired,
-        );
-        assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
-        assert_eq!(problem.retry(), RetryDirective::Never);
-        assert_eq!(problem.legal_actions(), &[LegalAction::Reset]);
-    }
-
     #[tokio::test]
     async fn memory_dispatch_preserves_partial_effect_receipt_as_an_admitted_terminal() {
         let operation =

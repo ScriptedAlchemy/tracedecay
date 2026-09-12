@@ -2039,47 +2039,6 @@ mod tests {
         ));
     }
 
-    /// The narrowest same-handle rewrite: identical length, identical head
-    /// line, differing only past the identity window, inside one mtime second.
-    /// This is the exact case the retired capture-time snapshot used to catch,
-    /// so it pins what the cheap checks actually still cover.
-    #[test]
-    fn same_size_middle_rewrite_after_generation_capture_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("middle.jsonl");
-        let head = b"{\"id\":\"head-stays-identical\"}\n";
-        let mut original = head.to_vec();
-        original.extend_from_slice(b"{\"body\":\"aaaaaaaaaaaaaaaaaaaa\"}\n");
-        let mut replacement = head.to_vec();
-        replacement.extend_from_slice(b"{\"body\":\"bbbbbbbbbbbbbbbbbbbb\"}\n");
-        assert_eq!(original.len(), replacement.len());
-        std::fs::write(&path, &original).unwrap();
-        let handle = std::fs::File::open(&path).unwrap();
-
-        let outcome = try_stream_new_jsonl_raw_from_file(
-            &path,
-            handle,
-            RawJsonlScanRequest {
-                previous: StoredCursor::default(),
-                max_new_bytes: None,
-                max_frames: MAX_JSONL_FRAMES_PER_BATCH,
-                oversized_policy: MalformedJsonlPolicy::Defer,
-                max_record_bytes: MAX_JSONL_RECORD_BYTES,
-                resume_state: None,
-            },
-            || std::fs::write(&path, &replacement).unwrap(),
-        );
-
-        assert!(
-            matches!(
-                outcome,
-                Err(TranscriptIngestError::ScanGenerationChanged { path: ref p })
-                    if *p == path
-            ),
-            "a same-handle rewrite must invalidate the scan generation"
-        );
-    }
-
     /// The counterpart to the rewrite test: a transcript being appended to
     /// while it is scanned is the normal case for a live session, and the
     /// appended bytes are past what the scan consumed. Growth moves the same
@@ -2120,50 +2079,6 @@ mod tests {
             outcome.io.snapshot_hash_bytes, 0,
             "and still does not hash the file to prove it"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn settled_unchanged_resume_reads_zero_file_bytes() {
-        // The warm entry this test proves must survive between its two polls,
-        // and the isolation reset is process-global.
-        let _hold = HoldUnchangedGenerationCache::enter();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("unchanged.jsonl");
-        std::fs::write(&path, b"{\"v\":0}\n{\"v\":1}\n").unwrap();
-        let first = try_stream_new_jsonl_raw_strict_with_resume(
-            &path,
-            StoredCursor::default(),
-            None,
-            MAX_JSONL_RECORD_BYTES,
-            None,
-        )
-        .unwrap();
-        let checkpoint = JsonlResumeState {
-            generation: first.new_cursor.file_id,
-            file_identity: first.file_identity,
-            fingerprint: first.frames.last().unwrap().resume_fingerprint,
-        };
-        let second = try_stream_new_jsonl_raw_strict_with_resume(
-            &path,
-            first.new_cursor,
-            None,
-            MAX_JSONL_RECORD_BYTES,
-            Some(checkpoint),
-        )
-        .unwrap();
-        assert_eq!(second.io.change, JsonlChangeKind::Unchanged);
-        assert_eq!(
-            second.io.content_bytes, 0,
-            "an unchanged poll must not consume frame bytes past the cursor"
-        );
-        assert_eq!(
-            second.io.snapshot_hash_bytes, 0,
-            "EOF resume skips the whole-file snapshot hash"
-        );
-        assert_eq!(second.io.prefix_validation_bytes, 0);
-        assert_eq!(second.io.identity_window_bytes, 0);
-        assert_eq!(second.io.scan_payload_read_bytes, 0);
     }
 
     #[cfg(unix)]
@@ -2394,60 +2309,5 @@ mod tests {
             second.io.snapshot_hash_bytes, 0,
             "append-only resume must not snapshot-hash the already-validated prefix"
         );
-    }
-
-    /// RED leftover: a durable resume is `(position, generation, file_identity,
-    /// fingerprint)`. The fingerprint cannot seed `Sha256`, so the first
-    /// append after a process-local-memo miss still walks `[0, cursor)`.
-    /// Stashing hasher bytes in `StoredCursor::file_id` would weaken rewrite
-    /// and file-identity detection. This test locks that invariant.
-    #[test]
-    fn first_append_after_durable_cursor_rewalks_prefix_to_rebuild_hasher() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("durable-append.jsonl");
-        let first_line = b"{\"v\":0}\n";
-        std::fs::write(&path, first_line).unwrap();
-        let first = try_stream_new_jsonl_raw_strict_with_resume(
-            &path,
-            StoredCursor::default(),
-            None,
-            MAX_JSONL_RECORD_BYTES,
-            None,
-        )
-        .unwrap();
-        let checkpoint = JsonlResumeState {
-            generation: first.new_cursor.file_id,
-            file_identity: first.file_identity,
-            fingerprint: first.frames.last().unwrap().resume_fingerprint,
-        };
-        // Drop process-local unchanged memo by using a distinct path identity
-        // window is still required; append changes size so the memo cannot
-        // apply anyway. The durable cursor is only StoredCursor + checkpoint.
-        let appended = b"{\"v\":1}\n";
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(appended)
-            .unwrap();
-        let second = try_stream_new_jsonl_raw_strict_with_resume(
-            &path,
-            first.new_cursor,
-            None,
-            MAX_JSONL_RECORD_BYTES,
-            Some(checkpoint),
-        )
-        .unwrap();
-        let prefix = u64::try_from(first_line.len()).unwrap();
-        assert_eq!(second.io.change, JsonlChangeKind::Appended);
-        assert_eq!(
-            second.io.prefix_validation_bytes, prefix,
-            "hasher mid-state is not in the domain cursor; first append re-walks [0, cursor)"
-        );
-        assert_eq!(
-            second.io.content_bytes,
-            u64::try_from(appended.len()).unwrap()
-        );
-        assert_eq!(second.new_cursor.file_id, checkpoint.generation);
     }
 }

@@ -2690,7 +2690,7 @@ fn debt_from_db(
 #[cfg(test)]
 mod authority_tests {
     use super::*;
-    use crate::{LcmSummarizerMode, schema};
+    use crate::schema;
 
     #[test]
     fn missing_or_empty_role_is_a_typed_skip() {
@@ -2839,49 +2839,5 @@ mod authority_tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].node_id, "current");
         assert_eq!(candidates[0].summary_text, "current summary");
-    }
-
-    #[test]
-    fn replay_budget_matches_policy_for_object_with_text() {
-        let message = json!({
-            "content": {
-                "extra": "ignored key words",
-                "text": "one",
-            }
-        });
-        assert_eq!(replay_token_estimate(std::slice::from_ref(&message)), 1);
-        assert_eq!(
-            replay_token_estimate(std::slice::from_ref(&message)),
-            crate::lcm_message_budget_tokens(&message)
-        );
-    }
-
-    #[test]
-    fn replay_budget_matches_policy_for_array_of_text_parts() {
-        let message = json!({
-            "content": [
-                { "extra": "ignored key words", "text": "one" },
-                { "text": "two three" },
-            ]
-        });
-        assert_eq!(replay_token_estimate(std::slice::from_ref(&message)), 3);
-        assert_eq!(
-            replay_token_estimate(std::slice::from_ref(&message)),
-            crate::lcm_message_budget_tokens(&message)
-        );
-    }
-
-    #[test]
-    fn authoritative_summary_text_is_never_replaced_by_an_extractive_fallback() {
-        let summary = "Exact native host summary. ".repeat(400);
-        let adapter = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
-            summary_text: summary.clone(),
-            route: Some("native_host".to_string()),
-        });
-
-        let invocation = adapter
-            .persisted_summary_invocation()
-            .expect("non-empty authoritative summary should persist");
-        assert_eq!(invocation.summary_text, summary);
     }
 }

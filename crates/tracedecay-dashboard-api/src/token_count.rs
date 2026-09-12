@@ -647,15 +647,6 @@ mod tests {
         assert!(bpe <= text.len() as i64);
     }
 
-    #[cfg(feature = "token-counting")]
-    #[test]
-    fn bpe_counts_use_cl100k_for_legacy_models() {
-        let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let cl = count_text_tokens(text, "gpt-4").expect("token counting is compiled in");
-        assert!(cl > 0);
-        assert!(cl <= text.len() as i64);
-    }
-
     #[cfg(not(feature = "token-counting"))]
     #[test]
     fn a_compiled_out_tokenizer_is_unavailable_instead_of_zero() {

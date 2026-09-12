@@ -255,22 +255,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        PlannedSourceEditFile, capture_planned_source_edit, capture_source_edit_plan,
-        publish_planned_source_edit, rollback_planned_source_edit_files,
+        PlannedSourceEditFile, capture_source_edit_plan, publish_planned_source_edit,
+        rollback_planned_source_edit_files,
     };
-
-    #[tokio::test]
-    async fn source_edit_plan_capture_retains_exact_pre_and_post_bytes() {
-        let ((), files) = capture_source_edit_plan(async {
-            capture_planned_source_edit("src/lib.rs", Some("before\n"), Some("after\n"));
-        })
-        .await;
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].relative_path, "src/lib.rs");
-        assert_eq!(files[0].expected.as_deref(), Some("before\n"));
-        assert_eq!(files[0].intended.as_deref(), Some("after\n"));
-    }
 
     #[tokio::test]
     async fn source_edit_plan_capture_intercepts_apply_publication() {

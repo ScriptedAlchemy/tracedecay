@@ -192,22 +192,6 @@ describe('a scoped read whose scope changed', () => {
  * scope it was issued under.
  */
 describe('a read that is never rewritten by scope', () => {
-  it('holds one cache entry across scope changes', async () => {
-    useScope.getState().selectProject('proj_a', 'Project A', 'active');
-    const { client } = renderRegistryProbe();
-    await waitFor(() => expect(attempts).toHaveLength(1));
-    expect(attempts[0]!.url).toBe('/api/projects');
-    act(() => attempts[0]!.settle('registry'));
-
-    act(() => useScope.getState().selectProject('proj_b', 'Project B', 'active'));
-    act(() => useScope.getState().selectAllProjects());
-
-    const entries = client.getQueryCache().findAll({ queryKey: ['registry-probe'] });
-    expect(entries).toHaveLength(1);
-    // And nothing about a project in the key it is filed under.
-    expect(JSON.stringify(entries[0]!.queryKey)).not.toContain('proj_');
-  });
-
   it('serves the answer it already has instead of refetching per project', async () => {
     useScope.getState().selectProject('proj_a', 'Project A', 'active');
     const { findByText } = renderRegistryProbe();

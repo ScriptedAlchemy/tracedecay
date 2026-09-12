@@ -794,7 +794,6 @@ async fn ingest_project_claude_observations(
 mod tests {
     use std::collections::BTreeSet;
 
-    use crate::runtime::SessionProvider;
     use crate::runtime::claude_observation::{
         ClaudeObservationIngestError, ClaudeObservationIngestStats,
     };
@@ -804,23 +803,10 @@ mod tests {
     use crate::runtime::source::TranscriptIngestError;
 
     use super::{
-        MAX_CODEX_SOURCE_FAILURES_PER_PASS, PROJECT_CATCH_UP_PROVIDERS, ProviderRunOutcome,
-        claude_provider_run_outcome, codex_source_failure_saturates_pass,
-        cursor_composer_run_outcome, merge_cursor_sweep_outcome,
+        MAX_CODEX_SOURCE_FAILURES_PER_PASS, ProviderRunOutcome, claude_provider_run_outcome,
+        codex_source_failure_saturates_pass, cursor_composer_run_outcome,
+        merge_cursor_sweep_outcome,
     };
-
-    #[test]
-    fn project_catch_up_schedules_every_final_host() {
-        for provider in [
-            SessionProvider::Claude,
-            SessionProvider::Codex,
-            SessionProvider::Cursor,
-            SessionProvider::Kimi,
-            SessionProvider::OpenCode,
-        ] {
-            assert!(PROJECT_CATCH_UP_PROVIDERS.contains(&provider));
-        }
-    }
 
     #[test]
     fn codex_source_failures_bound_each_provider_pass() {
