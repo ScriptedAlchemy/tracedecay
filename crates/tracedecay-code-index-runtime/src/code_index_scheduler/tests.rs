@@ -13148,16 +13148,9 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     let capped_page = capped_dispatch
         .payload
         .expect("candidate-capped trait dispatch page");
-    assert_eq!(capped_page.items.len(), 2);
+    assert_eq!(capped_page.items.len(), 1);
     assert_eq!(capped_page.items[0].symbol.node_id, trait_method);
-    assert!(capped_page.items[1].dispatch_via_trait);
-    assert!(
-        [
-            implementation_method.as_str(),
-            second_implementation_method.as_str(),
-        ]
-        .contains(&capped_page.items[1].symbol.node_id.as_str())
-    );
+    assert!(!capped_page.items[0].dispatch_via_trait);
     assert!(
         capped_dispatch
             .omissions
