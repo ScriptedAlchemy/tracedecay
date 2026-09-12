@@ -717,6 +717,18 @@ impl DaemonInvocationState {
                 DaemonInvocationProblem::InvalidRequest,
             );
         };
+        if let Some(continuation) = request.continuation.as_ref()
+            && (continuation.validate().is_err()
+                || continuation.scope_set_digest() != scope_set.digest()
+                || continuation.query_digest() != &query_digest
+                || continuation.order_digest() != &order_digest
+                || continuation.next_page() != request.page)
+        {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        }
         let database = match store_administration.registered_profile_database().await {
             Ok(database) => database,
             Err(_) => {
@@ -839,40 +851,91 @@ impl DaemonInvocationState {
                 generations.push(generation);
                 continue;
             };
-            let source_revision = if matches!(
-                request.operation,
-                tracedecay_contracts::MultiRootOperationV1::Git { .. }
-            ) {
-                match explicit_git_state(&root) {
-                    Some(head) => head,
-                    None => {
-                        let Ok(generation) = unavailable_root_generation(
-                            scope,
-                            tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
-                        ) else {
-                            return DaemonInvocationResponse::problem(
-                                request_id,
-                                DaemonInvocationProblem::InvalidRequest,
-                            );
-                        };
-                        generations.push(generation);
-                        continue;
+            let source_revision = match request.operation {
+                tracedecay_contracts::MultiRootOperationV1::Git { .. } => {
+                    match explicit_git_state(&root) {
+                        Some(state) => Some(state),
+                        None => {
+                            let Ok(generation) = unavailable_root_generation(
+                                scope,
+                                tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
+                            ) else {
+                                return DaemonInvocationResponse::problem(
+                                    request_id,
+                                    DaemonInvocationProblem::InvalidRequest,
+                                );
+                            };
+                            generations.push(generation);
+                            continue;
+                        }
                     }
                 }
-            } else {
-                scope.scope_digest.as_str().to_owned()
+                tracedecay_contracts::MultiRootOperationV1::Query { .. } => self
+                    .code_index_schedulers
+                    .latest_generation_id(&root)
+                    .await
+                    .map(|generation| generation.as_str().to_owned()),
+                tracedecay_contracts::MultiRootOperationV1::Work { .. }
+                | tracedecay_contracts::MultiRootOperationV1::Feedback { .. }
+                | tracedecay_contracts::MultiRootOperationV1::Impact { .. } => None,
             };
-            let Ok(generation) = frozen_root_generation(
-                scope,
-                scope_set.digest(),
-                &source_revision,
-                &operation_value,
+            let generation_outcome = match source_revision.as_deref() {
+                Some(source_revision) => match frozen_root_generation(
+                    scope,
+                    scope_set.digest(),
+                    source_revision,
+                    &operation_value,
+                ) {
+                    Ok(generation) => tracedecay_domain::ScopeOutcome::Exact(Some(generation)),
+                    Err(_) => {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            DaemonInvocationProblem::InvalidRequest,
+                        );
+                    }
+                },
+                None => tracedecay_domain::ScopeOutcome::Exact(None),
+            };
+            if request.continuation.as_ref().is_some_and(|continuation| {
+                continuation.root_generation(&scope.scope_digest) != Some(&generation_outcome)
+            }) {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                );
+            }
+            let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
+                scope.scope_digest.clone(),
+                generation_outcome,
             ) else {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
                 );
             };
+            let child_cursor = request.continuation.as_ref().and_then(|continuation| {
+                match continuation.root_cursor(&scope.scope_digest) {
+                    Some(tracedecay_domain::ScopeOutcome::Exact(cursor))
+                    | Some(tracedecay_domain::ScopeOutcome::Partial { value: cursor, .. }) => {
+                        cursor.clone()
+                    }
+                    _ => None,
+                }
+            });
+            if request.continuation.is_some() && child_cursor.is_none() {
+                contexts.push(context);
+                generations.push(generation);
+                outcomes.insert(
+                    scope.scope_digest.clone(),
+                    tracedecay_domain::ScopeOutcome::Exact(
+                        tracedecay_contracts::MultiRootRootPageV1 {
+                            value: Vec::new(),
+                            next_cursor: None,
+                        },
+                    ),
+                );
+                continue;
+            }
             let value = match parsed_operation.as_ref() {
                 Ok(parsed) => {
                     self.execute_one_multi_root_operation(
@@ -886,6 +949,7 @@ impl DaemonInvocationState {
                         cancellation.clone(),
                         request_lease,
                         request_cancellation.clone(),
+                        child_cursor,
                     )
                     .await
                 }
@@ -907,7 +971,12 @@ impl DaemonInvocationState {
                 );
             }
             let outcome = match value {
-                Ok(value) => tracedecay_domain::ScopeOutcome::Exact(vec![value]),
+                Ok((value, next_cursor)) => tracedecay_domain::ScopeOutcome::Exact(
+                    tracedecay_contracts::MultiRootRootPageV1 {
+                        value: vec![value],
+                        next_cursor,
+                    },
+                ),
                 Err(DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
                     tracedecay_domain::ScopeOutcome::Denied
                 }
@@ -916,15 +985,6 @@ impl DaemonInvocationState {
                 },
             };
             contexts.push(context);
-            let Ok(generation) = tracedecay_domain::RootScopeOutcomeV1::new(
-                scope.scope_digest.clone(),
-                tracedecay_domain::ScopeOutcome::Exact(generation),
-            ) else {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            };
             generations.push(generation);
             outcomes.insert(scope.scope_digest.clone(), outcome);
         }
@@ -1014,7 +1074,11 @@ impl DaemonInvocationState {
         cancellation: tracedecay_contracts::CancellationContext,
         project_admission: ProjectRuntimeRequestLeaseV1,
         request_cancellation: Option<CancellationToken>,
-    ) -> std::result::Result<Value, DaemonInvocationProblem> {
+        child_cursor: Option<tracedecay_contracts::OpaqueCursor>,
+    ) -> std::result::Result<
+        (Value, Option<tracedecay_contracts::OpaqueCursor>),
+        DaemonInvocationProblem,
+    > {
         match operation {
             ParsedMultiRootOperationV1::Work(request) => {
                 let control_cancellation = tracedecay_contracts::CancellationSignal::active(
@@ -1055,7 +1119,7 @@ impl DaemonInvocationState {
                 if &actual_scope != scope {
                     return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
                 }
-                extract_work_application_payload(&outcome)
+                extract_work_application_payload(&outcome).map(|value| (value, None))
             }
             ParsedMultiRootOperationV1::Surface { operation, request } => {
                 tracedecay_daemon_service::application_surface::invoke_multi_root_surface_request(
@@ -1072,7 +1136,7 @@ impl DaemonInvocationState {
                         "request.multi-root.surface.{ordinal}"
                     ))
                     .map_err(|_| DaemonInvocationProblem::InvalidRequest)?,
-                    tracedecay_contracts::PageRequest::new(100, None)
+                    tracedecay_contracts::PageRequest::new(100, child_cursor)
                         .map_err(|_| DaemonInvocationProblem::InvalidRequest)?,
                     deadline,
                     tracedecay_contracts::CancellationSignal::active(
@@ -1083,6 +1147,15 @@ impl DaemonInvocationState {
                 )
                 .await
                 .map_err(|_| DaemonInvocationProblem::Unavailable)
+                .and_then(|value| {
+                    let next_cursor = value
+                        .get("next_cursor")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+                    Ok((value, next_cursor.flatten()))
+                })
             }
         }
     }

@@ -31,18 +31,20 @@ pub(super) struct FederatedSurfaceRequestV1 {
 }
 
 pub(super) struct PrecomputedMultiRootQueryPort {
-    pub(super) outcomes:
-        BTreeMap<tracedecay_domain::ManifestDigest, tracedecay_domain::ScopeOutcome<Vec<Value>>>,
+    pub(super) outcomes: BTreeMap<
+        tracedecay_domain::ManifestDigest,
+        tracedecay_domain::ScopeOutcome<tracedecay_contracts::MultiRootRootPageV1<Value>>,
+    >,
 }
 
 impl tracedecay_contracts::MultiRootQueryPort<Value, Value> for PrecomputedMultiRootQueryPort {
     fn query_root(
         &self,
         context: &tracedecay_contracts::RequestContext,
-        _generation: &tracedecay_domain::RootGenerationV1,
+        _generation: Option<&tracedecay_domain::RootGenerationV1>,
         _query: &Value,
-        _page: u64,
-    ) -> tracedecay_domain::ScopeOutcome<Vec<Value>> {
+        _cursor: Option<&tracedecay_contracts::OpaqueCursor>,
+    ) -> tracedecay_domain::ScopeOutcome<tracedecay_contracts::MultiRootRootPageV1<Value>> {
         self.outcomes
             .get(&context.scope().scope_digest)
             .cloned()
@@ -55,7 +57,7 @@ impl tracedecay_contracts::MultiRootQueryPort<Value, Value> for PrecomputedMulti
 pub(super) fn denied_root_generation(
     scope: &tracedecay_contracts::ResolvedScope,
 ) -> std::result::Result<
-    tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+    tracedecay_domain::RootScopeOutcomeV1<Option<tracedecay_domain::RootGenerationV1>>,
     DaemonInvocationProblem,
 > {
     tracedecay_domain::RootScopeOutcomeV1::new(
@@ -69,7 +71,7 @@ pub(super) fn unavailable_root_generation(
     scope: &tracedecay_contracts::ResolvedScope,
     reason: tracedecay_domain::ScopeUnavailableReasonV1,
 ) -> std::result::Result<
-    tracedecay_domain::RootScopeOutcomeV1<tracedecay_domain::RootGenerationV1>,
+    tracedecay_domain::RootScopeOutcomeV1<Option<tracedecay_domain::RootGenerationV1>>,
     DaemonInvocationProblem,
 > {
     tracedecay_domain::RootScopeOutcomeV1::new(

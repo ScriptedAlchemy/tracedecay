@@ -228,7 +228,8 @@ pub use multi_root::{
     AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootCollectionResolutionV1,
     MultiRootCollectionSelectorV1, MultiRootCollectionUnavailableV1, MultiRootContinuationV1,
     MultiRootExecuteRequestV1, MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1,
-    MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootRootPageV1,
+    MultiRootScopeSetCasRequestV1,
     MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
     RegisteredRootLocatorV1, RegisteredRootSelectorV1, SharedProfileStoreLocatorV1,
 };
