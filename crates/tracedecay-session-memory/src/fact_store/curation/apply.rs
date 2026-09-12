@@ -19,7 +19,9 @@ use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
 use tracedecay_runtime_core::db::engine::{params, params_from_iter};
 
 use super::super::crud::{
-    add_project_memory_fact_tx, commit_batch_tx, remove_project_memory_fact_tx, sanitize_payload,
+    add_project_memory_fact_tx, commit_batch_tx,
+    remove_project_memory_fact_after_curation_review_tx, remove_project_memory_fact_tx,
+    sanitize_payload, update_project_memory_fact_after_curation_review_tx,
     update_project_memory_fact_tx,
 };
 use super::super::envelope::{
@@ -570,6 +572,9 @@ pub(in crate::fact_store) async fn apply_project_memory_fact_curation_tx(
 
     verify_curation_review_tx(transaction, request).await?;
 
+    // Every child request is bound to the exact snapshot verified above. Children retain that
+    // immutable request for receipts while advancing from this transaction's current lineage, so
+    // legal edits to the same fact compose without mistaking an earlier child for a foreign write.
     // Counted after the replay check so replays do not re-count their batch.
     hotpath::gauge!("runtime_core.memory.curation_operations")
         .inc(request.operations().len() as f64);
@@ -599,8 +604,11 @@ pub(in crate::fact_store) async fn apply_project_memory_fact_curation_tx(
                 effects.push(ProjectMemoryFactCurationOperationEffectV1::add(&outcome)?);
             }
             ProjectMemoryFactCurationOperationV1::Update(operation) => {
-                let outcome =
-                    update_project_memory_fact_tx(transaction, operation.command()).await?;
+                let outcome = update_project_memory_fact_after_curation_review_tx(
+                    transaction,
+                    operation.command(),
+                )
+                .await?;
                 if seen.insert(outcome.fact().fact_id().clone()) {
                     changed_ids.push(outcome.fact().fact_id().clone());
                 }
@@ -609,8 +617,11 @@ pub(in crate::fact_store) async fn apply_project_memory_fact_curation_tx(
                 )?);
             }
             ProjectMemoryFactCurationOperationV1::Merge(operation) => {
-                let outcome =
-                    merge_project_memory_facts_tx(transaction, operation.command()).await?;
+                let outcome = merge_project_memory_facts_after_curation_review_tx(
+                    transaction,
+                    operation.command(),
+                )
+                .await?;
                 if outcome.content_updated() && seen.insert(outcome.winner().fact_id().clone()) {
                     changed_ids.push(outcome.winner().fact_id().clone());
                 }
@@ -622,8 +633,11 @@ pub(in crate::fact_store) async fn apply_project_memory_fact_curation_tx(
                 effects.push(ProjectMemoryFactCurationOperationEffectV1::merge(outcome));
             }
             ProjectMemoryFactCurationOperationV1::Remove(operation) => {
-                let outcome =
-                    remove_project_memory_fact_tx(transaction, operation.command()).await?;
+                let outcome = remove_project_memory_fact_after_curation_review_tx(
+                    transaction,
+                    operation.command(),
+                )
+                .await?;
                 if outcome.was_removed()
                     && seen.insert(operation.command().target().fact_id().clone())
                 {
@@ -908,6 +922,21 @@ pub(in crate::fact_store) async fn merge_project_memory_facts_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactMergeCommandV1,
 ) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
+    merge_project_memory_facts_with_cas_tx(transaction, request, false).await
+}
+
+async fn merge_project_memory_facts_after_curation_review_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactMergeCommandV1,
+) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
+    merge_project_memory_facts_with_cas_tx(transaction, request, true).await
+}
+
+async fn merge_project_memory_facts_with_cas_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactMergeCommandV1,
+    use_transaction_current_cas: bool,
+) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
     let request_digest = request.input_digest()?;
     if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
@@ -923,7 +952,9 @@ pub(in crate::fact_store) async fn merge_project_memory_facts_tx(
 
     let now = project_memory_now()?;
     let winner_fact = available_curation_fact_tx(transaction, request.winner()).await?;
-    if winner_fact.last_event_id() != request.winner_target().expected_last_event_id() {
+    if !use_transaction_current_cas
+        && winner_fact.last_event_id() != request.winner_target().expected_last_event_id()
+    {
         return Err(FactStoreError::CommitConflict {
             conflict: FactCommitConflict::LastEventMismatch {
                 expected: Some(request.winner_target().expected_last_event_id().clone()),
@@ -934,7 +965,8 @@ pub(in crate::fact_store) async fn merge_project_memory_facts_tx(
     let mut loser_facts = Vec::with_capacity(request.loser_targets().len());
     for target in request.loser_targets() {
         let loser = available_curation_fact_tx(transaction, target.fact()).await?;
-        if loser.last_event_id() != target.expected_last_event_id() {
+        if !use_transaction_current_cas && loser.last_event_id() != target.expected_last_event_id()
+        {
             return Err(FactStoreError::CommitConflict {
                 conflict: FactCommitConflict::LastEventMismatch {
                     expected: Some(target.expected_last_event_id().clone()),
@@ -983,11 +1015,16 @@ pub(in crate::fact_store) async fn merge_project_memory_facts_tx(
                 "merge winner cannot also be a loser",
             ));
         }
+        let expected_last_event_id = if use_transaction_current_cas {
+            loser.last_event_id()
+        } else {
+            target.expected_last_event_id()
+        };
         let batch = merge_removal_batch(
             loser.fact_id(),
             request.owner(),
             loser.payload_access(),
-            target.expected_last_event_id(),
+            expected_last_event_id,
             winner_fact.fact_id(),
             request.actor().cloned(),
             now,

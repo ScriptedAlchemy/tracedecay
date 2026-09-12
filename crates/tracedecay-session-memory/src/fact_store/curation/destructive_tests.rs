@@ -490,6 +490,101 @@ async fn mixed_destructive_batch_commits_once_and_exactly_replays_every_effect()
 }
 
 #[tokio::test]
+async fn same_fact_updates_share_the_reviewed_base_and_replay_exactly() {
+    let fixture = Fixture::new("same-fact-updates").await;
+    let (target, reviewed_event) = fixture.seed("same-fact-target").await;
+    let (evidence_fact, evidence_event) = fixture.seed("same-fact-evidence").await;
+    let outer_id = provenance_id("curation.outer.same-fact-updates");
+    let child_id = |index| {
+        derive_project_memory_fact_curation_child_operation_id(
+            &outer_id,
+            index,
+            ProjectMemoryFactCurationMutationKindV1::Update,
+        )
+        .expect("stable same-fact child identity")
+    };
+    let first = ProjectMemoryFactCurationUpdateV1::new(
+        update_command(
+            target.clone(),
+            reviewed_event.clone(),
+            child_id(0).as_str(),
+            "The first reviewed edit updates canonical content.",
+        ),
+        evidence(
+            &fixture.owner,
+            evidence_fact.clone(),
+            evidence_event.clone(),
+            "First exact reviewed edit",
+        ),
+    )
+    .expect("first same-fact update");
+    let second = ProjectMemoryFactCurationUpdateV1::new(
+        ProjectMemoryFactUpdateCommandV1::new(
+            target.clone(),
+            child_id(1),
+            Some(reviewed_event),
+            ProjectMemoryFactUpdatePatchV1::new(
+                None,
+                None,
+                None,
+                Some(vec!["automatic-curation".to_owned(), "reviewed".to_owned()]),
+                None,
+                None,
+                None,
+            )
+            .expect("second same-fact patch"),
+            None,
+        )
+        .expect("second same-fact command"),
+        evidence(
+            &fixture.owner,
+            evidence_fact,
+            evidence_event,
+            "Second exact reviewed edit",
+        ),
+    )
+    .expect("second same-fact update");
+    let request = ProjectMemoryFactCurationBatchV1::new(
+        fixture.owner.clone(),
+        outer_id,
+        None,
+        Confidence::new(0.8).expect("minimum same-fact confidence"),
+        vec![
+            ProjectMemoryFactCurationOperationV1::Update(first),
+            ProjectMemoryFactCurationOperationV1::Update(second),
+        ],
+    )
+    .expect("same-fact curation batch");
+
+    let committed = fixture
+        .store()
+        .apply_project_memory_fact_curation(request.clone(), &fixture.control)
+        .await
+        .expect("commit both operations reviewed against one base");
+    assert!(!committed.replayed());
+    assert_eq!(committed.accepted_operations(), 2);
+    assert_eq!(committed.facts_updated(), 2);
+    assert_eq!(committed.changed_facts(), [target]);
+    assert!(committed.operation_effects().iter().all(|effect| matches!(
+        effect,
+        ProjectMemoryFactCurationOperationEffectV1::Update { .. }
+    )));
+    let before_replay = lineage_event_ids(&fixture).await;
+
+    let replayed = fixture
+        .store()
+        .apply_project_memory_fact_curation(request, &fixture.control)
+        .await
+        .expect("replay same-fact curation batch");
+    assert!(replayed.replayed());
+    assert_eq!(lineage_event_ids(&fixture).await, before_replay);
+    assert_eq!(
+        serde_json::to_value(replayed).expect("serialize same-fact replay"),
+        serde_json::to_value(committed).expect("serialize same-fact commit")
+    );
+}
+
+#[tokio::test]
 async fn stale_late_child_rolls_back_prior_child_and_all_operation_receipts() {
     let fixture = Fixture::new("atomic-rollback").await;
     let (update_target, update_event) = fixture.seed("update-target").await;
