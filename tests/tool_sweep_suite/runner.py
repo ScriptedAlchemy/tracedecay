@@ -445,6 +445,7 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
         "pub struct SweepType { pub value: i32 }\n"
         "impl SweepTrait for SweepType { fn marker(&self) -> i32 { self.value } }\n"
         "pub fn sweep_peer() -> i32 { sweep_anchor().marker() }\n"
+        "pub fn sweep_typed(input: SweepType) -> SweepType { input }\n"
         "\n"
         "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
     )
@@ -982,37 +983,10 @@ def prime_fixture_values(
                     raise SweepError("LCM session producer omitted the captured prompt message")
                 time.sleep(MOUNT_RETRY_DELAY_S)
 
-    # The callable code-query surface serves only complete immutable index
-    # generations, and a cold fixture publishes its first generation
-    # asynchronously after admission. Resolve the fixture symbol through the
-    # live symbol-search producer so navigation consumers receive a real
-    # code-query node identity instead of racing the first build.
-    with prime_group("code_node"):
-        ends_at = time.monotonic() + CODE_INDEX_READY_TIMEOUT_S
-        code_node_id: str | None = None
-        while code_node_id is None:
-            searched, _ = client.call_tool(
-                "tracedecay_code_symbol_search",
-                {
-                    "query": fixture["symbol"],
-                    "lazy_index_ignored_dependencies": False,
-                    "scope": {},
-                    "meta": {"projection": "summary", "order": "relevance"},
-                    "format": "json",
-                },
-                deadline("tracedecay_code_symbol_search"),
-            )
-            candidate = first_value(searched, {"node_id"})
-            code_node_id = (
-                candidate if isinstance(candidate, str) and candidate else None
-            )
-            if code_node_id is None:
-                if time.monotonic() >= ends_at:
-                    raise SweepError(
-                        "code symbol-search producer did not publish a complete generation identity"
-                    )
-                time.sleep(0.5)
-        fixture["code_node_id"] = code_node_id
+    with prime_group("code_navigation"):
+        prime_code_navigation(
+            client, fixture, deadline("tracedecay_code_symbol_search")
+        )
 
     with prime_group("git_preview"):
         mint_preview_input(client, fixture, deadline("tracedecay_git_hunks"))
@@ -1039,6 +1013,55 @@ def prime_fixture_values(
                 deadline,
                 effect_target,
             )
+
+
+def prime_code_navigation(
+    client: McpClient, fixture: dict[str, Any], deadline_ms: int,
+) -> None:
+    """Mint every navigation node from one real symbol-search page."""
+    ends_at = time.monotonic() + CODE_INDEX_READY_TIMEOUT_S
+    while True:
+        searched, elapsed_ms = client.call_tool(
+            "tracedecay_code_symbol_search",
+            {
+                "query": "sweep",
+                "lazy_index_ignored_dependencies": False,
+                "scope": {},
+                "meta": {"projection": "summary", "order": "relevance"},
+                "format": "json",
+            },
+            deadline_ms,
+        )
+        row = response_row(
+            "tool", "tracedecay_code_symbol_search", searched, elapsed_ms, deadline_ms
+        )
+        records = [
+            value
+            for value in _objects(searched)
+            if isinstance(value.get("node_id"), str)
+            and isinstance(value.get("name"), str)
+        ]
+        selected: dict[str, str] = {}
+        for tool, expected_name in CODE_NAVIGATION_NODE_NAMES.items():
+            matches = [value for value in records if value["name"] == expected_name]
+            if tool == "tracedecay_code_type_hierarchy":
+                matches = [value for value in matches if value.get("kind") == "struct"]
+            if len(matches) == 1:
+                selected[tool] = matches[0]["node_id"]
+        if row["verdict"] == "PASS" and len(selected) == len(CODE_NAVIGATION_NODE_NAMES):
+            if duration_us(searched) is None:
+                raise SweepError(
+                    "code symbol-search producer omitted the enabled _meta.duration_us receipt"
+                )
+            fixture["code_navigation_node_ids"] = selected
+            return
+        if time.monotonic() >= ends_at:
+            missing = sorted(set(CODE_NAVIGATION_NODE_NAMES) - set(selected))
+            raise SweepError(
+                "code symbol-search producer did not publish the navigation identities: "
+                + ", ".join(missing)
+            )
+        time.sleep(MOUNT_RETRY_DELAY_S)
 
 
 def mint_preview_input(client: McpClient, fixture: dict[str, str], deadline_ms: int) -> None:
@@ -1076,18 +1099,18 @@ OPAQUE_FIELDS = frozenset(
 # so a cold fixture answers typed-stale until its first build publishes.
 CODE_INDEX_READY_TIMEOUT_S = 120
 
+CODE_NAVIGATION_NODE_NAMES = {
+    "tracedecay_code_callees": "sweep_peer",
+    "tracedecay_code_callers": "sweep_anchor",
+    "tracedecay_code_declaration": "sweep_anchor",
+    "tracedecay_code_references": "sweep_anchor",
+    "tracedecay_code_type_definition": "sweep_typed",
+    "tracedecay_code_type_hierarchy": "SweepType",
+}
+
 # Navigation consumers whose `node_id` is a code-query identity minted by the
 # symbol-search producer, not the graph node identity used everywhere else.
-CODE_QUERY_NODE_CONSUMERS = frozenset(
-    {
-        "tracedecay_code_callees",
-        "tracedecay_code_callers",
-        "tracedecay_code_declaration",
-        "tracedecay_code_references",
-        "tracedecay_code_type_definition",
-        "tracedecay_code_type_hierarchy",
-    }
-)
+CODE_QUERY_NODE_CONSUMERS = frozenset(CODE_NAVIGATION_NODE_NAMES)
 
 # Expected hermetic typed-denial verdicts. Each entry asserts the EXACT
 # (kind, code) problem a tool must return inside the hermetic fixture because
@@ -1353,9 +1376,10 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
             raise SweepError(f"{name}: denial probe exists without an expected hermetic denial")
         return dict(probe)
     if isinstance(name, str) and name in CODE_QUERY_NODE_CONSUMERS:
-        code_node_id = fixture.get("code_node_id")
-        if not code_node_id:
-            raise SweepError(f"{name}: code symbol-search producer minted no code node identity")
+        identities = fixture.get("code_navigation_node_ids")
+        code_node_id = identities.get(name) if isinstance(identities, dict) else None
+        if not isinstance(code_node_id, str) or not code_node_id:
+            raise SweepError(f"{name}: code symbol-search producer minted no navigation identity")
         fixture = {**fixture, "node_id": code_node_id}
     schema = definition.get("inputSchema")
     if not isinstance(schema, dict) or schema.get("type") != "object":
@@ -1363,6 +1387,8 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
     value = _materialize(schema, fixture, None, schema)
     if not isinstance(value, dict):
         raise SweepError("tool input did not materialize an object")
+    if isinstance(name, str) and name in CODE_QUERY_NODE_CONSUMERS:
+        value["format"] = "json"
     return value
 
 
@@ -1751,6 +1777,23 @@ def _read_tool_row(
     except Exception as error:
         return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
     row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
+    if row["verdict"] == "PASS" and policy.name in CODE_QUERY_NODE_CONSUMERS:
+        items = next(
+            (
+                value["items"]
+                for value in _objects(response)
+                if isinstance(value.get("items"), list)
+            ),
+            None,
+        )
+        if not items:
+            row.update(
+                {
+                    "verdict": "FAIL",
+                    "problem_code": "tool_sweep.navigation_evidence_empty",
+                    "note": "navigation consumer returned no symbol evidence",
+                }
+            )
     expected = EXPECTED_HERMETIC_DENIALS.get(policy.name)
     if row["verdict"] == "FAIL":
         ends_at = time.monotonic() + MOUNT_RETRY_BUDGET_OVERRIDES_S.get(
