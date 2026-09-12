@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tracedecay_contracts::context_scout::{ContextScoutModelBackendV1, ContextScoutModelReceiptV1};
 
-use super::context_scout_v2::{
+use super::{
     ContextScoutModelAssistantV1, ContextScoutModelCandidateV1, ContextScoutModelErrorV1,
     ContextScoutModelExecutionV1, ContextScoutModelFuture, ContextScoutModelProposalV1,
     ContextScoutModelRequestV1, serialized_token_count, warm_token_counter,
@@ -342,17 +342,14 @@ mod tests {
 
     fn request() -> ContextScoutModelRequestV1 {
         ContextScoutModelRequestV1 {
-            candidates: vec![
-                super::super::context_scout_v2::ContextScoutModelCandidateInputV1 {
-                    dedupe_key: [1; 32],
-                    category:
-                        tracedecay_contracts::context_scout::ContextScoutCategoryV1::Verification,
-                    suggestion_text: "Run the cited focused test.".to_string(),
-                    citation_anchor_ids: vec![
-                        tracedecay_domain::RetrievalAnchorId::new("anchor.model.fixture").unwrap(),
-                    ],
-                },
-            ],
+            candidates: vec![super::super::ContextScoutModelCandidateInputV1 {
+                dedupe_key: [1; 32],
+                category: tracedecay_contracts::context_scout::ContextScoutCategoryV1::Verification,
+                suggestion_text: "Run the cited focused test.".to_string(),
+                citation_anchor_ids: vec![
+                    tracedecay_domain::RetrievalAnchorId::new("anchor.model.fixture").unwrap(),
+                ],
+            }],
         }
     }
 

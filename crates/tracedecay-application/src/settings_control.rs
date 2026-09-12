@@ -16,10 +16,9 @@ use tracedecay_domain::configuration::{
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 
-use tracedecay_contracts::{ProjectSettingsPatchInputV1, validate_project_settings_patch};
-
-use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_configuration::config::PinnedRuntimeConfiguration;
+use tracedecay_contracts::{ProjectSettingsPatchInputV1, validate_project_settings_patch};
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
 pub use tracedecay_contracts::SettingsValidationIssueV1;
 

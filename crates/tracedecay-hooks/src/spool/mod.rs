@@ -73,7 +73,6 @@ const CONTROL_FRAME_RESERVE_BYTES: u64 = 4 * 1024;
 // Acknowledgements can arrive out of global sequence order because replay is
 // fair across sessions. Reserve room for one bounded marker per live record.
 const MAX_META_BYTES: usize = 1024 * 1024;
-const MAX_LEASE_BYTES: usize = 512;
 const MAX_REPLAY_SESSIONS: usize = 4;
 const RECORDS_FILE: &str = "records.v1.bin";
 const META_FILE: &str = "meta.v1.json";
@@ -144,6 +143,21 @@ impl Drop for SpoolLeaseHoldObservationV1 {
 }
 
 impl HookSpoolV1 {
+    /// Cheap conservative replay probe that never acquires the writer lease.
+    ///
+    /// `false` means the records file is absent or empty. `true` does not claim
+    /// that every physical record is still pending; opening under the writer
+    /// lease remains the authority for acknowledgement and recovery state.
+    pub fn has_durable_records(root: &Path) -> Result<bool, HookSpoolError> {
+        let path = records_path(root);
+        if !validate_regular_or_missing(&path)? {
+            return Ok(false);
+        }
+        fs::metadata(path)
+            .map(|metadata| metadata.len() > 0)
+            .map_err(|_| HookSpoolError::Io)
+    }
+
     /// Explicitly recreate one exact host spool without decoding incompatible
     /// metadata, records, or cursors. The normal writer lease still fences a
     /// live adapter, and only the incompatible transport-owned files are

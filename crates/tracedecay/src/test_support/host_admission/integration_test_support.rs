@@ -7,7 +7,7 @@ use tracedecay_domain::{
     LocatorDigest, ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
     SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceBindingOwnerV1,
     SourceBindingV1, SourceCaptureModeV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
-    SourceInstanceId, SourceRefetchStrategyV1, UtcMicros, canonical_sha256,
+    SourceInstanceId, SourceRefetchStrategyV1, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryReadOperationV1,
@@ -513,8 +513,7 @@ impl RuntimeRequestProbeV1 for ExternalSourceRuntimeReadProbe {
 }
 
 fn digest_suffix(digest: &str) -> std::result::Result<&str, HostAdmissionOutcome> {
-    digest
-        .strip_prefix("sha256:")
+    sha256_hex_suffix(digest)
         .ok_or_else(|| external_source_read_failed("non-canonical external-source digest"))
 }
 

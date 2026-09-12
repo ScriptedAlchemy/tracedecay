@@ -19,7 +19,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision};
+use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision, sha256_hex_suffix};
 
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
@@ -536,7 +536,7 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
             .expect("decode generation manifest");
     let segment_digest = manifest["generation"]["file_segments"][0]["segment_digest"]
         .as_str()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .and_then(|digest| sha256_hex_suffix(digest))
         .expect("file segment digest");
     let segment_path = store
         .path()

@@ -8,6 +8,7 @@ use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
 use tracedecay_domain::{
     AnchorDurabilityClass, DurableObservationV1, HydrationStateV1, ObservationScopeV1,
     PayloadAccessState, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord, SessionId,
+    sha256_hex_suffix,
 };
 use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, engine::params};
 use tracedecay_store::SessionMessageRecord;
@@ -1416,7 +1417,7 @@ fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {
 }
 
 fn content_hash_equals(expected: &str, actual_hex: &str) -> bool {
-    expected.strip_prefix("sha256:").unwrap_or(expected) == actual_hex
+    sha256_hex_suffix(expected).unwrap_or(expected) == actual_hex
 }
 
 #[cfg(test)]

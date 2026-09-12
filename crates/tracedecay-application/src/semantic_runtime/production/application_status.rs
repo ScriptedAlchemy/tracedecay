@@ -1,3 +1,5 @@
+#[cfg(test)]
+use tracedecay_domain::EmbeddingExecutionProviderV1;
 use tracedecay_domain::VectorGenerationIdV1;
 #[cfg(test)]
 use tracedecay_semantic_contracts::SemanticModelRemediationV1;
@@ -28,7 +30,7 @@ pub fn application_status_from_projection(
     configuration: Option<SemanticConfigurationPinV1>,
     activation_receipt: Option<SemanticActivationReceiptV1>,
 ) -> SemanticRuntimeStatusV1 {
-    match &projection.status {
+    let status = match &projection.status {
         SemanticRuntimeScheduleStatusV1::Unavailable => SemanticRuntimeStatusV1::new(
             configuration,
             SemanticRuntimeStateV1::Unavailable {
@@ -79,7 +81,8 @@ pub fn application_status_from_projection(
         SemanticRuntimeScheduleStatusV1::Current { generation } => {
             ready_or_typed_missing_receipt(generation, configuration, activation_receipt)
         }
-    }
+    };
+    status.with_execution_provider(projection.execution_provider)
 }
 
 fn ready_or_typed_missing_receipt(
@@ -308,7 +311,7 @@ mod tests {
 
     use super::*;
     use crate::semantic_runtime::SemanticRuntimeRouteV1;
-    use tracedecay_configuration::ConfigurationCurrentStateV1;
+    use tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1;
 
     fn pin() -> SemanticConfigurationPinV1 {
         SemanticConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {
@@ -340,6 +343,22 @@ mod tests {
             },
             semantics_omitted: true,
         }
+    }
+
+    #[test]
+    fn scheduler_projection_preserves_the_resolved_execution_provider() {
+        let projection = SemanticRuntimeStatusProjectionV1 {
+            status: SemanticRuntimeScheduleStatusV1::Unavailable,
+            degraded_reason: None,
+            prior_generation: None,
+            execution_provider: Some(EmbeddingExecutionProviderV1::WebGpu),
+        };
+
+        let status = application_status_from_projection(&projection, None, None);
+        assert_eq!(
+            status.execution_provider,
+            Some(EmbeddingExecutionProviderV1::WebGpu)
+        );
     }
 
     fn generic_unavailable(

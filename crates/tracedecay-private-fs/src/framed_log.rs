@@ -14,6 +14,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 };
 
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_SYNC_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectorySyncPolicy {
     /// Surface every fsync failure.
@@ -25,6 +30,8 @@ pub enum DirectorySyncPolicy {
 /// Flush a directory's metadata so a preceding create/rename/remove is durable.
 #[hotpath::measure(label = "private_fs.framed_log.sync_directory")]
 pub fn sync_directory(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
+    #[cfg(test)]
+    DIRECTORY_SYNC_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     #[cfg(unix)]
     {
         match File::open(dir).and_then(|directory| sync_owned_file(&directory)) {
@@ -736,30 +743,47 @@ pub fn append_durable(
 ) -> io::Result<u64> {
     hotpath::gauge!("private_fs.framed_log.write_bytes").set(frame.len());
     tighten_existing_file(path)?;
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut output = options.open(path)?;
+    let (mut output, created) = open_append_target(path)?;
     let offset = output.seek(SeekFrom::End(0))?;
     output.write_all(frame)?;
     sync_owned_file(&output)?;
-    sync_parent_directory(path, directory_policy)?;
+    if created {
+        sync_parent_directory(path, directory_policy)?;
+    }
     Ok(offset)
 }
 
+fn open_append_target(path: &Path) -> io::Result<(File, bool)> {
+    let mut existing = OpenOptions::new();
+    existing.append(true);
+    match existing.open(path) {
+        Ok(file) => return Ok((file, false)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut create = OpenOptions::new();
+    create.append(true).create_new(true);
+    #[cfg(unix)]
+    create.mode(0o600);
+    match create.open(path) {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            existing.open(path).map(|file| (file, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[hotpath::measure(label = "private_fs.framed_log.truncate")]
-pub fn truncate_file(
-    path: &Path,
-    len: u64,
-    directory_policy: DirectorySyncPolicy,
-) -> io::Result<()> {
+/// Truncation rewrites an existing inode's length; the directory entry is
+/// unchanged, so only the file itself needs a durability barrier.
+pub fn truncate_file(path: &Path, len: u64) -> io::Result<()> {
     tighten_existing_file(path)?;
     let output = OpenOptions::new().write(true).open(path)?;
     output.set_len(len)?;
     sync_owned_file(&output)?;
-    tighten_existing_file(path)?;
-    sync_parent_directory(path, directory_policy)
+    tighten_existing_file(path)
 }
 
 #[cfg(test)]
@@ -767,7 +791,26 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{DirectorySyncPolicy, atomic_write_prepared};
+    use super::{DIRECTORY_SYNC_CALLS, DirectorySyncPolicy, append_durable, atomic_write_prepared};
+
+    #[test]
+    fn appends_sync_the_directory_only_when_creating_the_log() {
+        let root = tempfile::tempdir().expect("append fixture root");
+        let log = root.path().join("events.log");
+        DIRECTORY_SYNC_CALLS.with(|calls| calls.set(0));
+
+        append_durable(&log, b"first", DirectorySyncPolicy::TolerateUnsupported)
+            .expect("create durable log");
+        assert_eq!(DIRECTORY_SYNC_CALLS.with(std::cell::Cell::get), 1);
+
+        append_durable(&log, b"second", DirectorySyncPolicy::TolerateUnsupported)
+            .expect("append durable record");
+        assert_eq!(
+            DIRECTORY_SYNC_CALLS.with(std::cell::Cell::get),
+            1,
+            "an existing directory entry does not need another durability barrier"
+        );
+    }
 
     fn deny_writes(path: &Path) {
         let mut permissions = fs::metadata(path).expect("staging metadata").permissions();

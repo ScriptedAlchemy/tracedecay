@@ -11,7 +11,9 @@ use tracedecay_contracts::{
     EffectReceipt, EffectResult, EffectTermination, IdempotencyKey, OperationBudgetUsage,
     OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestContext, RequestId,
 };
-use tracedecay_domain::{ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
+};
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 use super::{RegisteredWorkRuntime, current_micros};
@@ -83,9 +85,7 @@ where
         observed_at,
         deadline,
     )?;
-    let suffix = input_digest
-        .as_str()
-        .strip_prefix("sha256:")
+    let suffix = sha256_hex_suffix(input_digest.as_str())
         .ok_or(ApplicationContractError::Inconsistent {
             field: "administrative input digest",
         })?

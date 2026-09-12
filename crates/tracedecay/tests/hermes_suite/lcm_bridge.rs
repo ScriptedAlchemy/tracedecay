@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::common::host_sources;
 use tempfile::TempDir;
+use tracedecay_agent_hosts::agents::host_bundle::{HostBundleComponentV1, HostKindV1};
 use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
-use tracedecay_agent_hosts::agents::host_bundle_v2::{HostBundleComponentV1, HostKindV1};
 use tracedecay_runtime_core::ast_grep::ast_grep_command;
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the

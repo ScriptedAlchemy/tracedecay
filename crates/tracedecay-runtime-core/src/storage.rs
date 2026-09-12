@@ -22,6 +22,9 @@ pub const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
 pub const DAEMON_AUTHORITY_DIRECTORY: &str = "daemon-authority";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
+/// Directory holding truncated tool responses: under an enrolled project's
+/// store shard, or directly under the profile root for any other checkout.
+pub const RESPONSE_HANDLES_DIRECTORY: &str = "response-handles";
 pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 pub const DURABLE_REMOVAL_TOMBSTONE_PREFIX: &str = ".tracedecay-deleted-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;

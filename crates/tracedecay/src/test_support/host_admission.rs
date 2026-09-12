@@ -911,7 +911,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::PinnedRuntimeConfiguration> {
+    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
         crate::config::ensure_runtime_configuration_for_registered_database(
             project_root,
             layout,
@@ -926,7 +926,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::PinnedRuntimeConfiguration> {
+    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
         crate::config::resolve_runtime_configuration_for_registered_database(
             project_root,
             layout,
@@ -941,7 +941,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::PinnedRuntimeConfiguration> {
+    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
         crate::config::open_runtime_configuration_for_registered_database_read_only(
             project_root,
             layout,

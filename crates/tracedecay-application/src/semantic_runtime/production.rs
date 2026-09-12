@@ -18,7 +18,7 @@ use tracedecay_domain::{
     ProjectionOperationV1, ProjectionReplayReasonV1, QueryFallbackSubpayload, RetrievalAnchorId,
     RetrievalCursorKeyId, RetrieverBatch, RetrieverKind, RetrieverOutcome, ScoreDomainId,
     SemanticSearchIndexKeyV1, SemanticSearchIndexKindV1, SemanticSearchIndexProfileV1,
-    SourceOccurrenceId, VectorGenerationIdV1, WorktreeId, canonical_sha256,
+    SourceOccurrenceId, VectorGenerationIdV1, WorktreeId, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_policy::retrieval_selection::{
     RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
@@ -55,19 +55,18 @@ use tracedecay_graph_db::GraphCancellation;
 use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::graph::production_code_index_freshness;
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
 };
-use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
     SemanticAbstentionDispositionV1, SemanticAnnCandidateWindowV1, SemanticAnnCandidatesV1,
     SemanticAnnIndexStateV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
-    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
-    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
-    SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
-    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
-    SemanticVectorScanSummaryV1,
+    SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever, SemanticQueryDecisionV1,
+    SemanticQueryModeV1, SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
+    SemanticRetrievalRequestV1, SemanticSearchKindV1, SemanticVectorReadPort,
+    SemanticVectorReadRequestV1, SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
 };
 use tracedecay_query::search_quality::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
 use tracedecay_query::search_quality::semantic_native::{
@@ -2274,7 +2273,7 @@ impl ProductionSemanticRuntimeV1 {
         fallback: Arc<QueryFallbackSubpayload>,
     ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
     where
-        C: SemanticExecutionControl + Sync,
+        C: RetrievalExecutionControl + Sync,
     {
         if request.code_generation == code_generation.manifest().generation_id
             && request.capability_manifest_digest == code_generation.capability().manifest_digest
@@ -2658,23 +2657,13 @@ struct SemanticEvaluationExecutionControlV1 {
     cancellation: Arc<dyn SemanticEvaluationCancellationV1>,
 }
 
-impl SemanticExecutionControl for SemanticEvaluationExecutionControlV1 {
+impl RetrievalExecutionControl for SemanticEvaluationExecutionControlV1 {
     fn is_cancelled(&self) -> bool {
         self.cancellation.interruption().is_some()
     }
 
     fn elapsed_micros(&self) -> u64 {
         self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
-    }
-}
-
-impl RerankExecutionControlV1 for SemanticEvaluationExecutionControlV1 {
-    fn elapsed_micros(&self) -> u64 {
-        self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancellation.interruption().is_some()
     }
 }
 
@@ -2760,7 +2749,7 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
             let artifact_digest = state.artifact_digest();
             let expected_artifact = required.artifact_manifest_digest.as_str();
             if artifact_digest != expected_artifact
-                && expected_artifact.strip_prefix("sha256:") != Some(artifact_digest)
+                && sha256_hex_suffix(expected_artifact) != Some(artifact_digest)
             {
                 return Err(SemanticRuntimeBackendErrorV1::RejectedAt(
                     SemanticRuntimeRefusalV1::at("inspect_generation.artifact_digest"),
@@ -2995,7 +2984,7 @@ fn lifecycle_artifact_matches(
 ) -> bool {
     let observed = lifecycle_state.artifact_digest();
     observed == expected_artifact.as_str()
-        || expected_artifact.as_str().strip_prefix("sha256:") == Some(observed)
+        || sha256_hex_suffix(expected_artifact.as_str()) == Some(observed)
 }
 
 fn check_evaluation_cancellation(
@@ -3944,7 +3933,7 @@ pub fn compose_application_semantic_search<'a, V, C>(
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
     V: SemanticVectorReadPort,
-    C: SemanticExecutionControl + Sync,
+    C: RetrievalExecutionControl + Sync,
 {
     let ApplicationSemanticSearchParametersV1 {
         handle,
@@ -4010,7 +3999,7 @@ pub async fn compose_project_application_semantic_search<C>(
     fallback: Arc<QueryFallbackSubpayload>,
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
-    C: SemanticExecutionControl + Sync,
+    C: RetrievalExecutionControl + Sync,
 {
     let Some(runtime) = project_semantic_production_runtime(project_root) else {
         return execute_calibrated_semantic_query(
@@ -4058,7 +4047,7 @@ impl ProductionProjectSemanticSearchBridgeV1 {
         parameters: AuthorizedProjectSemanticSearchParametersV1<'a, C>,
     ) -> SemanticRuntimeFuture<'a, Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>>
     where
-        C: SemanticExecutionControl + Sync + 'a,
+        C: RetrievalExecutionControl + Sync + 'a,
     {
         let AuthorizedProjectSemanticSearchParametersV1 {
             project_root,
@@ -5006,8 +4995,8 @@ mod tests {
             cancellation: Arc::new(DeadlineCancellation),
         };
 
-        assert!(SemanticExecutionControl::is_cancelled(&control));
-        assert!(RerankExecutionControlV1::is_cancelled(&control));
+        assert!(RetrievalExecutionControl::is_cancelled(&control));
+        assert!(RetrievalExecutionControl::is_cancelled(&control));
     }
 
     #[test]
@@ -5600,7 +5589,7 @@ mod tests {
             checks: AtomicUsize,
         }
 
-        impl SemanticExecutionControl for CancelAtRuntimeBoundary {
+        impl RetrievalExecutionControl for CancelAtRuntimeBoundary {
             fn is_cancelled(&self) -> bool {
                 self.checks.fetch_add(1, Ordering::SeqCst) != 0
             }
@@ -5881,7 +5870,7 @@ mod tests {
             }
         }
         struct IdleControl;
-        impl SemanticExecutionControl for IdleControl {
+        impl RetrievalExecutionControl for IdleControl {
             fn is_cancelled(&self) -> bool {
                 false
             }
@@ -6179,6 +6168,7 @@ mod tests {
                 runtime_backend: "fastembed-ort".to_owned(),
                 runtime_build_revision: "ort-source-identity-1".to_owned(),
                 device_class: EmbeddingDeviceClassV1::Cpu,
+                execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
                 dimensions: 4,
                 metric: EmbeddingMetricV1::Cosine,
                 normalization: EmbeddingNormalizationV1::L2,

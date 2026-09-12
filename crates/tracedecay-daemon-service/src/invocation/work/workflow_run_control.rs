@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tracedecay_application::work::workflow_topology::WorkflowTopologyError;
-use tracedecay_contracts::{RequestContext, WorkflowRunStoragePort};
+use tracedecay_contracts::{
+    ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic,
+    WorkflowCatalogAdmissionError, WorkflowCoordinationError, WorkflowRunStoragePort,
+};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
@@ -324,7 +327,7 @@ pub(super) fn workflow_run_problem(
 }
 
 pub(super) fn workflow_coordination_problem(
-    error: tracedecay_contracts::WorkflowCoordinationError,
+    error: WorkflowCoordinationError,
 ) -> DaemonInvocationProblem {
     match error {
         tracedecay_contracts::WorkflowCoordinationError::AuthorityUnavailable(_) => {
@@ -348,6 +351,69 @@ pub(super) fn workflow_coordination_problem(
             DaemonInvocationProblem::InvalidRequest
         }
     }
+}
+
+pub(super) fn workflow_coordination_application_problem(
+    error: &WorkflowCoordinationError,
+) -> Option<ApplicationProblem> {
+    let diagnostic = match error {
+        WorkflowCoordinationError::InvalidDefinition => SafeDiagnostic {
+            code: "workflow.definition.invalid".to_owned(),
+            message: "definition failed structural validation".to_owned(),
+        },
+        WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::CatalogPinMismatch { pinned, current },
+        ) => SafeDiagnostic {
+            code: "workflow.catalog.pin_mismatch".to_owned(),
+            message: format!(
+                "pinned_catalog_digest expected {current}, observed {pinned}; register a new immutable definition version with the live Work executable catalog digest"
+            ),
+        },
+        WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::UnknownOperation { step_id, operation },
+        ) => SafeDiagnostic {
+            code: "workflow.catalog.operation_unknown".to_owned(),
+            message: format!(
+                "steps[{step_id}].operation observed {operation}; expected an operation in the live Work executable catalog"
+            ),
+        },
+        WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::OperationUnavailable { step_id, operation },
+        ) => SafeDiagnostic {
+            code: "workflow.catalog.operation_unavailable".to_owned(),
+            message: format!(
+                "steps[{step_id}].operation observed {operation}; expected a live executable binding"
+            ),
+        },
+        WorkflowCoordinationError::ImmutableDefinitionConflict => SafeDiagnostic {
+            code: "workflow.definition.immutable_conflict".to_owned(),
+            message:
+                "definition_id and definition_version already identify different immutable content"
+                    .to_owned(),
+        },
+        WorkflowCoordinationError::IllegalLifecycleTransition => SafeDiagnostic {
+            code: "workflow.lifecycle.illegal_transition".to_owned(),
+            message: "lifecycle operation is not legal from the observed definition state"
+                .to_owned(),
+        },
+        WorkflowCoordinationError::LifecycleRevisionConflict => SafeDiagnostic {
+            code: "workflow.lifecycle.revision_conflict".to_owned(),
+            message:
+                "expected_revision does not match the observed definition disposition revision"
+                    .to_owned(),
+        },
+        WorkflowCoordinationError::CatalogAdmissionDenied(
+            WorkflowCatalogAdmissionError::CatalogUnavailable(_),
+        )
+        | WorkflowCoordinationError::ScopeMismatch
+        | WorkflowCoordinationError::DefinitionNotFound
+        | WorkflowCoordinationError::AuthorityUnavailable(_) => return None,
+    };
+    Some(ApplicationProblem::InvalidRequest {
+        diagnostic,
+        retry: RetryDirective::Never,
+        legal_actions: vec![LegalAction::CorrectRequest],
+    })
 }
 
 pub(super) fn workflow_run_storage_problem(

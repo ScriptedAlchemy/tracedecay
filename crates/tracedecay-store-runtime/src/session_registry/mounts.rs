@@ -33,8 +33,8 @@ use super::{
     StoreRuntimeRegistry, StoreRuntimeResolver, bind_ready_project_memory_graph, open_runtime,
     open_runtime_with_presence, registry_open_error, runtime_incarnation, session_registry_error,
 };
-use crate::register_registered_schema_installer;
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_global_db::register_registered_schema_installer;
 
 /// Test-only hold installed immediately after the background session
 /// relation-graph open task publishes its settled state.

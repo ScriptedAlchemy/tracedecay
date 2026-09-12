@@ -49,7 +49,7 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay_domain::errors::Re
 /// map to `cursor`), so an id counts as canonical when ANY host behind it has a
 /// non-empty default component set — the transaction owns that id's artifacts.
 fn host_owns_canonical_component_set(agent_id: &str) -> bool {
-    tracedecay_agent_hosts::agents::host_bundle_v2::stock_host_kinds()
+    tracedecay_agent_hosts::agents::host_bundle::stock_host_kinds()
         .into_iter()
         .any(|host| {
             tracedecay_agent_hosts::agents::integration_id_for_host(host) == agent_id

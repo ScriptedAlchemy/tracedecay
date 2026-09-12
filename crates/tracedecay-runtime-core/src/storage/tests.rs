@@ -504,4 +504,32 @@ mod tests {
         PrivateStoreIo::append_line(&path, "{\"a\":3}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
     }
+
+    /// A response handle never decides that a directory is a project: an
+    /// unenrolled checkout resolves to the profile-wide root and mints no
+    /// `projects/proj_<hash>/` shard; an enrolled one keeps its own shard.
+    #[test]
+    fn response_handle_root_never_mints_a_shard_for_an_unenrolled_checkout() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = default_profile_root().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+
+        let root = resolve_response_handle_root(&project_root).unwrap();
+        assert_eq!(root, profile_root.join(RESPONSE_HANDLES_DIRECTORY));
+        assert!(
+            !profile_root.join("projects").exists(),
+            "resolving a response-handle root must not create a project shard"
+        );
+
+        pin_fixture_repository_identity(&project_root, "proj_response_handles").unwrap();
+        let enrolled = resolve_response_handle_root(&project_root).unwrap();
+        assert_eq!(
+            enrolled,
+            resolve_layout_for_current_profile(&project_root)
+                .unwrap()
+                .response_handle_root
+        );
+        assert!(enrolled.starts_with(profile_root.join("projects")));
+    }
 }

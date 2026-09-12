@@ -18,6 +18,7 @@ use tracedecay_daemon_protocol::{
 use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
 use tracedecay_tool_catalog::BindingId;
 
+use crate::analyzer::broker::DiagnosticSeverity;
 use crate::bridge::DaemonLspSessionTransport;
 use crate::capabilities::{
     CapabilityAvailability, CapabilityParseError, ClientCapabilities, EffectiveCapabilities,
@@ -36,8 +37,8 @@ use crate::context::{
     TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 use crate::diagnostics::{
-    DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
-    GatewayDiagnostic, LspPosition, LspRange, MAX_DOCUMENT_DIAGNOSTICS,
+    DiagnosticMerge, DiagnosticSource, DocumentDiagnosticReport, GatewayDiagnostic, LspPosition,
+    LspRange, MAX_DOCUMENT_DIAGNOSTICS,
 };
 use crate::dispatch::{dispatch_incoming, parse_incoming};
 use crate::gateway::{

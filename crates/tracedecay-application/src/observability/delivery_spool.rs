@@ -9,7 +9,9 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::canonical_text::is_lowercase_hex;
-use tracedecay_domain::{DeliverySettlementV1, canonical_json_bytes, canonical_sha256};
+use tracedecay_domain::{
+    DeliverySettlementV1, canonical_json_bytes, canonical_sha256, sha256_hex_suffix,
+};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, atomic_write, read_bounded, sync_directory, validate_regular_or_missing,
 };
@@ -51,10 +53,8 @@ impl DeliveryRecorderSourceReceiptV1 {
             &emission_identity,
         ))
         .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
-        let hex = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or(DeliveryRecorderSpoolError::InvalidReceipt)?;
+        let hex =
+            sha256_hex_suffix(digest.as_str()).ok_or(DeliveryRecorderSpoolError::InvalidReceipt)?;
         let mut receipt_id = [0_u8; 16];
         decode_hex_prefix(hex, &mut receipt_id)?;
         Ok(Self {
@@ -88,10 +88,8 @@ fn legacy_receipt_id(
 ) -> Result<[u8; 16], DeliveryRecorderSpoolError> {
     let digest = canonical_sha256(&("tracedecay.delivery-recorder-source-receipt.v1", settlement))
         .map_err(|_| DeliveryRecorderSpoolError::InvalidReceipt)?;
-    let hex = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DeliveryRecorderSpoolError::InvalidReceipt)?;
+    let hex =
+        sha256_hex_suffix(digest.as_str()).ok_or(DeliveryRecorderSpoolError::InvalidReceipt)?;
     let mut receipt_id = [0_u8; 16];
     decode_hex_prefix(hex, &mut receipt_id)?;
     Ok(receipt_id)

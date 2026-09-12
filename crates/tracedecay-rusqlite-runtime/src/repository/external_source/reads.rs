@@ -79,7 +79,7 @@ pub(super) fn load_next_pending_projection(
     {
         load_current_mutations(
             connection,
-            "external_source_projected_objects_v1",
+            "external_source_projected_objects_v2",
             binding.binding_id.as_str(),
         )?
     } else {

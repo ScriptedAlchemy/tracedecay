@@ -1409,6 +1409,81 @@ async fn sweep_unregistered_stores_collects_an_exactly_empty_old_directory() {
     assert!(!empty_dir.exists());
 }
 
+/// An unregistered store whose own manifest names a project root that no
+/// longer exists is debris the moment the census sees it: the retention
+/// window exists for stores whose root might still come back, and a missing
+/// or unreadable manifest, or a root that is still present, keeps that window.
+#[tokio::test]
+async fn unregistered_store_with_a_vanished_manifest_root_is_collected_at_once() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let base = 1_700_000_000i64;
+
+    let manifest_for = |data_root: &Path, project_root: &Path| StoreManifest {
+        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+        project_id: Some(data_root.file_name().unwrap().to_str().unwrap().to_owned()),
+        store_kind: StoreKind::CodeProject,
+        storage_mode: StorageMode::ProfileSharded,
+        project_root: project_root.to_path_buf(),
+        data_root: data_root.to_path_buf(),
+        graph_db_relpath: PathBuf::from("tracedecay.db"),
+        sessions_db_relpath: PathBuf::from("sessions.db"),
+        branch_meta_relpath: PathBuf::from("branch-meta.json"),
+    };
+    let seed = |name: &str, project_root: Option<&Path>| {
+        let data_root = profile_root.join("projects").join(name);
+        std::fs::create_dir_all(&data_root).unwrap();
+        std::fs::write(data_root.join("sessions.db"), b"fresh payload").unwrap();
+        if let Some(project_root) = project_root {
+            tracedecay_runtime_core::storage::write_store_manifest_to_path(
+                &data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+                &manifest_for(&data_root, project_root),
+            )
+            .unwrap();
+        }
+        data_root
+    };
+
+    let vanished_root = tmp.path().join("checkouts").join("deleted-worktree");
+    let present_root = tmp.path().join("checkouts").join("still-here");
+    std::fs::create_dir_all(&present_root).unwrap();
+    let vanished = seed("proj_vanished_root", Some(&vanished_root));
+    let present = seed("proj_present_root", Some(&present_root));
+    let unmanifested = seed("proj_no_manifest", None);
+    // Every payload was written just now: none of them is past the window.
+    let findings = census_unregistered_project_dirs(&db, &profile_root, base + 60)
+        .await
+        .unwrap();
+    assert_eq!(findings.len(), 3);
+    let plan = plan_unregistered_collection(findings, 7 * DAY);
+    assert_eq!(
+        plan.collect
+            .iter()
+            .map(|finding| finding.project_dir_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["proj_vanished_root"],
+        "only the store whose root is gone skips the retention window"
+    );
+    assert!(plan.collect[0].abandoned_root);
+    assert_eq!(plan.retained_immature.len(), 2);
+    assert!(
+        plan.retained_immature
+            .iter()
+            .all(|finding| !finding.abandoned_root)
+    );
+
+    let outcome = execute_unregistered_collection(&db, &plan, &profile_root)
+        .await
+        .unwrap();
+    assert_eq!(outcome.collected.len(), 1);
+    assert!(outcome.errors.is_empty());
+    assert!(!vanished.exists());
+    assert!(present.exists());
+    assert!(unmanifested.exists());
+}
+
 /// A registered project id must never be treated as an unregistered
 /// candidate, and re-registering between census and collection must abort
 /// the delete for that finding (closing the revival window).
@@ -3135,6 +3210,7 @@ async fn unregistered_collection_payload_fence_deadline_is_distinct() {
             expected_payload_mtime_secs: finding.expected_payload_mtime_secs,
             expected_data_root_fence: finding.expected_data_root_fence,
             expected_content_fence: finding.expected_content_fence,
+            abandoned_root: false,
         }],
         ..UnregisteredCollectionPlan::default()
     };

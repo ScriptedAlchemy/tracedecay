@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1,
-    canonical_json_bytes, canonical_sha256,
+    canonical_json_bytes, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, atomic_write, read_bounded, sync_directory, validate_regular_or_missing,
@@ -339,10 +339,7 @@ fn receipt_id_for_settlement(
         StableReceiptIdentity::from_settlement(settlement),
     ))
     .map_err(|_| HookDeliverySpoolError::InvalidReceipt)?;
-    let hex = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(HookDeliverySpoolError::InvalidReceipt)?;
+    let hex = sha256_hex_suffix(digest.as_str()).ok_or(HookDeliverySpoolError::InvalidReceipt)?;
     let mut receipt_id = [0_u8; 16];
     decode_hex_prefix(hex, &mut receipt_id)?;
     Ok(receipt_id)

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
-use tracedecay_agent_hosts::agents::host_bundle_v2::{
+use tracedecay_agent_hosts::agents::host_bundle::{
     HostBundleComponentV1, HostBundleInstallReceiptV1, HostBundleManifestV1,
     HostComponentSetReceiptV1,
 };

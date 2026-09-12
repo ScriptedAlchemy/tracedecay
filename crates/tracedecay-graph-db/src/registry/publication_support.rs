@@ -354,7 +354,14 @@ pub(super) fn locator_from_dependency(
     registration: &GraphDbRegistration,
     dependency: &tracedecay_store::runtime::GraphDependencyGenerationIdentityV1,
 ) -> Result<GenerationLocator, GraphDbError> {
-    if dependency.projection.shard_id != registration.binding().shard_id {
+    locator_from_dependency_in_binding(registration.binding(), dependency)
+}
+
+pub(super) fn locator_from_dependency_in_binding(
+    binding: &StoreRuntimeBindingV1,
+    dependency: &tracedecay_store::runtime::GraphDependencyGenerationIdentityV1,
+) -> Result<GenerationLocator, GraphDbError> {
+    if dependency.projection.shard_id != binding.shard_id {
         return Err(GraphDbError::conflict(
             "publication_support.locator_from_dependency",
         ));

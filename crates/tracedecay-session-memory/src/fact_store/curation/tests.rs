@@ -61,7 +61,7 @@ impl Fixture {
         let authority =
             DatabaseAuthority::acquire_test(&path, "canonical relation curation fixture")
                 .expect("database authority");
-        tracedecay_global_db::register_test_schema_installer();
+        tracedecay_global_db::register_registered_schema_installer();
         let (db, _) =
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
@@ -122,7 +122,7 @@ impl Fixture {
         drop(db);
         let authority = DatabaseAuthority::acquire_test(&path, "reopen curation fixture")
             .expect("reopen database authority");
-        tracedecay_global_db::register_test_schema_installer();
+        tracedecay_global_db::register_registered_schema_installer();
         let (db, _) =
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
                 .await

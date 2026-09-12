@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     JsonConfigMutation, McpUninstallPolicy, UpdatePluginOutcome, load_json_file,
@@ -1192,7 +1192,7 @@ fn doctor_check_plugin_rule(dc: &mut DoctorCounters, rule_path: &Path) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::agents::host_bundle_v2::{
+    use crate::agents::host_bundle::{
         HostBundleComponentDoctorStateV1, HostBundleError, HostBundleLifecycleOpV1,
         HostBundleRegistrationStateV1, HostBundleWriterV1, HostComponentSetExecutionRequestV1,
         HostComponentSetLifecycleRequestV1, HostComponentSetTransactionV1, HostKindV1,

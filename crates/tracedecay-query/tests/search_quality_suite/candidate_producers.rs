@@ -49,7 +49,6 @@ use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever, ExactLiteralV1,
 };
-use tracedecay_query::retrieval::graph::GraphExecutionControl;
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
@@ -64,14 +63,14 @@ use tracedecay_query::retrieval::lexical::{
     VerifiedCodeLexicalArtifactV1,
 };
 use tracedecay_query::retrieval::ports::{
-    ExactTermPostingReadPort, LexicalPostingReadPort, RetrievalPortError,
+    ExactTermPostingReadPort, LexicalPostingReadPort, RetrievalExecutionControl, RetrievalPortError,
 };
 use tracedecay_query::retrieval::{QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1};
 
 /// The request authority every uncancelled fixture request runs under.
-pub(crate) struct FixtureGraphExecutionControl;
+pub(crate) struct FixtureRetrievalExecutionControl;
 
-impl GraphExecutionControl for FixtureGraphExecutionControl {
+impl RetrievalExecutionControl for FixtureRetrievalExecutionControl {
     fn is_cancelled(&self) -> bool {
         false
     }
@@ -81,7 +80,8 @@ impl GraphExecutionControl for FixtureGraphExecutionControl {
     }
 }
 
-pub(crate) static ACTIVE_CONTROL: FixtureGraphExecutionControl = FixtureGraphExecutionControl;
+pub(crate) static ACTIVE_CONTROL: FixtureRetrievalExecutionControl =
+    FixtureRetrievalExecutionControl;
 
 struct ArtifactControl {
     cancelled: bool,
@@ -245,7 +245,7 @@ impl CancelAtObservation {
 /// The same cancel-at-observation semantics for lane-level request control:
 /// the `cancellation_observation`-th consultation and every later one report
 /// cancellation.
-impl GraphExecutionControl for CancelAtObservation {
+impl RetrievalExecutionControl for CancelAtObservation {
     fn is_cancelled(&self) -> bool {
         CodeIndexExecutionControlV1::is_cancelled(self)
     }
@@ -1358,7 +1358,7 @@ fn lexical_scan_cancellation_unwinds_artifact_and_in_memory_sources_before_compl
 
     fn widget_request<'a>(
         generation: &CodeGenerationId,
-        control: &'a dyn GraphExecutionControl,
+        control: &'a dyn RetrievalExecutionControl,
     ) -> LexicalLaneRequest<'a> {
         let mut request = lexical_request("widget", &["widget"], &[], &[], 0, 64);
         request.generation = generation.clone();

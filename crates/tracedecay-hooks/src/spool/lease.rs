@@ -1,5 +1,4 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -7,11 +6,8 @@ use crate::lock_admission::{LockAdmissionError, lock_until};
 
 use tracedecay_domain::UtcMicros;
 
-use super::types::{HookSpoolWriterLeaseV1, LeaseFileV1};
-use super::{
-    DIRECTORY_POLICY, HookSpoolError, HookSpoolV1, MAX_LEASE_BYTES, SPOOL_FORMAT_VERSION,
-    lease_path, next_token, shared_sync_directory, validate_regular_or_missing,
-};
+use super::types::HookSpoolWriterLeaseV1;
+use super::{HookSpoolError, HookSpoolV1, lease_path, next_token, validate_regular_or_missing};
 
 impl HookSpoolV1 {
     /// Reject a mutation once the acquired lease deadline has passed.
@@ -40,29 +36,6 @@ impl HookSpoolV1 {
     }
 }
 
-#[hotpath::measure(label = "hooks.spool.write_lease")]
-pub(super) fn write_lease_file(
-    file: &mut File,
-    lease: HookSpoolWriterLeaseV1,
-) -> Result<(), HookSpoolError> {
-    let bytes = serde_json::to_vec(&LeaseFileV1 {
-        version: SPOOL_FORMAT_VERSION,
-        token: lease.token,
-        expires_at: lease.expires_at,
-    })
-    .map_err(|_| HookSpoolError::InvalidLease)?;
-    if bytes.is_empty() || bytes.len() > MAX_LEASE_BYTES {
-        return Err(HookSpoolError::InvalidLease);
-    }
-    file.set_len(0).map_err(|_| HookSpoolError::Io)?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| HookSpoolError::Io)?;
-    file.write_all(&bytes).map_err(|_| HookSpoolError::Io)?;
-    hotpath::measure_block!("hooks.spool.fsync.lease", {
-        file.sync_all().map_err(|_| HookSpoolError::Io)
-    })
-}
-
 /// Acquires the single-writer lease without waiting. Native callbacks use the
 /// bounded admission path so capture and delivery each wait one budget.
 #[hotpath::measure(label = "hooks.spool.acquire_lease")]
@@ -75,10 +48,8 @@ pub(super) fn acquire_lease(
 }
 
 /// `wait_budget` bounds only the lock wait and is measured from the lock
-/// attempt itself. Creating the spool root and the lease file fsync the
-/// directory first; measuring the budget from before that work let a
-/// loaded disk spend it on an uncontended first-ever open, which then
-/// reported `AdmissionTimedOut` without ever contending for anything.
+/// attempt itself. Root validation and opening the advisory lock file happen
+/// before that budget because they are setup rather than lock contention.
 pub(super) fn acquire_lease_bounded(
     root: &Path,
     lease_duration_micros: i64,
@@ -95,7 +66,7 @@ pub(super) fn acquire_lease_bounded(
         expires_at,
     };
     let path = lease_path(root);
-    let lease_file_existed = validate_regular_or_missing(&path)?;
+    validate_regular_or_missing(&path)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -103,7 +74,7 @@ pub(super) fn acquire_lease_bounded(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&path).map_err(|_| HookSpoolError::Io)?;
+    let file = options.open(&path).map_err(|_| HookSpoolError::Io)?;
     if !validate_regular_or_missing(&path)? {
         return Err(HookSpoolError::UnsafePath);
     }
@@ -116,19 +87,12 @@ pub(super) fn acquire_lease_bounded(
         }
         None => file.try_lock().map_err(map_try_lock_error)?,
     }
-    write_lease_file(&mut file, candidate)?;
-    // Only a newly created lease file needs its directory entry made durable;
-    // re-syncing an entry that already survived a crash buys nothing and is
-    // paid inside the exclusive section every sibling hook is queued behind.
-    // The cost is not uniform: `File::sync_all` is `fcntl(F_FULLFSYNC)` on
-    // macOS, a device-level barrier rather than the page-cache flush the same
-    // call makes on Linux. A creator that has not yet reached this line still
-    // holds the lock, so it performs the sync before any waiter proceeds.
-    if !lease_file_existed {
-        hotpath::measure_block!("hooks.spool.fsync.directory", {
-            shared_sync_directory(root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
-        })?;
-    }
+    // The open file description and its OS lock are the sole cross-process
+    // ownership authority. The token and deadline remain in memory only to
+    // reject a stale live handle; no process reads lease-file bytes. Therefore
+    // persisting advisory ownership would add a durability barrier without
+    // strengthening exclusion, while records, metadata and replay cursors keep
+    // their independent fsync-before-return contracts.
     Ok((candidate, file))
 }
 
@@ -147,6 +111,25 @@ mod tests {
     use std::io;
 
     use super::*;
+
+    #[test]
+    fn advisory_lease_acquisition_does_not_write_ownership_state() {
+        let root =
+            std::env::temp_dir().join(format!("tracedecay-hook-lease-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        tracedecay_private_fs::create_private_directory(&root).expect("lease fixture root");
+
+        let (_lease, file) =
+            acquire_lease(&root, 1_000, UtcMicros(1)).expect("acquire advisory lease");
+
+        assert_eq!(
+            file.metadata().expect("lease metadata").len(),
+            0,
+            "the OS lock is the ownership authority; idle acquisition must not write or fsync"
+        );
+        drop(file);
+        std::fs::remove_dir_all(root).expect("remove lease fixture");
+    }
 
     #[test]
     fn standard_try_lock_errors_keep_contention_distinct_from_io() {

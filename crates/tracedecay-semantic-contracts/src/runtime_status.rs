@@ -1,7 +1,9 @@
 use std::fmt;
 
 use serde::Serialize;
-use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
+use tracedecay_domain::{
+    CodeGenerationId, EmbeddingExecutionProviderV1, ProjectionKeyV1, VectorGenerationIdV1,
+};
 
 use crate::configuration::SemanticFallbackReasonV1;
 
@@ -89,4 +91,5 @@ pub struct SemanticRuntimeStatusProjectionV1 {
     pub status: SemanticRuntimeScheduleStatusV1,
     pub degraded_reason: Option<SemanticFallbackReasonV1>,
     pub prior_generation: Option<VectorGenerationIdV1>,
+    pub execution_provider: Option<EmbeddingExecutionProviderV1>,
 }

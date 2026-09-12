@@ -240,6 +240,7 @@ fn runtime_projection_preserves_nested_tags_and_snake_case_reasons() {
         },
         degraded_reason: Some(SemanticFallbackReasonV1::ArtifactUnavailable),
         prior_generation: None,
+        execution_provider: None,
     };
     assert_eq!(
         serde_json::to_string(&projection).expect("runtime status JSON"),

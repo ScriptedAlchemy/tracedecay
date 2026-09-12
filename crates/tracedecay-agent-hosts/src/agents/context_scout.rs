@@ -30,6 +30,10 @@ use tracedecay_domain::{ActorId, ManifestDigest, RetrievalAnchorId, UtcMicros};
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
+pub mod model;
+pub mod owner;
+pub mod ports;
+
 const MAX_SCOUT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_SCOUT_CANDIDATES: usize = 32;
 const MAX_SCOUT_EVIDENCE: usize = 16;

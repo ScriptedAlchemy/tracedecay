@@ -49,7 +49,7 @@
 /// port for this crate's test process.
 #[cfg(test)]
 pub(crate) fn register_test_schema_installer() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
 }
 
 pub mod automation;
