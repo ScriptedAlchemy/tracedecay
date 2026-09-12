@@ -631,10 +631,10 @@ impl SealedCompactRows {
     /// LPG overlay whose id allocators start past the written ids, and a
     /// catalog naming the unique-key property indexes.
     fn write_container(self, path: &Path) -> Result<(), GraphDbError> {
-        let store = hotpath::measure_block!("graph_db.sealed_store.encode", self.builder.finish())
+        let store = hotpath::measure_block!("code_index.seal.write.compact", self.builder.finish())
             .map_err(|error| sealed_build_failure("encode", error))?;
         hotpath::measure_block!(
-            "graph_db.sealed_store.write_container",
+            "code_index.seal.write.container",
             GrafeoDB::write_compact_container(
                 path,
                 Arc::new(store),
@@ -1311,7 +1311,7 @@ fn push_manifest_rows(
     }
     let projection = &identity.projection.projection;
     let entities = &manifest.entities;
-    hotpath::measure_block!("graph_db.sealed_store.direct.entities", {
+    hotpath::measure_block!("code_index.seal.encode.entities", {
         for (index, entity) in entities.iter().enumerate() {
             check()?;
             if index
@@ -1332,7 +1332,7 @@ fn push_manifest_rows(
         }
         Ok::<(), GraphDbError>(())
     })?;
-    hotpath::measure_block!("graph_db.sealed_store.direct.relations", {
+    hotpath::measure_block!("code_index.seal.encode.relations", {
         let relations = &manifest.relations;
         for (index, relation) in relations.iter().enumerate() {
             check()?;
@@ -1580,7 +1580,10 @@ fn open_sealed_store(
     // resolved by marker against the container that engine opened. The proof
     // is filed now, so the engine is pure resident cost until a read actually
     // arrives: release it and let the first read reopen.
-    if let Err(error) = database.hibernate_if_lazy() {
+    if let Err(error) = hotpath::measure_block!(
+        "code_index.seal.verify.hibernate",
+        database.hibernate_if_lazy()
+    ) {
         let _ = database.close();
         return Err(sealed_store_failure("post-proof hibernation failed", error));
     }
@@ -1610,8 +1613,11 @@ fn sealed_copy_proof(
     let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
     // The marker is consulted only against the container the resident engine
     // loaded, so the engine has to be open before the lookup can answer.
-    database.ensure_opened()?;
-    if let Some(canonical_bytes) = database.inner.markers.lookup(&locator, expected.as_str()) {
+    hotpath::measure_block!("code_index.seal.verify.open", database.ensure_opened())?;
+    if let Some(canonical_bytes) = hotpath::measure_block!(
+        "code_index.seal.verify.marker_lookup",
+        database.inner.markers.lookup(&locator, expected.as_str())
+    ) {
         database.inner.markers.record_fresh(&locator);
         #[cfg(test)]
         crate::generation::record_sealed_copy_marker_hit();
@@ -1621,13 +1627,13 @@ fn sealed_copy_proof(
         );
         return Ok(canonical_bytes);
     }
-    let canonical_bytes = {
+    let canonical_bytes = hotpath::measure_block!("code_index.seal.verify.rows", {
         let guard = database.read_guard()?;
         let native = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let (_, canonical_bytes) =
             verify_sealed_copy_generation(native, identity, expected, check)?;
-        canonical_bytes
-    };
+        Ok::<u64, GraphDbError>(canonical_bytes)
+    })?;
     database
         .inner
         .markers
@@ -1641,7 +1647,10 @@ fn sealed_copy_proof(
     // then re-records the container as the closed handle reports it for the
     // next boot. A marker is a cache of completed proofs; failing to write one
     // costs the next open a re-proof and nothing else.
-    if let Err(error) = database.inner.markers.publish_resident() {
+    if let Err(error) = hotpath::measure_block!(
+        "code_index.seal.verify.marker_publish",
+        database.inner.markers.publish_resident()
+    ) {
         let _ = error;
     }
     crate::hotpath_observe::record_sealed_copy_verification(
