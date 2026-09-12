@@ -1,45 +1,11 @@
-//! Portable MCP tool types, catalog assembly, and response rendering.
+//! Portable MCP tool call results, CLI help rendering, and response rendering.
 
-pub mod definitions;
 pub mod render;
 pub mod renderers;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Write as _;
-
-pub use definitions::ast_grep::{
-    ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
-};
-pub use definitions::{
-    ToolRegistryMode, apply_context_warming_budget, context_description,
-    context_warming_description, explore_call_budget, format_capable_tool_names,
-    get_maximal_tool_definitions, get_maximal_tool_definitions_with_budget, get_tool_definitions,
-    get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    internal_daemon_tool_definition, mcp_input_schema, project_catalog_discovery_scope,
-    retain_host_available_tool_definitions, tool_defaults_to_markdown,
-};
-
-/// Maximum character length for a tool response before truncation.
-pub const MAX_RESPONSE_CHARS: usize = 15_000;
-
-/// A tool definition exposed by the MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    /// Unique tool name.
-    pub name: String,
-    /// Human-readable description of what the tool does.
-    pub description: String,
-    /// JSON Schema describing the tool's input parameters.
-    #[serde(rename = "inputSchema")]
-    pub input_schema: Value,
-    /// MCP tool annotations (readOnlyHint, title, etc.).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<Value>,
-    /// MCP tool metadata (e.g. anthropic/alwaysLoad).
-    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
-}
+use tracedecay_mcp_catalog::ToolDefinition;
 
 /// The result of a tool call, including the JSON response and the file
 /// paths that were touched (used to track saved tokens).
@@ -573,5 +539,22 @@ mod tests {
         assert_eq!(parsed["meta"]["temporal"]["kind"], json!("current"));
         // Optional scalar sub-keys stay out, exactly as at the top level.
         assert!(parsed["scope"].get("path_prefix").is_none());
+    }
+
+    /// The rename help must name every key the daemon requires in the accepted
+    /// preview, including the repository revision, and show it in the example.
+    #[test]
+    fn rename_help_requires_the_exact_preview_repository_revision() {
+        let definition = tracedecay_mcp_catalog::get_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_rename_symbol")
+            .expect("rename_symbol is advertised");
+
+        let help = render_tool_cli_help(&definition);
+        assert!(help.contains(
+            "object with required keys: preview_id, preview_digest, plan_digest, repository_revision, graph_revision"
+        ));
+        assert!(help.contains("\"repository_revision\":"));
     }
 }
