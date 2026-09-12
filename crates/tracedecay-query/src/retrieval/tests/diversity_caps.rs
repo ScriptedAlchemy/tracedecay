@@ -1,6 +1,9 @@
-use tracedecay_domain::{DiversityPolicy, ExactClass, RankingDecisionKind};
+use tracedecay_domain::{
+    CalibrationProfileId, DiversityPolicy, ExactClass, RankingDecisionKind, RetrieverKind,
+    RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
+};
 
-use super::{composition_lanes, corpus_lanes, id, mixed_caps, no_caps, profile};
+use super::{batch, candidate, composition_lanes, corpus_lanes, id, mixed_caps, no_caps, profile};
 use crate::retrieval::fusion::{CompositionKernel, CompositionOutputV1, FusionStageInput};
 use crate::retrieval::stage_counters;
 
@@ -166,5 +169,115 @@ fn a_boundary_cap_of_one_keeps_the_first_key_holder_and_refills_from_others() {
             .diversity_decisions
             .iter()
             .all(|decision| decision.decision.detail == "capped by session_or_thread")
+    );
+}
+
+#[test]
+fn semantic_recomposition_preserves_fallback_file_slots_and_uses_free_ones() {
+    let mut augmented_profile = profile();
+    let semantic_domain = id::<ScoreDomainId>("score.semantic.v1");
+    augmented_profile.calibrations.insert(
+        RetrieverKind::Semantic,
+        id::<CalibrationProfileId>("calibration.semantic.v1"),
+    );
+    augmented_profile.score_domain_calibrations.insert(
+        semantic_domain.clone(),
+        ScoreDomainCalibrationV1 {
+            calibration_profile_id: id("calibration.semantic.v1"),
+            score_domain: semantic_domain,
+            raw_min_micros: 0,
+            raw_max_micros: 1_000_000,
+        },
+    );
+    augmented_profile
+        .weights_micros
+        .insert(RetrieverKind::Semantic, 1_000_000);
+
+    let mut first = candidate(RetrieverKind::Lexical, "first", 900_000, 0);
+    let mut second = candidate(RetrieverKind::Lexical, "second", 800_000, 1);
+    let mut challenger = candidate(RetrieverKind::Lexical, "challenger", 700_000, 2);
+    for candidate in [&mut first, &mut second, &mut challenger] {
+        candidate.file_occurrence_id = Some(id("file.shared"));
+    }
+    let lexical = vec![first, second, challenger.clone()];
+    let policy = DiversityPolicy {
+        per_file: Some(2),
+        ..no_caps()
+    };
+    let kernel = CompositionKernel::new(id("ranking.fixture.v1"));
+    let fallback = kernel
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "exact")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(lexical.clone(), "lexical")),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "graph")),
+                    ),
+                ]),
+            },
+            &policy,
+        )
+        .expect("fallback composes");
+    assert_eq!(
+        ranked_anchors(&fallback),
+        vec!["anchor.first", "anchor.second"]
+    );
+
+    let mut semantic_challenger = candidate(RetrieverKind::Semantic, "challenger", 1_000_000, 0);
+    semantic_challenger.file_occurrence_id = Some(id("file.shared"));
+    semantic_challenger.anchor_id = challenger.anchor_id;
+    semantic_challenger.logical_evidence_id = challenger.logical_evidence_id;
+    let mut new_file = candidate(RetrieverKind::Semantic, "new-file", 600_000, 1);
+    new_file.file_occurrence_id = Some(id("file.other"));
+    let augmented_input = FusionStageInput {
+        profile: augmented_profile,
+        lanes: composition_lanes(vec![
+            (
+                RetrieverKind::ExactLiteral,
+                RetrieverOutcome::Complete(batch(Vec::new(), "exact")),
+            ),
+            (
+                RetrieverKind::Lexical,
+                RetrieverOutcome::Complete(batch(lexical, "lexical")),
+            ),
+            (
+                RetrieverKind::Graph,
+                RetrieverOutcome::Complete(batch(Vec::new(), "graph")),
+            ),
+            (
+                RetrieverKind::Semantic,
+                RetrieverOutcome::Complete(batch(vec![semantic_challenger, new_file], "semantic")),
+            ),
+        ]),
+    };
+
+    let unreserved = kernel
+        .compose(&augmented_input, &policy)
+        .expect("ordinary augmented composition succeeds");
+    assert!(!ranked_anchors(&unreserved).contains(&"anchor.second"));
+
+    let recomposed = kernel
+        .compose_preserving_cap_incumbents(&augmented_input, &policy, &fallback.ranked_candidates)
+        .expect("semantic recomposition succeeds");
+    assert_eq!(
+        ranked_anchors(&recomposed),
+        vec!["anchor.new-file", "anchor.first", "anchor.second"]
+    );
+    assert_eq!(
+        recomposed.diversity_decisions[0].capped[0].as_str(),
+        "anchor.challenger"
+    );
+    assert_eq!(
+        recomposed.ranked_candidates[0].candidate.utility_micros, 600_000,
+        "the new-file semantic candidate keeps its fused score and rank"
     );
 }
