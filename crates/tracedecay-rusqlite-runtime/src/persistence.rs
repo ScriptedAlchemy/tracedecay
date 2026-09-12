@@ -15,12 +15,16 @@ use crate::{
 
 pub(crate) struct RuntimeWriterPersistence<E> {
     executor: E,
+    may_contain_retired_idempotency: bool,
 }
 
 impl<E> RuntimeWriterPersistence<E> {
     #[hotpath::skip]
     pub(crate) const fn new(executor: E) -> Self {
-        Self { executor }
+        Self {
+            executor,
+            may_contain_retired_idempotency: true,
+        }
     }
 }
 
@@ -35,7 +39,11 @@ where
         idempotency: &IdempotencyIdentityV1,
     ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
         ledger::initialize_schema(transaction).map_err(map_ledger_error)?;
-        ledger::lookup_receipt(transaction, binding, idempotency).map_err(map_ledger_error)
+        let include_retired = self.may_contain_retired_idempotency
+            && ledger::retired_idempotency_ledger_present(transaction).map_err(map_ledger_error)?;
+        self.may_contain_retired_idempotency = include_retired;
+        ledger::lookup_receipt(transaction, binding, idempotency, include_retired)
+            .map_err(map_ledger_error)
     }
 
     fn apply_and_record(
@@ -208,6 +216,7 @@ mod tests {
                 &savepoint,
                 &binding,
                 &request.envelope().metadata.idempotency,
+                false,
             )
             .unwrap(),
             Some(receipt.clone())
