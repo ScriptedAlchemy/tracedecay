@@ -19,24 +19,30 @@ DOGFOOD_HEAD_TRACKING_REF=""
 DOGFOOD_HEAD_TRACKING_OID=""
 DOGFOOD_ORIGINAL_HEAD_REF=""
 DOGFOOD_ORIGINAL_HEAD_OID=""
+DOGFOOD_TRACKING_REFS_CREATED=0
 
 cleanup() {
   local status=$?
-  local current_head_ref
+  local current_head_ref delete_head_ref=1
   trap - EXIT
-  if [[ -n "$DOGFOOD_REF_PROJECT" ]]; then
+  if [[ "$DOGFOOD_TRACKING_REFS_CREATED" == 1 ]]; then
     current_head_ref="$(git -C "$DOGFOOD_REF_PROJECT" symbolic-ref -q HEAD || true)"
     if [[ "$current_head_ref" == "$DOGFOOD_HEAD_TRACKING_REF" ]]; then
       if [[ -n "$DOGFOOD_ORIGINAL_HEAD_REF" ]]; then
-        git -C "$DOGFOOD_REF_PROJECT" symbolic-ref HEAD "$DOGFOOD_ORIGINAL_HEAD_REF" || \
+        if ! git -C "$DOGFOOD_REF_PROJECT" symbolic-ref HEAD "$DOGFOOD_ORIGINAL_HEAD_REF"; then
           echo "warning: could not restore dogfood checkout HEAD" >&2
+          delete_head_ref=0
+        fi
       else
-        git -C "$DOGFOOD_REF_PROJECT" update-ref --no-deref HEAD \
-          "$DOGFOOD_ORIGINAL_HEAD_OID" || \
+        if ! git -C "$DOGFOOD_REF_PROJECT" update-ref --no-deref HEAD \
+          "$DOGFOOD_ORIGINAL_HEAD_OID"
+        then
           echo "warning: could not restore detached dogfood checkout HEAD" >&2
+          delete_head_ref=0
+        fi
       fi
     fi
-    if [[ -n "$DOGFOOD_HEAD_TRACKING_REF" ]]; then
+    if [[ "$delete_head_ref" == 1 ]]; then
       git -C "$DOGFOOD_REF_PROJECT" update-ref -d "$DOGFOOD_HEAD_TRACKING_REF" \
         "$DOGFOOD_HEAD_TRACKING_OID" || \
         echo "warning: dogfood head ref changed before cleanup: $DOGFOOD_HEAD_TRACKING_REF" >&2
@@ -469,6 +475,7 @@ run_smoke() {
     "$DOGFOOD_BASE_TRACKING_REF" "$base_oid" \
     "$DOGFOOD_HEAD_TRACKING_REF" "$head_oid" | \
     git -C "$project_root" update-ref --stdin
+  DOGFOOD_TRACKING_REFS_CREATED=1
   git -C "$project_root" symbolic-ref HEAD "$DOGFOOD_HEAD_TRACKING_REF"
 
   echo "tracedecay_ci_checkout head=$(git -C "$project_root" rev-parse HEAD) base=$base_ref"
