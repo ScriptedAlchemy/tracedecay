@@ -446,46 +446,25 @@ pub enum SessionRefreshActionV1 {
     Begin,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SessionRefreshProjectV1 {
-    pub id: String,
-    pub profile_id: String,
-    pub repository_id: String,
-    pub worktree_id: String,
-    pub branch_id: String,
-}
-
 /// Session-store owner one refresh is bound to.
 ///
-/// A project refresh names the exact registered project route whose session
-/// store owns the session; a profile refresh names only the profile whose
-/// untethered (user-scope) session store owns it. The daemon serves each
-/// variant from that owner's mounted authority and never redirects a profile
-/// refresh through whichever project happens to be active.
+/// The caller selects the already-mounted project or profile authority. Exact
+/// profile, project, repository, worktree, branch, store, and root identities
+/// stay daemon-owned and are resolved from that authority during admission.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionRefreshScopeV1 {
-    Project { project: SessionRefreshProjectV1 },
-    Profile { profile_id: String },
+    Project {},
+    Profile {},
 }
 
 impl SessionRefreshScopeV1 {
-    /// The profile that owns the selected session store in either scope.
-    #[hotpath::skip]
-    pub fn profile_id(&self) -> &str {
-        match self {
-            Self::Project { project } => &project.profile_id,
-            Self::Profile { profile_id } => profile_id,
-        }
-    }
-
     /// Wire spelling of the selected owner, echoed in refresh results.
     #[hotpath::skip]
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::Project { .. } => "project",
-            Self::Profile { .. } => "profile",
+            Self::Project {} => "project",
+            Self::Profile {} => "profile",
         }
     }
 }
@@ -494,8 +473,6 @@ impl SessionRefreshScopeV1 {
 #[serde(deny_unknown_fields)]
 pub struct SessionRefreshSessionV1 {
     pub id: String,
-    pub store_id: String,
-    pub root_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -542,9 +519,9 @@ pub struct SessionRefreshTargetV1 {
 
 /// Exact route-selected session-refresh request body.
 ///
-/// Each current route selects the action itself; `scope` selects the session
-/// store owner. Project-scoped requests are served under project-open
-/// admission, profile-scoped requests by the profile session authority.
+/// Each current route selects the action itself; `scope` selects the mounted
+/// session-store owner. Project-scoped requests are served under project-open
+/// admission, profile-scoped requests by the authenticated profile authority.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRefreshActionRequestV1 {
@@ -594,21 +571,8 @@ mod session_refresh_request_tests {
 
     fn route_body() -> serde_json::Value {
         json!({
-            "scope": {
-                "kind": "project",
-                "project": {
-                    "id": "project.1",
-                    "profile_id": "profile.default",
-                    "repository_id": "repository.1",
-                    "worktree_id": "worktree.1",
-                    "branch_id": "branch.1"
-                }
-            },
-            "session": {
-                "id": "session.1",
-                "store_id": "store.1",
-                "root_id": "root.1"
-            },
+            "scope": { "kind": "project" },
+            "session": { "id": "session.1" },
             "source": { "scope": "cursor" },
             "target": {
                 "temporal_mode": { "kind": "current" },
@@ -628,34 +592,21 @@ mod session_refresh_request_tests {
     }
 
     #[test]
-    fn profile_scope_carries_only_the_owning_profile() {
+    fn profile_scope_carries_no_daemon_owned_identity() {
         let mut body = route_body();
-        body["scope"] = json!({ "kind": "profile", "profile_id": "profile.default" });
-        body["session"]["store_id"] = json!("store.profile.default");
-        body["session"]["root_id"] = json!("root.profile.default");
+        body["scope"] = json!({ "kind": "profile" });
         let request = serde_json::from_value::<SessionRefreshActionRequestV1>(body)
             .expect("profile-scoped request");
-        assert_eq!(
-            request.scope,
-            SessionRefreshScopeV1::Profile {
-                profile_id: "profile.default".to_owned()
-            }
-        );
-        assert_eq!(request.scope.profile_id(), "profile.default");
+        assert_eq!(request.scope, SessionRefreshScopeV1::Profile {});
         assert_eq!(request.scope.as_str(), "profile");
     }
 
     #[test]
-    fn scope_rejects_untyped_and_mixed_owner_selectors() {
+    fn scope_rejects_untyped_and_internal_owner_selectors() {
         for scope in [
             json!("profile"),
-            json!({ "kind": "profile" }),
-            json!({ "kind": "project" }),
-            json!({
-                "kind": "profile",
-                "profile_id": "profile.default",
-                "project": route_body()["scope"]["project"]
-            }),
+            json!({ "kind": "profile", "profile_id": "profile.default" }),
+            json!({ "kind": "project", "project": {} }),
             json!({ "kind": "user", "profile_id": "profile.default" }),
         ] {
             let mut body = route_body();
