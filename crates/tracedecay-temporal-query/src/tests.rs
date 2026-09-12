@@ -734,7 +734,7 @@ fn malicious_producer_cannot_underreport_or_cross_prework_allocation_contract() 
             result,
             Err(TemporalKernelError::Port(
                 TemporalPortError::BudgetExceeded {
-                    resource: "candidate stable id bytes",
+                    resource: "candidate stable id bytes", accounting: None,
                 }
             ))
         );

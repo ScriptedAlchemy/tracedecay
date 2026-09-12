@@ -778,13 +778,19 @@ fn describe_execution_error(
         SessionTemporalExecutionError::ResetRequired => {
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
-        SessionTemporalExecutionError::BudgetExhausted { stage } => {
-            LcmDescribeServiceOutcome::BudgetExhausted { stage }
+        SessionTemporalExecutionError::BudgetExhausted { stage, accounting } => {
+            LcmDescribeServiceOutcome::BudgetExhausted { stage, accounting }
         }
         SessionTemporalExecutionError::Cancelled => LcmDescribeServiceOutcome::Cancelled,
+        SessionTemporalExecutionError::DeadlineExceeded => LcmDescribeServiceOutcome::TimedOut,
         SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
             LcmDescribeServiceOutcome::TimedOut
         }
+        SessionTemporalExecutionError::Storage { .. } => LcmDescribeServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
+            ),
+        ),
         SessionTemporalExecutionError::Stale { generation_lag } => {
             LcmDescribeServiceOutcome::Stale {
                 temporal,
@@ -815,13 +821,19 @@ fn expand_execution_error(
         SessionTemporalExecutionError::ResetRequired => {
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
-        SessionTemporalExecutionError::BudgetExhausted { stage } => {
-            LcmExpandServiceOutcome::BudgetExhausted { stage }
+        SessionTemporalExecutionError::BudgetExhausted { stage, accounting } => {
+            LcmExpandServiceOutcome::BudgetExhausted { stage, accounting }
         }
         SessionTemporalExecutionError::Cancelled => LcmExpandServiceOutcome::Cancelled,
+        SessionTemporalExecutionError::DeadlineExceeded => LcmExpandServiceOutcome::TimedOut,
         SessionTemporalExecutionError::Kernel(error) if temporal_kernel_deadline(&error) => {
             LcmExpandServiceOutcome::TimedOut
         }
+        SessionTemporalExecutionError::Storage { .. } => LcmExpandServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable::without_worker(
+                SessionRetrievalUnavailableReason::TemporalStoreReadFailed,
+            ),
+        ),
         SessionTemporalExecutionError::Stale { generation_lag } => LcmExpandServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(LcmDataFreshness::Stored { generation_lag }),
@@ -851,8 +863,8 @@ pub(super) fn describe_retrieval_outcome(
         SessionRetrievalOutcome::ResetRequired => {
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
-        SessionRetrievalOutcome::BudgetExhausted { stage } => {
-            LcmDescribeServiceOutcome::BudgetExhausted { stage }
+        SessionRetrievalOutcome::BudgetExhausted { stage, accounting } => {
+            LcmDescribeServiceOutcome::BudgetExhausted { stage, accounting }
         }
         SessionRetrievalOutcome::CursorManifestLimitExceeded {
             kind,
@@ -905,8 +917,8 @@ pub(super) fn expand_retrieval_outcome(
         SessionRetrievalOutcome::ResetRequired => {
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
-        SessionRetrievalOutcome::BudgetExhausted { stage } => {
-            LcmExpandServiceOutcome::BudgetExhausted { stage }
+        SessionRetrievalOutcome::BudgetExhausted { stage, accounting } => {
+            LcmExpandServiceOutcome::BudgetExhausted { stage, accounting }
         }
         SessionRetrievalOutcome::CursorManifestLimitExceeded {
             kind,

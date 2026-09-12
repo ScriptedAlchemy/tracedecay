@@ -698,9 +698,10 @@ impl MessageSearchInput {
                     kind, observed, maximum,
                 ));
             }
-            SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+            SessionRetrievalServiceOutcome::BudgetExhausted { stage, accounting } => {
                 return Err(RetainedSurfaceExecutionErrorV1::structural_budget_refusal(
                     stage,
+                    accounting,
                 ));
             }
             SessionRetrievalServiceOutcome::TimedOut => {

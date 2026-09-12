@@ -76,7 +76,10 @@ fn temporal_relation_error(
         return control_error;
     }
     match error {
-        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded { resource },
+        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
+            resource,
+            accounting: None,
+        },
         SessionRelationError::Cancelled => TemporalPortError::Cancelled,
         SessionRelationError::DeadlineExceeded => TemporalPortError::DeadlineExceeded,
         SessionRelationError::Invalid
@@ -558,7 +561,7 @@ impl<'a> SessionTemporalReadPort<'a> {
             count += 1;
             if count > MAX_SUMMARY_SOURCES_PER_RECORD {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "semantic filter source count",
+                    resource: "semantic filter source count", accounting: None,
                 });
             }
             let encoded: String = row
@@ -648,7 +651,7 @@ impl<'a> SessionTemporalReadPort<'a> {
             count += 1;
             if count > MAX_SUMMARY_SOURCES_PER_RECORD {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "semantic filter source count",
+                    resource: "semantic filter source count", accounting: None,
                 });
             }
             let encoded = row
@@ -1059,7 +1062,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                         .saturating_add(plan.clauses().len())
                 {
                     return Err(TemporalPortError::BudgetExceeded {
-                        resource: "candidate filter scans",
+                        resource: "candidate filter scans", accounting: None,
                     });
                 }
                 let query_limit = bounds
@@ -1131,7 +1134,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                     if !fits_bytes(page_bytes, encoded, bounds, request.max_item_bytes()) {
                         if sink.is_empty() {
                             return Err(TemporalPortError::BudgetExceeded {
-                                resource: "candidate bytes",
+                                resource: "candidate bytes", accounting: None,
                             });
                         }
                         extra = true;
@@ -1199,7 +1202,7 @@ impl<'a> SessionTemporalReadPort<'a> {
             window_queries += 1;
             if window_queries > bounds.items.saturating_add(1) {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "record candidate window scans",
+                    resource: "record candidate window scans", accounting: None,
                 });
             }
             let window_end = bounded_window_end(candidates.len(), cursor.candidate, window_size);
@@ -1228,7 +1231,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                 }
                 if candidate.anchor_id.to_string().len() > request.max_key_bytes() {
                     return Err(TemporalPortError::BudgetExceeded {
-                        resource: "record candidate anchor bytes",
+                        resource: "record candidate anchor bytes", accounting: None,
                     });
                 }
             }
@@ -1282,7 +1285,7 @@ impl<'a> SessionTemporalReadPort<'a> {
                 if !fits_bytes(page_bytes, encoded, bounds, request.max_item_bytes()) {
                     if sink.is_empty() {
                         return Err(TemporalPortError::BudgetExceeded {
-                            resource: "record bytes",
+                            resource: "record bytes", accounting: None,
                         });
                     }
                     extra = true;

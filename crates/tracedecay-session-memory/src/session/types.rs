@@ -1,7 +1,9 @@
 use std::fmt;
 
 use tracedecay_contracts::RequestContext;
-use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
+use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
+};
 use tracedecay_domain::{
     ActorId, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
@@ -599,6 +601,8 @@ pub enum SessionRetrievalOutcome<T> {
     /// different outcome and never uses this variant.
     BudgetExhausted {
         stage: SessionRetrievalBudgetStageV1,
+        /// The ceiling and count the refusing boundary kept, where it keeps one.
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
     TimedOut,
     Cancelled,

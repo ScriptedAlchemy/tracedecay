@@ -350,7 +350,7 @@ fn map_execution_control_error(error: TemporalPortError) -> SessionStoreError {
     match error {
         TemporalPortError::Cancelled => SessionStoreError::Cancelled,
         TemporalPortError::DeadlineExceeded => SessionStoreError::DeadlineExceeded,
-        TemporalPortError::BudgetExceeded { resource } => {
+        TemporalPortError::BudgetExceeded { resource, .. } => {
             SessionStoreError::BudgetExceeded { resource }
         }
         _ => SessionStoreError::InvalidStateTransition {

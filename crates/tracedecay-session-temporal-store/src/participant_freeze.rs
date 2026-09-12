@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde_json::Value;
-use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
+use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
+    SessionRetrievalBudgetStageV1,
+};
 use tracedecay_domain::{SessionId, SignedCursorKeyRefV1};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_temporal_query::ports::{
@@ -163,6 +166,12 @@ pub(super) async fn freeze_prepared_candidate_participants(
     if keys.len() > MAX_TEMPORAL_PARTICIPANTS {
         return Err(SessionTemporalExecutionError::BudgetExhausted {
             stage: SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
+            accounting: Some(SessionRetrievalBudgetAccountingV1 {
+                limit: MAX_TEMPORAL_PARTICIPANTS as u64,
+                observed: SessionRetrievalBudgetObservationV1::Requested {
+                    units: keys.len() as u64,
+                },
+            }),
         });
     }
     let encoded_keys = serde_json::to_string(
@@ -906,12 +915,22 @@ mod tests {
                     "{:?}",
                     SessionTemporalExecutionError::BudgetExhausted {
                         stage: SessionRetrievalBudgetStageV1::CandidateReadExhausted,
+                        // The default candidate ceiling, spent with more in
+                        // storage — the refusal reports its own accounting, not
+                        // a total it would have to finish the scan to learn.
+                        accounting: Some(SessionRetrievalBudgetAccountingV1 {
+                            limit: 256,
+                            observed:
+                                SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                                    units: 256,
+                                },
+                        }),
                     }
                 )
                 .as_str()
             ),
-            "a common root hit must name the candidate read budget, not the \
-             participant manifest limit"
+            "a common root hit must name the candidate read budget and its \
+             ceiling, not the participant manifest limit"
         );
     }
 

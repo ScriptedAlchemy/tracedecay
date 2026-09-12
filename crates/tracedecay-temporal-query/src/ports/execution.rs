@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use super::TemporalPortError;
+use super::{ReadBudgetAccounting, TemporalPortError, over_ceiling};
 
 const SHA256_PREFIX: &str = "sha256:";
 const SHA256_HEX_LEN: usize = 64;
@@ -150,7 +150,10 @@ impl ExecutionLimits {
             ),
         ] {
             if value == 0 || value > max {
-                return Err(TemporalPortError::BudgetExceeded { resource });
+                return Err(TemporalPortError::BudgetExceeded {
+                    resource,
+                    accounting: over_ceiling(value, max),
+                });
             }
         }
         for (resource, value, max) in [
@@ -171,7 +174,10 @@ impl ExecutionLimits {
             ),
         ] {
             if value == 0 || value > max {
-                return Err(TemporalPortError::BudgetExceeded { resource });
+                return Err(TemporalPortError::BudgetExceeded {
+                    resource,
+                    accounting: over_ceiling(value, max),
+                });
             }
         }
         Ok(self)
@@ -183,6 +189,9 @@ pub struct ExecutionControl {
     pub(super) cancellation: Arc<AtomicBool>,
     pub(super) deadline: Option<Instant>,
     pub(super) remaining_work: Option<Arc<AtomicUsize>>,
+    /// The ceiling `remaining_work` started from, so an exhausted checkpoint can
+    /// report the budget it spent instead of only naming the resource.
+    pub(super) work_limit: Option<usize>,
 }
 
 impl ExecutionControl {
@@ -191,12 +200,14 @@ impl ExecutionControl {
             cancellation: Arc::new(AtomicBool::new(false)),
             deadline,
             remaining_work: None,
+            work_limit: None,
         }
     }
 
     #[must_use]
     pub fn with_work_limit(mut self, work_units: usize) -> Self {
         self.remaining_work = Some(Arc::new(AtomicUsize::new(work_units)));
+        self.work_limit = Some(work_units);
         self
     }
 
@@ -215,6 +226,9 @@ impl ExecutionControl {
         }) {
             return Err(TemporalPortError::BudgetExceeded {
                 resource: "work units",
+                accounting: self.work_limit.map(|limit| {
+                    ReadBudgetAccounting::consumed_with_more(limit as u64, limit as u64)
+                }),
             });
         }
         Ok(())
