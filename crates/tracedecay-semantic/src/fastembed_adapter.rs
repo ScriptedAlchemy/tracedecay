@@ -393,6 +393,13 @@ impl VerifiedEmbeddingArtifactV1 {
         })?;
         lifecycle.read_member_bytes(role)
     }
+
+    #[cfg(feature = "semantic-fastembed")]
+    pub(crate) fn coreml_cache_dir(&self) -> Option<PathBuf> {
+        self.lifecycle_install
+            .as_ref()
+            .map(LifecycleInstallArtifactV1::coreml_cache_dir)
+    }
 }
 
 /// Single root-private authority pairing a store-admitted artifact with an
@@ -857,6 +864,15 @@ impl LifecycleInstallArtifactV1 {
             ));
         }
         Ok((path, pin))
+    }
+
+    /// Directory where the CoreML execution provider may persist its compiled
+    /// model between session opens. Lives beside the verified members so it
+    /// is scoped to exactly this model revision; a store-admitted artifact
+    /// exposes no filesystem path, so it gets no cache.
+    #[cfg(feature = "semantic-fastembed")]
+    fn coreml_cache_dir(&self) -> PathBuf {
+        self.root.join("coreml-cache")
     }
 
     // Byte reads exist only where a runtime consumes member bytes, matching
@@ -1342,6 +1358,7 @@ impl EmbeddingRuntime for FastEmbedEmbeddingRuntime {
             .with_intra_threads(intra_threads)
             .with_execution_providers(crate::execution_provider::execution_providers(
                 artifact.execution_provider(),
+                artifact.coreml_cache_dir().as_deref(),
             ));
         // Last boundary before the ORT constructor: an abandoned load drops
         // the buffered member bytes here instead of parsing and optimizing a
