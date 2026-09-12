@@ -5,7 +5,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
+use tracedecay_domain::{
+    CodeGenerationId, EmbeddingExecutionProviderV1, ProjectionKeyV1, VectorGenerationIdV1,
+};
 use tracedecay_query::retrieval::ports::RetrievalPortError;
 use tracedecay_query::retrieval::semantic::{
     EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
@@ -90,6 +92,11 @@ impl<R> CurrentSemanticQueryRuntimeV1<R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
+    pub(crate) fn execution_provider(&self) -> EmbeddingExecutionProviderV1 {
+        let (_, authority, _) = self.factory.runtime().active_snapshot();
+        authority.execution_provider()
+    }
+
     #[cfg(test)]
     pub fn new(
         pointer: SemanticGenerationPointerV1,

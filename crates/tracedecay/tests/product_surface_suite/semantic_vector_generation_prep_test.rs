@@ -57,6 +57,7 @@ fn embedding_key() -> EmbeddingProjectionKeyV1 {
         runtime_backend: "fastembed-ort".to_string(),
         runtime_build_revision: "ort-test-rev-1".to_string(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions: 4,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,

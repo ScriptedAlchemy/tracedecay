@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_domain::sha256_hex_suffix;
 
 use crate::generation::generation_identity_frames_digest;
 use crate::{GraphDbError, GraphGenerationManifestIdentity, SealedGraphStateDigest};
@@ -620,9 +621,7 @@ fn bundle_tmp_path(root: &Path, hex: &str, name: &str) -> PathBuf {
 }
 
 fn sealed_hex(sealed: &SealedGraphStateDigest) -> Result<String, GraphDbError> {
-    sealed
-        .as_str()
-        .strip_prefix("sha256:")
+    sha256_hex_suffix(sealed.as_str())
         .map(str::to_owned)
         .ok_or_else(|| GraphDbError::invalid("sealed graph state digest is not sha256"))
 }

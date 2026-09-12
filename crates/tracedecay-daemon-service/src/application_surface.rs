@@ -3004,11 +3004,8 @@ pub fn mcp_project_open_reset_refusal(
 }
 
 pub(crate) fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-    let now = i64::try_from(now.as_micros()).unwrap_or(i64::MAX);
-    Ok(UtcMicros(now))
+    tracedecay_contracts::clock::try_now_micros()
+        .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
 }
 
 fn invocation_problem(

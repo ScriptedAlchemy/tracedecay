@@ -32,7 +32,9 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 #[cfg(test)]
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::canonical_text::{is_lowercase_hex, sha256_hex};
-use tracedecay_domain::{CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
+};
 
 mod generation_scan;
 mod generation_transactions;
@@ -52,14 +54,14 @@ pub use locking::{
     try_acquire_code_generation_store_lock,
 };
 pub use scope_roots::{
-    RefusedCodeIndexScopeV1, ScopeRootAuthorityReceiptV1, ScopeRootBindingCleanupReplayV1,
-    ScopeRootCandidateBindingV1, ScopeRootLivenessProofV1, ScopeRootRetentionPlanV1,
-    ScopeRootRetentionReceiptV1, ScopeRootRetentionReportV1, StrandedCodeIndexScopeV1,
-    StrandedScopeRefusalV1, code_index_scope_store_root, code_index_store_root,
-    complete_scope_root_binding_cleanup, execute_scope_root_retention,
+    RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,
+    ScopeRootBindingCleanupReplayV1, ScopeRootCandidateBindingV1, ScopeRootLivenessProofV1,
+    ScopeRootRetentionPlanV1, ScopeRootRetentionReceiptV1, ScopeRootRetentionReportV1,
+    StrandedCodeIndexScopeV1, StrandedScopeRefusalV1, code_index_scope_store_root,
+    code_index_store_root, complete_scope_root_binding_cleanup, execute_scope_root_retention,
     git_worktree_scope_root_inventory, insert_live_root_variants, plan_scope_root_retention,
     plan_scope_root_retention_with_liveness_proof, prepare_scope_root_binding_cleanup,
-    recover_scope_root_binding_cleanup, recover_scope_root_retention,
+    record_scope_root, recover_scope_root_binding_cleanup, recover_scope_root_retention,
     resolve_live_code_index_roots,
 };
 pub use text_artifacts::{
@@ -929,9 +931,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
             read_generation_metadata(&path, verification, is_cancelled)?;
         let expected_file = format!(
             "generation-{}.json",
-            raw_state_digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&raw_state_digest)
+            sha256_hex_suffix(&raw_state_digest).unwrap_or(&raw_state_digest)
         );
         if file_name != expected_file {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
@@ -2026,7 +2026,7 @@ fn sha256_file_component<'a>(
     digest: &'a ManifestDigest,
     resource: &str,
 ) -> Result<&'a str, CodeGenerationRetentionErrorV1> {
-    let Some(value) = digest.as_str().strip_prefix("sha256:") else {
+    let Some(value) = sha256_hex_suffix(digest.as_str()) else {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "{resource} digest is not SHA-256"
         )));

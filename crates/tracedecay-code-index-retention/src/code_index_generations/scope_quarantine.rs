@@ -724,6 +724,7 @@ mod tests {
                 scope_hash: SCOPE_HASH.to_owned(),
                 size_bytes: 5,
                 newest_mtime_secs: 0,
+                root_missing: false,
             },
         )
     }

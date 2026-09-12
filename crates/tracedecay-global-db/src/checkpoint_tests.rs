@@ -113,7 +113,7 @@ async fn pressured_checkpoint_reports_pinned_reader_and_reclaims_after_release()
 /// drains it to a zero-byte file.
 #[tokio::test]
 async fn maintenance_truncate_drains_passive_busy_wal_to_zero_bytes() {
-    crate::register_test_schema_installer();
+    crate::register_registered_schema_installer();
     let directory = tempfile::tempdir().unwrap();
     let profile_root = directory.path().join("profile");
     tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();

@@ -140,6 +140,16 @@ pub(crate) fn validate_canonical_string(
     Ok(())
 }
 
+/// Hex body of a `sha256:`-tagged digest, if the algorithm tag is present.
+///
+/// This only strips the tag. It does not validate hex length or case — callers
+/// that already hold a [`crate::ManifestDigest`] still need it, because that
+/// type also accepts `blake3:` and `sha512:`.
+#[must_use]
+pub fn sha256_hex_suffix(value: &str) -> Option<&str> {
+    value.strip_prefix("sha256:")
+}
+
 /// The hex body of a `sha256:`-tagged digest, without the algorithm tag.
 ///
 /// Identities that embed a digest under their own namespace all need the
@@ -149,9 +159,7 @@ pub(crate) fn sha256_hex_body<'a>(
     value: &'a str,
     field: &'static str,
 ) -> Result<&'a str, DomainError> {
-    value
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical { field })
+    sha256_hex_suffix(value).ok_or(DomainError::NonCanonical { field })
 }
 
 /// A native Git object id, rejected as non-canonical at any other shape.
@@ -422,6 +430,24 @@ mod tests {
         );
         assert_eq!(
             validate_canonical_identity("", "field"),
+            Err(DomainError::NonCanonical { field: "field" })
+        );
+    }
+
+    #[test]
+    fn sha256_hex_suffix_strips_only_the_sha256_tag() {
+        let hex = "a".repeat(64);
+        let tagged = format!("sha256:{hex}");
+        assert_eq!(sha256_hex_suffix(&tagged), Some(hex.as_str()));
+        assert_eq!(sha256_hex_suffix(&hex), None);
+        assert_eq!(sha256_hex_suffix(&format!("blake3:{hex}")), None);
+        assert_eq!(
+            sha256_hex_suffix(&format!("sha512:{}", "b".repeat(128))),
+            None
+        );
+        assert_eq!(sha256_hex_body(&tagged, "field"), Ok(hex.as_str()));
+        assert_eq!(
+            sha256_hex_body(&hex, "field"),
             Err(DomainError::NonCanonical { field: "field" })
         );
     }

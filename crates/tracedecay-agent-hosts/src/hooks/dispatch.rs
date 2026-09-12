@@ -21,7 +21,7 @@ use tracedecay_hooks::{
     finish_synchronous_hook,
 };
 
-use crate::agents::context_scout_v2::{
+use crate::agents::context_scout::{
     ContextScoutDeliveryReceiptHookV1, context_scout_delivery_receipt_id,
 };
 use crate::ports::hook_runtime::HookRuntimeV1;

@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
+use tracedecay_domain::sha256_hex_suffix;
 
 mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
@@ -530,7 +531,7 @@ fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
         let state_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
         let file = format!(
             "generation-{}.json",
-            state_digest.strip_prefix("sha256:").expect("digest prefix")
+            sha256_hex_suffix(&state_digest).expect("digest prefix")
         );
         let size_bytes = u64::try_from(bytes.len()).expect("fixture size fits u64");
         std::fs::write(generations_root.join(&file), bytes).expect("write generation fixture");
@@ -765,10 +766,7 @@ fn text_artifact_retention_preserves_references_and_collects_orphans() {
     std::fs::write(&staging_path, b"abandoned staging").expect("write stale staging");
     let active_staging_name = format!(
         ".text-artifact-{}.staging",
-        active
-            .state_digest
-            .strip_prefix("sha256:")
-            .expect("active sealed digest")
+        sha256_hex_suffix(&active.state_digest).expect("active sealed digest")
     );
     let active_staging_path = artifacts_root.join(&active_staging_name);
     std::fs::write(&active_staging_path, b"resumable active staging")
@@ -1277,7 +1275,7 @@ fn pad_generation_file(
     let state_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
     let file = format!(
         "generation-{}.json",
-        state_digest.strip_prefix("sha256:").expect("digest prefix")
+        sha256_hex_suffix(&state_digest).expect("digest prefix")
     );
     let size_bytes = u64::try_from(bytes.len()).expect("fixture size fits u64");
     std::fs::write(generations_root.join(&file), bytes).expect("write padded generation");
@@ -2157,6 +2155,73 @@ fn scope_plan_refuses_an_unproven_live_root_set() {
     assert!(store.path().join(stranded).is_dir());
 }
 
+/// A stranded scope whose recorded checkout root is gone is collectable at
+/// once; the stranding age applies only when the root still exists (or was
+/// never recorded), and a record that does not hash to its own directory
+/// never condemns anything.
+#[test]
+fn scope_plan_skips_the_stranding_age_when_the_recorded_root_is_gone() {
+    let (store, _live, stranded) = fixture_scope_store();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs(),
+    )
+    .expect("clock fits");
+    let scope = store.path().join(&stranded);
+
+    // No record: too young to collect.
+    let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
+        .expect("plan");
+    assert_eq!(plan.collectable_scopes.len(), 0);
+    assert_eq!(plan.retained_immature_scopes.len(), 1);
+
+    // A record naming a different root than the directory hash: still young.
+    record_scope_root(&scope, Path::new("/repos/somewhere-else")).expect("record");
+    let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
+        .expect("plan");
+    assert_eq!(plan.collectable_scopes.len(), 0);
+    assert_eq!(plan.retained_immature_scopes.len(), 1);
+
+    // The genuine record for a root that never existed on this machine.
+    record_scope_root(&scope, Path::new(STRANDED_ROOT)).expect("record");
+    let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
+        .expect("plan");
+    assert_eq!(plan.retained_immature_scopes.len(), 0);
+    assert_eq!(plan.collectable_scopes.len(), 1);
+    assert!(plan.collectable_scopes[0].root_missing);
+    assert_eq!(plan.collectable_scopes[0].scope_hash, stranded);
+
+    // The same record for a root that exists keeps the age gate.
+    let present = tempfile::TempDir::new().expect("present root");
+    let present_root = present
+        .path()
+        .canonicalize()
+        .expect("canonical present root");
+    let present_hash = code_index_scope_hash(&present_root);
+    let present_scope = store.path().join(&present_hash);
+    std::fs::create_dir_all(present_scope.join(GENERATIONS_DIRECTORY)).expect("scope");
+    std::fs::write(
+        present_scope
+            .join(GENERATIONS_DIRECTORY)
+            .join("generation-fixture"),
+        b"present",
+    )
+    .expect("payload");
+    record_scope_root(&present_scope, &present_root).expect("record");
+    let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
+        .expect("plan");
+    assert_eq!(
+        plan.collectable_scopes.len(),
+        1,
+        "only the scope whose root is gone"
+    );
+    assert_eq!(plan.retained_immature_scopes.len(), 1);
+    assert_eq!(plan.retained_immature_scopes[0].scope_hash, present_hash);
+    assert!(!plan.retained_immature_scopes[0].root_missing);
+}
+
 #[test]
 fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     let (store, live, stranded) = fixture_scope_store();
@@ -2345,11 +2410,13 @@ fn scope_transaction_never_journals_a_live_scope() {
                 scope_hash: stranded,
                 size_bytes: 8,
                 newest_mtime_secs: 1,
+                root_missing: false,
             },
             StrandedCodeIndexScopeV1 {
                 scope_hash: live,
                 size_bytes: 4,
                 newest_mtime_secs: 1,
+                root_missing: false,
             },
         ],
         reclaimed_bytes: 12,
@@ -2619,10 +2686,7 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     let active = generations.last().expect("active generation");
     let artifacts_root = code_text_artifacts_root(store.path());
     std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
-    let active_digest = active
-        .state_digest
-        .strip_prefix("sha256:")
-        .expect("active sealed digest");
+    let active_digest = sha256_hex_suffix(&active.state_digest).expect("active sealed digest");
     let active_staging = artifacts_root.join(format!(".text-artifact-{active_digest}.staging"));
     std::fs::write(&active_staging, b"resumable active staging").expect("write active staging");
     let active_sidecar =

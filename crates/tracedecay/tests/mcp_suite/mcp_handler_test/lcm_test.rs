@@ -11,6 +11,8 @@ use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
 #[cfg(feature = "test-transport")]
+use tracedecay_domain::sha256_hex_suffix;
+#[cfg(feature = "test-transport")]
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 #[cfg(feature = "test-transport")]
 use tracedecay_lcm::{LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft};
@@ -1982,7 +1984,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     );
     assert!(
         receipt["payload"]["digest"].as_str().is_some_and(|digest| {
-            digest.strip_prefix("sha256:").is_some_and(|hex| {
+            sha256_hex_suffix(digest).is_some_and(|hex| {
                 hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
         }),

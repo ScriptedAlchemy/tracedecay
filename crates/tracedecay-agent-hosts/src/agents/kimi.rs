@@ -99,7 +99,7 @@ impl AgentIntegration for KimiIntegration {
     #[hotpath::measure(label = "hosts.agent.kimi.project_install")]
     fn activate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -130,7 +130,7 @@ impl AgentIntegration for KimiIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -142,7 +142,7 @@ impl AgentIntegration for KimiIntegration {
 
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -185,12 +185,10 @@ impl AgentIntegration for KimiIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::{
-            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
-        };
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1 as State};
 
         let code_home = kimi_code_home(&ctx.home);
         let installed_path = kimi_installed_json_path(&code_home);

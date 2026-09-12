@@ -43,6 +43,7 @@ pub use generation::{
     GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphProjectionIdentity,
     GraphProjectorRevision, GraphRelationRef, GraphReplayCollectionOutcome,
     SealedCodeGenerationReplay, SealedGraphStateDigest, SemanticVectorGenerationReplay,
+    SupersededReplayRetirement,
 };
 pub use generation_runtime::{SealedStagingRelease, SealedStagingRetentionReason};
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};

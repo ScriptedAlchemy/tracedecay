@@ -20,7 +20,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
     pub(in crate::daemon::project_open_owners) access:
         tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
     pub(in crate::daemon::project_open_owners) scout_configuration:
-        tracedecay_configuration::ConfigurationCurrentStateV1,
+        tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
     pub(in crate::daemon::project_open_owners) requester: tracedecay_domain::ActorId,
     pub(in crate::daemon::project_open_owners) mounted_providers: Vec<MountedLspProvider>,
     pub(in crate::daemon::project_open_owners) admitted_root_uri: String,

@@ -40,8 +40,7 @@ fn cli_configuration_idempotency_key(
     ))
     .map_err(|error| configuration_error(format!("invalid configuration mutation: {error}")))?;
     let suffix = digest
-        .as_str()
-        .strip_prefix("sha256:")
+        .hex_suffix()
         .ok_or_else(|| configuration_error("configuration mutation digest is malformed"))?;
     ConfigurationIdempotencyKey::new(format!("configuration.idempotency.cli.{suffix}"))
         .map_err(|error| configuration_error(format!("invalid configuration request key: {error}")))
@@ -62,8 +61,7 @@ fn cli_user_configuration_idempotency_key(
         configuration_error(format!("invalid user configuration mutation: {error}"))
     })?;
     let suffix = digest
-        .as_str()
-        .strip_prefix("sha256:")
+        .hex_suffix()
         .ok_or_else(|| configuration_error("user configuration mutation digest is malformed"))?;
     ConfigurationIdempotencyKey::new(format!("configuration.idempotency.cli.user.{suffix}"))
         .map_err(|error| {

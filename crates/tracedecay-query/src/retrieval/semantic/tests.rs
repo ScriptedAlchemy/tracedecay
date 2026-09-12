@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use tracedecay_domain::{
@@ -62,6 +62,7 @@ fn projection() -> AdmittedEmbeddingProjectionKeyV1 {
         runtime_backend: "onnx.cpu".to_owned(),
         runtime_build_revision: "runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions: 2,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,
@@ -275,6 +276,8 @@ struct FakeVectorReadPort {
     ann_windows: RefCell<Vec<SemanticAnnCandidateWindowV1>>,
     ann: Option<FakeAnnBehavior>,
     summary: Option<SemanticVectorScanSummaryV1>,
+    after_scan_cancel: Option<Arc<AtomicBool>>,
+    after_scan_elapsed: Option<(Arc<AtomicU64>, u64)>,
     vector_generation: VectorGenerationIdV1,
     projection_key: ProjectionKeyV1,
     search_index_key: SemanticSearchIndexKeyV1,
@@ -291,6 +294,8 @@ impl FakeVectorReadPort {
             ann_windows: RefCell::new(Vec::new()),
             ann: None,
             summary: None,
+            after_scan_cancel: None,
+            after_scan_elapsed: None,
             vector_generation: request.vector_generation.clone(),
             projection_key: request.projection.projection_key().clone(),
             search_index_key: request.search_index_key.clone(),
@@ -320,6 +325,12 @@ impl SemanticVectorReadPort for FakeVectorReadPort {
         for row in &self.rows {
             examine()?;
             visit(row)?;
+        }
+        if let Some(cancelled) = &self.after_scan_cancel {
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        if let Some((elapsed, value)) = &self.after_scan_elapsed {
+            elapsed.store(*value, Ordering::Relaxed);
         }
         Ok(self.summary.unwrap_or(SemanticVectorScanSummaryV1 {
             examined: self.rows.len() as u64,
@@ -394,37 +405,35 @@ impl SemanticVectorReadPort for FakeVectorReadPort {
 
 #[derive(Clone, Default)]
 struct FixedExecutionControl {
-    cancelled: Rc<Cell<bool>>,
-    elapsed_micros: Rc<Cell<u64>>,
-    cancellation_checks: Rc<Cell<u32>>,
+    cancelled: Arc<AtomicBool>,
+    elapsed_micros: Arc<AtomicU64>,
+    cancellation_checks: Arc<AtomicU32>,
     cancel_after_checks: Option<u32>,
-    elapsed_checks: Rc<Cell<u32>>,
+    elapsed_checks: Arc<AtomicU32>,
     expire_after_elapsed_checks: Option<u32>,
 }
 
-impl SemanticExecutionControl for FixedExecutionControl {
+impl RetrievalExecutionControl for FixedExecutionControl {
     fn is_cancelled(&self) -> bool {
-        let checks = self.cancellation_checks.get() + 1;
-        self.cancellation_checks.set(checks);
+        let checks = self.cancellation_checks.fetch_add(1, Ordering::Relaxed) + 1;
         if self
             .cancel_after_checks
             .is_some_and(|allowed| checks > allowed)
         {
             return true;
         }
-        self.cancelled.get()
+        self.cancelled.load(Ordering::Relaxed)
     }
 
     fn elapsed_micros(&self) -> u64 {
-        let checks = self.elapsed_checks.get() + 1;
-        self.elapsed_checks.set(checks);
+        let checks = self.elapsed_checks.fetch_add(1, Ordering::Relaxed) + 1;
         if self
             .expire_after_elapsed_checks
             .is_some_and(|allowed| checks > allowed)
         {
             return u64::MAX;
         }
-        self.elapsed_micros.get()
+        self.elapsed_micros.load(Ordering::Relaxed)
     }
 }
 
@@ -627,8 +636,8 @@ fn cancellation_invokes_no_embedding_or_vector_authority() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        cancelled: Rc::new(Cell::new(true)),
-        elapsed_micros: Rc::new(Cell::new(0)),
+        cancelled: Arc::new(AtomicBool::new(true)),
+        elapsed_micros: Arc::new(AtomicU64::new(0)),
         ..FixedExecutionControl::default()
     };
     let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
@@ -890,7 +899,9 @@ fn omitted_request_deadline_uses_crate_exact_flat_default() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
+        elapsed_micros: Arc::new(AtomicU64::new(
+            SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1,
+        )),
         ..FixedExecutionControl::default()
     };
 
@@ -913,7 +924,7 @@ fn request_deadline_overrides_crate_exact_flat_default() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(1)),
+        elapsed_micros: Arc::new(AtomicU64::new(1)),
         ..FixedExecutionControl::default()
     };
     let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)
@@ -930,7 +941,9 @@ fn request_deadline_overrides_crate_exact_flat_default() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1)),
+        elapsed_micros: Arc::new(AtomicU64::new(
+            SEMANTIC_EXACT_FLAT_DEFAULT_DEADLINE_MICROS_V1,
+        )),
         ..FixedExecutionControl::default()
     };
     let outcome = SemanticCodeRetriever::new(&embedder, &vectors, &control)
@@ -953,7 +966,7 @@ fn set_deadline_zero_is_immediate_expire_not_crate_fallback() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(0)),
+        elapsed_micros: Arc::new(AtomicU64::new(0)),
         ..FixedExecutionControl::default()
     };
     assert!(
@@ -979,7 +992,7 @@ fn tighter_of_lane_and_base_deadline_is_used() {
     let embedder = FakeQueryEmbedder::default();
     let vectors = FakeVectorReadPort::new(&request, Vec::new());
     let control = FixedExecutionControl {
-        elapsed_micros: Rc::new(Cell::new(1)),
+        elapsed_micros: Arc::new(AtomicU64::new(1)),
         ..FixedExecutionControl::default()
     };
     assert!(
@@ -1218,6 +1231,171 @@ fn empty_shared_lane(lane: RetrieverKind) -> CompositionLaneInput {
     .expect("empty shared-kernel lane")
 }
 
+fn seated_hybrid_fusion_profile() -> FusionProfile {
+    let lanes = [
+        RetrieverKind::ExactLiteral,
+        RetrieverKind::Lexical,
+        RetrieverKind::Graph,
+        RetrieverKind::Semantic,
+    ];
+    let calibrations = lanes
+        .into_iter()
+        .map(|lane| {
+            (
+                lane,
+                id::<CalibrationProfileId>(&format!("calibration.{}.seated.v1", lane.as_str())),
+            )
+        })
+        .collect();
+    let score_domain_calibrations = [
+        (
+            RetrieverKind::ExactLiteral,
+            crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
+            0,
+            1_000_000,
+        ),
+        (
+            RetrieverKind::Lexical,
+            crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            0,
+            1_000_000,
+        ),
+        (
+            RetrieverKind::Graph,
+            crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
+            0,
+            1_000_000,
+        ),
+        (
+            RetrieverKind::Semantic,
+            crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
+            crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1,
+            crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
+        ),
+    ]
+    .into_iter()
+    .map(|(lane, domain, raw_min_micros, raw_max_micros)| {
+        let score_domain: ScoreDomainId = id(domain);
+        (
+            score_domain.clone(),
+            ScoreDomainCalibrationV1 {
+                calibration_profile_id: id(&format!("calibration.{}.seated.v1", lane.as_str())),
+                score_domain,
+                raw_min_micros,
+                raw_max_micros,
+            },
+        )
+    })
+    .collect();
+    FusionProfile {
+        profile_id: id("profile.hybrid-conservative.seated.v1"),
+        evaluation_result_anchor: RetrievalAnchorId::new(
+            "evaluation.hybrid-conservative.seated.v1",
+        )
+        .expect("evaluation anchor"),
+        calibrations,
+        score_domain_calibrations,
+        minimum_calibrated_feature_micros: BTreeMap::new(),
+        weights_micros: lanes.into_iter().map(|lane| (lane, 1_000_000)).collect(),
+        diversity_policy_id: id("diversity.hybrid-conservative.seated.v1"),
+        rerank_policy_id: None,
+        retrieval_budget: budget(32),
+    }
+}
+
+fn published_semantic_lane(count: usize, score_domain: &str) -> CompositionLaneInput {
+    let mut candidates = Vec::with_capacity(count);
+    let mut evidence_by_occurrence = BTreeMap::new();
+    let score_domain: ScoreDomainId = id(score_domain);
+    for ordinal in 0..count {
+        let occurrence = id::<SourceOccurrenceId>(&format!("occurrence.published.{ordinal:02}"));
+        candidates.push(CompactCandidate {
+            anchor_id: RetrievalAnchorId::new(format!("anchor.published.{ordinal:02}"))
+                .expect("anchor"),
+            logical_evidence_id: id(&format!("logical.published.{ordinal:02}")),
+            source_occurrence_id: occurrence.clone(),
+            file_occurrence_id: None,
+            source_namespace: id("namespace.code"),
+            repository_id: Some(id("repository.fixture")),
+            session_or_thread_id: None,
+            logical_copy_cluster_id: None,
+            logical_copy_evidence_anchor: None,
+            evidence_role: EvidenceRole::Primary,
+            retriever: RetrieverKind::Semantic,
+            retriever_revision: id("retriever.semantic-flat.daemon.v1"),
+            score_domain: score_domain.clone(),
+            raw_score: FixedPointScore(
+                crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
+            ),
+            ordinal_rank: ordinal as u32,
+            exact_admission_proof: None,
+            retriever_evidence_anchor: RetrievalAnchorId::new(format!(
+                "code-semantic:chunk.published.{ordinal:02}"
+            ))
+            .expect("evidence anchor"),
+            freshness: freshness(),
+        });
+        evidence_by_occurrence.insert(occurrence, ());
+    }
+    let batch = RetrieverBatch {
+        candidates,
+        evidence_by_occurrence,
+        coverage: RetrieverCoverage {
+            examined: count as u64,
+            eligible: count as u64,
+            excluded: 0,
+            capped: 0,
+            unknown: 0,
+        },
+        continuation: Some(RetrieverContinuation {
+            lane: RetrieverKind::Semantic,
+            checkpoint_digest: digest('c'),
+            exhausted: true,
+        }),
+    };
+    batch.validate().expect("published semantic batch is valid");
+    CompositionLaneInput::new(RetrieverKind::Semantic, RetrieverOutcome::Complete(batch))
+        .expect("valid published semantic lane")
+}
+
+#[test]
+fn complete_published_semantic_batch_at_lane_cap_composes_with_seated_profile() {
+    // Production published vectors and seated hybrid profiles must share
+    // `QUERY_SEMANTIC_SCORE_DOMAIN_V1`. A completed batch of exactly the
+    // common lane cap (32) is the live shape: validation already passed,
+    // and composition must not reject it as a lane failure.
+    let semantic_lane =
+        published_semantic_lane(32, crate::retrieval::QUERY_SEMANTIC_SCORE_DOMAIN_V1);
+    let lanes = vec![
+        empty_shared_lane(RetrieverKind::ExactLiteral),
+        empty_shared_lane(RetrieverKind::Lexical),
+        empty_shared_lane(RetrieverKind::Graph),
+        semantic_lane,
+    ];
+    CompositionKernel::new(id("ranking.semantic.seated.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: seated_hybrid_fusion_profile(),
+                lanes,
+            },
+            &DiversityPolicy {
+                policy_id: id("diversity.hybrid-conservative.seated.v1"),
+                evaluation_result_anchor: Some(
+                    RetrievalAnchorId::new("evaluation.hybrid-conservative.seated.v1")
+                        .expect("evaluation anchor"),
+                ),
+                per_source_namespace: None,
+                per_source_instance: None,
+                per_repository: None,
+                per_file: None,
+                per_session_or_thread: None,
+                per_copy_cluster: None,
+                per_evidence_role: None,
+            },
+        )
+        .expect("a full published semantic batch must compose with the seated profile");
+}
+
 #[test]
 fn admitted_semantic_lane_uses_shared_fusion_cursor_and_hydration_stages() {
     let query_view = query_view();
@@ -1385,171 +1563,6 @@ fn missing_or_shifted_calibration_abstains_and_preserves_exact_fallback() {
             SemanticAbstentionV1::CalibrationShifted
         ))
     ));
-}
-
-fn seated_hybrid_fusion_profile() -> FusionProfile {
-    let lanes = [
-        RetrieverKind::ExactLiteral,
-        RetrieverKind::Lexical,
-        RetrieverKind::Graph,
-        RetrieverKind::Semantic,
-    ];
-    let calibrations = lanes
-        .into_iter()
-        .map(|lane| {
-            (
-                lane,
-                id::<CalibrationProfileId>(&format!("calibration.{}.seated.v1", lane.as_str())),
-            )
-        })
-        .collect();
-    let score_domain_calibrations = [
-        (
-            RetrieverKind::ExactLiteral,
-            crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
-            0,
-            1_000_000,
-        ),
-        (
-            RetrieverKind::Lexical,
-            crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
-            0,
-            1_000_000,
-        ),
-        (
-            RetrieverKind::Graph,
-            crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
-            0,
-            1_000_000,
-        ),
-        (
-            RetrieverKind::Semantic,
-            crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_DOMAIN_V1,
-            crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MIN_MICROS_V1,
-            crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
-        ),
-    ]
-    .into_iter()
-    .map(|(lane, domain, raw_min_micros, raw_max_micros)| {
-        let score_domain: ScoreDomainId = id(domain);
-        (
-            score_domain.clone(),
-            ScoreDomainCalibrationV1 {
-                calibration_profile_id: id(&format!("calibration.{}.seated.v1", lane.as_str())),
-                score_domain,
-                raw_min_micros,
-                raw_max_micros,
-            },
-        )
-    })
-    .collect();
-    FusionProfile {
-        profile_id: id("profile.hybrid-conservative.seated.v1"),
-        evaluation_result_anchor: RetrievalAnchorId::new(
-            "evaluation.hybrid-conservative.seated.v1",
-        )
-        .expect("evaluation anchor"),
-        calibrations,
-        score_domain_calibrations,
-        minimum_calibrated_feature_micros: BTreeMap::new(),
-        weights_micros: lanes.into_iter().map(|lane| (lane, 1_000_000)).collect(),
-        diversity_policy_id: id("diversity.hybrid-conservative.seated.v1"),
-        rerank_policy_id: None,
-        retrieval_budget: budget(32),
-    }
-}
-
-fn published_semantic_lane(count: usize, score_domain: &str) -> CompositionLaneInput {
-    let mut candidates = Vec::with_capacity(count);
-    let mut evidence_by_occurrence = BTreeMap::new();
-    let score_domain: ScoreDomainId = id(score_domain);
-    for ordinal in 0..count {
-        let occurrence = id::<SourceOccurrenceId>(&format!("occurrence.published.{ordinal:02}"));
-        candidates.push(CompactCandidate {
-            anchor_id: RetrievalAnchorId::new(format!("anchor.published.{ordinal:02}"))
-                .expect("anchor"),
-            logical_evidence_id: id(&format!("logical.published.{ordinal:02}")),
-            source_occurrence_id: occurrence.clone(),
-            file_occurrence_id: None,
-            source_namespace: id("namespace.code"),
-            repository_id: Some(id("repository.fixture")),
-            session_or_thread_id: None,
-            logical_copy_cluster_id: None,
-            logical_copy_evidence_anchor: None,
-            evidence_role: EvidenceRole::Primary,
-            retriever: RetrieverKind::Semantic,
-            retriever_revision: id("retriever.semantic-flat.daemon.v1"),
-            score_domain: score_domain.clone(),
-            raw_score: FixedPointScore(
-                crate::retrieval::QUERY_SEMANTIC_EVALUATION_SCORE_RAW_MAX_MICROS_V1,
-            ),
-            ordinal_rank: ordinal as u32,
-            exact_admission_proof: None,
-            retriever_evidence_anchor: RetrievalAnchorId::new(format!(
-                "code-semantic:chunk.published.{ordinal:02}"
-            ))
-            .expect("evidence anchor"),
-            freshness: freshness(),
-        });
-        evidence_by_occurrence.insert(occurrence, ());
-    }
-    let batch = RetrieverBatch {
-        candidates,
-        evidence_by_occurrence,
-        coverage: RetrieverCoverage {
-            examined: count as u64,
-            eligible: count as u64,
-            excluded: 0,
-            capped: 0,
-            unknown: 0,
-        },
-        continuation: Some(RetrieverContinuation {
-            lane: RetrieverKind::Semantic,
-            checkpoint_digest: digest('c'),
-            exhausted: true,
-        }),
-    };
-    batch.validate().expect("published semantic batch is valid");
-    CompositionLaneInput::new(RetrieverKind::Semantic, RetrieverOutcome::Complete(batch))
-        .expect("valid published semantic lane")
-}
-
-#[test]
-fn complete_published_semantic_batch_at_lane_cap_composes_with_seated_profile() {
-    // Production published vectors and seated hybrid profiles must share
-    // `QUERY_SEMANTIC_SCORE_DOMAIN_V1`. A completed batch of exactly the
-    // common lane cap (32) is the live shape: validation already passed,
-    // and composition must not reject it as a lane failure.
-    let semantic_lane =
-        published_semantic_lane(32, crate::retrieval::QUERY_SEMANTIC_SCORE_DOMAIN_V1);
-    let lanes = vec![
-        empty_shared_lane(RetrieverKind::ExactLiteral),
-        empty_shared_lane(RetrieverKind::Lexical),
-        empty_shared_lane(RetrieverKind::Graph),
-        semantic_lane,
-    ];
-    CompositionKernel::new(id("ranking.semantic.seated.v1"))
-        .compose(
-            &FusionStageInput {
-                profile: seated_hybrid_fusion_profile(),
-                lanes,
-            },
-            &DiversityPolicy {
-                policy_id: id("diversity.hybrid-conservative.seated.v1"),
-                evaluation_result_anchor: Some(
-                    RetrievalAnchorId::new("evaluation.hybrid-conservative.seated.v1")
-                        .expect("evaluation anchor"),
-                ),
-                per_source_namespace: None,
-                per_source_instance: None,
-                per_repository: None,
-                per_file: None,
-                per_session_or_thread: None,
-                per_copy_cluster: None,
-                per_evidence_role: None,
-            },
-        )
-        .expect("a full published semantic batch must compose with the seated profile");
 }
 
 #[test]

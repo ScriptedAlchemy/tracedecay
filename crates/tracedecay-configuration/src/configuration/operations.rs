@@ -12,12 +12,12 @@ use crate::config::registry::ConfigurationRegistry;
 use crate::config::scope_control::{
     ProtectedChangePlanDraftV1, plan_protected_change, validate_apply_binding,
 };
-
-use super::ports::{
+use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
-    ConfigurationOperationFuture, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort,
+    ScopeRevalidationEvidenceV1,
 };
-use super::types::{
+use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
@@ -471,7 +471,7 @@ where
         expected_revision: &ConfigurationRevisionId,
         sink: ConfigurationMutationSinkV1,
         effect: ConfigurationMutationEffectV1,
-    ) -> Result<super::ports::CurrentConfigurationMutationAuthorizationV1, ConfigurationError> {
+    ) -> Result<CurrentConfigurationMutationAuthorizationV1, ConfigurationError> {
         authority.validate_integrity()?;
         let now = self.clock.now();
         let current = self
@@ -564,7 +564,7 @@ fn validate_frozen_evidence(
 }
 
 fn validate_authorization_evidence(
-    authorization: &super::ports::CurrentConfigurationMutationAuthorizationV1,
+    authorization: &CurrentConfigurationMutationAuthorizationV1,
     evidence: &ScopeRevalidationEvidenceV1,
 ) -> Result<(), ConfigurationError> {
     if authorization.scope_digest != evidence.resolved_scope_digest
@@ -595,7 +595,7 @@ fn derive_plan_id(
         created_at,
     ))
     .map_err(ConfigurationError::validation)?;
-    let encoded = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+    let encoded = digest.hex_suffix().ok_or_else(|| {
         ConfigurationError::validation_message("configuration plan digest missing prefix")
     })?;
     ChangePlanId::new(format!("configuration.plan.v1.{encoded}"))
@@ -609,7 +609,6 @@ mod tests {
 
     use super::*;
     use crate::config::registry::ConfigurationRegistry;
-    use crate::configuration::types::ConfigurationSettlementAuthorityV1;
     use tracedecay_domain::configuration::{
         AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
         ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1, ConfigurationValueV1,
@@ -618,10 +617,11 @@ mod tests {
     use tracedecay_domain::{
         AccessPolicyDigest, ActorId, LocatorDigest, ManifestDigest, ProjectId,
     };
-
-    use super::super::ports::{
+    use tracedecay_global_db::configuration::contracts::ports::{
         ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
+        CurrentConfigurationMutationAuthorizationV1,
     };
+    use tracedecay_global_db::configuration::contracts::types::ConfigurationSettlementAuthorityV1;
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
@@ -788,7 +788,7 @@ mod tests {
     }
 
     struct Authorization {
-        current: super::super::ports::CurrentConfigurationMutationAuthorizationV1,
+        current: CurrentConfigurationMutationAuthorizationV1,
     }
 
     impl ConfigurationMutationAuthorizationPort for Authorization {
@@ -800,10 +800,7 @@ mod tests {
             _sink: ConfigurationMutationSinkV1,
             _effect: ConfigurationMutationEffectV1,
             _now: UtcMicros,
-        ) -> ConfigurationOperationFuture<
-            '_,
-            super::super::ports::CurrentConfigurationMutationAuthorizationV1,
-        > {
+        ) -> ConfigurationOperationFuture<'_, CurrentConfigurationMutationAuthorizationV1> {
             let current = self.current.clone();
             Box::pin(async move { Ok(current) })
         }
@@ -843,7 +840,7 @@ mod tests {
 
     #[test]
     fn current_authorization_must_match_scope_and_policy_evidence() {
-        let authorization = super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+        let authorization = CurrentConfigurationMutationAuthorizationV1 {
             grant_revision: 1,
             grant_digest: digest('c'),
             scope_digest: digest('a'),
@@ -889,7 +886,7 @@ mod tests {
             replay: Mutex::new(None),
         };
         let authorization = Authorization {
-            current: super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+            current: CurrentConfigurationMutationAuthorizationV1 {
                 grant_revision: 1,
                 grant_digest: digest('c'),
                 scope_digest: scope_digest.clone(),
@@ -1027,7 +1024,7 @@ mod tests {
             ))),
         };
         let authorization = Authorization {
-            current: super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+            current: CurrentConfigurationMutationAuthorizationV1 {
                 grant_revision: 2,
                 grant_digest: digest('e'),
                 scope_digest: scope_digest.clone(),

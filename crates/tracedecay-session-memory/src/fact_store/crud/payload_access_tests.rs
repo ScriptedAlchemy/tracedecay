@@ -20,7 +20,7 @@ async fn database() -> (TempDir, Database) {
     let path = directory.path().join("payload-access-list.db");
     let authority = DatabaseAuthority::acquire_test(&path, "payload-access list authority")
         .expect("payload-access authority");
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let (database, _) =
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await

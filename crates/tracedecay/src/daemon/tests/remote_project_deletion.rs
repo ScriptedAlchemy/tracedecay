@@ -158,7 +158,7 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
         .expect("write isolated profile payload");
 
     let hook_id = tracedecay_hooks::envelope_identity_hash16("project", "proj_remote_scout");
-    tracedecay_store_runtime::register_registered_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     // The owner binds the project's own graph database identity: deletion
     // only unregisters the owner whose database it is tearing down.
     let owner_path = layout.graph_db_path.clone();
@@ -176,7 +176,7 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
     .expect("project database")
     .0;
     let registered =
-        tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+        tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
             database,
             hook_id,
             tracedecay_domain::UtcMicros(1),
@@ -188,7 +188,7 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
     // what still pins it.
     std::fs::remove_file(&layout.graph_db_path).expect("remove graph file after owner startup");
     assert_eq!(
-        tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+        tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
             hook_id
         )
         .len(),
@@ -214,7 +214,7 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
         .await
         .expect("delete isolated remote project");
     assert!(
-        tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+        tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
             hook_id
         )
         .is_empty(),
@@ -237,7 +237,7 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
     .expect("replacement database")
     .0;
     let fresh =
-        tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+        tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
             replacement.clone(),
             hook_id,
             tracedecay_domain::UtcMicros(2),
@@ -253,7 +253,7 @@ async fn remote_project_deletion_unregisters_context_scout_owner() {
         fresh.store().database().canonical_database_path(),
         replacement.canonical_database_path()
     );
-    tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
+    tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner(
         hook_id,
         replacement.canonical_database_path(),
     );

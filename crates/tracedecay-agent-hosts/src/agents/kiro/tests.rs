@@ -585,8 +585,8 @@ fn add_and_remove_preserve_an_operator_owned_peer_server() {
 #[cfg(unix)]
 fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1 {
     crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
-        crate::agents::host_bundle_v2::HostKindV1::Kiro,
-        &[crate::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp],
+        crate::agents::host_bundle::HostKindV1::Kiro,
+        &[crate::agents::host_bundle::HostBundleComponentV1::ContextMcp],
         0,
         "/bin/tracedecay",
         crate::agents::TEST_GENERATOR_COMMIT,
@@ -596,15 +596,15 @@ fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbedded
 
 #[cfg(unix)]
 fn kiro_component_request(
-    operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
+    operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
     operation_id: [u8; 16],
-) -> crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1 {
-    crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1 {
-        lifecycle: crate::agents::host_bundle_v2::HostComponentSetLifecycleRequestV1 {
+) -> crate::agents::host_bundle::HostComponentSetExecutionRequestV1 {
+    crate::agents::host_bundle::HostComponentSetExecutionRequestV1 {
+        lifecycle: crate::agents::host_bundle::HostComponentSetLifecycleRequestV1 {
             operation,
-            expected_host: crate::agents::host_bundle_v2::HostKindV1::Kiro,
+            expected_host: crate::agents::host_bundle::HostKindV1::Kiro,
             expected_components: vec![
-                crate::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp,
+                crate::agents::host_bundle::HostBundleComponentV1::ContextMcp,
             ],
             explicit_confirmation: true,
             hermes_profile_bindings: 0,
@@ -617,7 +617,7 @@ fn kiro_component_request(
 #[cfg(unix)]
 #[test]
 fn failed_kiro_cli_effect_rolls_back_the_peer_containing_registry() {
-    use crate::agents::host_bundle_v2::{
+    use crate::agents::host_bundle::{
         HostBundleLifecycleOpV1, HostBundleWriterV1, HostComponentSetTransactionV1,
     };
 
@@ -674,7 +674,7 @@ fn failed_kiro_cli_effect_rolls_back_the_peer_containing_registry() {
 #[cfg(unix)]
 #[test]
 fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
-    use crate::agents::host_bundle_v2::{
+    use crate::agents::host_bundle::{
         HostBundleLifecycleOpV1, HostBundleWriterV1, HostComponentSetRegistrationV1,
         HostComponentSetTransactionV1,
     };
@@ -738,7 +738,7 @@ fn rollback_refuses_a_foreign_registry_write_after_cli_apply() {
     assert!(
         matches!(
             error,
-            crate::agents::host_bundle_v2::HostBundleError::StalePreview(_)
+            crate::agents::host_bundle::HostBundleError::StalePreview(_)
         ),
         "foreign drift must be typed stale preview: {error}"
     );

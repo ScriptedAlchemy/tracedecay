@@ -65,7 +65,7 @@ impl AgentIntegration for ClaudeIntegration {
     #[hotpath::measure(label = "hosts.agent.claude.project_install")]
     fn activate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -82,7 +82,7 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -91,7 +91,7 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -149,10 +149,10 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn host_component_registration(
         &self,
-        _component: super::host_bundle_v2::HostBundleComponentV1,
+        _component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
         let settings = match read_optional_json(&ctx.home.join(".claude/settings.json")) {
             Ok(Some(settings)) => settings,
@@ -181,11 +181,11 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn host_component_registration_for_lifecycle(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
         match self.host_component_registration(component, ctx) {
             State::Current => {
@@ -527,7 +527,7 @@ fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
         return Err(TraceDecayError::Config {
-            message: super::host_bundle_v2::HostBundleError::UnsafeClaudeHomeSymlink.to_string(),
+            message: super::host_bundle::HostBundleError::UnsafeClaudeHomeSymlink.to_string(),
         });
     }
     let deploy_dir = plugin_deploy_dir(home);

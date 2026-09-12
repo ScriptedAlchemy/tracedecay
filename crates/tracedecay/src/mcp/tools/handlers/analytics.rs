@@ -761,9 +761,20 @@ async fn facts_section(
 }
 
 async fn automation_section(project_root: &Path, since: i64) -> Value {
+    // Only an enrolled project has an automation ledger; resolving through the
+    // path-derived default layout would name a shard this directory never
+    // owned and the read below would mint it.
     let dashboard_root =
-        match tracedecay_runtime_core::storage::resolve_layout_for_current_profile(project_root) {
-            Ok(layout) => layout.dashboard_root,
+        match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
+            project_root,
+        ) {
+            Ok(Some(layout)) => layout.dashboard_root,
+            Ok(None) => {
+                return json!({
+                    "available": false,
+                    "reason": "project is not enrolled in this profile",
+                });
+            }
             Err(err) => {
                 return json!({
                     "available": false,

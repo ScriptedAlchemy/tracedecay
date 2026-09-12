@@ -12,7 +12,7 @@ use thiserror::Error;
 use tracedecay_domain::{
     CurrentRemoteAuthorityStateV1, DurableObservationV1, EnrollmentCredentialRecordV1,
     ManifestDigest, RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1,
-    RemoteRepositoryScopeV1, UtcMicros, canonical_sha256,
+    RemoteRepositoryScopeV1, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
@@ -332,9 +332,7 @@ fn capture_effect_envelope(
         outcome.caller.revision,
     ))
     .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-    let event_digest_id = event_digest
-        .as_str()
-        .strip_prefix("sha256:")
+    let event_digest_id = sha256_hex_suffix(event_digest.as_str())
         .ok_or(RemoteProtocolFailureV1::AuthorityUnavailable)?;
     let operation = UseCaseId::new(REMOTE_CAPTURE_USE_CASE_ID_V1)
         .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;

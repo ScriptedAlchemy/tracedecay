@@ -52,7 +52,7 @@ impl TraceDecay {
             && let Some(project_id) =
                 tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&self.store_layout)
         {
-            let _ = tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
+            let _ = tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner(
                 project_id,
                 self.db.canonical_database_path(),
             );

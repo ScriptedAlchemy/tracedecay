@@ -3,7 +3,9 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, WorkflowDefinition, canonical_sha256};
+use tracedecay_domain::{
+    ActorId, ManifestDigest, UtcMicros, WorkflowDefinition, canonical_sha256, sha256_hex_suffix,
+};
 use tracedecay_tool_catalog::UseCaseId;
 
 use crate::{
@@ -170,7 +172,7 @@ impl WorkflowEffectIdentityV1 {
             scope,
             receipt_binding_digest,
         ))?;
-        let suffix = digest.as_str().strip_prefix("sha256:").ok_or(
+        let suffix = sha256_hex_suffix(digest.as_str()).ok_or(
             crate::ApplicationContractError::Inconsistent {
                 field: "Workflow handoff redeem request digest",
             },
@@ -415,10 +417,11 @@ pub enum WorkflowEffectSuccessV1 {
     HandoffRedeemed(Box<TaskHandoffRedeemed>),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowEffectProblemV1 {
     InvalidRequest,
+    InvalidRequestDiagnostic(crate::SafeDiagnostic),
     NotFoundOrNotAuthorized,
     Conflict,
     TimedOut,

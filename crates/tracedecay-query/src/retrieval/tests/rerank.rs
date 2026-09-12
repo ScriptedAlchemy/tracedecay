@@ -8,10 +8,11 @@ use tracedecay_domain::{
 
 use super::*;
 use crate::retrieval::fusion::{CompositionKernel, FusionStageInput};
+use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::rerank::{
     BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, EphemeralRerankViewSourceV1,
-    LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
-    RerankViewOutcomeV1, RerankViewPermitV1,
+    LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1, RerankViewOutcomeV1,
+    RerankViewPermitV1,
 };
 
 fn ranked_candidates() -> Vec<RankedCandidate> {
@@ -64,13 +65,13 @@ fn rerank_policy() -> RerankPolicy {
 }
 
 struct Control {
-    elapsed: Cell<u64>,
+    elapsed: u64,
     cancelled: bool,
 }
 
-impl RerankExecutionControlV1 for Control {
+impl RetrievalExecutionControl for Control {
     fn elapsed_micros(&self) -> u64 {
-        self.elapsed.get()
+        self.elapsed
     }
 
     fn is_cancelled(&self) -> bool {
@@ -158,7 +159,7 @@ fn reranks_only_the_bounded_approximate_prefix_and_bypasses_exact() {
     let mut views = Views::default();
     let executor = ReverseExecutor::default();
     let control = Control {
-        elapsed: Cell::new(1),
+        elapsed: 1,
         cancelled: false,
     };
 
@@ -195,7 +196,7 @@ fn missing_view_preserves_the_exact_pre_rerank_bytes() {
     };
     let executor = ReverseExecutor::default();
     let control = Control {
-        elapsed: Cell::new(1),
+        elapsed: 1,
         cancelled: false,
     };
 
@@ -232,7 +233,7 @@ fn executor_error_timeout_and_cancellation_preserve_pre_rerank_bytes() {
             failure: Some(failure),
         };
         let control = Control {
-            elapsed: Cell::new(1),
+            elapsed: 1,
             cancelled: false,
         };
         let outcome = BoundedRerankRuntimeV1::new(&mut views, &executor)
@@ -247,7 +248,7 @@ fn executor_error_timeout_and_cancellation_preserve_pre_rerank_bytes() {
     let mut views = Views::default();
     let executor = ReverseExecutor::default();
     let cancelled = Control {
-        elapsed: Cell::new(1),
+        elapsed: 1,
         cancelled: true,
     };
     let outcome = BoundedRerankRuntimeV1::new(&mut views, &executor)
@@ -269,7 +270,7 @@ fn resource_and_deadline_limits_fail_before_executor_work() {
     let mut views = Views::default();
     let executor = ReverseExecutor::default();
     let control = Control {
-        elapsed: Cell::new(1),
+        elapsed: 1,
         cancelled: false,
     };
 
@@ -341,7 +342,7 @@ fn resource_and_deadline_limits_fail_before_executor_work() {
     let mut views = Views::default();
     let executor = ReverseExecutor::default();
     let expired = Control {
-        elapsed: Cell::new(policy.deadline_micros.unwrap()),
+        elapsed: policy.deadline_micros.unwrap(),
         cancelled: false,
     };
     let outcome = BoundedRerankRuntimeV1::new(&mut views, &executor)

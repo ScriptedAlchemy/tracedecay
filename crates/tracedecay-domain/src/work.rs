@@ -141,10 +141,7 @@ impl WorkAuthority {
     pub fn projection_generation_id(&self) -> Result<ProjectionGenerationId, WorkContractError> {
         let digest = canonical_sha256(&("tracedecay.work.projection.generation.v1", self))
             .map_err(|_| WorkContractError::InvalidProjectionGeneration)?;
-        let hex = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .unwrap_or(digest.as_str());
+        let hex = digest.hex_suffix().unwrap_or(digest.as_str());
         ProjectionGenerationId::try_from(format!("generation.work.{hex}"))
             .map_err(|_| WorkContractError::InvalidProjectionGeneration)
     }

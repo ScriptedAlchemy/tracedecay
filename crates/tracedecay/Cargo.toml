@@ -268,10 +268,10 @@ semantic-model2vec = [
     "tracedecay-application/semantic-model2vec",
     "tracedecay-code-index-runtime/semantic-model2vec",
 ]
-# GPU execution providers for the FastEmbed/ORT runtime. Not part of the
-# cross-platform `production` feature: release resolution adds CoreML only to
-# macOS artifacts. Compiled providers are selected automatically unless
-# `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu` opts out.
+# GPU execution providers for the FastEmbed/ORT runtime. Release resolution
+# adds CoreML to macOS. CUDA and WebGPU remain explicit build choices; WebGPU's
+# Linux distribution requires the separate Dawn shared library. Compiled
+# providers are selected automatically unless the environment opts out.
 semantic-gpu-coreml = [
     "tracedecay-semantic/semantic-gpu-coreml",
     "tracedecay-application/semantic-gpu-coreml",
@@ -279,6 +279,10 @@ semantic-gpu-coreml = [
 semantic-gpu-cuda = [
     "tracedecay-semantic/semantic-gpu-cuda",
     "tracedecay-application/semantic-gpu-cuda",
+]
+semantic-gpu-webgpu = [
+    "tracedecay-semantic/semantic-gpu-webgpu",
+    "tracedecay-application/semantic-gpu-webgpu",
 ]
 
 [lib]

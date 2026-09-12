@@ -6,11 +6,11 @@ use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
-use tracedecay_agent_hosts::agents::host_bundle_v2::{
+use tracedecay_agent_hosts::agents::host_bundle::{
     HostBundleComponentV1, HostComponentSetReceiptV1, HostKindV1, latest_host_component_receipt_at,
     latest_host_component_set_receipt_at,
 };
+use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
 
 #[path = "host_lifecycle_cli_acceptance/native_plugin_fixture.rs"]
 mod native_plugin_fixture;

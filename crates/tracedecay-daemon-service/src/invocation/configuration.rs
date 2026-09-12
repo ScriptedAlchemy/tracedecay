@@ -424,7 +424,10 @@ pub(super) async fn apply_configuration_or_semantic_transition(
     mutation: DirectConfigurationMutation,
     expected_revision: ConfigurationRevisionId,
     now: UtcMicros,
-) -> Result<tracedecay_configuration::ConfigurationMutationReceipt, ConfigurationError> {
+) -> Result<
+    tracedecay_global_db::configuration::contracts::types::ConfigurationMutationReceipt,
+    ConfigurationError,
+> {
     let requested_semantic_profile = semantic_profile_transition(&mutation)?;
     let current = Box::pin(registered.runtime.client().current()).await?;
     let semantic_profile = requested_semantic_profile.filter(|requested| {
@@ -485,7 +488,7 @@ pub(super) async fn apply_configuration_or_semantic_transition(
             Ok(current) => {
                 refresh_live_configuration_runtime(
                     registered,
-                    tracedecay_configuration::ConfigurationCurrentStateV1 {
+                    tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1 {
                         revision_id: current.revision_id().clone(),
                         snapshot: current.snapshot().clone(),
                     },
@@ -734,7 +737,7 @@ pub(super) struct ContextScoutRequestAuthorityV1 {
 
 pub(super) fn context_scout_request_authority(
     registered: &RegisteredConfigurationRuntime,
-    current: &tracedecay_configuration::ConfigurationCurrentStateV1,
+    current: &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
     request_id: &str,
     operation: ApplicationSurfaceOperation,
     observed_at: UtcMicros,

@@ -1250,6 +1250,7 @@ fn admitted_embedding_with_dimensions(dimensions: u32) -> AdmittedEmbeddingProje
         runtime_backend: "fixture-runtime".to_owned(),
         runtime_build_revision: "fixture-runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,

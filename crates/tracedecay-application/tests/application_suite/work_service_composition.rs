@@ -47,7 +47,7 @@ fn assert_unbound_topology(error: TraceDecayError, operation: &str) {
 
 #[tokio::test]
 async fn work_application_attach_fails_without_project_graph_runtime() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime =
@@ -64,7 +64,7 @@ async fn work_application_attach_fails_without_project_graph_runtime() {
 
 #[tokio::test]
 async fn workflow_application_attach_fails_without_project_graph_runtime() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime =
@@ -81,7 +81,7 @@ async fn workflow_application_attach_fails_without_project_graph_runtime() {
 
 #[tokio::test]
 async fn work_product_and_intelligence_attach_from_storage_without_graph_runtime() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let runtime =
@@ -155,7 +155,7 @@ fn probe_projection() -> GraphProjectionIdentity {
 /// completes — no rebind, no 5-second refusal loop for the daemon lifetime.
 #[tokio::test]
 async fn work_surfaces_attach_and_recover_through_deferred_graph_activation() {
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let profile = tempfile::tempdir().expect("profile");
     let project = tempfile::tempdir().expect("project");
     let graph_root = tempfile::tempdir().expect("graph store root");

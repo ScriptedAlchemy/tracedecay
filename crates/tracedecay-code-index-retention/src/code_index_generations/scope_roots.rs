@@ -62,6 +62,47 @@ const SCOPE_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     label: "scope reconciliation receipt",
 };
 
+/// The scope's canonical project root, recorded by the scheduler that opened
+/// it. The scope directory name is only the root's hash, so without this
+/// record reconciliation cannot tell a checkout that was deleted from one it
+/// simply has not seen registered, and must wait out the stranding age for
+/// both. With it, a root that is gone from disk is collectable at once.
+pub const SCOPE_ROOT_RECORD_FILE: &str = "scope-root.v1";
+
+/// Record `canonical_project_root` inside its scope directory. Idempotent:
+/// an identical record is left untouched so it never bumps the scope mtime.
+pub fn record_scope_root(scope_root: &Path, canonical_project_root: &Path) -> std::io::Result<()> {
+    let path = scope_root.join(SCOPE_ROOT_RECORD_FILE);
+    // The same lossy string the scope hash is derived from, so the record
+    // verifies against the directory name byte for byte.
+    let recorded = canonical_project_root.to_string_lossy();
+    if std::fs::read(&path).is_ok_and(|existing| existing == recorded.as_bytes()) {
+        return Ok(());
+    }
+    let temporary = scope_root.join(format!("{SCOPE_ROOT_RECORD_FILE}.tmp"));
+    std::fs::write(&temporary, recorded.as_bytes())?;
+    std::fs::rename(&temporary, &path)
+}
+
+/// Whether the scope's recorded canonical root has left the filesystem.
+///
+/// `true` only when a record exists, hashes to `scope_hash` (so a stray or
+/// tampered record cannot condemn a different scope), and the path is
+/// definitively absent. Any other observation — no record, a mismatch, a
+/// present root, or an unreadable one — is `false`: the age gate decides.
+fn recorded_scope_root_missing(scope_root: &Path, scope_hash: &str) -> bool {
+    let Ok(recorded) = std::fs::read_to_string(scope_root.join(SCOPE_ROOT_RECORD_FILE)) else {
+        return false;
+    };
+    if recorded.is_empty() || code_index_scope_hash(Path::new(&recorded)) != scope_hash {
+        return false;
+    }
+    matches!(
+        std::fs::symlink_metadata(Path::new(&recorded)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 /// One `code-index-v1/` scope directory whose scope hash matches no live
 /// canonical project root.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +114,10 @@ pub struct StrandedCodeIndexScopeV1 {
     pub size_bytes: u64,
     /// Newest mtime anywhere in the scope, in unix seconds. Drives the age gate.
     pub newest_mtime_secs: i64,
+    /// The recorded canonical root is gone from disk, so the age gate does
+    /// not apply: nothing can publish into this scope again under that root.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub root_missing: bool,
 }
 /// Why a stranded scope was left alone even though nothing live names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -509,10 +554,12 @@ pub(super) fn plan_scope_root_retention_from_hashes(
 
         let scope_root = entry.path();
         let (size_bytes, newest_mtime_secs) = measure_scope_tree(&scope_root)?;
+        let root_missing = recorded_scope_root_missing(&scope_root, &scope_hash);
         let scope = StrandedCodeIndexScopeV1 {
             scope_hash,
             size_bytes,
             newest_mtime_secs,
+            root_missing,
         };
         if scope_root.join(TRANSACTION_FILE).exists() {
             plan.refused_scopes.push(RefusedCodeIndexScopeV1 {
@@ -521,7 +568,12 @@ pub(super) fn plan_scope_root_retention_from_hashes(
             });
             continue;
         }
-        if now_secs.saturating_sub(newest_mtime_secs) < minimum_stranding_age_secs {
+        // A checkout that was deleted can never publish into this scope
+        // again, so its index is debris the moment the root is gone. The age
+        // gate exists for the other case: a root that still exists but no
+        // authority currently names.
+        if !root_missing && now_secs.saturating_sub(newest_mtime_secs) < minimum_stranding_age_secs
+        {
             plan.retained_immature_scopes.push(scope);
             continue;
         }
@@ -638,7 +690,13 @@ pub fn execute_scope_root_retention(
                 scope.scope_hash
             )));
         }
-        if now_secs.saturating_sub(newest_mtime_secs) < plan.minimum_stranding_age_secs {
+        // The plan's age bypass must still hold at execution: a root that
+        // reappeared since the mark phase is no longer provably abandoned.
+        let root_missing =
+            scope.root_missing && recorded_scope_root_missing(&scope_root, &scope.scope_hash);
+        if !root_missing
+            && now_secs.saturating_sub(newest_mtime_secs) < plan.minimum_stranding_age_secs
+        {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "stranded scope '{}' is younger than the minimum stranding age",
                 scope.scope_hash

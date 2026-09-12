@@ -6,6 +6,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::analyzer::broker::DiagnosticSeverity;
+
 pub const MAX_DOCUMENT_DIAGNOSTICS: usize = 200;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
 pub const MAX_DIAGNOSTIC_RELATED_INFORMATION: usize = 8;
@@ -24,14 +26,6 @@ pub struct LspPosition {
 pub struct LspRange {
     pub start: LspPosition,
     pub end: LspPosition,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-    Information,
-    Hint,
 }
 
 /// The source lane preserved while composing a document diagnostic report.

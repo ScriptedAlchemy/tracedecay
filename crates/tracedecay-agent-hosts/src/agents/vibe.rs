@@ -27,7 +27,7 @@ use tracedecay_automation_runtime::automation::skill_targets::{
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, TextFileMutation,

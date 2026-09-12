@@ -14,17 +14,17 @@ use tracedecay_domain::{
     SourceOccurrenceId, UtcMicros, canonical_sha256,
 };
 
-use super::{GraphExecutionControl, GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
+use super::{GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
 use crate::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
-    contract_error,
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalExecutionControl,
+    RetrievalPortError, contract_error,
 };
 
 impl GraphEvidenceReadPort for CodeGraphEvidenceReader {
     fn read_graph_evidence(
         &self,
         request: &GraphLaneRequest,
-        control: Arc<dyn GraphExecutionControl>,
+        control: Arc<dyn RetrievalExecutionControl>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
         read_graph_evidence(self, request, control)
     }
@@ -34,7 +34,7 @@ impl GraphEvidenceReadPort for CodeGraphEvidenceReader {
 fn read_graph_evidence(
     reader: &CodeGraphEvidenceReader,
     request: &GraphLaneRequest,
-    control: Arc<dyn GraphExecutionControl>,
+    control: Arc<dyn RetrievalExecutionControl>,
 ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
     request.validate()?;
     check_request_control(request, control.as_ref())?;
@@ -91,7 +91,7 @@ fn read_graph_evidence(
 fn project_graph_batch(
     reader: &CodeGraphEvidenceReader,
     request: &GraphLaneRequest,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
     raw: CodeGraphTraversalBatchV1,
 ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
     let retriever_revision =
@@ -198,7 +198,7 @@ fn project_graph_batch(
 }
 
 struct GraphTraversalCancellationV1 {
-    control: Arc<dyn GraphExecutionControl>,
+    control: Arc<dyn RetrievalExecutionControl>,
     deadline_micros: Option<u64>,
 }
 
@@ -213,7 +213,7 @@ impl tracedecay_graph_db::GraphCancellation for GraphTraversalCancellationV1 {
 
 fn check_request_control(
     request: &GraphLaneRequest,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> Result<(), RetrievalPortError> {
     if control.is_cancelled() {
         Err(RetrievalPortError::Cancelled)
