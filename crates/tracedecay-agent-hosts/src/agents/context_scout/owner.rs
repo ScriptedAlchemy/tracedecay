@@ -1089,7 +1089,6 @@ mod tests {
     use super::super::ports::ContextScoutAddressBindOutcomeV1;
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
-    use tracedecay_application::configuration::ConfigurationCurrentStateV1;
     use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
@@ -1102,6 +1101,7 @@ mod tests {
     };
     use tracedecay_domain::feedback::FeedbackScopeV1;
     use tracedecay_domain::{ActorId, RepositoryId, WorktreeId};
+    use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
     use tracedecay_hooks::{
         HookCapabilityV1, HookEventFamily, HookHostV1, HookScopeBindingV1,
         NativeEnvelopeMaterialV1, decode_bound_native_hook_event, stock_event_support,

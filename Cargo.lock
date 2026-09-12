@@ -6284,6 +6284,7 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-code-index-retention",
+ "tracedecay-configuration",
  "tracedecay-contracts",
  "tracedecay-dashboard-api",
  "tracedecay-domain",

@@ -17801,8 +17801,8 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         crate::config::resolver::resolve_configuration(&configuration_registry, &[layer])
             .expect("resolve configured native graph refusal")
             .snapshot;
-    let config = tracedecay_application::config::PinnedRuntimeConfiguration::new(
-        tracedecay_application::config::RuntimeConfigurationTarget {
+    let config = tracedecay_configuration::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::RuntimeConfigurationTarget {
             project_id: test_project_id(),
             project_root: fixture.path().to_path_buf(),
         },

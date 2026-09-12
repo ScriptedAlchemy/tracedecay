@@ -104,7 +104,7 @@ pub(super) fn retain_codex_stop(
 }
 
 pub(super) async fn await_terminal_operation<T>(
-    cancellation: &tracedecay_application::observation::ObservationCancellation,
+    cancellation: &tracedecay_sessions::observation::ObservationCancellation,
     operation: impl Future<Output = T>,
 ) -> Option<T> {
     tokio::pin!(operation);
