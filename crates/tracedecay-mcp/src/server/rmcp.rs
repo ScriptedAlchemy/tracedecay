@@ -10,8 +10,8 @@ use std::sync::Arc;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, CustomNotification, ErrorCode,
     ErrorData, Implementation, InitializeRequestParams, InitializeResult, ListResourcesResult,
-    ListToolsResult, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-    ServerCapabilities, ServerInfo,
+    ListToolsResult, MetaObject, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler};
@@ -647,11 +647,20 @@ where
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        rmcp_response_result::<CallToolResult>(
+        let started = self.timings_enabled.then(std::time::Instant::now);
+        let mut result = rmcp_response_result::<CallToolResult>(
             self.dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
                 .await?,
-        )
-        .map(Into::into)
+        )?;
+        if let Some(started) = started {
+            result
+                .meta
+                .get_or_insert_with(MetaObject::new)
+                .0
+                .entry("duration_us".to_owned())
+                .or_insert_with(|| json!(started.elapsed().as_micros() as u64));
+        }
+        Ok(result.into())
     }
 
     #[hotpath::skip]
