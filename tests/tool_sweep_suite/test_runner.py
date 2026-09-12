@@ -1691,10 +1691,6 @@ class FixturePrimingRetryTests(unittest.TestCase):
                     },
                 },
             ),
-            "tracedecay_session_refresh_status": cls.response(
-                '{"outcome":"complete","receipt":{"operation_id":'
-                '"refresh.operation.fixture","state":"complete"}}'
-            ),
             "tracedecay_active_project": cls.response(
                 '{"project_id":"project.fixture"}'
             ),
