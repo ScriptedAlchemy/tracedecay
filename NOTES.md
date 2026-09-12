@@ -333,12 +333,11 @@ the product-runtime registration) and from the three fixtures that bypass it.
   handle_tool_call_with_registry_options}`, `crate::mcp::server::McpServerConstructionContext`,
   `tracedecay_daemon_service::DaemonProjectRegistryReadService` (11 call sites retargeted to these free
   functions).
-- `tracedecay-project → tracedecay-agent-hosts → tracedecay-mcp` is the crate's only transitive path to
-  `tracedecay-mcp` (`cargo tree -i tracedecay-mcp`); it disappears with the agent-hosts cycle break. It has
-  no path to `tracedecay-daemon-service`.
+- With #1251 (agent-hosts cycle break, `tracedecay-mcp-catalog`) merged, `cargo tree -p tracedecay-project
+  -e normal -i tracedecay-mcp` and `-i tracedecay-daemon-service` both resolve to nothing: the crate reaches
+  neither consumer. Its only catalog edge is `agent-hosts → tracedecay-mcp-catalog`.
 
-**Now movable** (`TraceDecay` is below both consumers; still waiting on the agent-hosts cycle break for
-mcp to take agent-hosts): every (c) row in `src/mcp/` that was blocked only by `TraceDecay` —
+**Now movable** (`TraceDecay` is below both consumers and the agent-hosts cycle is broken): every (c) row in `src/mcp/` that was blocked only by `TraceDecay` —
 `dispatch_groups.rs` (27 `TraceDecay` reads), `handlers/edit.rs` (17), `handlers/hook_runtime/` (38),
 `handlers/mod.rs` (7), `construction.rs` (8), `dashboard.rs` (4) — plus the `src/daemon/` (c) rows that
 named only `TraceDecay` or root `config`: `scheduler/` (44 reads), `project_open_owners/`,
@@ -419,7 +418,8 @@ their two `crate::mcp` uses are typed.
 
 ### Order
 
-1. `tracedecay-agent-hosts/src/ports/mcp_tools.rs`: drop the two `tracedecay_mcp::` calls (cycle break).
+1. ~~`tracedecay-agent-hosts/src/ports/mcp_tools.rs`: drop the two `tracedecay_mcp::` calls~~ — done in #1251
+   (`tracedecay-mcp-catalog`).
 2. ~~New `tracedecay-project`~~ — done, see above (also took `product_runtime.rs`, `version.rs`, and the
    host-admission test runtime).
 3. `src/mcp` (b) rows, one commit per target crate; then (c) into tracedecay-mcp behind `McpToolContext`.
