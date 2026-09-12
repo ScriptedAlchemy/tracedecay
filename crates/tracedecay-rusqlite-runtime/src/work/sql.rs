@@ -79,4 +79,3 @@ pub(crate) fn registered_work_query(
 ) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError> {
     source.work_query(exact_sql_statement(sql, params)?)
 }
-
