@@ -23,7 +23,7 @@ fn requires_daemon_restart(
 
 pub(super) async fn refresh_live_configuration_runtime(
     registered: &RegisteredConfigurationRuntime,
-    current: tracedecay_configuration::ConfigurationCurrentStateV1,
+    current: tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
 ) -> Result<(), String> {
     let refresh = registered
         .feedback_refresh
@@ -39,7 +39,7 @@ pub(super) async fn refresh_live_configuration_runtime(
 #[hotpath::measure(label = "daemon.service.configuration.reconcile", future = true)]
 pub(super) async fn reconcile_configuration_runtime(
     registered: &RegisteredConfigurationRuntime,
-    receipt: &tracedecay_configuration::ConfigurationMutationReceipt,
+    receipt: &tracedecay_global_db::configuration::contracts::types::ConfigurationMutationReceipt,
     now: UtcMicros,
 ) {
     let current = match hotpath::future!(
@@ -101,10 +101,11 @@ pub(super) async fn reconcile_configuration_runtime(
         );
     }
     let revision_id = current.revision_id().clone();
-    let refresh_state = tracedecay_configuration::ConfigurationCurrentStateV1 {
-        revision_id: revision_id.clone(),
-        snapshot: current.snapshot().clone(),
-    };
+    let refresh_state =
+        tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1 {
+            revision_id: revision_id.clone(),
+            snapshot: current.snapshot().clone(),
+        };
     let successful_observed_revision_id = if restart_required {
         observed.revision_id
     } else {
@@ -172,14 +173,9 @@ pub(super) fn configuration_effect(
         &(actor, scope, operation.as_str(), &idempotency_key),
     )
     .map_err(|error| ConfigurationError::validation_message(error.to_string()))?;
-    let effect_identity_suffix = effect_identity_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or_else(|| {
-            ConfigurationError::validation_message(
-                "configuration effect identity digest is malformed",
-            )
-        })?;
+    let effect_identity_suffix = effect_identity_digest.hex_suffix().ok_or_else(|| {
+        ConfigurationError::validation_message("configuration effect identity digest is malformed")
+    })?;
     let canonical_request_id =
         RequestId::new(format!("request.configuration.{effect_identity_suffix}"))
             .map_err(ConfigurationError::validation)?;

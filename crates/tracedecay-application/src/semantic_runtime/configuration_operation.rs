@@ -20,9 +20,10 @@ use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
     RetrievalProfileCasV1, RetrievalRuntimeCompatibilityV1, SemanticResourceRequirementV1,
 };
-use tracedecay_configuration::{
+use tracedecay_configuration::ProjectConfigurationRuntime;
+use tracedecay_global_db::configuration::contracts::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    DirectConfigurationMutation, ProjectConfigurationRuntime,
+    DirectConfigurationMutation,
 };
 use tracedecay_query::search_quality::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
@@ -498,11 +499,7 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .compatibility()
                 .semantic
                 .as_ref()
-                .and_then(|pins| {
-                    pins.artifact_manifest_digest
-                        .as_str()
-                        .strip_prefix("sha256:")
-                })
+                .and_then(|pins| pins.artifact_manifest_digest.hex_suffix())
                 != Some(request.selected_profile.artifact_digest.as_str())
         {
             return Err(log_semantic_activation_failure(

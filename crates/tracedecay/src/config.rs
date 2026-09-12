@@ -10,12 +10,13 @@ use tracedecay_domain::configuration::{
     UserProfileId,
 };
 
-use tracedecay_configuration::ConfigurationControlStore;
 use tracedecay_configuration::{
     SyncConfig, TelemetryConfig, TraceDecayConfig, get_config_path, is_in_gitignore,
     load_config_from_path,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
     ProfileCodeIndexWorkerConfigurationV1,
@@ -65,12 +66,12 @@ pub use tracedecay_configuration::config::RuntimeConfigurationTarget;
 /// construction, so the fields stay private: there is no way to hold this
 /// value with settings that disagree with its snapshot.
 #[derive(Clone, Debug)]
-pub struct PinnedRuntimeConfiguration {
+pub struct DaemonRuntimeConfiguration {
     runtime: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     config: TraceDecayConfig,
 }
 
-impl PinnedRuntimeConfiguration {
+impl DaemonRuntimeConfiguration {
     /// Materializes the legacy runtime shape from a complete typed snapshot.
     /// The conversion rejects missing or wrongly typed settings rather than
     /// adding adapter-local defaults.
@@ -148,12 +149,12 @@ impl PinnedRuntimeConfiguration {
 /// perform an in-memory lookup.
 #[derive(Default)]
 pub struct RuntimeConfigurationCache {
-    by_project: RwLock<BTreeMap<String, PinnedRuntimeConfiguration>>,
+    by_project: RwLock<BTreeMap<String, DaemonRuntimeConfiguration>>,
     project_by_root: RwLock<BTreeMap<PathBuf, String>>,
 }
 
 impl RuntimeConfigurationCache {
-    pub fn insert(&self, configuration: PinnedRuntimeConfiguration) {
+    pub fn insert(&self, configuration: DaemonRuntimeConfiguration) {
         let project_id = configuration.target().project_id.as_str().to_owned();
         let project_root = configuration.target().project_root.clone();
         self.by_project
@@ -166,7 +167,7 @@ impl RuntimeConfigurationCache {
             .insert(project_root, project_id);
     }
 
-    pub fn for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration> {
+    pub fn for_project(&self, project_id: &ProjectId) -> Result<DaemonRuntimeConfiguration> {
         self.by_project
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -180,7 +181,7 @@ impl RuntimeConfigurationCache {
             })
     }
 
-    pub fn for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
+    pub fn for_root(&self, project_root: &Path) -> Result<DaemonRuntimeConfiguration> {
         let project_id = self
             .project_by_root
             .read()
@@ -236,7 +237,7 @@ pub fn install_dashboard_configuration_read_port() -> Result<()> {
 }
 
 /// Publishes one daemon-resolved snapshot for runtime and hook consumers.
-pub fn install_pinned_runtime_configuration(configuration: PinnedRuntimeConfiguration) {
+pub fn install_pinned_runtime_configuration(configuration: DaemonRuntimeConfiguration) {
     runtime_configuration_cache().insert(configuration);
 }
 
@@ -275,7 +276,7 @@ pub fn runtime_configuration_target_for_project_id(
 pub fn runtime_configuration_for_layout(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
-) -> Result<PinnedRuntimeConfiguration> {
+) -> Result<DaemonRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     let configuration = runtime_configuration_cache()
         .for_project(&target.project_id)?
@@ -302,7 +303,7 @@ pub(crate) async fn resolve_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
-) -> Result<PinnedRuntimeConfiguration> {
+) -> Result<DaemonRuntimeConfiguration> {
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     validate_registered_configuration_database(&target, database.as_ref())?;
     if let Ok(configuration) = runtime_configuration_cache().for_project(&target.project_id) {
@@ -329,7 +330,7 @@ pub(crate) async fn resolve_runtime_configuration_for_registered_database(
 /// open. Daemon composition consumes this bundle instead of opening a second
 /// configuration database or resolving a second snapshot.
 pub(crate) struct OpenedRuntimeConfiguration {
-    pub(crate) configuration: PinnedRuntimeConfiguration,
+    pub(crate) configuration: DaemonRuntimeConfiguration,
     /// Exact daemon-owned registered session runtime used to resolve this
     /// snapshot. Configuration composition retains this authority directly;
     /// it never reacquires the physical database by path.
@@ -369,7 +370,7 @@ impl tracedecay_configuration::config::PinnedRuntimeConfigurationCachePort
         &self,
         configuration: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     ) -> Result<()> {
-        install_pinned_runtime_configuration(PinnedRuntimeConfiguration::from_runtime(
+        install_pinned_runtime_configuration(DaemonRuntimeConfiguration::from_runtime(
             configuration,
         )?);
         Ok(())
@@ -504,7 +505,7 @@ async fn initialize_canonical_project_configuration(
 async fn open_runtime_configuration_from_store(
     target: RuntimeConfigurationTarget,
     store: &GlobalDbConfigurationControlStore<'_>,
-) -> Result<PinnedRuntimeConfiguration> {
+) -> Result<DaemonRuntimeConfiguration> {
     if let Err(error) = store.current().await {
         if !store
             .is_uninitialized()
@@ -531,7 +532,7 @@ async fn open_runtime_configuration_from_store(
         .await
     {
         Ok(state) => state,
-        Err(tracedecay_configuration::ConfigurationError::RevisionConflict) => {
+        Err(ConfigurationError::RevisionConflict) => {
             store.current().await.map_err(map_configuration_error)?
         }
         Err(error) => return Err(map_configuration_error(error)),
@@ -595,7 +596,7 @@ async fn open_runtime_configuration_from_store(
                     Ok(state) => state,
                     // A concurrent open won the swap; adopt what it
                     // published and re-verify it exactly.
-                    Err(tracedecay_configuration::ConfigurationError::RevisionConflict) => {
+                    Err(ConfigurationError::RevisionConflict) => {
                         store.current().await.map_err(map_configuration_error)?
                     }
                     Err(error) => return Err(map_configuration_error(error)),
@@ -610,7 +611,7 @@ async fn open_runtime_configuration_from_store(
         }
     }
     let configuration =
-        PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
+        DaemonRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone());
     Ok(configuration)
 }
@@ -624,7 +625,7 @@ pub(crate) async fn ensure_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &tracedecay_runtime_core::storage::StoreLayout,
     database: RegisteredGlobalDbLeaseV1,
-) -> Result<PinnedRuntimeConfiguration> {
+) -> Result<DaemonRuntimeConfiguration> {
     Ok(
         open_runtime_configuration_for_registered_database(project_root, layout, database)
             .await?
@@ -653,7 +654,7 @@ pub(crate) async fn open_runtime_configuration_for_registered_database_read_only
 async fn open_runtime_configuration_read_only_from_store(
     target: RuntimeConfigurationTarget,
     store: &GlobalDbConfigurationControlStore<'_>,
-) -> Result<PinnedRuntimeConfiguration> {
+) -> Result<DaemonRuntimeConfiguration> {
     if store
         .is_uninitialized()
         .await
@@ -666,7 +667,7 @@ async fn open_runtime_configuration_read_only_from_store(
     }
     let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
-        PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
+        DaemonRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone());
     Ok(configuration)
 }
@@ -687,9 +688,9 @@ fn validate_registered_configuration_database(
     }
 }
 
-fn map_configuration_error(error: tracedecay_configuration::ConfigurationError) -> TraceDecayError {
+fn map_configuration_error(error: ConfigurationError) -> TraceDecayError {
     match error {
-        tracedecay_configuration::ConfigurationError::ResetRequired { reason } => {
+        ConfigurationError::ResetRequired { reason } => {
             TraceDecayError::reset_required("configuration", reason)
         }
         error => config_error(format!("configuration authority unavailable: {error}")),
@@ -698,7 +699,7 @@ fn map_configuration_error(error: tracedecay_configuration::ConfigurationError) 
 
 /// Returns a cached configuration without resolving a layout, opening a
 /// database, performing IPC, or reading a file. This is the hook-safe lookup.
-pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
+pub fn cached_runtime_configuration(project_root: &Path) -> Result<DaemonRuntimeConfiguration> {
     runtime_configuration_cache().for_root(project_root)
 }
 
@@ -708,7 +709,7 @@ pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntime
 pub fn cached_runtime_configuration_for_project_id(
     project_root: &Path,
     project_id: &str,
-) -> Result<PinnedRuntimeConfiguration> {
+) -> Result<DaemonRuntimeConfiguration> {
     let target = runtime_configuration_target_for_project_id(project_root, project_id)?;
     Ok(runtime_configuration_cache()
         .for_project(&target.project_id)?

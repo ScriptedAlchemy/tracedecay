@@ -94,7 +94,7 @@ pub use stack_delivery::{
 
 /// Installs the canonical registered global/session schema installer into the
 /// kernel's fail-closed [`tracedecay_runtime_core::ports::registered_schema`]
-/// port for dependent test builds.
+/// port for production and dependent test builds.
 ///
 /// The kernel opens a profile- or session-scoped shard through that port when a
 /// fixture calls `Database::publish_test_runtime`, but the real schema
@@ -103,10 +103,8 @@ pub use stack_delivery::{
 /// (`register_registered_schema_installer`); this helper lets the root crate's
 /// integration suites (and this crate's own tests) register the identical real
 /// schema without reaching into daemon internals. Idempotent — the port keeps
-/// the first registration. Gated behind `test-helpers`, so no production build
-/// gains a registrar and the port stays fail-closed when nothing registers.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn register_test_schema_installer() {
+/// the first registration; without registration it remains fail-closed.
+pub fn register_registered_schema_installer() {
     tracedecay_runtime_core::ports::registered_schema::register(|connection| {
         Box::pin(ensure_registered_schema(connection))
     });

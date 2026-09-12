@@ -24,7 +24,7 @@ use tracedecay_domain::{
     PullRequestSnapshotAnchorRefV1, RepositoryId, ResolutionAuthorizationV1, RetentionClass,
     RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
     RetrievalAnchorTargetV2, ScopeResolutionId, UserProfileId, UtcMicros, VectorWatermark,
-    canonical_sha256,
+    canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_global_db::{RegisteredGitTopologyAnchorAuthorityV2, RegisteredGlobalDbLeaseV1};
 use tracedecay_tool_catalog::{CapabilityId as GrantCapabilityId, UseCaseId as GrantUseCaseId};
@@ -478,7 +478,7 @@ fn exact_commit_source_record(
         commit_id,
     ))
     .ok()?;
-    let suffix = digest.as_str().strip_prefix("sha256:")?;
+    let suffix = sha256_hex_suffix(digest.as_str())?;
     let mut source_authorization = authorization.clone();
     source_authorization.canonical_request_digest =
         PrivacyDomainBoundLocatorDigest::new(digest.as_str()).ok()?;
@@ -513,7 +513,7 @@ fn privacy_domain_for_scope(
     profile_id: &UserProfileId,
     scope: &tracedecay_contracts::ResolvedScope,
 ) -> Option<PrivacyDomainId> {
-    let scope_suffix = scope.scope_digest.as_str().strip_prefix("sha256:")?;
+    let scope_suffix = sha256_hex_suffix(scope.scope_digest.as_str())?;
     PrivacyDomainId::new(format!(
         "privacy.github-stack.{}.{}",
         profile_id.as_str(),
@@ -675,7 +675,7 @@ fn retrieval_record(
             .ok()?;
             ProjectionGenerationId::new(format!(
                 "generation.github-pull-request.{}",
-                digest.as_str().strip_prefix("sha256:")?
+                sha256_hex_suffix(digest.as_str())?
             ))
             .ok()?
         }
@@ -707,11 +707,7 @@ fn authorization(
     context: &RequestContext,
     request: &GitHubReviewReadRequestV1,
 ) -> Option<ResolutionAuthorizationV1> {
-    let scope_suffix = context
-        .scope()
-        .scope_digest
-        .as_str()
-        .strip_prefix("sha256:")?;
+    let scope_suffix = sha256_hex_suffix(context.scope().scope_digest.as_str())?;
     let policy = canonical_sha256(&(
         "tracedecay.github-stack.anchor-policy.v1",
         context.scope(),

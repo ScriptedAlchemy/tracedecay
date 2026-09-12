@@ -14,7 +14,7 @@ pub(crate) fn retire_registered_context_scout_owner(
     graph_db_path: &std::path::Path,
 ) {
     let hook_id = tracedecay_hooks::envelope_identity_hash16("project", project_id.as_str());
-    let _ = tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
+    let _ = tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner(
         hook_id,
         graph_db_path,
     );
@@ -581,7 +581,7 @@ mod tests {
             .context_scout_owner()
             .expect("writable open registers a Context Scout owner");
         assert_eq!(
-            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+            tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
                 hook_id
             )
             .len(),
@@ -590,14 +590,14 @@ mod tests {
 
         retire_registered_context_scout_owner(&project_id, &graph.db_path());
         assert!(
-            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+            tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
                 hook_id
             )
             .is_empty(),
             "retirement must remove the process-global Context Scout owner"
         );
 
-        tracedecay_store_runtime::register_registered_schema_installer();
+        tracedecay_global_db::register_registered_schema_installer();
         let replacement_root = tempfile::TempDir::new().expect("replacement database");
         let replacement_path = replacement_root.path().join("graph.db");
         let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
@@ -614,7 +614,7 @@ mod tests {
         .expect("replacement database")
         .0;
         let fresh =
-            tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+            tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 replacement.clone(),
                 hook_id,
                 tracedecay_domain::UtcMicros(2),
@@ -630,7 +630,7 @@ mod tests {
             fresh.store().database().canonical_database_path(),
             replacement.canonical_database_path()
         );
-        tracedecay_agent_hosts::agents::context_scout_owner::unregister_registered_context_scout_owner(
+        tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner(
             hook_id,
             replacement.canonical_database_path(),
         );

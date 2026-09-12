@@ -15,7 +15,7 @@ use tracedecay_contracts::{
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
-use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
+use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest, sha256_hex_suffix};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
@@ -1689,7 +1689,7 @@ fn validate_admission_shape(admission: &DurableAutomationAdmission) -> Result<()
 }
 
 fn validate_sha256_text(digest: &str) -> Result<()> {
-    let Some(raw) = digest.strip_prefix("sha256:") else {
+    let Some(raw) = sha256_hex_suffix(digest) else {
         return Err(contract_error(
             "automation recovery source digest is not canonical SHA-256",
         ));

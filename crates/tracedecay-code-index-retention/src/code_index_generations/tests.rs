@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
+use tracedecay_domain::sha256_hex_suffix;
 
 mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
@@ -530,7 +531,7 @@ fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
         let state_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
         let file = format!(
             "generation-{}.json",
-            state_digest.strip_prefix("sha256:").expect("digest prefix")
+            sha256_hex_suffix(&state_digest).expect("digest prefix")
         );
         let size_bytes = u64::try_from(bytes.len()).expect("fixture size fits u64");
         std::fs::write(generations_root.join(&file), bytes).expect("write generation fixture");
@@ -765,10 +766,7 @@ fn text_artifact_retention_preserves_references_and_collects_orphans() {
     std::fs::write(&staging_path, b"abandoned staging").expect("write stale staging");
     let active_staging_name = format!(
         ".text-artifact-{}.staging",
-        active
-            .state_digest
-            .strip_prefix("sha256:")
-            .expect("active sealed digest")
+        sha256_hex_suffix(&active.state_digest).expect("active sealed digest")
     );
     let active_staging_path = artifacts_root.join(&active_staging_name);
     std::fs::write(&active_staging_path, b"resumable active staging")
@@ -1277,7 +1275,7 @@ fn pad_generation_file(
     let state_digest = encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&bytes));
     let file = format!(
         "generation-{}.json",
-        state_digest.strip_prefix("sha256:").expect("digest prefix")
+        sha256_hex_suffix(&state_digest).expect("digest prefix")
     );
     let size_bytes = u64::try_from(bytes.len()).expect("fixture size fits u64");
     std::fs::write(generations_root.join(&file), bytes).expect("write padded generation");
@@ -2688,10 +2686,7 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     let active = generations.last().expect("active generation");
     let artifacts_root = code_text_artifacts_root(store.path());
     std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
-    let active_digest = active
-        .state_digest
-        .strip_prefix("sha256:")
-        .expect("active sealed digest");
+    let active_digest = sha256_hex_suffix(&active.state_digest).expect("active sealed digest");
     let active_staging = artifacts_root.join(format!(".text-artifact-{active_digest}.staging"));
     std::fs::write(&active_staging, b"resumable active staging").expect("write active staging");
     let active_sidecar =

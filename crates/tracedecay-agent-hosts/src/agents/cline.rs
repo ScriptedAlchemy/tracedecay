@@ -61,11 +61,11 @@ impl AgentIntegration for ClineIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
-            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        if component != super::host_bundle::HostBundleComponentV1::ContextMcp {
+            return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
         mcp_servers_registration_state(&cline_mcp_settings_path(&ctx.home))
     }
@@ -83,10 +83,10 @@ impl AgentIntegration for ClineIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
             let path = cline_mcp_settings_path(home);
             vec![path.clone(), config_backup_path(&path)]
         } else {
@@ -97,10 +97,10 @@ impl AgentIntegration for ClineIntegration {
     #[hotpath::measure(label = "cline_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             install_mcp_server_entry(
                 &cline_mcp_settings_path(&ctx.home),
                 "mcpServers",
@@ -120,10 +120,10 @@ impl AgentIntegration for ClineIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             uninstall_mcp_server_entry(
                 &cline_mcp_settings_path(&ctx.home),
                 "mcpServers",

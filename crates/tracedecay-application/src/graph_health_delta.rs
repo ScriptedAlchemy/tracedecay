@@ -13,7 +13,7 @@ use tracedecay_contracts::{ApplicationContractError, ObservabilityApplicationV1}
 use tracedecay_domain::{
     CoverageStateV1, HealthDimensionObservedV1, HealthSnapshotObservedV1, ManifestDigest,
     ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
-    ObservabilityTerminalResultV1, UtcMicros, canonical_sha256,
+    ObservabilityTerminalResultV1, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -155,7 +155,7 @@ fn health_delta_cursor(scope: &HealthDeltaScopeV1, generation: &str) -> Result<S
     })?;
     Ok(format!(
         "{HEALTH_DELTA_CURSOR_PREFIX}{}",
-        digest.as_str().strip_prefix("sha256:").unwrap_or_default()
+        sha256_hex_suffix(digest.as_str()).unwrap_or_default()
     ))
 }
 

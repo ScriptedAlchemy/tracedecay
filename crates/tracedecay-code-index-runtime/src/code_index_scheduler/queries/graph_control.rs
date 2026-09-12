@@ -3,15 +3,17 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tracedecay_contracts::RequestContext;
 use tracedecay_domain::{RetrievalBudget, UtcMicros};
-use tracedecay_query::retrieval::graph::GraphExecutionControl;
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 
-pub struct CallableGraphExecutionControl {
+pub struct CallableRetrievalExecutionControl {
     request: RequestContext,
     started_at: Instant,
 }
 
-impl CallableGraphExecutionControl {
-    pub fn for_request(request: &RequestContext) -> Arc<dyn GraphExecutionControl> {
+impl CallableRetrievalExecutionControl {
+    pub fn for_request(
+        request: &RequestContext,
+    ) -> Arc<dyn RetrievalExecutionControl> {
         Arc::new(Self {
             request: request.clone(),
             started_at: Instant::now(),
@@ -19,7 +21,7 @@ impl CallableGraphExecutionControl {
     }
 }
 
-impl GraphExecutionControl for CallableGraphExecutionControl {
+impl RetrievalExecutionControl for CallableRetrievalExecutionControl {
     fn is_cancelled(&self) -> bool {
         self.request.cancellation().is_cancelled()
     }

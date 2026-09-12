@@ -11,7 +11,7 @@ use crate::advisory::ci_runtime::{CiSourceAccessAuthorityV1, CiSourceAccessOutco
 use crate::source_authorization::{
     ProjectSourceAccessOutcome, project_source_access_snapshot_for_request,
 };
-use tracedecay_configuration::ConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationControlStore;
 
 pub struct ConfiguredGitHubSourceAccessAuthorityV1<C> {
     configuration: C,

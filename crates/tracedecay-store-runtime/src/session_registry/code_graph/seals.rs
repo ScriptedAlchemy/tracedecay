@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_directory};
 
@@ -116,7 +117,8 @@ pub(super) fn stage_project_graph_replay_unlink(
     replay_root: &Path,
     sealed_digest: &SealedGraphStateDigest,
 ) -> Result<Option<StagedReplayUnlink>, GraphDbError> {
-    let digest = digest_hex(sealed_digest)?;
+    let digest = sha256_hex_suffix(sealed_digest.as_str())
+        .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))?;
     let path = replay_root.join(format!("generation-{digest}.json"));
     match path.symlink_metadata() {
         Ok(metadata) => {
@@ -180,7 +182,8 @@ pub(super) fn finalize_project_graph_replay_unlink(
     sealed_digest: &SealedGraphStateDigest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(), GraphDbError> {
-    let digest = digest_hex(sealed_digest)?;
+    let digest = sha256_hex_suffix(sealed_digest.as_str())
+        .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))?;
     let verified = verify_seal_digest(&staged.path, digest, check);
     let _pool = lock_project_graph_replay_pool(replay_root, check)?;
     if !staged_identity_matches(&staged.path, &staged.file, &staged.fingerprint)? {
@@ -265,7 +268,8 @@ pub(super) fn prove_stable_sealed_source(
     sealed_state_digest: &SealedGraphStateDigest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<StableSealedSourceProofV1, GraphDbError> {
-    let digest = digest_hex(sealed_state_digest)?;
+    let digest = sha256_hex_suffix(sealed_state_digest.as_str())
+        .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))?;
     let _pool = lock_project_graph_replay_pool(replay_root, check)?;
     let path = resolve_stable_seal_path(generations_root, replay_root, digest)?;
     let file = File::open(&path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
@@ -319,13 +323,6 @@ fn lock_code_generation_store(
             None => std::thread::park_timeout(Duration::from_millis(5)),
         }
     }
-}
-
-fn digest_hex(sealed: &SealedGraphStateDigest) -> Result<&str, GraphDbError> {
-    sealed
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or_else(|| GraphDbError::invalid("code generation replay digest is not sha256"))
 }
 
 fn sync_replay_root(replay_root: &Path) -> Result<(), GraphDbError> {
