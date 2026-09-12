@@ -553,12 +553,6 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
     })
     .await;
 
-    // Subscribe before the opens so a seat that lands during them is observed
-    // on the next `changed()`.
-    let mut serving_seats = engine
-        .invocation
-        .code_index_schedulers
-        .subscribe_serving_seats();
     let (primary_server, linked_server) = tokio::join!(
         engine.project_server(&primary_handshake),
         engine.project_server(&linked_handshake),
@@ -598,33 +592,47 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
         (route.clone(), scope)
     });
 
-    // Both routes index behind their opens. Wait on the serving-seat signal —
-    // recorded exactly when a complete (graph-bearing) generation is seated,
-    // the same signal the deferred project-open owners wait on — until each
-    // route seats a generation of its own; the bound is the deferred-mount
-    // bound `fresh_committed_project_open_mounts_feedback_before_lsp` uses.
-    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+    // Both routes index behind their opens. Complete-generation decoding is an
+    // explicit consumer demand, so route readiness is the current retained
+    // text owner plus its verified persistent graph. Poll the canonical
+    // freshness authority: the decoded-seat signal intentionally does not move
+    // when this lightweight owner becomes current.
+    let readiness = tokio::time::timeout(std::time::Duration::from_secs(90), async {
         loop {
-            let mut seated = true;
-            for (route, scope) in &route_scopes {
-                seated &= engine
+            let mut ready = true;
+            for (_, scope) in &route_scopes {
+                ready &= engine
                     .invocation
                     .code_index_schedulers
-                    .latest_complete_serving_for_root_scope(route, scope)
+                    .retained_text_owner_freshness_for_scope(scope)
                     .await
-                    .is_some();
+                    .is_some_and(|(owner, current)| {
+                        current && owner.interactive_graph_store().is_ok()
+                    });
             }
-            if seated {
+            if ready {
                 break;
             }
-            serving_seats
-                .changed()
-                .await
-                .expect("serving-seat signal must outlive the open routes");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("both worktree routes must seat a complete generation within the project-open bound");
+    .await;
+    if readiness.is_err() {
+        let primary_status = engine
+            .invocation
+            .code_index_schedulers
+            .dashboard_freshness(&primary)
+            .await;
+        let linked_status = engine
+            .invocation
+            .code_index_schedulers
+            .dashboard_freshness(&linked)
+            .await;
+        panic!(
+            "both worktree routes must become current within the project-open bound; \
+             primary={primary_status:?}; linked={linked_status:?}"
+        );
+    }
 
     let linked_session_id = "session.opted-in-linked-follow-up";
     notify_workspace_open(linked_server.as_ref(), linked_session_id, &linked).await;
