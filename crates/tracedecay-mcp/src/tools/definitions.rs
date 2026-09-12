@@ -416,7 +416,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_files(),
         def_multi_root_scope_set_read(),
         def_multi_root_scope_set_compare_and_swap(),
-        def_multi_root_execute(),
+        def_multi_root_execute()?,
         def_remote_status_read(),
         def_affected(),
         def_dead_code(),

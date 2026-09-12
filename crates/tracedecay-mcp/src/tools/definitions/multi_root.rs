@@ -2,8 +2,8 @@
 
 use serde_json::json;
 
-use super::{def, def_rw, required_object_schema};
-use crate::ToolDefinition;
+use super::{def, def_rw, mcp_input_schema, required_object_schema};
+use crate::{McpCatalogError, ToolDefinition};
 
 fn selector_schema() -> serde_json::Value {
     required_object_schema(
@@ -66,38 +66,15 @@ pub(super) fn def_multi_root_scope_set_compare_and_swap() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_multi_root_execute() -> ToolDefinition {
-    def(
+pub(super) fn def_multi_root_execute() -> Result<ToolDefinition, McpCatalogError> {
+    let canonical = serde_json::to_value(schemars::schema_for!(
+        tracedecay_contracts::MultiRootExecuteRequestV1
+    ))
+    .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
+    Ok(def(
         "tracedecay_multi_root_execute",
         "Execute a frozen multi-root query",
         "Execute one closed query family against an exact saved scope-set revision. Continuations are daemon-authenticated and retain frozen root generations.",
-        required_object_schema(
-            json!({
-                "scope_set_id": {"type": "string"},
-                "scope_set_revision": {"type": "integer", "minimum": 1},
-                "scope_set_digest": {"type": "string"},
-                "operation": {
-                    "oneOf": [
-                        {"type": "object", "properties": {"kind": {"const": "work"}, "request": {}}, "required": ["kind", "request"]},
-                        {"type": "object", "properties": {"kind": {"const": "git"}, "request": {}}, "required": ["kind", "request"]},
-                        {"type": "object", "properties": {"kind": {"const": "feedback"}, "request": {}}, "required": ["kind", "request"]},
-                        {"type": "object", "properties": {"kind": {"const": "impact"}, "request": {}}, "required": ["kind", "request"]},
-                        {"type": "object", "properties": {"kind": {"const": "query"}, "request": {}}, "required": ["kind", "request"]}
-                    ]
-                },
-                "page": {"type": "integer", "minimum": 0},
-                "continuation": {
-                    "type": ["string", "null"],
-                    "description": "Daemon-authenticated continuation from the previous multi-root page."
-                }
-            }),
-            &[
-                "scope_set_id",
-                "scope_set_revision",
-                "scope_set_digest",
-                "operation",
-                "page",
-            ],
-        ),
-    )
+        mcp_input_schema(&canonical),
+    ))
 }

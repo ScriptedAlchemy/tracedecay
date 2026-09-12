@@ -142,6 +142,45 @@ fn whole_payload_invocation_parses_without_a_tool_definition() {
 }
 
 #[test]
+fn multi_root_execute_accepts_its_emitted_continuation_object() {
+    let digest = |byte: char| {
+        tracedecay_domain::ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
+            .expect("test digest")
+    };
+    let generation = tracedecay_domain::RootScopeOutcomeV1::new(
+        digest('b'),
+        tracedecay_domain::ScopeOutcome::<tracedecay_domain::RootGenerationV1>::Denied,
+    )
+    .expect("denied root generation");
+    let emitted = tracedecay_contracts::MultiRootContinuationV1::new(
+        digest('a'),
+        vec![generation],
+        digest('c'),
+        digest('d'),
+        1,
+    )
+    .expect("page-zero continuation");
+    let continuation = serde_json::to_value(emitted).expect("emitted continuation JSON");
+    let arguments = json!({
+        "scope_set_id": "scope-set.cli-replay",
+        "scope_set_revision": 1,
+        "scope_set_digest": format!("sha256:{}", "a".repeat(64)),
+        "operation": {"kind": "query", "request": {}},
+        "page": 1,
+        "continuation": continuation
+    });
+
+    let parsed = parse_invocation_with_stdin(
+        &def("multi_root_execute"),
+        &["--args".to_owned(), arguments.to_string()],
+        || panic!("inline JSON must not read stdin"),
+    )
+    .expect("the public CLI must replay the continuation emitted by page zero");
+
+    assert_eq!(parsed.tool_args["continuation"], continuation);
+}
+
+#[test]
 fn whole_payload_invocation_defers_schema_dependent_flags() {
     for args in [
         vec!["--query".to_owned(), "needle".to_owned()],
