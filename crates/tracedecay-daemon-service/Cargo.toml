@@ -31,7 +31,6 @@ tower = { version = "0.5", features = ["util"] }
 tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 axum = "0.8"
-futures-util = "0.3.33"
 getrandom = "0.2"
 hex = "0.4"
 hotpath.workspace = true
