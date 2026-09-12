@@ -8377,6 +8377,52 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_currency_witness_refuses_a_stale_generation() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _) = mounted_core_query_worktree(&fixture, &store).await;
+    let stale = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let stale_generation = stale.generation().manifest().generation_id.clone();
+    let stale_content = stale.generation().snapshot().content_identity.clone();
+
+    fixture.edit("src/main.rs", "fn main() { changed(); }\n");
+    git(fixture.path(), &["commit", "-qam", "publish successor"]);
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+            .await,
+        "the changed source is admitted to the retained worker"
+    );
+    let successor = wait_for_generation_change(&registry, fixture.path(), &stale_generation).await;
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree source fence");
+
+    assert!(
+        source_freshness
+            .source_currency_witness_for(&stale_generation, &stale_content)
+            .is_none(),
+        "a generation whose sealed content predates the freshness proof cannot obtain a witness"
+    );
+    assert!(
+        source_freshness
+            .source_currency_witness_for(
+                &successor,
+                &wait_for_live_complete_generation(&registry, fixture.path())
+                    .await
+                    .generation()
+                    .snapshot()
+                    .content_identity,
+            )
+            .is_some(),
+        "the exact generation proved by the freshness fence obtains a witness"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
     let store = TempDir::new().expect("store root");

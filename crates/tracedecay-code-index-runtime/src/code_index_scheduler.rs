@@ -5595,9 +5595,16 @@ impl SourceFreshnessFenceV1 {
     fn source_currency_witness_for(
         &self,
         generation_id: &CodeGenerationId,
+        snapshot_content_identity: &ContentDigest,
     ) -> Option<ServingSourceWitnessV1> {
         let state = self.snapshot();
-        if !state.verified_against_source || state.source_witness.is_none() {
+        if !state.verified_against_source
+            || !state.source_witness.as_ref().is_some_and(|witness| {
+                witness
+                    .content_manifest
+                    .describes_snapshot(snapshot_content_identity)
+            })
+        {
             return None;
         }
         Some(ServingSourceWitnessV1 {
@@ -7804,9 +7811,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn source_currency_witness_for(
         &self,
         generation_id: &CodeGenerationId,
+        snapshot_content_identity: &ContentDigest,
     ) -> Option<ServingSourceWitnessV1> {
         self.freshness_fence
-            .source_currency_witness_for(generation_id)
+            .source_currency_witness_for(generation_id, snapshot_content_identity)
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
