@@ -357,13 +357,9 @@ where
 
 /// Read one MCP/daemon JSON-RPC line with the dedicated frame ceiling.
 ///
-/// Oversized input is discarded through newline/EOF and returned as the typed
-/// IO error carrying only a bounded leading prefix for request-id inspection.
-///
-/// The returned future owns the partial-frame accumulator, so it is NOT
-/// cancellation-safe: callers that race it inside `tokio::select!` must either
-/// pin one future across the whole wait or, preferably, hold a
-/// [`BoundedLineReader`] whose state survives a dropped read.
+/// Test helper only. Production callers hold a [`BoundedLineReader`] so a
+/// dropped read future does not lose the partial-frame accumulator.
+#[cfg(test)]
 pub async fn read_bounded_mcp_line<R>(reader: &mut R) -> io::Result<Option<String>>
 where
     R: AsyncBufRead + Unpin,
