@@ -73,9 +73,12 @@ pub(super) fn registered_context(
     cg: TraceDecay,
     authority: &WriterTestFixtureAuthority,
 ) -> McpServerConstructionContext {
-    let mut context = registered_runtime(authority)
-        .mcp_server_context_for_test(cg, None)
-        .expect("registered MCP server context");
+    let mut context = crate::test_support::host_admission::mcp_server_context_for_test(
+        registered_runtime(authority),
+        cg,
+        None,
+    )
+    .expect("registered MCP server context");
     // These fixtures assert exact code-index reconcile-sink accounting.
     // Startup catch-up admits one reconciliation through that same sink
     // (its contract is covered by `background_refresh_writer_tests`), so it

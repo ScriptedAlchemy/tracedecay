@@ -309,9 +309,12 @@ async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
     git(repo.path(), &["branch", "-q", "-D", "feature-11"]);
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open(repo.path())
-            .await
-            .expect("open project graph"),
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .expect("open project graph"),
     );
     let data_root = graph.store_layout().data_root.clone();
     let discovery = discover_open_prs_with_control(repo.path(), default_pr_command_control())
@@ -533,9 +536,12 @@ async fn manual_branch_activates_when_scheduler_is_injected() {
     init_manual_branch_repo(repo.path(), "feature-manual");
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open(repo.path())
-            .await
-            .expect("open project graph"),
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .expect("open project graph"),
     );
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
     let activation =
@@ -589,9 +595,12 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     let linked = linked_parent.path().join("linked");
     init_manual_branch_repo(repo.path(), "feature-retained-refusal");
 
-    let graph = crate::project::TraceDecay::open(repo.path())
-        .await
-        .expect("open writable parent graph");
+    let graph = crate::project::TraceDecay::open_with_options_for_test(
+        repo.path(),
+        crate::project::TraceDecayOpenOptions::default(),
+    )
+    .await
+    .expect("open writable parent graph");
     let current = graph
         .configuration_runtime()
         .client()
@@ -644,9 +653,12 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     graph.close();
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open_read_only(repo.path())
-            .await
-            .expect("reopen parent graph from persisted configuration"),
+        crate::project::TraceDecay::open_read_only_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .expect("reopen parent graph from persisted configuration"),
     );
     assert!(
         !graph.get_config().native_graph_activation,
@@ -735,7 +747,14 @@ async fn manual_branch_identity_keeps_slashed_and_underscored_names_disjoint() {
     git(repo.path(), &["commit", "-qm", "underscored feature"]);
     git(repo.path(), &["checkout", "-q", "main"]);
 
-    let graph = Arc::new(crate::project::TraceDecay::open(repo.path()).await.unwrap());
+    let graph = Arc::new(
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .unwrap(),
+    );
     let data_root = graph.store_layout().data_root.clone();
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
     let slashed = activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/a")
@@ -778,7 +797,14 @@ async fn manual_branch_stages_new_head_without_replacing_published_worktree() {
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/advance");
-    let graph = Arc::new(crate::project::TraceDecay::open(repo.path()).await.unwrap());
+    let graph = Arc::new(
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .unwrap(),
+    );
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
     let initial =
         activate_manual_branch_head(repo.path(), &graph, Some(&schedulers), "feature/advance")
@@ -942,7 +968,14 @@ async fn manual_branch_activation_refuses_exact_lifecycle_contention_before_muta
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/contended");
-    let graph = Arc::new(crate::project::TraceDecay::open(repo.path()).await.unwrap());
+    let graph = Arc::new(
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .unwrap(),
+    );
     let lifecycle =
         try_acquire_manual_branch_lifecycle(&graph.store_layout().data_root, "feature/contended")
             .expect("first lifecycle owner");
@@ -979,7 +1012,14 @@ async fn failed_manual_branch_sealing_retires_the_exact_mount_worktree_and_track
 
     let repo = tempfile::tempdir().unwrap();
     init_manual_branch_repo(repo.path(), "feature/failure-cleanup");
-    let graph = Arc::new(crate::project::TraceDecay::open(repo.path()).await.unwrap());
+    let graph = Arc::new(
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .unwrap(),
+    );
     let data_root = graph.store_layout().data_root.clone();
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
     let lifecycle = try_acquire_manual_branch_lifecycle(&data_root, "feature/failure-cleanup")
@@ -1035,9 +1075,12 @@ async fn manual_branch_fails_closed_without_scheduler_before_git_or_state_mutati
     init_manual_branch_repo(repo.path(), "feature-denied");
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open(repo.path())
-            .await
-            .expect("open project graph"),
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .expect("open project graph"),
     );
     let data_root = graph.store_layout().data_root.clone();
     let error = activate_manual_branch_head(repo.path(), &graph, None, "feature-denied")
@@ -1072,9 +1115,12 @@ async fn manual_branch_missing_ref_is_typed_failure() {
     init_manual_branch_repo(repo.path(), "feature-present");
 
     let graph = Arc::new(
-        crate::project::TraceDecay::open(repo.path())
-            .await
-            .expect("open project graph"),
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .expect("open project graph"),
     );
     let data_root = graph.store_layout().data_root.clone();
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
@@ -1121,9 +1167,12 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
     let branch = "feature/stalled-exact-read";
     init_manual_branch_repo(repo.path(), branch);
     let graph = Arc::new(
-        crate::project::TraceDecay::open(repo.path())
-            .await
-            .expect("open project graph"),
+        crate::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            crate::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .expect("open project graph"),
     );
     let data_root = graph.store_layout().data_root.clone();
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);

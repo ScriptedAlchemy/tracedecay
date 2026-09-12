@@ -1084,8 +1084,7 @@ async fn server_with_broker_and_runtime(
     runtime: Arc<HostAdmissionTestRuntimeV1>,
 ) -> Arc<McpServer> {
     let mut context = with_broker(
-        runtime
-            .mcp_server_context_for_test(cg, None)
+        crate::test_support::host_admission::mcp_server_context_for_test(runtime, cg, None)
             .expect("registered MCP server context"),
         broker,
         reconcile_sink,

@@ -7,7 +7,7 @@ use super::TraceDecay;
 
 impl TraceDecay {
     #[hotpath::measure(label = "lifecycle.register_project_store", future = true)]
-    pub(crate) async fn register_project_store_in_global_registry(&self) -> Result<()> {
+    pub async fn register_project_store_in_global_registry(&self) -> Result<()> {
         tracedecay_global_db::register_project_store(
             self.profile_database.as_ref(),
             &self.project_root,

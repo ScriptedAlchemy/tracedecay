@@ -11,7 +11,7 @@ use super::{MovedStoreAdoption, TraceDecay, TraceDecayOpenOptions};
 
 impl TraceDecay {
     #[hotpath::measure(label = "lifecycle.resolve_registered_layout", future = true)]
-    pub(crate) async fn resolve_registered_configuration_layout(
+    pub async fn resolve_registered_configuration_layout(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
         registry_database: &RegisteredGlobalDb,
@@ -36,7 +36,7 @@ impl TraceDecay {
     /// in that a project with no enrollment marker or registry match falls
     /// through to a default identity instead of failing closed.
     #[hotpath::skip]
-    pub(crate) async fn resolve_first_touch_configuration_layout(
+    pub async fn resolve_first_touch_configuration_layout(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
         registry_database: &RegisteredGlobalDb,
@@ -55,7 +55,7 @@ impl TraceDecay {
     /// explicit operator adoption decision; ambient first-touch passes
     /// [`MovedStoreAdoption::Never`] and always mints fresh.
     #[hotpath::measure(label = "lifecycle.resolve_first_touch_layout", future = true)]
-    pub(crate) async fn resolve_first_touch_configuration_layout_with_adoption(
+    pub async fn resolve_first_touch_configuration_layout_with_adoption(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
         registry_database: &RegisteredGlobalDb,
