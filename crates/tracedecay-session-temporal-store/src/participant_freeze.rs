@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde_json::Value;
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{SessionId, SignedCursorKeyRefV1};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_temporal_query::ports::{
@@ -160,7 +161,9 @@ pub(super) async fn freeze_prepared_candidate_participants(
         });
     }
     if keys.len() > MAX_TEMPORAL_PARTICIPANTS {
-        return Err(SessionTemporalExecutionError::BudgetExhausted);
+        return Err(SessionTemporalExecutionError::BudgetExhausted {
+            stage: SessionRetrievalBudgetStageV1::ParticipantManifestParticipants,
+        });
     }
     let encoded_keys = serde_json::to_string(
         &keys
@@ -804,10 +807,21 @@ mod tests {
             .freeze(&root_execution_request("needle cohort"))
             .await;
 
-        assert!(matches!(
-            result,
-            Err(SessionTemporalExecutionError::BudgetExhausted)
-        ));
+        let refusal = result.err().map(|error| format!("{error:?}"));
+        assert_eq!(
+            refusal.as_deref(),
+            Some(
+                format!(
+                    "{:?}",
+                    SessionTemporalExecutionError::BudgetExhausted {
+                        stage: SessionRetrievalBudgetStageV1::CandidateReadExhausted,
+                    }
+                )
+                .as_str()
+            ),
+            "a common root hit must name the candidate read budget, not the \
+             participant manifest limit"
+        );
     }
 
     #[tokio::test]

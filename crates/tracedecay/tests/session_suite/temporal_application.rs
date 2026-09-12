@@ -305,7 +305,9 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
             "execution-deleted" => Some(SessionTemporalExecutionError::Deleted),
             "execution-denied" => Some(SessionTemporalExecutionError::Denied),
             "execution-unavailable" => Some(SessionTemporalExecutionError::Unavailable),
-            "execution-budget" => Some(SessionTemporalExecutionError::BudgetExhausted),
+            "execution-budget" => Some(SessionTemporalExecutionError::BudgetExhausted {
+                stage: SessionRetrievalBudgetStageV1::RecordReadExhausted,
+            }),
             "execution-cancelled" => Some(SessionTemporalExecutionError::Cancelled),
             _ => None,
         };
@@ -1865,8 +1867,10 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
     ));
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("execution-budget")).await,
+        // The store names the boundary it refused at; the service forwards it
+        // instead of re-labelling every refusal as work-unit exhaustion.
         SessionRetrievalOutcome::BudgetExhausted {
-            stage: SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+            stage: SessionRetrievalBudgetStageV1::RecordReadExhausted,
         }
     ));
     assert!(matches!(

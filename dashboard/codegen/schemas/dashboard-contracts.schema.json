@@ -18343,9 +18343,12 @@
         "request_hydration_bytes",
         "estimator_version_mismatch",
         "execution_work_exhausted",
+        "candidate_read_exhausted",
+        "record_read_exhausted",
         "kernel_result_limit",
         "participant_manifest_participants",
         "participant_manifest_canonical_bytes",
+        "cursor_manifest_limit",
         "hydration_bytes",
         "context_bytes",
         "context_tokens"

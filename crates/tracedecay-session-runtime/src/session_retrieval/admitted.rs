@@ -447,8 +447,8 @@ fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescr
             LcmDescribeServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalServiceOutcome::CursorStale => LcmDescribeServiceOutcome::CursorStale,
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            LcmDescribeServiceOutcome::BudgetExhausted
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+            LcmDescribeServiceOutcome::BudgetExhausted { stage }
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,
@@ -476,8 +476,8 @@ fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandS
             LcmExpandServiceOutcome::ResetRequired { store_scope }
         }
         SessionRetrievalServiceOutcome::CursorStale => LcmExpandServiceOutcome::CursorStale,
-        SessionRetrievalServiceOutcome::BudgetExhausted { .. } => {
-            LcmExpandServiceOutcome::BudgetExhausted
+        SessionRetrievalServiceOutcome::BudgetExhausted { stage } => {
+            LcmExpandServiceOutcome::BudgetExhausted { stage }
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,
