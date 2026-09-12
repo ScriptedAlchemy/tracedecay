@@ -831,6 +831,7 @@ def prime_fixture_values(
             client, tool, arguments, deadline_ms
         ),
         deadline,
+        effect_target,
     )
     if "tracedecay_workflow_validate_definition" in policies:
         prime_workflow_lifecycle(
@@ -1145,6 +1146,8 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         }
     if name == "tracedecay_work_prepare_graph_mutation":
         return dict(fixture["work_prepare_create_arguments"])
+    if name == "tracedecay_work_prepare_duplicate_adjudication":
+        return dict(fixture["work_duplicate_arguments"])
     if name == "tracedecay_work_run_control":
         return {
             "task_id": fixture["work_task_id"],
