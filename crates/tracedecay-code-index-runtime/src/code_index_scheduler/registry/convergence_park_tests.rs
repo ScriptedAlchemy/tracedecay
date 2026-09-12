@@ -130,10 +130,9 @@ impl Fixture {
     async fn wait_for_freshness(
         &self,
         accept: impl Fn(
-            &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1,
+            &tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1,
         ) -> bool,
-    ) -> Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1>
-    {
+    ) -> Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1> {
         let deadline = tokio::time::Instant::now() + CONVERGENCE_DEADLINE;
         let mut last = None;
         while tokio::time::Instant::now() < deadline {

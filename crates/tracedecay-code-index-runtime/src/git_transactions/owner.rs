@@ -29,9 +29,9 @@ use super::{
 };
 use crate::ports::ApplicationCatalogSnapshotErrorV1;
 use tracedecay_application::ProjectSourceAccessSnapshot;
-use tracedecay_application::configuration::ConfigurationControlStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::ConfigurationControlStore;
 
 const GIT_POLICY_REVISION: u64 = 2;
 

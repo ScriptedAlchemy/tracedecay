@@ -57,7 +57,7 @@ impl OrphanStoreRecordV1 {
 
 /// Exact code-generation retention census. `superseded_*` reports every sealed
 /// generation except the active pointer target; `collectable_*` is the subset
-/// outside the vector-readable live set and rollback floor.
+/// outside the vector-readable live set.
 ///
 /// `stranded_scope_*` counts a disjoint storage class one level up: whole
 /// `code-index-v1/<scope>/` directories whose canonical project root no longer

@@ -1,5 +1,5 @@
-//! Session retrieval, project memory, provider usage, and runtime telemetry
-//! use cases, extracted from `tracedecay-application` so session-facing adapters
+//! Session retrieval, project memory, and provider usage use cases,
+//! extracted from `tracedecay-application` so session-facing adapters
 //! (`tracedecay-automation-runtime`, `tracedecay-host-admission`,
 //! `tracedecay-mcp`, `tracedecay-cli`) compile without the advisory,
 //! semantic-runtime, and code-index surfaces that crate carries.
@@ -22,7 +22,6 @@ pub mod observability_store;
 pub mod provider_pricing;
 pub mod provider_usage;
 pub mod response_handles;
-pub mod runtime_telemetry;
 pub mod session;
 pub mod transcript;
 pub mod user_config;

@@ -33,7 +33,7 @@ fn isolated_pool() -> (tempfile::TempDir, std::path::PathBuf) {
 /// typed busy result instead of a deadline-free flock. Nothing is exposed.
 #[test]
 fn publisher_between_probe_and_execute_defers_without_exposure() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     ensure_replay_pool(&pool_root);
 
@@ -43,7 +43,7 @@ fn publisher_between_probe_and_execute_defers_without_exposure() {
     drop(probe);
 
     let publisher = hold_replay_pool(&pool_root);
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     assert!(
         !plan.collectable_generations.is_empty(),
@@ -110,7 +110,6 @@ fn segment_only_sweep_defers_while_the_replay_pool_is_held() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         Some(&pool_root),
     )
@@ -178,7 +177,6 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
     let error = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         Some(&pool_root),
     )
@@ -193,7 +191,6 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         Some(&pool_root),
     )
@@ -211,7 +208,6 @@ fn segment_sweep_marks_a_replay_unlink_while_staged() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(123),
         Some(&pool_root),
@@ -249,10 +245,10 @@ fn checked_acquire_returns_cancelled_without_waiting_out_the_budget() {
 
 #[test]
 fn execute_cancels_held_pool_acquire_before_any_exposure() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     let publisher = hold_replay_pool(&pool_root);
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let checks = AtomicUsize::new(0);

@@ -37,9 +37,7 @@ use tracedecay_application::semantic_runtime::{
 use tracedecay_application::store::vector_generations::{
     GraphVectorGenerationStoreV1, SemanticVectorStageDescriptorV1, VectorGenerationPlanV1,
 };
-use tracedecay_code_index_retention::code_index_generations::{
-    DEFAULT_SUPERSEDED_GENERATION_FLOOR, prepare_next_code_generation_retention_cancellable,
-};
+use tracedecay_code_index_retention::code_index_generations::prepare_next_code_generation_retention_cancellable;
 use tracedecay_store::{
     GraphPublicationKeyV1, GraphVerifiedHeadV1, SemanticVectorPublishedGenerationKey,
     SemanticVectorPublishedGenerationLookup, SemanticVectorStageBatchReceipt,
@@ -846,7 +844,6 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
     let plan = prepare_next_code_generation_retention_cancellable(
         &code_store_root,
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         Some(&graph_replay_pool_root),
     )
@@ -1751,7 +1748,6 @@ async fn mounted_default_off_retention_requires_an_empty_vector_census() {
     let plan = prepare_next_code_generation_retention_cancellable(
         &code_store,
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         Some(&graph_replay_pool_root),
     )
