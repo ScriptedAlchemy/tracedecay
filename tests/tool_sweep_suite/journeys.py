@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any, Callable
 
@@ -24,6 +25,7 @@ class JourneyError(RuntimeError):
 
 
 Call = Callable[[str, dict[str, Any], int], dict[str, Any]]
+Probe = Callable[[str, dict[str, Any], int], dict[str, Any]]
 Deadline = Callable[[str], int]
 
 
@@ -31,6 +33,7 @@ Deadline = Callable[[str], int]
 class PreparedJourney:
     arguments: dict[str, Any]
     cleanup: Callable[[dict[str, Any]], str]
+    settlement: str = "verified"
 
 
 def _fact_trust(response: dict[str, Any], fact_id: str | int) -> float | None:
@@ -82,6 +85,589 @@ def _object_field(response: dict[str, Any], name: str) -> dict[str, Any]:
         if isinstance(candidate, dict):
             return candidate
     raise JourneyError(f"producer omitted its structured {name}")
+
+
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_WORKFLOW_LIFECYCLE_EFFECTS = frozenset(
+    {
+        "tracedecay_workflow_register_definition",
+        "tracedecay_workflow_activate_definition",
+        "tracedecay_workflow_retire_definition",
+        "tracedecay_workflow_reject_definition",
+        "tracedecay_workflow_start_run",
+        "tracedecay_workflow_pause_run",
+        "tracedecay_workflow_resume_run",
+        "tracedecay_workflow_cancel_run",
+    }
+)
+
+
+def _manifest_digest(value: Any, field: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise JourneyError(f"producer omitted its canonical {field}")
+    return value
+
+
+def _workflow_policy_digest(response: dict[str, Any]) -> str:
+    for value in objects(response):
+        policy = value.get("policy")
+        if isinstance(policy, dict) and "digest" in policy:
+            return _manifest_digest(policy["digest"], "Workflow policy digest")
+    raise JourneyError("configuration evidence omitted its Workflow policy digest")
+
+
+def _workflow_catalog_digest(response: dict[str, Any]) -> str:
+    for value in objects(response):
+        diagnostic = value.get("diagnostic")
+        if not isinstance(diagnostic, dict):
+            continue
+        if diagnostic.get("code") != "workflow.catalog.pin_mismatch":
+            continue
+        message = diagnostic.get("message")
+        if not isinstance(message, str):
+            break
+        match = re.search(
+            r"pinned_catalog_digest expected (sha256:[0-9a-f]{64}), observed ",
+            message,
+        )
+        if match is not None:
+            return match.group(1)
+    raise JourneyError("Workflow catalog probe omitted its current digest diagnostic")
+
+
+def _workflow_definition(
+    *,
+    definition_id: str,
+    version: int,
+    project_id: str,
+    policy_digest: str,
+    configuration_digest: str,
+    catalog_digest: str,
+    changed: bool = False,
+) -> dict[str, Any]:
+    return {
+        "definition_id": definition_id,
+        "definition_version": version,
+        "project_id": project_id,
+        "steps": [
+            {
+                "step_id": "step.tool-sweep.inspect",
+                "operation": "operation.work.start_attempt",
+                "predecessors": [],
+                "inputs": [],
+                "outputs": ["inspection"] if changed else [],
+                "fan_out": None,
+            }
+        ],
+        "pinned_policy_digest": policy_digest,
+        "pinned_configuration_digest": configuration_digest,
+        "pinned_catalog_digest": catalog_digest,
+    }
+
+
+def _exact_workflow_definition(
+    response: dict[str, Any], definition_id: str, version: int,
+) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("definition_id") == definition_id
+            and value.get("definition_version") == version
+            and isinstance(value.get("steps"), list)
+        ):
+            return value
+    raise JourneyError("Workflow definition consumer omitted the produced identity")
+
+
+def _workflow_disposition(
+    response: dict[str, Any], definition_id: str, state: str,
+) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("definition_id") == definition_id
+            and value.get("state") == state
+            and isinstance(value.get("revision"), int)
+        ):
+            return value
+    raise JourneyError(f"Workflow transition omitted its {state} disposition")
+
+
+def _workflow_run(
+    response: dict[str, Any], run_id: str, statuses: set[str],
+) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("run_id") == run_id
+            and value.get("status") in statuses
+            and isinstance(value.get("sequence"), int)
+        ):
+            return value
+    expected = ", ".join(sorted(statuses))
+    raise JourneyError(f"Workflow run omitted {run_id} in status {expected}")
+
+
+def _prepare_workflow_effect_journey(
+    name: str,
+    fixture: dict[str, Any],
+    call: Call,
+    deadline: Deadline,
+    policy_digest: str,
+    configuration_digest: str,
+    catalog_digest: str,
+) -> PreparedJourney:
+    retained = fixture["workflow_effect_arguments"]
+    definition_id = fixture["workflow_definition_id"]
+    if name in {
+        "tracedecay_workflow_register_definition",
+        "tracedecay_workflow_activate_definition",
+        "tracedecay_workflow_retire_definition",
+        "tracedecay_workflow_reject_definition",
+    }:
+        arguments = retained[name]
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if name == "tracedecay_workflow_register_definition":
+                _exact_workflow_definition(response, definition_id, 1)
+            else:
+                state = {
+                    "tracedecay_workflow_activate_definition": "active",
+                    "tracedecay_workflow_retire_definition": "retired",
+                    "tracedecay_workflow_reject_definition": "rejected",
+                }[name]
+                _workflow_disposition(response, definition_id, state)
+            return "exact journal replay verified; terminal definition stays in disposable store"
+
+        return PreparedJourney(dict(arguments), cleanup, "contained")
+
+    if name not in {
+        "tracedecay_workflow_start_run",
+        "tracedecay_workflow_pause_run",
+        "tracedecay_workflow_resume_run",
+        "tracedecay_workflow_cancel_run",
+    }:
+        raise JourneyError(f"no Workflow lifecycle journey for {name}")
+
+    suffix = str(time.monotonic_ns())
+    effect_definition_id = f"workflow.tool-sweep.effect.{suffix}"
+    definition = _workflow_definition(
+        definition_id=effect_definition_id,
+        version=1,
+        project_id=fixture["project_id"],
+        policy_digest=policy_digest,
+        configuration_digest=configuration_digest,
+        catalog_digest=catalog_digest,
+    )
+    call(
+        "tracedecay_workflow_register_definition",
+        {"definition": definition, "format": "json"},
+        deadline("tracedecay_workflow_register_definition"),
+    )
+    activated = call(
+        "tracedecay_workflow_activate_definition",
+        {
+            "definition_id": effect_definition_id,
+            "definition_version": 1,
+            "expected_revision": 1,
+            "format": "json",
+        },
+        deadline("tracedecay_workflow_activate_definition"),
+    )
+    active = _workflow_disposition(activated, effect_definition_id, "active")
+    execution_snapshot = fixture["work_execution_snapshot"]
+    run_id = f"workflow-run.tool-sweep.effect.{suffix}"
+    start = {
+        "run_id": run_id,
+        "definition_id": effect_definition_id,
+        "definition_version": 1,
+        "provider": {
+            "route": execution_snapshot["route"],
+            "backend": execution_snapshot["backend"],
+            "model": execution_snapshot["model"],
+            "priority": 1,
+        },
+        "fan_out": None,
+        "command_id": f"command.workflow.effect.start.{suffix}",
+        "format": "json",
+    }
+    started: dict[str, Any] | None = None
+    paused: dict[str, Any] | None = None
+    if name != "tracedecay_workflow_start_run":
+        started = _workflow_run(
+            call(
+                "tracedecay_workflow_start_run",
+                start,
+                deadline("tracedecay_workflow_start_run"),
+            ),
+            run_id,
+            {"running"},
+        )
+    if name == "tracedecay_workflow_resume_run":
+        assert started is not None
+        paused = _workflow_run(
+            call(
+                "tracedecay_workflow_pause_run",
+                {
+                    "run_id": run_id,
+                    "expected_sequence": started["sequence"],
+                    "command_id": f"command.workflow.effect.pause.{suffix}",
+                    "format": "json",
+                },
+                deadline("tracedecay_workflow_pause_run"),
+            ),
+            run_id,
+            {"paused"},
+        )
+    if name == "tracedecay_workflow_start_run":
+        arguments = start
+    elif name == "tracedecay_workflow_pause_run":
+        assert started is not None
+        arguments = {
+            "run_id": run_id,
+            "expected_sequence": started["sequence"],
+            "command_id": f"command.workflow.effect.pause.{suffix}",
+            "format": "json",
+        }
+    elif name == "tracedecay_workflow_resume_run":
+        assert paused is not None
+        arguments = {
+            "run_id": run_id,
+            "expected_sequence": paused["sequence"],
+            "command_id": f"command.workflow.effect.resume.{suffix}",
+            "format": "json",
+        }
+    else:
+        assert started is not None
+        arguments = {
+            "run_id": run_id,
+            "expected_sequence": started["sequence"],
+            "command_id": f"command.workflow.effect.cancel.{suffix}",
+            "format": "json",
+        }
+
+    def cleanup(response: dict[str, Any]) -> str:
+        projection = _workflow_run(
+            response,
+            run_id,
+            {
+                "running" if name in {"tracedecay_workflow_start_run", "tracedecay_workflow_resume_run"} else
+                "paused" if name == "tracedecay_workflow_pause_run" else "cancelled"
+            },
+        )
+        if projection["status"] == "paused":
+            projection = _workflow_run(
+                call(
+                    "tracedecay_workflow_resume_run",
+                    {
+                        "run_id": run_id,
+                        "expected_sequence": projection["sequence"],
+                        "command_id": f"command.workflow.effect.cleanup.resume.{suffix}",
+                        "format": "json",
+                    },
+                    deadline("tracedecay_workflow_resume_run"),
+                ),
+                run_id,
+                {"running"},
+            )
+        if projection["status"] == "running":
+            projection = _workflow_run(
+                call(
+                    "tracedecay_workflow_cancel_run",
+                    {
+                        "run_id": run_id,
+                        "expected_sequence": projection["sequence"],
+                        "command_id": f"command.workflow.effect.cleanup.cancel.{suffix}",
+                        "format": "json",
+                    },
+                    deadline("tracedecay_workflow_cancel_run"),
+                ),
+                run_id,
+                {"cancelled"},
+            )
+        observed = call(
+            "tracedecay_workflow_get_run",
+            {"run_id": run_id, "format": "json"},
+            deadline("tracedecay_workflow_get_run"),
+        )
+        _workflow_run(observed, run_id, {"cancelled"})
+        retired = call(
+            "tracedecay_workflow_retire_definition",
+            {
+                "definition_id": effect_definition_id,
+                "definition_version": 1,
+                "expected_revision": active["revision"],
+                "format": "json",
+            },
+            deadline("tracedecay_workflow_retire_definition"),
+        )
+        _workflow_disposition(retired, effect_definition_id, "retired")
+        return "run reached cancelled and definition retired in disposable store"
+
+    return PreparedJourney(arguments, cleanup, "contained")
+
+
+def prime_workflow_lifecycle(
+    fixture: dict[str, Any],
+    call: Call,
+    probe: Probe,
+    deadline: Deadline,
+    effect_target: str | None = None,
+) -> None:
+    """Exercise one pinned definition and contained no-fan-out run lifecycle."""
+    suffix = str(time.monotonic_ns())
+    project_id = fixture["project_id"]
+    configuration = call(
+        "tracedecay_configuration_get",
+        {"key": fixture["configuration_key"], "format": "json"},
+        deadline("tracedecay_configuration_get"),
+    )
+    policy_digest = _workflow_policy_digest(configuration)
+    configuration_digest = _manifest_digest(
+        first_value(configuration, {"effective_behavior_digest"}),
+        "Workflow configuration digest",
+    )
+    definition_id = f"workflow.tool-sweep.{suffix}"
+    stale_definition = _workflow_definition(
+        definition_id=definition_id,
+        version=1,
+        project_id=project_id,
+        policy_digest=policy_digest,
+        configuration_digest=configuration_digest,
+        catalog_digest="sha256:" + "0" * 64,
+    )
+    catalog_probe = probe(
+        "tracedecay_workflow_validate_definition",
+        {"definition": stale_definition, "format": "json"},
+        deadline("tracedecay_workflow_validate_definition"),
+    )
+    catalog_digest = _workflow_catalog_digest(catalog_probe)
+    definition_v1 = {
+        **stale_definition,
+        "pinned_catalog_digest": catalog_digest,
+    }
+    definition_v2 = _workflow_definition(
+        definition_id=definition_id,
+        version=2,
+        project_id=project_id,
+        policy_digest=policy_digest,
+        configuration_digest=configuration_digest,
+        catalog_digest=catalog_digest,
+        changed=True,
+    )
+    validated = call(
+        "tracedecay_workflow_validate_definition",
+        {"definition": definition_v1, "format": "json"},
+        deadline("tracedecay_workflow_validate_definition"),
+    )
+    _exact_workflow_definition(validated, definition_id, 1)
+    for definition in (definition_v1, definition_v2):
+        registered = call(
+            "tracedecay_workflow_register_definition",
+            {"definition": definition, "format": "json"},
+            deadline("tracedecay_workflow_register_definition"),
+        )
+        _exact_workflow_definition(
+            registered, definition_id, definition["definition_version"]
+        )
+    fetched = call(
+        "tracedecay_workflow_get_definition",
+        {"definition_id": definition_id, "definition_version": 1, "format": "json"},
+        deadline("tracedecay_workflow_get_definition"),
+    )
+    _exact_workflow_definition(fetched, definition_id, 1)
+    listed = call(
+        "tracedecay_workflow_list_definitions",
+        {"format": "json"},
+        deadline("tracedecay_workflow_list_definitions"),
+    )
+    _exact_workflow_definition(listed, definition_id, 1)
+    history = call(
+        "tracedecay_workflow_definition_history",
+        {"definition_id": definition_id, "format": "json"},
+        deadline("tracedecay_workflow_definition_history"),
+    )
+    _exact_workflow_definition(history, definition_id, 1)
+    _exact_workflow_definition(history, definition_id, 2)
+    diff = call(
+        "tracedecay_workflow_diff_definition",
+        {
+            "definition_id": definition_id,
+            "from_version": 1,
+            "to_version": 2,
+            "format": "json",
+        },
+        deadline("tracedecay_workflow_diff_definition"),
+    )
+    if not any(
+        value.get("definition_id") == definition_id
+        and value.get("from_version") == 1
+        and value.get("to_version") == 2
+        and "step.tool-sweep.inspect" in value.get("changed_steps", [])
+        for value in objects(diff)
+    ):
+        raise JourneyError("Workflow diff did not identify the changed produced step")
+    activated = call(
+        "tracedecay_workflow_activate_definition",
+        {
+            "definition_id": definition_id,
+            "definition_version": 1,
+            "expected_revision": 1,
+            "format": "json",
+        },
+        deadline("tracedecay_workflow_activate_definition"),
+    )
+    active = _workflow_disposition(activated, definition_id, "active")
+
+    execution_snapshot = fixture["work_execution_snapshot"]
+    route = execution_snapshot.get("route")
+    backend = execution_snapshot.get("backend")
+    model = execution_snapshot.get("model")
+    if not isinstance(route, dict) or not isinstance(backend, str) or not isinstance(model, str):
+        raise JourneyError("Work admission omitted Workflow provider registration fields")
+    run_id = f"workflow-run.tool-sweep.{suffix}"
+    start_arguments = {
+        "run_id": run_id,
+        "definition_id": definition_id,
+        "definition_version": 1,
+        "provider": {
+            "route": route,
+            "backend": backend,
+            "model": model,
+            "priority": 1,
+        },
+        "fan_out": None,
+        "command_id": f"command.workflow.start.{suffix}",
+        "format": "json",
+    }
+    started = call(
+        "tracedecay_workflow_start_run",
+        start_arguments,
+        deadline("tracedecay_workflow_start_run"),
+    )
+    running = _workflow_run(started, run_id, {"running"})
+    observed = call(
+        "tracedecay_workflow_get_run",
+        {"run_id": run_id, "format": "json"},
+        deadline("tracedecay_workflow_get_run"),
+    )
+    _workflow_run(observed, run_id, {"running"})
+    pause_arguments = {
+        "run_id": run_id,
+        "expected_sequence": running["sequence"],
+        "command_id": f"command.workflow.pause.{suffix}",
+        "format": "json",
+    }
+    paused = call(
+        "tracedecay_workflow_pause_run",
+        pause_arguments,
+        deadline("tracedecay_workflow_pause_run"),
+    )
+    paused_run = _workflow_run(paused, run_id, {"paused"})
+    resume_arguments = {
+        "run_id": run_id,
+        "expected_sequence": paused_run["sequence"],
+        "command_id": f"command.workflow.resume.{suffix}",
+        "format": "json",
+    }
+    resumed = call(
+        "tracedecay_workflow_resume_run",
+        resume_arguments,
+        deadline("tracedecay_workflow_resume_run"),
+    )
+    resumed_run = _workflow_run(resumed, run_id, {"running"})
+    cancel_arguments = {
+        "run_id": run_id,
+        "expected_sequence": resumed_run["sequence"],
+        "command_id": f"command.workflow.cancel.{suffix}",
+        "format": "json",
+    }
+    cancelled = call(
+        "tracedecay_workflow_cancel_run",
+        cancel_arguments,
+        deadline("tracedecay_workflow_cancel_run"),
+    )
+    _workflow_run(cancelled, run_id, {"cancelled"})
+    retired_arguments = {
+        "definition_id": definition_id,
+        "definition_version": 1,
+        "expected_revision": active["revision"],
+        "format": "json",
+    }
+    retired = call(
+        "tracedecay_workflow_retire_definition",
+        retired_arguments,
+        deadline("tracedecay_workflow_retire_definition"),
+    )
+    _workflow_disposition(retired, definition_id, "retired")
+    rejected = call(
+        "tracedecay_workflow_reject_definition",
+        {
+            "definition_id": definition_id,
+            "definition_version": 2,
+            "expected_revision": 1,
+            "format": "json",
+        },
+        deadline("tracedecay_workflow_reject_definition"),
+    )
+    _workflow_disposition(rejected, definition_id, "rejected")
+
+    fixture.update(
+        {
+            "workflow_definition_id": definition_id,
+            "workflow_definition_v1": definition_v1,
+            "workflow_run_id": run_id,
+            "workflow_effect_arguments": {
+                "tracedecay_workflow_register_definition": {
+                    "definition": definition_v1,
+                    "format": "json",
+                },
+                "tracedecay_workflow_activate_definition": {
+                    "definition_id": definition_id,
+                    "definition_version": 1,
+                    "expected_revision": 1,
+                    "format": "json",
+                },
+                "tracedecay_workflow_retire_definition": retired_arguments,
+                "tracedecay_workflow_reject_definition": {
+                    "definition_id": definition_id,
+                    "definition_version": 2,
+                    "expected_revision": 1,
+                    "format": "json",
+                },
+            },
+            "workflow_read_arguments": {
+                "tracedecay_workflow_validate_definition": {
+                    "definition": definition_v1,
+                    "format": "json",
+                },
+                "tracedecay_workflow_get_definition": {
+                    "definition_id": definition_id,
+                    "definition_version": 1,
+                    "format": "json",
+                },
+                "tracedecay_workflow_list_definitions": {"format": "json"},
+                "tracedecay_workflow_definition_history": {
+                    "definition_id": definition_id,
+                    "format": "json",
+                },
+                "tracedecay_workflow_diff_definition": {
+                    "definition_id": definition_id,
+                    "from_version": 1,
+                    "to_version": 2,
+                    "format": "json",
+                },
+                "tracedecay_workflow_get_run": {"run_id": run_id, "format": "json"},
+            },
+        }
+    )
+    if effect_target in _WORKFLOW_LIFECYCLE_EFFECTS:
+        fixture["workflow_effect_journey"] = _prepare_workflow_effect_journey(
+            effect_target,
+            fixture,
+            call,
+            deadline,
+            policy_digest,
+            configuration_digest,
+            catalog_digest,
+        )
 
 
 def prime_work_lifecycle(
@@ -301,6 +887,7 @@ def prime_work_lifecycle(
             "work_attempt_id": attempt_id,
             "work_initial_version": initial_version,
             "work_admitted_version": admitted_version,
+            "work_execution_snapshot": execution_snapshot,
             "work_prepare_create_arguments": prepare_create,
             "work_generate_arguments": generate_arguments,
             "work_placement_arguments": placement_arguments,
@@ -1099,6 +1686,10 @@ def prepare(
         )
     if name == "tracedecay_git_apply":
         return _git_apply(call, deadline)
+    if name.startswith("tracedecay_workflow_"):
+        prepared = fixture.get("workflow_effect_journey")
+        if isinstance(prepared, PreparedJourney):
+            return prepared
     if name in {
         "tracedecay_work_create",
         "tracedecay_work_accept_proposal",
