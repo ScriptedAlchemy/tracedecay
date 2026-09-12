@@ -56,6 +56,14 @@ export const AdjudicateWorkLeakCommandV1Schema = z.object({
 }).strict();
 export type AdjudicateWorkLeakCommandV1 = z.infer<typeof AdjudicateWorkLeakCommandV1Schema>;
 
+/** Execution admission together with the immutable provider snapshot licensed
+by the accepted proposal and current configuration authority. */
+export const AdmittedWorkExecutionV1Schema = z.object({
+  execution_snapshot: z.lazy(() => WorkExecutionSnapshotSchema),
+  mutation: z.lazy(() => WorkProductMutationReceiptV1Schema),
+}).strict();
+export type AdmittedWorkExecutionV1 = z.infer<typeof AdmittedWorkExecutionV1Schema>;
+
 export const AdmitWorkExecutionRequestV1Schema = z.object({
   based_on_version: z.number().int().safe().min(0),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
@@ -6789,6 +6797,7 @@ export type WorkProposalReasonV1 = z.infer<typeof WorkProposalReasonV1Schema>;
 export const WorkProposalV1Schema = z.object({
   based_on_version: z.number().int().safe().min(0),
   children: z.array(z.lazy(() => WorkProposedChildV1Schema)),
+  configuration_digest: z.lazy(() => ManifestDigestSchema),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   explanation: z.string(),
   proposal_id: z.lazy(() => ProposalIdSchema),

@@ -209,6 +209,23 @@
       ],
       "type": "object"
     },
+    "AdmittedWorkExecutionV1": {
+      "additionalProperties": false,
+      "description": "Execution admission together with the immutable provider snapshot licensed\nby the accepted proposal and current configuration authority.",
+      "properties": {
+        "execution_snapshot": {
+          "$ref": "#/$defs/WorkExecutionSnapshot"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationReceiptV1"
+        }
+      },
+      "required": [
+        "mutation",
+        "execution_snapshot"
+      ],
+      "type": "object"
+    },
     "AnalyticsAgentUsageV1": {
       "properties": {
         "agent": {
@@ -26279,6 +26296,9 @@
           },
           "type": "array"
         },
+        "configuration_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
         "evidence_digest": {
           "$ref": "#/$defs/ManifestDigest"
         },
@@ -26310,7 +26330,8 @@
         "children",
         "route",
         "explanation",
-        "evidence_digest"
+        "evidence_digest",
+        "configuration_digest"
       ],
       "type": "object"
     },
@@ -29688,6 +29709,9 @@
     "work_admit_synthesis_command": {
       "$ref": "#/$defs/AdmitWorkSynthesisCommand"
     },
+    "work_admitted_execution": {
+      "$ref": "#/$defs/AdmittedWorkExecutionV1"
+    },
     "work_artifact_hydration": {
       "$ref": "#/$defs/WorkArtifactHydrationV1"
     },
@@ -29923,6 +29947,7 @@
     "work_review_proposal_request",
     "work_accept_proposal_request",
     "work_admit_execution_request",
+    "work_admitted_execution",
     "work_start_attempt_command",
     "work_admit_synthesis_command",
     "work_synthesis_attempt",

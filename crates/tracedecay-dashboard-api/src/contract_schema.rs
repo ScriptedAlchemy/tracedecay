@@ -7,8 +7,9 @@ use tracedecay_contracts::retained_surfaces::{
     AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
 };
 use tracedecay_contracts::{
+
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AuthorizedScopeSet,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, AuthorizedScopeSet,
     CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkTaskRequestV1,
     ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
     GenerateProposalRequest, GeneratedWorkProposal, ListTaskHandoffsRequestV1,
@@ -20,6 +21,7 @@ use tracedecay_contracts::{
     StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
     WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
@@ -134,6 +136,7 @@ struct DashboardContractCatalogV1 {
     work_review_proposal_request: ReviewWorkProposalRequestV1,
     work_accept_proposal_request: AcceptWorkProposalRequestV1,
     work_admit_execution_request: AdmitWorkExecutionRequestV1,
+    work_admitted_execution: AdmittedWorkExecutionV1,
     work_start_attempt_command: StartWorkAttemptCommand,
     work_admit_synthesis_command: AdmitWorkSynthesisCommand,
     work_synthesis_attempt: WorkSynthesisAttemptV1,
@@ -363,6 +366,7 @@ mod tests {
                 "work_admit_execution_request",
                 "AdmitWorkExecutionRequestV1",
             ),
+            ("work_admitted_execution", "AdmittedWorkExecutionV1"),
             ("work_start_attempt_command", "StartWorkAttemptCommand"),
             ("work_admit_synthesis_command", "AdmitWorkSynthesisCommand"),
             ("work_synthesis_attempt", "WorkSynthesisAttemptV1"),
