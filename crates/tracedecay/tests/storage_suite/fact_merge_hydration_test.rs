@@ -31,8 +31,9 @@ use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
     FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactReadControl, FactStore,
     FactStoreError, FactWriteBatch, FactWriteControl, MAX_FACT_QUERY_CONTRADICTIONS,
-    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactSearchKindV1,
-    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 struct TestDb {
@@ -803,13 +804,16 @@ async fn superseded_fact_leaves_current_views_but_retains_ordered_history() {
     );
     let read_control = FactReadControl::new(std::sync::Arc::new(|| false));
     let source_target = ProjectMemoryFactIdV1::new(owner.clone(), source.fact_id.clone()).unwrap();
-    assert!(
-        store
-            .get_project_memory_fact(source_target.clone(), &read_control)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    let exact = store
+        .get_project_memory_fact(source_target.clone(), &read_control)
+        .await
+        .unwrap()
+        .expect("superseded facts remain readable by exact id");
+    let ProjectMemoryFactProjectionV1::Available(exact) = exact else {
+        panic!("the superseded fact retains its eligible payload");
+    };
+    assert_eq!(exact.content(), "old claim");
+    assert_eq!(exact.superseded_by(), Some(&replacement.fact_id));
     let search = store
         .search_project_memory_facts(
             ProjectMemoryFactSearchQuery::new(
