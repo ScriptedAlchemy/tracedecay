@@ -57,7 +57,6 @@ gix = { version = "=0.86.0", default-features = false, features = [
     "sha256",
     "status",
 ] }
-hex = "0.4"
 # `tokio` always: `hotpath::wrap::tokio::sync::Mutex` names the lock type in
 # both modes (the plain tokio mutex until a binary selects the backend).
 hotpath = { workspace = true, features = ["tokio"] }
@@ -69,7 +68,6 @@ sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7.19", features = ["codec"] }
 tracing = "0.1"
 url = "2"
 walkdir = "2"

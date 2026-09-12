@@ -1331,7 +1331,7 @@ mod tests {
         CodeIndexSearchAuthorityV1, CodeIndexSearchModeV1, CodeIndexSearchOutcomeV1,
         CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1,
     };
-    use tracedecay_session_memory::context::CancellationToken;
+    use tracedecay_runtime_core::cancellation::CancellationToken;
 
     use super::*;
     use crate::mcp_admission::{
