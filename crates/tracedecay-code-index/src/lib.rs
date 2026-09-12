@@ -39,6 +39,7 @@ pub mod receipts;
 pub mod retained_parse;
 pub mod source_walk;
 pub mod test_attribution;
+pub mod unmounted_files;
 
 pub use self::intake::CodeIndexIntake;
 
