@@ -1322,6 +1322,11 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 '{"outcome":"started","handle":"srh_fixture",'
                 '"operation_id":"refresh.operation.fixture"}'
             ),
+            "tracedecay_session_refresh_status": cls.response(
+                '{"tool":"tracedecay_session_refresh_status",'
+                '"outcome":"complete","receipt":{"operation_id":'
+                '"refresh.operation.fixture"}}'
+            ),
             "tracedecay_active_project": cls.response(
                 '{"project_id":"project.fixture"}'
             ),
@@ -1416,6 +1421,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_automation_run_list",
             "tracedecay_lcm_load_session",
             "tracedecay_session_refresh_begin",
+            "tracedecay_session_refresh_status",
             "tracedecay_active_project",
             "tracedecay_configuration_set",
             "tracedecay_configuration_unset",
@@ -1485,6 +1491,66 @@ class FixturePrimingRetryTests(unittest.TestCase):
         )
         self.assertEqual(fixture["configuration_scalar_value"], {"kind": "boolean", "value": False})
         self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
+
+    def test_delayed_automation_and_lcm_producers_are_consumed(self) -> None:
+        runner = load_runner()
+        client = self.client([self.response('{"node_id":"function:fixture"}')])
+        original = client.call_tool
+        attempts = {"tracedecay_automation_run_list": 0, "tracedecay_lcm_load_session": 0}
+
+        def delayed(name, arguments, deadline_ms):
+            if name in attempts:
+                attempts[name] += 1
+                if attempts[name] == 1:
+                    if name.endswith("run_list"):
+                        return self.response('{"runs":[]}'), 3
+                    return self.response(
+                        '{"problem":{"kind":"unavailable",'
+                        '"code":"application.retained.authority-unavailable"}}',
+                        is_error=True,
+                    ), 3
+            return original(name, arguments, deadline_ms)
+
+        client.call_tool = delayed
+        fixture = {
+            "symbol": "sweep_anchor",
+            "qualified_name": "src/lib.rs::sweep_anchor",
+            "session_id": "session.fixture",
+            "lcm_message": "catalog sweep captured LCM message",
+            "root": "/fixture/root",
+            "commit": "a" * 40,
+        }
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+
+        runner.prime_fixture_values(client, fixture, self.policies(runner))
+
+        self.assertEqual(attempts, {
+            "tracedecay_automation_run_list": 2,
+            "tracedecay_lcm_load_session": 2,
+        })
+        self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
+        self.assertEqual(fixture["lcm_store_id"], 41)
+
+    def test_effect_preparation_skips_read_only_automation_and_lcm_producers(self) -> None:
+        runner = load_runner()
+        client = self.client([self.response('{"node_id":"function:fixture"}')])
+        fixture = {
+            "symbol": "sweep_anchor",
+            "qualified_name": "src/lib.rs::sweep_anchor",
+            "session_id": "session.fixture",
+            "lcm_message": "catalog sweep captured LCM message",
+            "root": "/fixture/root",
+            "commit": "a" * 40,
+        }
+
+        runner.prime_fixture_values(
+            client, fixture, self.policies(runner), "tracedecay_str_replace"
+        )
+
+        names = {name for name, _arguments in client.calls}
+        self.assertNotIn("tracedecay_automation_run_list", names)
+        self.assertNotIn("tracedecay_lcm_load_session", names)
+        self.assertNotIn("tracedecay_session_refresh_begin", names)
         self.assertEqual(fixture["work_admitted_version"], {"graph_version": 3})
         self.assertEqual(
             fixture["work_status_arguments"]["attempt_id"],
