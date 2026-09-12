@@ -101,7 +101,7 @@ pub enum WorkOperation {
 /// mechanical compositions of the key and segment, so the table is the single
 /// place an operation is described. A row cannot disagree with itself.
 macro_rules! work_operations {
-    ($($variant:ident: $key:literal, $segment:literal;)+) => {
+    ($($variant:ident: $key:literal, $segment:literal, $description:literal;)+) => {
         impl WorkOperation {
             /// The catalog operation key, as it appears in `operation.work.{key}`.
             pub const fn operation_key(self) -> &'static str {
@@ -116,6 +116,12 @@ macro_rules! work_operations {
             /// The final path segment that names this operation on its router.
             pub const fn route_segment(self) -> &'static str {
                 match self { $(Self::$variant => $segment,)+ }
+            }
+
+            /// Concise discovery text that distinguishes this operation from
+            /// the other Work lifecycle controls.
+            pub const fn description(self) -> &'static str {
+                match self { $(Self::$variant => $description,)+ }
             }
 
             /// The path this operation answers on the application router.
@@ -141,38 +147,70 @@ macro_rules! work_operations {
 }
 
 work_operations! {
-    GenerateProposal: "generate_proposal", "generate-proposal";
-    Create: "create", "create";
-    ReviewProposal: "review_proposal", "review-proposal";
-    AcceptProposal: "accept_proposal", "accept-proposal";
-    AdmitExecution: "admit_execution", "admit-execution";
-    StartAttempt: "start_attempt", "start-attempt";
-    Synthesize: "synthesize", "synthesize";
-    AttemptStatus: "attempt_status", "attempt-status";
-    CancelAttempt: "cancel_attempt", "cancel-attempt";
-    ResumeAttempts: "resume_attempts", "resume-attempts";
-    RetryAttempt: "retry_attempt", "retry-attempt";
-    ListAttempts: "list_attempts", "list-attempts";
-    ExecutionHistory: "execution_history", "execution-history";
-    HydrateArtifacts: "hydrate_artifacts", "hydrate-artifacts";
-    RetrieveEvidence: "retrieve_evidence", "retrieve-evidence";
-    Views: "views", "views";
-    Experience: "experience", "experience";
-    CompareProposal: "compare_proposal", "compare-proposal";
-    PrepareGraphMutation: "prepare_graph_mutation", "prepare-graph-mutation";
-    MutateGraph: "mutate_graph", "mutate-graph";
-    Topology: "topology", "topology";
-    TopologyMetrics: "topology_metrics", "topology-metrics";
-    PrepareDuplicateAdjudication: "prepare_duplicate_adjudication", "prepare-duplicate-adjudication";
-    AdjudicateDuplicate: "adjudicate_duplicate", "adjudicate-duplicate";
-    AdjudicateLeak: "adjudicate_leak", "adjudicate-leak";
-    PauseRun: "pause_run", "pause-run";
-    ResumeRun: "resume_run", "resume-run";
-    RunControl: "run_control", "run-control";
-    PlacementPreflight: "placement_preflight", "placement-preflight";
-    AdmitPlacement: "admit_placement", "admit-placement";
-    PlacementStatus: "placement_status", "placement-status";
-    ReleasePlacement: "release_placement", "release-placement";
+    GenerateProposal: "generate_proposal", "generate-proposal",
+        "Generate an evidence-calibrated proposal for one task against an exact current Work graph.";
+    Create: "create", "create",
+        "Create a Work task with its initiative, plan, milestone, and item under the supplied mutation identity.";
+    ReviewProposal: "review_proposal", "review-proposal",
+        "Reject or supersede an exact proposal under the supplied graph mutation identity.";
+    AcceptProposal: "accept_proposal", "accept-proposal",
+        "Accept an exact proposal under the supplied graph mutation identity.";
+    AdmitExecution: "admit_execution", "admit-execution",
+        "Admit an accepted task for execution against an exact Work graph version.";
+    StartAttempt: "start_attempt", "start-attempt",
+        "Start one admitted provider attempt using its exact task, run, attempt, and execution snapshot.";
+    Synthesize: "synthesize", "synthesize",
+        "Admit one synthesis attempt over exact sibling attempts, or return why none can be cited.";
+    AttemptStatus: "attempt_status", "attempt-status",
+        "Read current state and evidence for one exact task, run, and attempt identity.";
+    CancelAttempt: "cancel_attempt", "cancel-attempt",
+        "Request cancellation of one exact attempt while preserving the cancellation request identity.";
+    ResumeAttempts: "resume_attempts", "resume-attempts",
+        "Recover open attempts after daemon restart and fence those that require an explicit retry.";
+    RetryAttempt: "retry_attempt", "retry-attempt",
+        "Admit a new attempt identity after verifying the selected failure of an original attempt.";
+    ListAttempts: "list_attempts", "list-attempts",
+        "Page durable attempts in the authorized scope under one verified topology generation.";
+    ExecutionHistory: "execution_history", "execution-history",
+        "Read durable execution spans and terminal-event order for a generation-bound attempt page.";
+    HydrateArtifacts: "hydrate_artifacts", "hydrate-artifacts",
+        "Page attempt artifact references and sealed evidence, without artifact bytes, under one verified generation.";
+    RetrieveEvidence: "retrieve_evidence", "retrieve-evidence",
+        "Read or expand evidence for one task at an exact verified Work graph version.";
+    Views: "views", "views",
+        "Read current, as-of, evolution, or forensic projections of the selected Work graph.";
+    Experience: "experience", "experience",
+        "Read consent-authorized prior accepted-work evidence applicable to one task for ephemeral use.";
+    CompareProposal: "compare_proposal", "compare-proposal",
+        "Compare one task's relations and evidence between two exact graph versions without applying changes.";
+    PrepareGraphMutation: "prepare_graph_mutation", "prepare-graph-mutation",
+        "Bind a selected graph change to current authority and revision pins, returning an executable mutation.";
+    MutateGraph: "mutate_graph", "mutate-graph",
+        "Apply an exact prepared Work graph mutation using its preserved identity and revision pins.";
+    Topology: "topology", "topology",
+        "Page execution placement lanes and branch, review, and integration policy under a verified generation.";
+    TopologyMetrics: "topology_metrics", "topology-metrics",
+        "Read bounded execution-topology measurements and coverage for an observability horizon.";
+    PrepareDuplicateAdjudication: "prepare_duplicate_adjudication", "prepare-duplicate-adjudication",
+        "Bind a duplicate-effort verdict for an exact attempt pair to current evidence and revisions.";
+    AdjudicateDuplicate: "adjudicate_duplicate", "adjudicate-duplicate",
+        "Record a prepared, evidence-backed duplicate-effort verdict with its exact command identity.";
+    AdjudicateLeak: "adjudicate_leak", "adjudicate-leak",
+        "Scan canonical execution evidence and record a revisioned leak verdict for one exact attempt.";
+    PauseRun: "pause_run", "pause-run",
+        "Pause an admitted run and fence new attempt reservations at the expected authority version.";
+    ResumeRun: "resume_run", "resume-run",
+        "Resume a paused run using its exact current authority version.";
+    RunControl: "run_control", "run-control",
+        "Read one admitted run's control state and current live-attempt frontier.";
+    PlacementPreflight: "placement_preflight", "placement-preflight",
+        "Evaluate one run's exact placement target and blockers without changing placement state.";
+    AdmitPlacement: "admit_placement", "admit-placement",
+        "Claim an exact placement target for one task and run under the placement authority.";
+    PlacementStatus: "placement_status", "placement-status",
+        "Read the durable or absent placement state for one exact task and run.";
+    ReleasePlacement: "release_placement", "release-placement",
+        "Release or quarantine one run's placement at the expected authority version without deleting bytes.";
 }
 
 impl WorkOperation {
