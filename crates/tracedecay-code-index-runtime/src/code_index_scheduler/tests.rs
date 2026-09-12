@@ -78,11 +78,28 @@ use tracedecay_query::retrieval::exact::{
 };
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_query::retrieval::lexical::{
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, LexicalLaneRequest,
     LexicalRouteKindV1, LexicalRoutingV1,
 };
 use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
+
+#[test]
+fn text_artifact_source_batches_scale_with_build_memory() {
+    assert_eq!(
+        super::text_artifact_source_batch_limits(
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+        ),
+        (64, 64 * 1024 * 1024, 128)
+    );
+    assert_eq!(
+        super::text_artifact_source_batch_limits(
+            8 * CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+        ),
+        (512, 512 * 1024 * 1024, 1024)
+    );
+}
 use tracedecay_query::retrieval::rerank::{
     AdmittedNativeRerankExecutorV1, BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1,
     LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1,
@@ -6503,12 +6520,12 @@ fn source_window_and_builder_share_one_memory_reservation() {
     let ceiling =
         tracedecay_query::retrieval::lexical::CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1;
     assert_eq!(
-        super::text_artifact_builder_budget(ceiling - 1),
+        super::text_artifact_builder_budget(ceiling, ceiling - 1),
         Ok(1),
         "the source window must be subtracted from the builder's authority"
     );
     assert_eq!(
-        super::text_artifact_builder_budget(ceiling),
+        super::text_artifact_builder_budget(ceiling, ceiling),
         Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
         "a source consuming the reservation must refuse before builder path access"
     );
