@@ -97,6 +97,7 @@ class CursorComposerSelectionTest(unittest.TestCase):
             str(env.home / ".cursor/plugins/local/tracedecay"),
         )
         self.assertIn("--approve-mcps", command)
+        self.assertIn("--force", command)
         self.assertIn("--trust", command)
 
 
