@@ -10,24 +10,25 @@ use serde_json::Value;
 use tracedecay_api::WorkflowOperation;
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
-    ApplicationResult, CancellationSignal, Deadline, LegalAction, ResultContractRef,
-    RetryDirective, SafeDiagnostic, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
-    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
-    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    workflow_executable_binding_registry,
+    ApplicationResult, CancellationSignal, Deadline, ResultContractRef, SafeDiagnostic,
+    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
+    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
+    WorkflowDefinitionValidateRequest, workflow_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
 
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
-    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
-    WorkflowApplicationInvocation, WorkflowApplicationOutcome,
+    DaemonInvocationOutcome, DaemonInvocationRequest, WorkflowApplicationInvocation,
+    WorkflowApplicationOutcome,
 };
 use tracedecay_daemon_protocol::{InvocationCancellationPolicy, invocation_now_micros};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+
+use crate::application_cli::{WORKFLOW, config_error};
 
 fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
     let operation_id =
@@ -200,7 +201,7 @@ pub async fn invoke_workflow_cli(
             return Ok(Err(workflow_problem(
                 result_contract,
                 request_id,
-                invalid_workflow_request(),
+                WORKFLOW.invalid_request(),
             )?));
         }
     };
@@ -248,7 +249,7 @@ pub async fn invoke_workflow_cli(
         DaemonInvocationOutcome::Problem { problem } => Ok(Err(workflow_problem(
             result_contract,
             request_id,
-            daemon_application_problem(problem),
+            WORKFLOW.daemon_problem(problem),
         )?)),
         _ => Ok(Err(workflow_problem(
             result_contract,
@@ -293,66 +294,23 @@ fn workflow_problem(
     ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
-fn invalid_workflow_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "invalid_workflow_request".to_owned(),
-            message: "The Workflow request does not match its operation contract".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
-}
-
-fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
-    match problem {
-        DaemonInvocationProblem::InvalidRequest => invalid_workflow_request(),
-        DaemonInvocationProblem::UnsupportedRevision => ApplicationProblem::Unsupported {
-            diagnostic: SafeDiagnostic {
-                code: "unsupported_workflow_revision".to_owned(),
-                message: "The daemon does not support this Workflow revision".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
-        DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-        }
-        DaemonInvocationProblem::ResetRequired => {
-            ApplicationProblem::reset_required(SafeDiagnostic {
-                code: "workflow_authority_reset_required".to_owned(),
-                message: "The owning Workflow authority requires an explicit reset".to_owned(),
-            })
-        }
-        DaemonInvocationProblem::ApplicationContractViolation => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "workflow_application_contract_violation".to_owned(),
-                message: "The Workflow result violated its canonical contract".to_owned(),
-            })
-        }
-        DaemonInvocationProblem::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "workflow_authority_unavailable".to_owned(),
-            message: "The owning Workflow authority is unavailable".to_owned(),
-        }),
-    }
-}
-
 fn decode<T>(body: Value) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    serde_json::from_value(body).map_err(|error| TraceDecayError::Config {
-        message: format!("invalid typed Workflow request: {error}"),
-    })
+    WORKFLOW.decode(body)
 }
 
 #[cfg(test)]
 mod reset_problem_tests {
-    use super::*;
+    use tracedecay_contracts::{ApplicationProblem, LegalAction, RetryDirective};
+    use tracedecay_daemon_protocol::DaemonInvocationProblem;
+
+    use super::WORKFLOW;
 
     #[test]
     fn daemon_workflow_reset_remains_a_typed_cli_problem() {
-        let problem = daemon_application_problem(DaemonInvocationProblem::ResetRequired);
+        let problem = WORKFLOW.daemon_problem(DaemonInvocationProblem::ResetRequired);
         let ApplicationProblem::ResetRequired {
             diagnostic,
             retry,
@@ -368,12 +326,6 @@ mod reset_problem_tests {
         );
         assert_eq!(retry, RetryDirective::Never);
         assert_eq!(legal_actions, vec![LegalAction::Reset]);
-    }
-}
-
-fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: error.to_string(),
     }
 }
 
