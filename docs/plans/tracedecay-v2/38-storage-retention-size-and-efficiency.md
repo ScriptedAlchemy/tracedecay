@@ -303,6 +303,13 @@ idempotency ledger, one `mutation_json` per mutation, slim receipts with
 frontiers stored once, and a Doctor census of dead sealed artifacts. On the
 measured 16 GB `sessions.db` those remove roughly 7 GB.
 
+**Also landed 2026-09-12 (graph side):** a deferred retirement now deletes
+the retired generation's sealed artifact on its first pass — the directory
+needs no engine — and the Doctor `RetentionBacklog` finding reports the
+live container against its sealed heads with the deferred native
+retirement count. Plan 39's corrected amendment records why the container
+of an inactive project still needs a design.
+
 **Also landed 2026-09-12:** `observation_repository_provenance` embedded the
 repository capture twice per row (`capture_json` and
 `availability_json.value`). Twenty-nine distinct captures stood behind
