@@ -31,9 +31,6 @@ use tracedecay_application::operation_stream::{
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_graph_query::redundancy_scan::{
-    RedundancyOptions, RedundancyPairViewV1, redundancy_for_symbols,
-};
 
 use super::support::{generic_tool_result, rendered_tool_result, unique_file_paths};
 use tracedecay_mcp::ToolResult;
@@ -47,13 +44,6 @@ use tracedecay_mcp::{
     RunAffectedArgs, TestProfile, TestRunControl, TestRunFailure, TestRunOutput, libtest_identity,
     parse_libtest_output, run_cargo_tests,
 };
-
-/// Maximum near-duplicate matches attached per diagnostic.
-const NEAR_DUP_MAX: usize = 3;
-
-/// Bound the canonical request-scoped redundancy result used to enrich one
-/// diagnose response. The scan itself retains its paced comparison budget.
-const DIAGNOSE_REDUNDANCY_PAIR_LIMIT: usize = 500;
 
 /// Bound concurrent reads while hashing changed files for a managed test run.
 /// Large edit sets must not serialize hundreds of awaited `fs::read` calls.
@@ -176,36 +166,12 @@ pub(super) async fn handle_diagnose(
 
     let mut items: Vec<Value> = Vec::with_capacity(diagnostics.len());
     let mut touched: HashSet<String> = HashSet::new();
-    // Map first so duplicate enrichment compares only pairs involving a
-    // reported symbol, once per request even when diagnostics share a body.
-    let mapped_nodes = diagnostics
-        .iter()
-        .map(|diagnostic| {
-            // Preserve the compiler spelling in the result; the graph uses
-            // project-relative paths with forward slashes.
-            let path = normalized_diagnostic_path(cg.project_root(), &diagnostic.file);
-            touched.insert(path.clone());
-            diagnostic_symbol_at_location(graph, &path, diagnostic.line)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let targets = mapped_nodes
-        .iter()
-        .flatten()
-        .map(|node| node.occurrence.as_str().to_owned())
-        .collect();
-    let near_duplicates_by_node = diagnose_redundancy_index(graph, &targets).await?;
-
-    for (d, node) in diagnostics.iter().zip(mapped_nodes) {
-        let near_duplicates = node
-            .as_ref()
-            .and_then(|node| near_duplicates_by_node.get(node.occurrence.as_str()))
-            .cloned()
-            .unwrap_or_default();
-        for dupe in &near_duplicates {
-            if let Some(file) = dupe.get("file").and_then(Value::as_str) {
-                touched.insert(file.to_string());
-            }
-        }
+    for d in &diagnostics {
+        // Preserve the compiler spelling in the result; the graph uses
+        // project-relative paths with forward slashes.
+        let path = normalized_diagnostic_path(cg.project_root(), &d.file);
+        touched.insert(path.clone());
+        let node = diagnostic_symbol_at_location(graph, &path, d.line)?;
         let callers_json = if include_callers {
             match &node {
                 Some(n) => {
@@ -245,7 +211,6 @@ pub(super) async fn handle_diagnose(
             "column": d.column,
             "node": node.as_ref().map(diagnostic_symbol_json).transpose()?,
             "callers": callers_json,
-            "near_duplicates": near_duplicates,
         }));
     }
 
@@ -363,13 +328,17 @@ fn diagnostic_symbol_json(symbol: &CodeGraphSymbolSummaryV1) -> Result<Value> {
         .start_line
         .checked_add(metadata.line_span - 1)
         .ok_or_else(|| diagnostic_graph_problem("verified diagnostic line span overflowed"))?;
+    let line = metadata
+        .start_line
+        .checked_add(1)
+        .ok_or_else(|| diagnostic_graph_problem("verified diagnostic display line overflowed"))?;
     Ok(json!({
         "node_id": symbol.occurrence.as_str(),
         "name": metadata.simple_name,
         "kind": metadata.kind,
         "qualified_name": metadata.qualified_name,
         "file": file,
-        "line": metadata.start_line,
+        "line": line,
         "start_line": metadata.start_line,
         "end_line": end_line,
     }))
@@ -470,61 +439,6 @@ fn compiler_publication_report(
         }),
         Outcome::Failed { reason } => json!({ "status": "failed", "reason": reason }),
     }
-}
-
-/// Runs the maintained redundancy journey once and indexes its already-ranked
-/// structural pairs by both endpoint identities for diagnostic enrichment.
-#[hotpath::measure(future = true, label = "mcp.workflow.diagnose.redundancy")]
-async fn diagnose_redundancy_index(
-    graph: &tracedecay_graph_query::VerifiedGraphQuery,
-    targets: &HashSet<String>,
-) -> Result<HashMap<String, Vec<Value>>> {
-    if targets.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let options = RedundancyOptions {
-        path_prefix: None,
-        min_lines: 8,
-        max_pairs: DIAGNOSE_REDUNDANCY_PAIR_LIMIT,
-        threshold: 0.6,
-        include_naming: false,
-        include_generated: false,
-    };
-    let pairs = redundancy_for_symbols(graph, &options, targets).await?;
-    Ok(near_duplicate_index(&pairs))
-}
-
-fn near_duplicate_index(pairs: &[RedundancyPairViewV1]) -> HashMap<String, Vec<Value>> {
-    let mut index: HashMap<String, Vec<Value>> = HashMap::new();
-    for pair in pairs {
-        let left = json!({
-            "name": pair.b.name,
-            "file": pair.b.file,
-            "line": pair.b.line,
-            "id": pair.b.id,
-            "ranking_score": pair.ranking_score,
-            "severity": pair.severity,
-            "overlap_kind": pair.overlap_kind,
-        });
-        let right = json!({
-            "name": pair.a.name,
-            "file": pair.a.file,
-            "line": pair.a.line,
-            "id": pair.a.id,
-            "ranking_score": pair.ranking_score,
-            "severity": pair.severity,
-            "overlap_kind": pair.overlap_kind,
-        });
-        let left_matches = index.entry(pair.a.id.clone()).or_default();
-        if left_matches.len() < NEAR_DUP_MAX {
-            left_matches.push(left);
-        }
-        let right_matches = index.entry(pair.b.id.clone()).or_default();
-        if right_matches.len() < NEAR_DUP_MAX {
-            right_matches.push(right);
-        }
-    }
-    index
 }
 
 fn severity_string(s: Severity) -> &'static str {

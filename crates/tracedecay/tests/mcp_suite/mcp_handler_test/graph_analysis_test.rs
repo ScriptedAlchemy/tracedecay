@@ -2073,7 +2073,11 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn target() {}\npub fn caller() { target(); }\n",
+    )
+    .unwrap();
     let (cg, _env) = init_test_project(project).await;
 
     let abs_path = project.join("src/lib.rs");
@@ -2086,7 +2090,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_diagnose",
-        json!({"cargo_output": cargo_output, "include_callers": false}),
+        json!({"cargo_output": cargo_output, "include_callers": true}),
         None,
         None,
     )
@@ -2099,85 +2103,14 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
         mapped, 2,
         "both diagnostics should map to nodes after path normalization; got mapped={mapped} full={output:#}"
     );
-}
-
-/// `tracedecay_diagnose` builds a request-scoped redundancy view from the
-/// admitted generation and surfaces AST-isomorphic functions under
-/// `near_duplicates`.
-#[tokio::test]
-async fn diagnose_surfaces_generation_pinned_near_duplicates() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    fs::create_dir_all(&project_root).unwrap();
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-pub fn compute_a(value: i32) -> i32 {
-    let mut acc = 0;
-    for i in 0..value {
-        if i % 2 == 0 {
-            acc += i;
-        } else {
-            acc -= i;
-        }
+    for diagnostic in output["diagnostics"].as_array().expect("diagnostics") {
+        assert_eq!(diagnostic["node"]["name"], "target");
+        let callers = diagnostic["callers"].as_array().expect("callers");
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0]["name"], "caller");
+        assert_eq!(callers[0]["file"], "src/lib.rs");
+        assert_eq!(callers[0]["line"], 2);
     }
-    acc
-}
-
-pub fn compute_b(input: i32) -> i32 {
-    let mut total = 0;
-    for j in 0..input {
-        if j % 2 == 0 {
-            total += j;
-        } else {
-            total -= j;
-        }
-    }
-    total
-}
-"#,
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(project).await;
-
-    // The fixture is stable: compute_a begins on line 2.
-    let diag_line = 2;
-    let cargo_output =
-        format!("error[E0001]: synthetic error\n  --> src/lib.rs:{diag_line}:5\n   |\n");
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_diagnose",
-        json!({"cargo_output": cargo_output, "include_callers": false}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-
-    let diagnostics = output["diagnostics"].as_array().expect("diagnostics");
-    let diag = diagnostics
-        .iter()
-        .find(|d| d["node"]["name"].as_str() == Some("compute_a"))
-        .unwrap_or_else(|| panic!("diagnostic did not map to compute_a: {output:#}"));
-    let dupes = diag["near_duplicates"]
-        .as_array()
-        .unwrap_or_else(|| panic!("near_duplicates missing: {output:#}"));
-    assert!(
-        dupes
-            .iter()
-            .any(|d| d["name"].as_str() == Some("compute_b")),
-        "expected compute_b in near_duplicates, got: {output:#}"
-    );
-    let top = &dupes[0];
-    assert_eq!(top["name"].as_str(), Some("compute_b"));
-    assert_eq!(top["overlap_kind"].as_str(), Some("ast_isomorphic"));
-    assert_eq!(top["severity"].as_str(), Some("definite"));
-    assert!(top["ranking_score"].as_f64().unwrap_or(0.0) > 0.0);
 }
 
 /// The resolver's kind-compatibility filter must apply to the same-file
