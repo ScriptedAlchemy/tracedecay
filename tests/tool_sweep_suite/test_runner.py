@@ -766,6 +766,74 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertIn("trust", note)
         self.assertTrue(state["removed"])
 
+    def test_fact_supersede_journey_retires_default_but_preserves_exact_history(self) -> None:
+        runner = load_runner()
+        fact_ids = iter(("fact.v1.retired", "fact.v1.successor"))
+        calls = []
+
+        def call(tool, arguments, _deadline_ms):
+            calls.append((tool, dict(arguments)))
+            if tool == "tracedecay_fact_store_add":
+                fact_id = next(fact_ids)
+                return self.response(json.dumps({
+                    "result": {"fact": {"fact": {
+                        "fact_id": fact_id,
+                        "content": arguments["content"],
+                    }}},
+                }))
+            if tool == "tracedecay_fact_store_list":
+                return self.response(json.dumps({"facts": [{
+                    "fact_id": "fact.v1.successor",
+                    "content": "catalog sweep fact after supersession",
+                }]}))
+            if tool == "tracedecay_fact_store_get":
+                self.assertEqual(arguments["fact_id"], "fact.v1.retired")
+                return self.response(json.dumps({"fact": {
+                    "kind": "superseded",
+                    "superseded_by": "fact.v1.successor",
+                    "fact": {
+                        "fact_id": "fact.v1.retired",
+                        "content": "catalog sweep fact before supersession",
+                    },
+                }}))
+            self.assertEqual(tool, "tracedecay_fact_store_supersede")
+            return self.response(json.dumps({
+                "outcome": "superseded",
+                "fact_id": "fact.v1.retired",
+                "superseded_by": "fact.v1.successor",
+                "commit": {
+                    "disposition": "idempotent_replay",
+                    "last_event_id": "fact-event.v1.retirement",
+                },
+            }))
+
+        prepared = runner.prepare_journey(
+            "tracedecay_fact_store_supersede", object(), {}, lambda _tool: 1_000, call
+        )
+        self.assertEqual(prepared.arguments, {
+            "fact_id": "fact.v1.retired",
+            "superseded_by": "fact.v1.successor",
+            "format": "json",
+        })
+        note = prepared.cleanup(self.response(json.dumps({
+            "outcome": "superseded",
+            "fact_id": "fact.v1.retired",
+            "superseded_by": "fact.v1.successor",
+            "commit": {"last_event_id": "fact-event.v1.retirement"},
+        })))
+
+        self.assertIn("exact-get/replay", note)
+        self.assertEqual(
+            [tool for tool, _arguments in calls],
+            [
+                "tracedecay_fact_store_add",
+                "tracedecay_fact_store_add",
+                "tracedecay_fact_store_list",
+                "tracedecay_fact_store_get",
+                "tracedecay_fact_store_supersede",
+            ],
+        )
+
     def test_memory_status_journey_counts_the_seeded_fact(self) -> None:
         """The repaired status must truthfully count the seeded fact before rollback."""
         runner = load_runner()
