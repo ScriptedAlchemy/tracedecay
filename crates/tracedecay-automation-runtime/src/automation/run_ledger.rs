@@ -954,6 +954,13 @@ fn with_run_ledger_read_lock<T>(
     path: &Path,
     read: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    // A read must not mint the dashboard directory: acquiring the lock
+    // creates it, and a root that does not exist has no ledger, no append
+    // intent, and no writer to serialize against. The readers already answer
+    // an absent ledger with an empty page.
+    if !dashboard_root.is_dir() {
+        return read();
+    }
     let lock = exact_publication::acquire_run_ledger_lock(path).map_err(TraceDecayError::from)?;
     let result = (|| {
         exact_publication::ensure_no_exact_append_intent(dashboard_root)
