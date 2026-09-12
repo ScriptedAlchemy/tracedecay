@@ -209,7 +209,7 @@ pub struct CodexAppServerBackend {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::items_after_test_module, clippy::unwrap_used)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -281,7 +281,7 @@ mod tests {
         let policy = BackendRetryPolicy::new(
             3,
             vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         );
         let mut report = AgentTaskRetryReport::default();
 
@@ -313,7 +313,7 @@ mod tests {
                 reason: "workspace write scope was denied".to_string(),
             },
         );
-        let policy = BackendRetryPolicy::new(3, vec![Duration::ZERO], Duration::from_secs(120));
+        let policy = BackendRetryPolicy::new(3, vec![Duration::ZERO], Duration::from_mins(2));
         let mut report = AgentTaskRetryReport::default();
 
         let error = run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
@@ -343,7 +343,7 @@ mod tests {
         let policy = BackendRetryPolicy::new(
             3,
             vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         );
         let mut report = AgentTaskRetryReport::default();
 
@@ -370,7 +370,7 @@ mod tests {
         let policy = BackendRetryPolicy::new(
             3,
             vec![Duration::ZERO, Duration::ZERO],
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         );
         let mut report = AgentTaskRetryReport::default();
 
