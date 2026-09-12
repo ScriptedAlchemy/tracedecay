@@ -33,7 +33,7 @@ enum RequestedExecutionProviderV1 {
 fn requested_execution_provider() -> RequestedExecutionProviderV1 {
     match std::env::var(EXECUTION_PROVIDER_ENV) {
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" => RequestedExecutionProviderV1::Auto,
+            "" | "auto" => RequestedExecutionProviderV1::Auto,
             "cpu" => RequestedExecutionProviderV1::Cpu,
             "coreml" => RequestedExecutionProviderV1::CoreMl,
             "cuda" => RequestedExecutionProviderV1::Cuda,
@@ -373,6 +373,16 @@ mod tests {
             );
         });
         with_env(Some(" \n"), || {
+            assert_eq!(
+                requested_execution_provider(),
+                RequestedExecutionProviderV1::Auto
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_auto_matches_unset() {
+        with_env(Some("auto"), || {
             assert_eq!(
                 requested_execution_provider(),
                 RequestedExecutionProviderV1::Auto
