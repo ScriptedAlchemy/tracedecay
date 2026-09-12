@@ -7,7 +7,9 @@ description: Test current changes with relevant checks and map failures back to 
 
 Use `tracedecay:assessing-impact`.
 
-- **Args:** interpret `$ARGUMENTS` as explicit changed paths; if absent, use the current working tree.
-- Select structural candidates with `tracedecay_affected`; `tracedecay_run_affected_tests` executes the supported Rust selection. Diagnostics reads do not run the toolchain. Respect Cursor approval/run-mode for execution, confirm a nonzero executed count, and supplement with relevant native or host checks when graph selection misses the behavior.
-
-Output: pass/fail summary, failing-symbol mapping, and suggested missing tests.
+Interpret `$ARGUMENTS` as changed paths; if absent, use the working tree. Select
+structural candidates, then respect Cursor approval and run mode while executing
+the supported Rust tests. Confirm a nonzero count. Add relevant native or host
+checks when graph selection misses integration, configuration, I/O, generated,
+or external behavior. Report results, mapped failures, and material coverage
+gaps.
