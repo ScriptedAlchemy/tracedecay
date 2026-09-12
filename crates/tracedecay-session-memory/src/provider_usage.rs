@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CanonicalUnknownStateV1, ObservationScopeV1, ProviderUsageCounterSemanticsV1,
@@ -27,7 +26,7 @@ pub fn provider_usage_range_start(range: &str) -> Result<u64, String> {
     })
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderUsageCoverageV1 {
     Complete,
@@ -35,7 +34,7 @@ pub enum ProviderUsageCoverageV1 {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderUsageIssueKindV1 {
     InitialCumulativeCheckpoint,
@@ -57,7 +56,7 @@ pub enum ProviderUsageIssueKindV1 {
     PaginationCursorDidNotAdvance,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderUsageIssueV1 {
     pub kind: ProviderUsageIssueKindV1,
     pub observation_sequence: Option<u64>,
@@ -65,7 +64,7 @@ pub struct ProviderUsageIssueV1 {
     pub session_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AggregatedProviderUsageCountersV1 {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -89,14 +88,14 @@ impl AggregatedProviderUsageCountersV1 {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderUsageDeltaDerivationV1 {
     NativeDelta,
     CumulativeDifference,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderUsageDeltaV1 {
     pub observation_id: String,
     pub receipt_id: String,
@@ -117,7 +116,7 @@ pub struct ProviderUsageDeltaV1 {
     pub counters: AggregatedProviderUsageCountersV1,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProviderUsageAggregateV1 {
     pub coverage: ProviderUsageCoverageV1,
     pub observations_seen: u64,
@@ -127,7 +126,7 @@ pub struct ProviderUsageAggregateV1 {
     pub upper_observation_sequence: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProviderUsageModelCostV1 {
     pub provider: String,
     pub model: String,
@@ -136,7 +135,7 @@ pub struct ProviderUsageModelCostV1 {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProviderUsageCostSummaryV1 {
     pub coverage: ProviderUsageCoverageV1,
     pub pricing_revision: String,
