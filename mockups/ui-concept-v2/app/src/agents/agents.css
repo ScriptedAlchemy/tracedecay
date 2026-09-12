@@ -207,6 +207,13 @@
 .ag-topo-legend i { font-style: normal; }
 .ag-topo-legend .cy { color: color-mix(in oklab, var(--signal-cyan) 75%, #8aa); }
 .ag-topo-legend .am { color: color-mix(in oklab, var(--activity-amber) 80%, #a98); }
+.ag-snapshot-controls { display: flex; align-items: center; gap: 4px; padding: 5px 11px 0; }
+.ag-snapshot-controls button, .ag-snapshot-controls input { appearance: none; min-width: 0; border: 1px solid color-mix(in oklab, var(--signal-cyan) 22%, var(--edge-subtle)); background: #070b12; color: #8b99a8; font: 8px var(--font-display); letter-spacing: .08em; padding: 4px 6px; }
+.ag-snapshot-controls button { cursor: pointer; }
+.ag-snapshot-controls button[aria-pressed="true"] { color: var(--signal-cyan); border-color: var(--signal-cyan); }
+.ag-snapshot-controls input { width: min(240px, 33%); margin-left: auto; color: #d7eaf4; font-family: var(--font-mono); letter-spacing: 0; }
+.ag-topo:not(.ag-dense-topo) .ag-field { inset: 68px 0 0; }
+.ag-snapshot-exact { inset: 68px 0 0; }
 
 .ag-field {
   position: absolute;
@@ -270,6 +277,7 @@
   stroke-width: 12;
   cursor: pointer;
 }
+.ag-edge-grade { pointer-events: none; fill: #78cdd8; font: 7px var(--font-mono); letter-spacing: .06em; paint-order: stroke; stroke: #061019; stroke-width: 3px; }
 .ag-link:focus { outline: none; }
 .ag-link:focus .ag-edge,
 .ag-link.is-on .ag-edge {
@@ -537,6 +545,7 @@
 .ag-relation-legend i { display: inline-block; width: 18px; height: 5px; margin: 0 3px 0 7px; border-top: 1px solid var(--signal-cyan); }
 .ag-relation-legend i.handoff { border-top-color: var(--activity-amber); border-top-style: dashed; }
 .ag-relation-legend i.rejoin { height: 7px; border-top: 3px double #a28bff; }
+.ag-relation-legend strong { color: #8ddce2; font: 8px var(--font-display); letter-spacing: .08em; }
 
 .ag-dense-field { position: absolute; inset: 79px 0 0; overflow: auto; }
 .ag-dense-field svg { display: block; width: 100%; min-height: 100%; }
@@ -703,6 +712,10 @@
     margin-top: 3px;
   }
   .ag-topo-legend { white-space: normal; padding: 4px 8px 6px; }
+  .ag-snapshot-controls { flex-wrap: wrap; padding: 5px 8px; }
+  .ag-snapshot-controls input { width: 100%; margin-left: 0; }
+  .ag-topo:not(.ag-dense-topo) .ag-field { inset: 103px 0 0; }
+  .ag-snapshot-exact { inset: 103px 0 0; }
   .ag-field { display: none; }
   .ag-dense-field { display: block; inset: 119px 0 0; }
   .ag-dense-field svg { min-width: 560px; }

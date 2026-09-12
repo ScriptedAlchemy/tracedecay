@@ -928,3 +928,117 @@ Record p50/p95/p99 latency, peak RSS, store bytes, write amplification, and reop
 Review the complete behavior and diff against the active final-V2 authority.
 Accept only coherent, directly verified graph journeys with no duplicate
 storage authority.
+
+## Dated amendment (2026-09-12, recorded decision): live container reclaim
+
+**Measured.** The live `tracedecay.grafeo` for one project reached 11.1 GB
+while the newest sealed head it served was 0.75 GB (~250k entities). Every
+publication stages a new physical namespace into the live container; the
+superseded namespaces were never deleted because sealed-generation retirement
+was reachable only from code-index generation deletion (fixed 2026-09-12:
+`retire_superseded_projection_replays` runs on head install), and deleted
+rows do not shrink the container because nothing rewrites it. Grafeo `0.5.42`
+has no namespace drop and no vacuum; the only rewrite is `GrafeoDB::compact()`.
+
+**Standing.** `docs/graph-at-rest/README.md` records that the schema blocker
+for `compact()` is gone (entity, relation, publication, and projection
+identity resolve through indexed properties, not per-entity labels) and that
+the pinned fork's compact-store property hash index removes the point-read
+regression. What still blocks whole-store compaction is the defect observed
+at generation scale: a real ~45k-entity generation fails its post-reopen
+recovered-digest proof in compact form with "relation scalar endpoints do not
+match native topology" while the same rows seal and serve in replay form.
+Toy-scale contracts pass, so the defect is scale- or ordering-dependent.
+
+**Decision.** Live-container reclaim is `compact()` under the maintenance
+lease, not a bespoke re-seal or a quarantine-and-rebuild:
+
+1. Reproduce the endpoint mismatch in the fork with a generation-scale
+   fixture (the sealed-store contract's `rich_manifest` grown to the failing
+   size), fix it there, and gate `COMPACT_ROUND_TRIPS_BYTES` on the recovered
+   digest proving equal in compact and replay form for that fixture.
+2. Add a maintenance-cadence step beside `run_branch_compaction`: when a
+   project's live container exceeds twice the summed bytes of its verified
+   heads' sealed artifacts (both figures are already censused — see the
+   `RetentionBacklog` finding's sealed evidence), take the project store
+   maintenance lease, quiesce the graph owner, `compact()`, close, and reopen.
+   The reopen reconstructs the layered store from the `CompactStore` section;
+   later writes land in the overlay, so the store stays mutable.
+3. Prove the swap with the existing recovered-digest verification before the
+   compacted container replaces the live file; a mismatch keeps the original
+   and reports a typed degradation. Vector generations, whose only durable
+   home is the live container, are covered by the same proof and never
+   re-embedded.
+
+**Non-goals.** No re-projection from canonical replay authorities as a
+compaction path (that is corruption recovery and would re-embed vectors), and
+no quarantine of a healthy container.
+
+### Correction (2026-09-12, later the same day, measured)
+
+The decision above rests on a wrong premise. Read against the pinned fork:
+
+- The container already reclaims deleted rows. `GrafeoFileManager`
+  writes every checkpoint out of place, flips the header, and truncates
+  the dead generation when the new one lands below it, so the file
+  oscillates between one and two live generations
+  (`grafeo-storage/src/file/manager.rs`, `write_sections`). The LPG
+  section serializes visible rows only. The graph-db suite now proves it:
+  `retiring_superseded_generations_shrinks_the_staging_container_on_checkpoint`
+  retires two of three bulk generations and the container gives back more
+  than half within two checkpoints. `compact()` is not what shrinks the
+  file, and the "relation scalar endpoints" defect belongs to an older
+  sealed-lane design — sealed stores have built in compact form at
+  generation scale since `sealed_store.rs` adopted
+  `IncrementalCompactStoreBuilder`.
+- What keeps an 10.6 GB container at 10.6 GB is that its rows were never
+  deleted: `delete_staged_generation_rows` returns `RetentionPending` when
+  the engine is hibernated, by design, because opening a multi-gigabyte LPG
+  container costs roughly twice its size in RAM (the "20+ GB open" the
+  store-runtime release path records). `compact()` needs the same open, so
+  it cannot reach this case either. On the measured project the journal
+  holds 13 retirement tombstones and 18 superseded `code-generation`
+  replays behind the head, all waiting for an engine that only a
+  publication opens; the project also carries one semantic vector stage,
+  whose rows have no home outside the live container.
+
+**Revised decision.**
+
+1. Landed: retirement and tombstone finalization run at the end of every
+   publication, when the engine is already open
+   (`retire_superseded_projection_replays_with_lease` after
+   `publish_journaled`), so an active project converges to one-to-two
+   generations of container within two checkpoints of its next publish.
+   Landed: a deferred retirement still deletes the generation's sealed
+   artifact on the first pass — the directory needs no engine, and on the
+   measured project that is 9.5 GB of the 20 GB the project holds — while
+   the tombstone keeps the native row delete queued for the next open.
+   Landed: the Doctor `RetentionBacklog` finding carries the live container
+   bytes, the sealed heads' bytes, and the deferred native retirement count,
+   and reads Stale when retirements are deferred and the container exceeds
+   twice its heads — the inactive-project case is visible instead of silent.
+   Landed: the maintenance sweep's retirement pass now follows the release
+   sweep's policy — when the census finds work and the engine is
+   hibernated, open it once, delete, hibernate again — so an inactive
+   project converges on the ordinary maintenance cadence at the cost of
+   one open per productive tick. That open still costs roughly twice the
+   container in RAM the first time; the designs below remove the cost
+   rather than pay it.
+2. Open: reclaim without loading the old container at all. Two candidate
+   designs, neither chosen yet:
+   a. Keep the live container in layered form (columnar base + overlay)
+      from the first seal onward, so a hibernated open is an mmap of the
+      base rather than a replay into RAM, deletes land in the overlay's
+      deletions section, and `recompact()` merges on the maintenance
+      cadence. Blocked on validating TraceDecay's staging writes against a
+      `LayeredStore` (README gaps 3 and 4: `has_vector_index` planning and
+      the MVCC-free base).
+   b. Rebuild a fresh container by streaming the retained authorities —
+      sealed heads and their dependency closure from their compact stores,
+      pending replays from `canonical_replay_source`, vector generations
+      from their sealed stores — then prove every generation's recovered
+      digest against the journal before swapping files under the
+      maintenance lease. Memory is bounded by the largest generation, not
+      the container. Blocked on vector generations: the sealed lane never
+      routes vector search to sealed stores, so a rebuilt live container
+      must re-stage the vector rows and rebuild the HNSW index on open.

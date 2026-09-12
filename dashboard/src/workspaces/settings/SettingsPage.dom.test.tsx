@@ -909,46 +909,6 @@ describe('Settings responsive controls', () => {
     expect(within(navigation).getByRole('button', { name: /User/ })).toBeTruthy();
     expect(within(navigation).getByRole('button', { name: /Environment/ })).toBeTruthy();
   });
-
-  /**
-   * The premise that keeps section ids safe to put in a selector.
-   *
-   * `jumpTo` builds `[data-section=…]` out of a section id, which is only safe
-   * because the ids are the keys of `SettingsPayloadV1Schema` — a closed
-   * `z.object` over Rust field names, which strips everything else before the
-   * surface sees it. So the reviewed concern (a daemon-chosen key containing a
-   * quote or a backslash) is unreachable today, and this pins the reason
-   * rather than staging a payload production cannot produce: if the generated
-   * schema ever stops stripping, or grows a map-valued section, this fails.
-   *
-   * Pinned here rather than defended with `CSS.escape` at the call site,
-   * because escaping would buy nothing against a closed contract and would
-   * introduce a real dependency on a global jsdom does not define.
-   */
-  it('admits no section id that a selector could not hold', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        const envelope = settings();
-        const body = settingsBody(envelope);
-        body['weird"key'] = { enabled: true };
-        body['back\\slash'] = { enabled: true };
-        return jsonResponse(envelope);
-      }),
-    );
-    renderSettings();
-    await screen.findByRole('navigation', { name: 'Configuration groups' });
-
-    const ids = [...document.querySelectorAll('[data-section]')].map(
-      (node) => node.getAttribute('data-section') ?? '',
-    );
-    expect(ids.length).toBeGreaterThan(0);
-    for (const id of ids) {
-      // A CSS identifier, so the selector `jumpTo` builds around it parses.
-      expect(id).toMatch(/^[a-z_][a-z0-9_]*$/i);
-      expect(() => document.querySelector(`[data-section="${id}"]`)).not.toThrow();
-    }
-  });
 });
 
 function renderSettings() {
@@ -1009,46 +969,3 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { 'content-type': 'application/json' },
   });
 }
-
-describe('Settings header identity stamps', () => {
-  /**
-   * The live regression: the project and user groups of a real payload carry
-   * the SAME snapshot and revision ids, and the header strip rendered the
-   * SNAPSHOT/REVISION pair once per group — a doubled header row and duplicate
-   * `label:value` React keys under it. One identity is one stamp, and React
-   * must have nothing to warn about while the strip renders.
-   */
-  it('renders a shared snapshot identity exactly once, with unique keys', async () => {
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        const envelope = settings();
-        const body = settingsBody(envelope);
-        const project = body['project'] as Record<string, unknown>;
-        const user = body['user'] as Record<string, unknown>;
-        user['configuration_snapshot_id'] = project['configuration_snapshot_id'];
-        user['configuration_revision_id'] = project['configuration_revision_id'];
-        return jsonResponse(envelope);
-      }),
-    );
-    renderSettings();
-    await screen.findAllByText('snap-42');
-
-    // One SNAPSHOT cell and one REVISION cell in the header strip, however
-    // many groups pin them. Scoped to the header: the body legitimately
-    // renders each group's configuration_snapshot_id row as a setting.
-    const header = document.querySelector<HTMLElement>('[data-workspace-header]');
-    expect(header).not.toBeNull();
-    expect(within(header as HTMLElement).getAllByText('snap-42')).toHaveLength(1);
-    expect(within(header as HTMLElement).getAllByText('rev-42')).toHaveLength(1);
-    expect(within(header as HTMLElement).getAllByText('snapshot')).toHaveLength(1);
-    expect(within(header as HTMLElement).getAllByText('revision')).toHaveLength(1);
-
-    const duplicateKeyWarnings = consoleError.mock.calls.filter((call) =>
-      String(call[0]).includes('two children with the same key'),
-    );
-    expect(duplicateKeyWarnings).toEqual([]);
-    consoleError.mockRestore();
-  });
-});

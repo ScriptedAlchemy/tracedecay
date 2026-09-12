@@ -1,6 +1,9 @@
 use std::path::Path;
+use std::sync::Arc;
 
-use tracedecay_contracts::{NativeIntegrationPortError, NativeIntegrationPreflightRequestV1};
+use tracedecay_contracts::{
+    CancellationSignal, NativeIntegrationPortError, NativeIntegrationPreflightRequestV1,
+};
 use tracedecay_domain::{
     GitOidV1, GitOperationStateV1, ManifestDigest, MechanicalIntegrationModeV1,
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewV1,
@@ -9,14 +12,14 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git_repository::{
-    GitNativeIntegrationMode, GitNativePreflightDisposition, GitNativeUnsupportedReason,
-    GitRepositoryAuthority,
+    GitNativeIntegrationMode, GitNativePreflightCaptureError, GitNativePreflightDisposition,
+    GitNativeUnsupportedReason, GitRepositoryAuthority,
 };
 use tracedecay_store::NativeIntegrationRecordV1;
 
 use super::{
-    NativeApplyEffectV1, NativeIntegrationMechanics, NativeIntegrationProbeV1, domain_error,
-    native_error,
+    NativeApplyEffectV1, NativeIntegrationAnalysisPort, NativeIntegrationAnalysisRevalidationV1,
+    NativeIntegrationMechanics, NativeIntegrationProbeV1, domain_error, native_error,
 };
 
 const ADAPTER_REVISION: &str = "gix-native-integration-v1";
@@ -27,6 +30,7 @@ pub struct GixNativeIntegrationAdapter {
     project_id: ProjectId,
     repository_id: RepositoryId,
     repository: GitRepositoryAuthority,
+    analysis: Arc<dyn NativeIntegrationAnalysisPort>,
 }
 
 impl GixNativeIntegrationAdapter {
@@ -34,6 +38,7 @@ impl GixNativeIntegrationAdapter {
         project_id: ProjectId,
         repository_id: RepositoryId,
         enrolled_repository_root: &Path,
+        analysis: Arc<dyn NativeIntegrationAnalysisPort>,
     ) -> Result<Self, NativeIntegrationPortError> {
         project_id.validate().map_err(domain_error)?;
         repository_id.validate().map_err(domain_error)?;
@@ -43,6 +48,7 @@ impl GixNativeIntegrationAdapter {
             project_id,
             repository_id,
             repository,
+            analysis,
         })
     }
 
@@ -117,6 +123,7 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
         &self,
         selection: &NativeIntegrationSelectionV1,
         request: &NativeIntegrationPreflightRequestV1,
+        cancellation_signal: &CancellationSignal,
         cancellation: &CancellationToken,
     ) -> Result<NativeIntegrationPreviewV1, NativeIntegrationPortError> {
         selection.validate().map_err(domain_error)?;
@@ -133,17 +140,30 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
             .preferred_mode
             .unwrap_or(MechanicalIntegrationModeV1::TwoParentMerge);
         let native_mode = native_mode(mode);
-        let native = self
+        let (native, analysis) = self
             .repository
-            .preflight_native_integration(
+            .preflight_native_integration_with_candidate(
                 source_ref.as_str(),
                 destination_ref.as_str(),
                 &source_tip,
                 &destination_tip,
                 native_mode,
                 cancellation,
+                |native, candidate| {
+                    self.analysis.analyze(
+                        selection,
+                        native,
+                        candidate,
+                        request.context.deadline(),
+                        cancellation_signal,
+                        cancellation,
+                    )
+                },
             )
-            .map_err(native_error)?;
+            .map_err(|error| match error {
+                GitNativePreflightCaptureError::Repository(error) => native_error(error),
+                GitNativePreflightCaptureError::Capture(error) => error,
+            })?;
         let status = self.repository.status().map_err(native_error)?;
         let references = self.repository.references().map_err(native_error)?;
         let refs_digest = canonical_sha256(
@@ -228,9 +248,17 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
                         reason: NativeIntegrationUnavailabilityV1::DestinationOccupied,
                     }
                 }
-                GitNativePreflightDisposition::Eligible => {
-                    NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(mode)
-                }
+                GitNativePreflightDisposition::Eligible => match analysis.as_ref() {
+                    Some(report) if report.is_complete() && report.conflicts.is_empty() => {
+                        NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(mode)
+                    }
+                    Some(report) => NativeIntegrationPreviewDispositionV1::SemanticReviewRequired {
+                        evidence_digest: report.digest.clone(),
+                    },
+                    None => NativeIntegrationPreviewDispositionV1::Unavailable {
+                        reason: NativeIntegrationUnavailabilityV1::PartialEvidence,
+                    },
+                },
                 GitNativePreflightDisposition::AlreadyIntegrated => {
                     NativeIntegrationPreviewDispositionV1::AlreadyIntegrated
                 }
@@ -263,22 +291,14 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
                 }
             }
         };
-        let candidate_tree = matches!(
-            disposition,
-            NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
-        )
-        .then(|| native.candidate_tree)
-        .flatten();
+        let candidate_tree = analysis.as_ref().and(native.candidate_tree.clone());
         NativeIntegrationPreviewV1 {
             preview_id: request.preview_id.clone(),
             selection: selection.clone(),
             repository_snapshot,
             grant_digest: request.topology.grant_digest.clone(),
             policy_digest: request.topology.policy_digest.clone(),
-            graph_revision_digest: request.evidence.graph_revision_digest.clone(),
-            test_revision_digest: request.evidence.test_revision_digest.clone(),
-            schema_revision_digest: request.evidence.schema_revision_digest.clone(),
-            migration_revision_digest: request.evidence.migration_revision_digest.clone(),
+            analysis,
             disposition,
             candidate_tree,
             ordered_commits: native.ordered_commits,
@@ -350,6 +370,18 @@ impl NativeIntegrationMechanics for GixNativeIntegrationAdapter {
                 }
             }
         }
+    }
+
+    fn revalidate_analysis(
+        &self,
+        preview: &NativeIntegrationPreviewV1,
+        deadline: &tracedecay_contracts::Deadline,
+        cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationAnalysisRevalidationV1, NativeIntegrationPortError> {
+        let Some(report) = &preview.analysis else {
+            return Ok(NativeIntegrationAnalysisRevalidationV1::Stale);
+        };
+        self.analysis.revalidate(report, deadline, cancellation)
     }
 
     fn probe(

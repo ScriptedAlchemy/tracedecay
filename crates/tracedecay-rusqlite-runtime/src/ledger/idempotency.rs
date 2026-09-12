@@ -9,16 +9,16 @@ use super::{
     sqlite::{BindingKey, LedgerTransaction, Submission, decode_json, sqlite_u64},
 };
 
-const IDEMPOTENCY_TABLE: &str = "td_runtime_writer_idempotency_v1";
+const IDEMPOTENCY_TABLE: &str = "td_runtime_writer_idempotency_v2";
 const SELECT_IDEMPOTENCY: &str = r#"
 SELECT request_digest, original_receipt_json, transaction_scope_json,
        operation_id, durability_json, committed_at_micros
-FROM td_runtime_writer_idempotency_v1
+FROM td_runtime_writer_idempotency_v2
 WHERE shard_json = ?1 AND incarnation = ?2 AND authority_epoch = ?3
   AND idempotency_key = ?4
 "#;
 const INSERT_IDEMPOTENCY: &str = r#"
-INSERT OR IGNORE INTO td_runtime_writer_idempotency_v1 (
+INSERT OR IGNORE INTO td_runtime_writer_idempotency_v2 (
     shard_json, incarnation, authority_epoch, idempotency_key, request_digest,
     original_receipt_json, transaction_scope_json, operation_id, durability_json,
     committed_at_micros

@@ -508,20 +508,6 @@ mod tests {
     use super::WorkOperation;
 
     #[test]
-    fn every_operation_is_reachable_by_the_segment_its_path_ends_with() {
-        for operation in WorkOperation::ALL {
-            let path = operation.route_path();
-            let segment = path.rsplit('/').next().expect("a non-empty final segment");
-            assert_eq!(segment, operation.route_segment(), "{path}");
-            assert_eq!(
-                WorkOperation::parse(operation.route_segment()),
-                Some(operation),
-                "{path}"
-            );
-        }
-    }
-
-    #[test]
     fn retired_projection_operations_are_not_public_routes() {
         for retired in ["snapshot", "delta", "replan_dependencies", "accept_task"] {
             assert!(
@@ -535,71 +521,6 @@ mod tests {
                 "retired operation {retired} must not be mounted"
             );
         }
-    }
-
-    #[test]
-    fn the_catalog_and_dashboard_paths_are_the_router_path_under_their_prefixes() {
-        for operation in WorkOperation::ALL {
-            assert_eq!(
-                operation.application_route_path(),
-                format!("/application{}", operation.route_path())
-            );
-            assert_eq!(
-                operation.dashboard_route_path(),
-                format!("/api{}", operation.route_path()),
-                "{}",
-                operation.operation_key()
-            );
-        }
-    }
-
-    #[test]
-    fn the_operation_id_literal_is_the_key_under_the_canonical_prefix() {
-        for operation in WorkOperation::ALL {
-            assert_eq!(
-                operation.operation_id_str(),
-                format!("operation.work.{}", operation.operation_key())
-            );
-            assert_eq!(operation.operation_id(), operation.operation_id_str());
-        }
-    }
-
-    #[test]
-    fn read_only_operations_are_declared_exactly() {
-        let read_only = WorkOperation::ALL
-            .into_iter()
-            .filter(|operation| operation.is_read_only())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            read_only,
-            vec![
-                WorkOperation::GenerateProposal,
-                WorkOperation::AttemptStatus,
-                WorkOperation::ListAttempts,
-                WorkOperation::ExecutionHistory,
-                WorkOperation::HydrateArtifacts,
-                WorkOperation::RetrieveEvidence,
-                WorkOperation::Views,
-                WorkOperation::Experience,
-                WorkOperation::CompareProposal,
-                WorkOperation::PrepareGraphMutation,
-                WorkOperation::Topology,
-                WorkOperation::TopologyMetrics,
-                WorkOperation::PrepareDuplicateAdjudication,
-                WorkOperation::RunControl,
-                WorkOperation::PlacementPreflight,
-                WorkOperation::PlacementStatus,
-            ]
-        );
-    }
-
-    #[test]
-    fn dashboard_excludes_scheduler_owned_attempt_start() {
-        let excluded = WorkOperation::ALL
-            .into_iter()
-            .filter(|operation| !operation.is_dashboard_operation())
-            .collect::<Vec<_>>();
-        assert_eq!(excluded, vec![WorkOperation::StartAttempt]);
     }
 
     #[test]

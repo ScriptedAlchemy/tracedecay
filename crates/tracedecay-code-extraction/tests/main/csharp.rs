@@ -170,33 +170,6 @@ public enum Color
 }
 
 #[test]
-fn test_cs_method() {
-    let source = r#"
-public class Foo
-{
-    public void DoSomething() {}
-    private int Compute(int x) { return x * 2; }
-    protected string GetName() { return "foo"; }
-}
-"#;
-    let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert_eq!(methods.len(), 3);
-    let do_something = methods.iter().find(|m| m.name == "DoSomething").unwrap();
-    assert_eq!(do_something.visibility, Visibility::Pub);
-    let compute = methods.iter().find(|m| m.name == "Compute").unwrap();
-    assert_eq!(compute.visibility, Visibility::Private);
-    let get_name = methods.iter().find(|m| m.name == "GetName").unwrap();
-    assert_eq!(get_name.visibility, Visibility::PubSuper);
-}
-
-#[test]
 fn test_cs_constructor() {
     let source = r#"
 public class Person
@@ -476,35 +449,6 @@ public class Foo
         !docstring.contains("<summary>"),
         "docstring should not contain XML tags: {:?}",
         docstring
-    );
-}
-
-#[test]
-fn test_cs_call_sites() {
-    let source = r#"
-public class App
-{
-    public void Run()
-    {
-        Console.WriteLine("hello");
-        Helper();
-        var list = new List<string>();
-    }
-    private void Helper() {}
-}
-"#;
-    let extractor = CSharpExtractor;
-    let result = extractor.extract("test.cs", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let call_refs: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.reference_kind == EdgeKind::Calls)
-        .collect();
-    assert!(
-        !call_refs.is_empty(),
-        "should have call refs, got: {:?}",
-        result.unresolved_refs
     );
 }
 

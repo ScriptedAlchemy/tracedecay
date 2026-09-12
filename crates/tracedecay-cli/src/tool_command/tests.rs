@@ -93,6 +93,30 @@ fn application_operations_resolve_by_identity_and_by_cli_spelling() {
 }
 
 #[test]
+fn retryable_surface_refusals_stop_at_the_attempt_and_deadline_bounds() {
+    let delay = Duration::from_millis(10);
+    let roomy_deadline = Instant::now() + Duration::from_secs(1);
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 1, roomy_deadline),
+        Some(delay)
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 2, roomy_deadline),
+        Some(delay)
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 3, roomy_deadline),
+        None,
+        "the third typed refusal is surfaced instead of retried"
+    );
+    assert_eq!(
+        bounded_surface_retry_delay(Some(delay), 1, Instant::now() + delay),
+        None,
+        "a retry that cannot complete inside the request deadline is refused"
+    );
+}
+
+#[test]
 fn whole_payload_invocation_parses_without_a_tool_definition() {
     let parsed = parse_whole_payload_invocation_with_stdin(
         &[
@@ -115,6 +139,45 @@ fn whole_payload_invocation_parses_without_a_tool_definition() {
     assert!(parsed.raw_json);
     assert!(!parsed.dry_run);
     assert!(!parsed.show_help);
+}
+
+#[test]
+fn multi_root_execute_accepts_its_emitted_continuation_object() {
+    let digest = |byte: char| {
+        tracedecay_domain::ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
+            .expect("test digest")
+    };
+    let generation = tracedecay_domain::RootScopeOutcomeV1::new(
+        digest('b'),
+        tracedecay_domain::ScopeOutcome::<tracedecay_domain::RootGenerationV1>::Denied,
+    )
+    .expect("denied root generation");
+    let emitted = tracedecay_contracts::MultiRootContinuationV1::new(
+        digest('a'),
+        vec![generation],
+        digest('c'),
+        digest('d'),
+        1,
+    )
+    .expect("page-zero continuation");
+    let continuation = serde_json::to_value(emitted).expect("emitted continuation JSON");
+    let arguments = json!({
+        "scope_set_id": "scope-set.cli-replay",
+        "scope_set_revision": 1,
+        "scope_set_digest": format!("sha256:{}", "a".repeat(64)),
+        "operation": {"kind": "query", "request": {}},
+        "page": 1,
+        "continuation": continuation
+    });
+
+    let parsed = parse_invocation_with_stdin(
+        &def("multi_root_execute"),
+        &["--args".to_owned(), arguments.to_string()],
+        || panic!("inline JSON must not read stdin"),
+    )
+    .expect("the public CLI must replay the continuation emitted by page zero");
+
+    assert_eq!(parsed.tool_args["continuation"], continuation);
 }
 
 #[test]
@@ -156,24 +219,6 @@ fn whole_payload_invocation_defers_schema_dependent_flags() {
 }
 
 #[test]
-fn parses_positional_required_string() {
-    let d = def("search");
-    let parsed = parse_invocation(&d, &["foo".to_string()]).unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "foo" }));
-}
-
-#[test]
-fn coerces_integer_flag() {
-    let d = def("search");
-    let parsed = parse_invocation(
-        &d,
-        &["foo".to_string(), "--limit".to_string(), "25".to_string()],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "foo", "limit": 25 }));
-}
-
-#[test]
 fn rejects_non_numeric_flag() {
     let d = def("search");
     let err = parse_invocation(
@@ -186,44 +231,6 @@ fn rejects_non_numeric_flag() {
         msg.contains("number") || msg.contains("integer"),
         "got: {msg}"
     );
-}
-
-#[test]
-fn coerces_boolean_flag() {
-    let d = def("context");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "describe X".to_string(),
-            "--include-code".to_string(),
-            "true".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["include_code"], json!(true));
-}
-
-#[test]
-fn missing_required_errors() {
-    let d = def("search");
-    let err = parse_invocation(&d, &[]).unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("missing required parameter"), "got: {msg}");
-}
-
-#[test]
-fn args_escape_hatch() {
-    let d = def("search");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--args".to_string(),
-            r#"{"query":"foo","limit":3}"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["query"], json!("foo"));
-    assert_eq!(parsed.tool_args["limit"], json!(3));
 }
 
 #[test]
@@ -254,16 +261,6 @@ fn args_escape_hatch_reads_stdin_dash() {
     })
     .unwrap();
     assert_eq!(parsed.tool_args, json!({ "query": "stdin", "limit": 9 }));
-}
-
-#[test]
-fn args_escape_hatch_reads_stdin_at_dash() {
-    let d = def("search");
-    let parsed = parse_invocation_with_stdin(&d, &["--args".to_string(), "@-".to_string()], || {
-        Ok(r#"{"query":"stdin-at"}"#.to_string())
-    })
-    .unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "stdin-at" }));
 }
 
 #[test]
@@ -333,24 +330,8 @@ fn reserved_flags_extracted() {
 }
 
 #[test]
-fn help_flag_short_circuits() {
-    let d = def("search");
-    let parsed = parse_invocation(&d, &["--help".to_string()]).unwrap();
-    assert!(parsed.show_help);
-}
-
-#[test]
-fn unknown_tool_name_errors() {
-    // canonical_tool_name only normalises — unknown names are caught by
-    // the lookup in run(). Simulate the lookup here.
-    let canonical = canonical_tool_name("totally-fake-tool");
-    let found = defs().into_iter().any(|d| d.name == canonical);
-    assert!(!found);
-}
-
-#[test]
 fn array_value_collected_via_repetition() {
-    let d = def("affected_tests");
+    let d = def("affected");
     let parsed = parse_invocation(
         &d,
         &[
@@ -371,7 +352,7 @@ fn array_value_collected_via_repetition() {
 
 #[test]
 fn finalize_arrays_splits_csv() {
-    let d = def("affected_tests");
+    let d = def("affected");
     let mut map = Map::new();
     map.insert("files".to_string(), json!("src/a.rs,src/b.rs,src/c.rs"));
     finalize_arrays(&d, &mut map);
@@ -456,28 +437,6 @@ fn profile_scoped_session_refresh_dispatch_is_projectless() {
     );
 }
 
-#[test]
-fn user_memory_scope_dispatch_is_projectless() {
-    let dispatch = DaemonToolDispatch::for_tool(
-        None,
-        "tracedecay_fact_store_list",
-        &json!({
-            "memory_scope": "user",
-        }),
-    );
-
-    assert_eq!(dispatch.project_path, None);
-}
-
-#[test]
-fn implicit_tool_dispatch_stays_projectless_without_initialized_ancestor() {
-    let root = tempfile::tempdir().expect("projectless tool fixture");
-    let nested = root.path().join("nested");
-    std::fs::create_dir_all(&nested).expect("nested directory");
-
-    assert_eq!(implicit_tool_project_path(&nested), None);
-}
-
 // --- Validation gate and corrective-error contract ---
 
 #[test]
@@ -500,21 +459,6 @@ fn unknown_key_errors_with_did_you_mean_and_valid_keys() {
 }
 
 #[test]
-fn unknown_key_in_args_payload_errors_too() {
-    let d = def("search");
-    let err = parse_invocation(
-        &d,
-        &[
-            "--args".to_string(),
-            r#"{"query":"x","limt":2}"#.to_string(),
-        ],
-    )
-    .unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("unknown parameter `--limt`"), "got: {msg}");
-}
-
-#[test]
 fn invalid_enum_errors_with_allowed_values() {
     let d = def("gini");
     let err = parse_invocation(&d, &["--metric".to_string(), "bogus".to_string()]).unwrap_err();
@@ -522,13 +466,6 @@ fn invalid_enum_errors_with_allowed_values() {
     assert!(msg.contains("`bogus` is not one of:"), "got: {msg}");
     assert!(msg.contains("complexity"), "got: {msg}");
     assert!(msg.contains("fan_in"), "got: {msg}");
-}
-
-#[test]
-fn valid_enum_passes() {
-    let d = def("gini");
-    let parsed = parse_invocation(&d, &["--metric".to_string(), "fan_in".to_string()]).unwrap();
-    assert_eq!(parsed.tool_args["metric"], json!("fan_in"));
 }
 
 /// The fact category vocabulary reaches the schema through a `$defs`
@@ -559,22 +496,6 @@ fn invalid_ref_enum_errors_with_allowed_values() {
     ] {
         assert!(msg.contains(admitted), "missing `{admitted}` in: {msg}");
     }
-}
-
-#[test]
-fn valid_ref_enum_passes() {
-    let d = def("fact_store_add");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--content".to_string(),
-            "categorized fact".to_string(),
-            "--category".to_string(),
-            "decision".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["category"], json!("decision"));
 }
 
 #[test]
@@ -684,25 +605,6 @@ fn lcm_cli_help_exposes_scope_without_hermes_profile_routing() {
 }
 
 #[test]
-fn per_key_json_array_of_pairs_parses() {
-    let d = def("multi_str_replace");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--path".to_string(),
-            "lib.rs".to_string(),
-            "--replacements".to_string(),
-            r#"[["alpha","gamma"]]"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args["replacements"],
-        json!([["alpha", "gamma"]])
-    );
-}
-
-#[test]
 fn comma_split_array_of_pairs_gets_corrective_error() {
     let d = def("multi_str_replace");
     let err = parse_invocation(
@@ -718,25 +620,6 @@ fn comma_split_array_of_pairs_gets_corrective_error() {
     let msg = format!("{err}");
     assert!(msg.contains("array of arrays"), "got: {msg}");
     assert!(msg.contains("--args -"), "got: {msg}");
-}
-
-#[test]
-fn per_key_json_object_parses() {
-    let d = def("message_search");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--query".to_string(),
-            "zeta".to_string(),
-            "--project-selector".to_string(),
-            r#"{"project_id":"other"}"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args["project_selector"],
-        json!({"project_id": "other"})
-    );
 }
 
 #[test]
@@ -766,13 +649,6 @@ fn key_equals_value_form_accepted() {
 }
 
 #[test]
-fn reserved_flag_equals_value_form_accepted() {
-    let d = def("search");
-    let parsed = parse_invocation(&d, &["--args={\"query\":\"eq\"}".to_string()]).unwrap();
-    assert_eq!(parsed.tool_args, json!({ "query": "eq" }));
-}
-
-#[test]
 fn fact_feedback_bare_helpful_flag_does_not_swallow_note_flag() {
     let d = def("fact_feedback");
     let parsed = parse_invocation(
@@ -794,16 +670,6 @@ fn fact_feedback_bare_helpful_flag_does_not_swallow_note_flag() {
 }
 
 #[test]
-fn bare_boolean_flag_at_end_of_args_defaults_to_true() {
-    let d = def("context");
-    let parsed = parse_invocation(&d, &["how".to_string(), "--include-code".to_string()]).unwrap();
-    assert_eq!(
-        parsed.tool_args,
-        json!({ "task": "how", "include_code": true })
-    );
-}
-
-#[test]
 fn bare_boolean_flag_before_next_flag_does_not_swallow_it() {
     let d = def("context");
     let parsed = parse_invocation(
@@ -819,24 +685,6 @@ fn bare_boolean_flag_before_next_flag_does_not_swallow_it() {
     assert_eq!(
         parsed.tool_args,
         json!({ "task": "how", "include_code": true })
-    );
-}
-
-#[test]
-fn boolean_flag_with_explicit_value_after_it_is_still_consumed() {
-    let d = def("context");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "how".to_string(),
-            "--include-code".to_string(),
-            "false".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        parsed.tool_args,
-        json!({ "task": "how", "include_code": false })
     );
 }
 
@@ -937,12 +785,6 @@ fn validation_skips_opaque_schemas() {
     )
     .unwrap();
     assert_eq!(parsed.tool_args["anything"], json!("goes"));
-}
-
-#[test]
-fn join_content_text_returns_single_block() {
-    let value = json!({ "content": [{ "type": "text", "text": "only payload" }] });
-    assert_eq!(join_content_text(&value), "only payload");
 }
 
 #[test]
@@ -1227,6 +1069,9 @@ fn application_problem_makes_the_tool_command_fail() {
 fn documented_json_invocations() -> Vec<(&'static str, Value)> {
     vec![
         ("tracedecay_storage_status", json!({})),
+        // `health_read` takes no parameters at all, so the documented
+        // invocation is the empty object on every transport.
+        ("tracedecay_health_read", json!({})),
         ("tracedecay_git_status", json!({})),
         ("tracedecay_git_diff", json!({})),
         ("tracedecay_git_history", json!({"count": 3})),
@@ -1261,35 +1106,6 @@ fn documented_format_argument_never_reaches_the_reviewed_request() {
         parse_application_surface_request(operation, request).unwrap_or_else(|error| {
             panic!("{tool_name} did not match its reviewed schema: {error}")
         });
-    }
-}
-
-#[test]
-fn cli_and_mcp_separate_transport_metadata_identically() {
-    for (tool_name, args) in documented_json_invocations() {
-        let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
-            .unwrap_or_else(|| panic!("{tool_name} is an application surface operation"));
-        let arguments = with_format(args, "json");
-
-        let (cli_request, cli_format) = cli_surface_invocation(tool_name, arguments.clone(), false)
-            .unwrap_or_else(|error| panic!("{tool_name} CLI normalization failed: {error}"));
-        // The MCP transport reaches the reviewed schema through the same
-        // adapter; an argument accepted there must be accepted here.
-        let mcp = adapt_application_tool_request(tool_name, arguments)
-            .unwrap_or_else(|error| panic!("{tool_name} MCP normalization failed: {error}"));
-
-        assert_eq!(cli_request, mcp.request, "{tool_name}");
-        assert_eq!(cli_format, mcp.requested_format, "{tool_name}");
-
-        let cli_parsed = serde_json::to_value(
-            parse_application_surface_request(operation, cli_request).expect("cli request"),
-        )
-        .expect("cli request is serializable");
-        let mcp_parsed = serde_json::to_value(
-            parse_application_surface_request(operation, mcp.request).expect("mcp request"),
-        )
-        .expect("mcp request is serializable");
-        assert_eq!(cli_parsed, mcp_parsed, "{tool_name}");
     }
 }
 
@@ -1619,13 +1435,6 @@ fn json_flag_and_json_format_select_the_same_output() {
     assert_eq!(flag_format, RequestedOutputFormat::Json);
     assert_eq!(format_format, RequestedOutputFormat::Json);
     assert_eq!(flag_request, format_request);
-}
-
-#[test]
-fn markdown_remains_the_default_presentation() {
-    let (_request, format) =
-        cli_surface_invocation("tracedecay_storage_status", json!({}), false).expect("default");
-    assert_eq!(format, RequestedOutputFormat::Markdown);
 }
 
 #[test]

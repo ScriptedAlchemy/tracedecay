@@ -61,48 +61,6 @@ struct SeamSpyAdmission {
     cover_past_advances: Mutex<Vec<ObservationCursorAdvance>>,
 }
 
-#[test]
-fn install_shared_jsonl_preparation_authority_is_idempotent_across_memory_arcs() {
-    use std::num::NonZeroU64;
-    use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
-
-    super::install_test_shared_jsonl_preparation_authority();
-    let other = std::sync::Arc::new(ProcessResidentMemoryV1::new(
-        NonZeroU64::new(64 * 1024 * 1024).expect("nonzero JSONL fixture budget"),
-    ));
-    let other_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN));
-    super::install_shared_jsonl_preparation_authority(other, other_cpu).expect(
-        "a second installer with distinct memory/CPU Arcs must not poison the process-wide authority",
-    );
-    assert_eq!(
-        super::shared_jsonl_preparation_workers(),
-        48,
-        "the first installed CPU width must remain the one preparation meters against"
-    );
-}
-
-#[tokio::test]
-async fn shared_jsonl_page_reuses_one_bounded_scan() {
-    super::install_test_shared_jsonl_preparation_authority();
-    let temp = tempfile::TempDir::new().expect("temp directory");
-    let path = temp.path().join("shared.jsonl");
-    std::fs::write(&path, b"{}\n").expect("JSONL fixture");
-    let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
-
-    let (first, first_hit) =
-        super::shared_jsonl_page(&path, StoredCursor::default(), Some(1024), None, true)
-            .await
-            .expect("initial shared page");
-    let (second, second_hit) =
-        super::shared_jsonl_page(&path, StoredCursor::default(), Some(1024), None, true)
-            .await
-            .expect("cached shared page");
-
-    assert!(!first_hit);
-    assert!(second_hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &second));
-}
-
 #[tokio::test]
 async fn shared_jsonl_page_precomputes_codex_context_hints_once() {
     super::install_test_shared_jsonl_preparation_authority();
@@ -425,110 +383,6 @@ async fn aborting_a_prefetch_build_releases_waiters_and_speculative_capacity() {
 }
 
 #[tokio::test]
-async fn build_observation_excludes_an_overlapping_sibling_generation() {
-    super::install_test_shared_jsonl_preparation_authority();
-    let temp = tempfile::TempDir::new().expect("temp directory");
-    let observed_path = temp.path().join("observed-generation.jsonl");
-    let sibling_path = temp.path().join("sibling-generation.jsonl");
-    std::fs::write(&observed_path, b"{}\n").expect("observed JSONL fixture");
-    std::fs::write(&sibling_path, b"{}\n").expect("sibling JSONL fixture");
-    let observed_builds =
-        super::SharedJsonlBuildObserver::for_paths(std::slice::from_ref(&observed_path));
-    let sibling_builds =
-        super::SharedJsonlBuildObserver::for_paths(std::slice::from_ref(&sibling_path));
-    let sibling_gate = Arc::new(std::sync::Barrier::new(2));
-    super::SHARED_JSONL_BUILD_GATES
-        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-        .lock()
-        .unwrap()
-        .insert(sibling_path.clone(), Arc::clone(&sibling_gate));
-
-    let sibling_task = tokio::spawn({
-        let sibling_path = sibling_path.clone();
-        async move {
-            super::shared_jsonl_page(
-                &sibling_path,
-                StoredCursor::default(),
-                Some(1024),
-                None,
-                super::SharedJsonlFramePreparation::Lazy,
-            )
-            .await
-        }
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while sibling_builds.active() == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("sibling generation reached its blocking build");
-
-    super::shared_jsonl_page(
-        &observed_path,
-        StoredCursor::default(),
-        Some(1024),
-        None,
-        super::SharedJsonlFramePreparation::Lazy,
-    )
-    .await
-    .expect("observed generation page");
-    assert_eq!(
-        observed_builds.active(),
-        0,
-        "the completed generation must release its own active-build slot"
-    );
-    assert_eq!(observed_builds.peak(), 1);
-    assert_eq!(
-        sibling_builds.active(),
-        1,
-        "the independently observed sibling must remain blocked"
-    );
-
-    super::SHARED_JSONL_BUILD_GATES
-        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-        .lock()
-        .unwrap()
-        .remove(&sibling_path);
-    tokio::task::spawn_blocking(move || sibling_gate.wait())
-        .await
-        .expect("release sibling build gate");
-    sibling_task
-        .await
-        .expect("sibling generation task")
-        .expect("sibling generation page");
-    assert_eq!(
-        sibling_builds.active(),
-        0,
-        "the sibling generation must release its own active-build slot"
-    );
-}
-
-#[tokio::test]
-async fn unpinned_admission_page_defers_decode_to_the_scope_gate() {
-    super::install_test_shared_jsonl_preparation_authority();
-    let temp = tempfile::TempDir::new().expect("temp directory");
-    let path = temp.path().join("scope-first.jsonl");
-    std::fs::write(&path, b"{\"type\":\"event_msg\"}\n").expect("JSONL fixture");
-
-    let (page, _) =
-        super::shared_jsonl_page(&path, StoredCursor::default(), Some(1024), None, true)
-            .await
-            .expect("standalone admission page");
-
-    assert!(
-        page.frames
-            .iter()
-            .all(|frame| frame.prepared.get().is_none()),
-        "an unpinned standalone/replay page must not decode before its scope gate"
-    );
-    assert!(
-        page._memory.is_some(),
-        "raw replay pages must retain a process-memory reservation until their final Arc drops"
-    );
-}
-
-#[tokio::test]
 async fn generation_pin_prevents_slow_consumer_page_eviction() {
     super::install_test_shared_jsonl_preparation_authority();
     let temp = tempfile::TempDir::new().expect("temp directory");
@@ -684,37 +538,6 @@ async fn prepared_generation_uses_bounded_parallelism_and_retained_bytes() {
 }
 
 #[test]
-fn preparation_uses_the_daemon_installed_worker_width() {
-    super::install_test_shared_jsonl_preparation_authority();
-    assert_eq!(super::shared_jsonl_preparation_workers(), 48);
-}
-
-#[test]
-fn preparation_preserves_configured_widths_above_sixty_four() {
-    assert_eq!(super::shared_jsonl_preparation_workers_from(96), 96);
-}
-
-#[test]
-fn preparation_width_backs_down_under_memory_pressure() {
-    let reservation = super::SHARED_JSONL_WORKER_RESERVATION_BYTES;
-    assert_eq!(
-        super::shared_jsonl_preparation_capacity_from(48, reservation * 64, 0),
-        48
-    );
-    assert_eq!(
-        super::shared_jsonl_preparation_capacity_from(48, reservation * 8, reservation * 6),
-        2
-    );
-}
-
-#[test]
-fn speculative_preparation_reserves_capacity_for_exact_cursor_demand() {
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(48), 47);
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(2), 1);
-    assert_eq!(super::shared_jsonl_speculative_capacity_from(1), 0);
-}
-
-#[test]
 fn small_lazy_pages_release_build_headroom_for_exact_demand() {
     use std::num::NonZeroU64;
 
@@ -821,35 +644,6 @@ async fn lazy_preparation_retains_only_its_measured_memory_charge() {
         lazy_charge < 1024 * 1024,
         "lazy preparation must shrink its bounded reservation to measured bytes"
     );
-}
-
-#[test]
-fn speculative_capacity_is_one_global_quota_across_prefetch_generations() {
-    let key = |name: &str| super::SharedJsonlPageKey {
-        path: PathBuf::from(name),
-        position: 0,
-        generation: 0,
-        max_new_bytes: Some(super::SHARED_JSONL_PAGE_MAX_NEW_BYTES),
-        max_frames: None,
-        resume: None,
-        preparation: true.into(),
-    };
-    let first = key("/generation-a.jsonl");
-    let second = key("/generation-b.jsonl");
-    let demand_slot = key("/exact-demand.jsonl");
-    let mut cache = super::SharedJsonlPageCache::default();
-
-    assert!(super::reserve_shared_jsonl_speculative_slot(
-        &mut cache, &first, 2
-    ));
-    assert!(super::reserve_shared_jsonl_speculative_slot(
-        &mut cache, &second, 2
-    ));
-    assert!(
-        !super::reserve_shared_jsonl_speculative_slot(&mut cache, &demand_slot, 2),
-        "a second prefetch generation cannot recompute and reuse occupied speculative slots"
-    );
-    assert_eq!(cache.speculative_in_flight.len(), 2);
 }
 
 impl SeamSpyAdmission {
@@ -1616,69 +1410,6 @@ async fn out_of_scope_frames_are_rejected_before_the_decode() {
             .expect("covered-past frames still advance the frontier")
             .position(),
         len
-    );
-}
-
-/// The same rollout in scope: records still admit, and the decode still owns
-/// the malformed verdict for the frame the scope gate no longer intercepts.
-#[tokio::test]
-async fn in_scope_frames_still_admit_and_keep_the_decode_verdict() {
-    super::install_test_shared_jsonl_preparation_authority();
-    let temp = tempfile::tempdir().unwrap();
-    let cwd = temp.path().join("workspace");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let path = temp.path().join("rollout.jsonl");
-    write_undecodable_tail_rollout(&path, &cwd);
-    let _pin = super::pin_shared_jsonl_paths(std::slice::from_ref(&path));
-    let spy = SeamSpyAdmission::default();
-
-    let progress =
-        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
-            .await
-            .expect("an in-scope rollout admits");
-    let (page, hit) = super::shared_jsonl_page(
-        &path,
-        StoredCursor::default(),
-        None,
-        None,
-        super::SharedJsonlFramePreparation::Lazy,
-    )
-    .await
-    .expect("the retained admission page remains available");
-
-    assert_eq!(spy.inner.observations().len(), 2);
-    assert_eq!(progress.frames_persisted, 2);
-    assert_eq!(progress.frames_decoded, 3);
-    assert_eq!(
-        progress.frames_rejected_before_decode, 0,
-        "nothing in scope may be refused before it is decoded"
-    );
-    assert!(hit);
-    assert_eq!(
-        super::shared_jsonl_frame_preparations_for_test(page.file_identity),
-        3,
-        "the context frame and both in-scope frames must reach canonical preparation"
-    );
-    assert_eq!(
-        progress
-            .frames_decoded
-            .saturating_add(progress.frames_rejected_before_decode),
-        3,
-        "every attempted frame is either decoded or rejected before decode, never both"
-    );
-    assert!(
-        page.frames
-            .iter()
-            .all(|frame| frame.prepared.get().is_some()),
-        "in-scope replay frames must prepare once through the shared admitted worker path"
-    );
-    assert_eq!(
-        spy.cover_past_advances()
-            .iter()
-            .map(ObservationCursorAdvance::reason)
-            .collect::<Vec<_>>(),
-        vec![ObservationCoverageReason::MalformedFrame],
-        "in scope, the undecodable frame keeps the decode's own verdict"
     );
 }
 

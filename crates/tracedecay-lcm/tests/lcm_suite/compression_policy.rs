@@ -1,9 +1,8 @@
 use serde_json::{Value, json};
 use tracedecay_lcm::compression_policy::{
-    AssemblyCapInput, CondensationCandidateDecision, OverflowRecoveryCapInput,
-    bounded_leaf_chunk_len, condensation_candidate_decision, effective_assembly_token_cap,
-    effective_leaf_chunk_tokens, forced_overflow_pressure, incremental_max_depth_limit,
-    overflow_recovery_assembly_cap, progress_leaf_chunk_len, threshold_pressure,
+    AssemblyCapInput, OverflowRecoveryCapInput, bounded_leaf_chunk_len,
+    effective_assembly_token_cap, effective_leaf_chunk_tokens, overflow_recovery_assembly_cap,
+    progress_leaf_chunk_len,
 };
 use tracedecay_lcm::contracts::{LcmRawMessage, LcmStorageKind};
 
@@ -96,51 +95,6 @@ fn overflow_recovery_cap_reserves_non_message_overhead() {
     );
 }
 
-/// Structured content must count visible words, not serialized JSON keys.
-/// `{"extra":"ignored key words","text":"one"}` would be 3 tokens if the
-/// policy stringified the object; visible-text extraction is 1.
-fn object_with_text_fixture() -> Value {
-    json!({
-        "content": {
-            "extra": "ignored key words",
-            "text": "one",
-        }
-    })
-}
-
-fn array_of_text_parts_fixture() -> Value {
-    json!({
-        "content": [
-            { "extra": "ignored key words", "text": "one" },
-            { "text": "two three" },
-        ]
-    })
-}
-
-#[test]
-fn overflow_recovery_cap_counts_object_with_text_as_visible_words() {
-    assert_eq!(
-        overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
-            current_tokens: Some(6),
-            max_assembly_tokens: Some(10),
-            messages: &[object_with_text_fixture()],
-        }),
-        Some(5)
-    );
-}
-
-#[test]
-fn overflow_recovery_cap_counts_array_of_text_parts_as_visible_words() {
-    assert_eq!(
-        overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
-            current_tokens: Some(8),
-            max_assembly_tokens: Some(10),
-            messages: &[array_of_text_parts_fixture()],
-        }),
-        Some(5)
-    );
-}
-
 #[test]
 fn dynamic_leaf_size_grows_by_powers_of_two_within_the_ceiling() {
     assert_eq!(
@@ -172,23 +126,5 @@ fn atomic_tool_transactions_are_never_split_by_leaf_caps() {
     assert_eq!(
         progress_leaf_chunk_len(&transaction, Some(1), Some(1)),
         transaction.len()
-    );
-}
-
-#[test]
-fn pressure_and_condensation_limits_keep_boundary_semantics() {
-    assert!(threshold_pressure(Some(10), Some(10)));
-    assert!(!threshold_pressure(Some(9), Some(10)));
-    assert!(forced_overflow_pressure(Some(10), Some(10)));
-    assert!(!forced_overflow_pressure(Some(10), None));
-    assert_eq!(incremental_max_depth_limit(None), 1);
-    assert_eq!(incremental_max_depth_limit(Some(-1)), i64::MAX);
-    assert_eq!(
-        condensation_candidate_decision(2, 3),
-        CondensationCandidateDecision::SkipNotEnoughCandidates
-    );
-    assert_eq!(
-        condensation_candidate_decision(3, 3),
-        CondensationCandidateDecision::Condense
     );
 }

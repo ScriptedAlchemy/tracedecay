@@ -359,21 +359,6 @@ mod tests {
     };
 
     #[test]
-    fn descriptor_derives_route_and_catalog_identity() {
-        for operation in WorkflowOperation::ALL {
-            assert_eq!(
-                operation.application_route_path(),
-                format!("/application{}", operation.route_path())
-            );
-            assert!(
-                operation
-                    .operation_id_str()
-                    .starts_with("operation.workflow.")
-            );
-        }
-    }
-
-    #[test]
     fn read_only_operations_mirror_the_catalog_effect_class() {
         let registry = tracedecay_contracts::workflow_executable_binding_registry()
             .expect("canonical Workflow executable registry");

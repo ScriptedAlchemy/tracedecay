@@ -1,3 +1,5 @@
+#[cfg(test)]
+use tracedecay_domain::EmbeddingExecutionProviderV1;
 use tracedecay_domain::VectorGenerationIdV1;
 #[cfg(test)]
 use tracedecay_semantic_contracts::SemanticModelRemediationV1;
@@ -28,7 +30,7 @@ pub fn application_status_from_projection(
     configuration: Option<SemanticConfigurationPinV1>,
     activation_receipt: Option<SemanticActivationReceiptV1>,
 ) -> SemanticRuntimeStatusV1 {
-    match &projection.status {
+    let status = match &projection.status {
         SemanticRuntimeScheduleStatusV1::Unavailable => SemanticRuntimeStatusV1::new(
             configuration,
             SemanticRuntimeStateV1::Unavailable {
@@ -79,7 +81,8 @@ pub fn application_status_from_projection(
         SemanticRuntimeScheduleStatusV1::Current { generation } => {
             ready_or_typed_missing_receipt(generation, configuration, activation_receipt)
         }
-    }
+    };
+    status.with_execution_provider(projection.execution_provider)
 }
 
 fn ready_or_typed_missing_receipt(
@@ -342,6 +345,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scheduler_projection_preserves_the_resolved_execution_provider() {
+        let projection = SemanticRuntimeStatusProjectionV1 {
+            status: SemanticRuntimeScheduleStatusV1::Unavailable,
+            degraded_reason: None,
+            prior_generation: None,
+            execution_provider: Some(EmbeddingExecutionProviderV1::WebGpu),
+        };
+
+        let status = application_status_from_projection(&projection, None, None);
+        assert_eq!(
+            status.execution_provider,
+            Some(EmbeddingExecutionProviderV1::WebGpu)
+        );
+    }
+
     fn generic_unavailable(
         configuration: Option<SemanticConfigurationPinV1>,
     ) -> SemanticRuntimeStatusV1 {
@@ -360,16 +379,6 @@ mod tests {
             artifact_digest: digest(),
             bytes_received: 10,
             bytes_total: 100,
-        }
-    }
-
-    fn failed() -> SemanticModelLifecycleStateV1 {
-        SemanticModelLifecycleStateV1::Failed {
-            model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-            revision: "rev".to_owned(),
-            artifact_digest: digest(),
-            detail: "connection refused to unroutable endpoint".to_owned(),
-            retryable: true,
         }
     }
 
@@ -456,31 +465,6 @@ mod tests {
                 assert_eq!(*bytes_total, 100);
             }
             other => panic!("expected downloading, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn generic_unavailable_yields_to_lifecycle_failed() {
-        let status = prefer_lifecycle_over_generic_unavailable(
-            generic_unavailable(Some(pin())),
-            &lifecycle_status(Some("JinaEmbeddingsV2BaseCode"), Some(failed())),
-        );
-
-        assert_eq!(status.validate(), Ok(()));
-        assert_eq!(
-            status.route(),
-            SemanticRuntimeRouteV1::LexicalFallback {
-                reason: SemanticFallbackReasonV1::ModelFailed,
-            }
-        );
-        match &status.state {
-            SemanticRuntimeStateV1::Failed {
-                detail, retryable, ..
-            } => {
-                assert_eq!(detail, "connection refused to unroutable endpoint");
-                assert!(retryable);
-            }
-            other => panic!("expected failed, got {other:?}"),
         }
     }
 

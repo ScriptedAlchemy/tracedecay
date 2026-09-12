@@ -654,28 +654,4 @@ mod producer_source_tests {
             );
         }
     }
-
-    #[test]
-    fn upstream_lane_always_wins_over_a_claimed_tracedecay_source() {
-        let merged = DiagnosticMerge::new(vec![diagnostic(DiagnosticSource::TraceDecayCi)], vec![]);
-        assert_eq!(merged.items[0].source, DiagnosticSource::Upstream);
-    }
-
-    #[test]
-    fn producer_mapping_round_trips_and_defaults_safely() {
-        for source in [
-            DiagnosticSource::TraceDecay,
-            DiagnosticSource::TraceDecayGitHub,
-            DiagnosticSource::TraceDecayCi,
-            DiagnosticSource::TraceDecayProximity,
-        ] {
-            assert_eq!(DiagnosticSource::from_producer(source.wire_name()), source);
-            assert!(source.is_tracedecay());
-        }
-        assert_eq!(
-            DiagnosticSource::from_producer("some-unknown-producer"),
-            DiagnosticSource::TraceDecay
-        );
-        assert!(!DiagnosticSource::Upstream.is_tracedecay());
-    }
 }

@@ -1744,7 +1744,7 @@ The storage family never reports a silent overage: each subclass names one
 observable retention/size condition Doctor surfaces over canonical size
 observability read models. The set is closed and grows only through a future
 versioned enum, never by widening an existing subclass. */
-export const DoctorStorageFindingKindV1Schema = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth")]);
+export const DoctorStorageFindingKindV1Schema = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth"), z.literal("pending_schema_migration")]);
 export type DoctorStorageFindingKindV1 = z.infer<typeof DoctorStorageFindingKindV1Schema>;
 
 export const DuplicateEffectOutcomeV1Schema = z.enum(["committed", "not_applicable", "prevented", "unknown"]);
@@ -5622,6 +5622,7 @@ export type WorkExperienceApplicabilityV1 = z.infer<typeof WorkExperienceApplica
 
 export const WorkExperienceCandidateV1Schema = z.object({
   applicability: z.array(z.lazy(() => WorkExperienceApplicabilityV1Schema)),
+  attempt_receipts: z.array(z.lazy(() => WorkAttemptReceiptV1Schema)),
   evidence: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
   item: z.lazy(() => WorkItemV1Schema),
 }).strict();

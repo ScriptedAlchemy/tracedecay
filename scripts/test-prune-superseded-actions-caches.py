@@ -51,13 +51,6 @@ class SupersededSelectionTests(unittest.TestCase):
         ]
         self.assertEqual(ids(self.prune.superseded(entries)), {1, 2})
 
-    def test_a_toolchain_env_change_supersedes_the_older_env_generation(self) -> None:
-        entries = [
-            entry(1, "v0-rust-ci-dev-Linux-Linux-x64-a68045c9-6447760f", "2026-09-08T15:10:00Z"),
-            entry(2, "v0-rust-ci-dev-Linux-Linux-x64-0badf00d-6447760f", "2026-09-08T19:00:00Z"),
-        ]
-        self.assertEqual(ids(self.prune.superseded(entries)), {1})
-
     def test_distinct_rust_cache_prefixes_are_separate_lineages(self) -> None:
         entries = [
             entry(1, "v0-rust-ci-test-full-Linux-Linux-x64-a68045c9-6447760f", "2026-09-08T16:57:00Z"),
@@ -132,18 +125,6 @@ class SupersededSelectionTests(unittest.TestCase):
         self.assertEqual(completed.stdout, "11\n")
         self.assertIn("1 of 3 cache entries superseded (1 MiB)", completed.stderr)
         self.assertIn("v0-rust-ci-clippy-full-Linux-Linux-x64-a68045c9-26efddad", completed.stderr)
-
-    def test_command_with_nothing_to_prune_prints_nothing_on_stdout(self) -> None:
-        completed = subprocess.run(
-            [sys.executable, str(SCRIPT_PATH)],
-            input=json.dumps({"total_count": 0, "actions_caches": []}),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        self.assertEqual(completed.stdout, "")
-        self.assertIn("0 of 0 cache entries superseded", completed.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

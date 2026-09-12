@@ -45,7 +45,7 @@ fn replace_file_atomically(
 }
 
 pub(crate) fn truncate_file(path: &Path, len: u64) -> Result<(), SpoolError> {
-    shared_truncate_file(path, len, DIRECTORY_POLICY).map_err(io_error)
+    shared_truncate_file(path, len).map_err(io_error)
 }
 
 pub(crate) fn with_owned_temp_publish<T>(

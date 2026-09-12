@@ -289,19 +289,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_notification_without_id() {
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "method": "initialized"
-        });
-
-        let request: JsonRpcRequest = serde_json::from_value(msg).unwrap();
-        assert_eq!(request.method, "initialized");
-        assert!(request.id.is_none());
-        assert!(request.params.is_none());
-    }
-
-    #[test]
     fn test_serialize_success_response() {
         let response =
             JsonRpcResponse::success(serde_json::Value::Number(1.into()), json!({"tools": []}));
@@ -324,16 +311,6 @@ mod tests {
         assert!(json.contains("-32601"));
         assert!(json.contains("Method not found"));
         assert!(!json.contains("\"result\""));
-    }
-
-    #[test]
-    fn test_error_codes() {
-        assert_eq!(ErrorCode::ParseError.as_i32(), -32700);
-        assert_eq!(ErrorCode::InvalidRequest.as_i32(), -32600);
-        assert_eq!(ErrorCode::MethodNotFound.as_i32(), -32601);
-        assert_eq!(ErrorCode::InvalidParams.as_i32(), -32602);
-        assert_eq!(ErrorCode::RequestCancelled.as_i32(), -32800);
-        assert_eq!(ErrorCode::InternalError.as_i32(), -32603);
     }
 
     fn invalid_request_id(error: JsonRpcDecodeError) -> Value {

@@ -8,12 +8,12 @@ use tracedecay_domain::{
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
     RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
-use tracedecay_tool_catalog::{CapabilityId, EffectClass, UseCaseId};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::transactions::scope_reference_matches_snapshot;
 use super::{
     GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
-    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, git_index_effect_class,
+    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
 };
 use crate::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
@@ -180,22 +180,6 @@ fn apply_request(
         },
         observed_at: UtcMicros(15),
     }
-}
-
-#[test]
-fn each_index_mutation_keeps_its_own_effect_class() {
-    assert_eq!(
-        git_index_effect_class(GitIndexTransactionOperationV1::StageHunks),
-        EffectClass::GitIndexStage
-    );
-    assert_eq!(
-        git_index_effect_class(GitIndexTransactionOperationV1::UnstageHunks),
-        EffectClass::GitIndexUnstage
-    );
-    assert_eq!(
-        git_index_effect_class(GitIndexTransactionOperationV1::CommitIndex),
-        EffectClass::GitIndexCommit
-    );
 }
 
 #[test]

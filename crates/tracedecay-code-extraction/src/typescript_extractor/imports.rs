@@ -219,6 +219,8 @@ fn push_evidence(
         module_specifier: module_specifier.to_owned(),
         imported_name: names.0,
         local_name: names.1,
+        is_public: false,
+        is_glob: false,
         namespace,
         module_kind,
         span,

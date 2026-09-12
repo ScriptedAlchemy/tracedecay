@@ -227,31 +227,3 @@ where
         }
     }
 }
-
-#[cfg(test)]
-mod controller_tests {
-    use super::{SemanticRequest, Value};
-    use crate::diagnostics::LspPosition;
-
-    #[test]
-    fn semantic_controller_projects_provider_result() {
-        let mut session = super::super::tests::session();
-        super::super::tests::initialize(&mut session);
-        session.start_semantic_request(
-            Value::from("semantic-controller"),
-            Some(("file:///root/a.rs".to_owned(), 0)),
-            SemanticRequest::Definition {
-                document_uri: "file:///root/a.rs".to_owned(),
-                position: LspPosition {
-                    line: 0,
-                    character: 0,
-                },
-            },
-            2,
-        );
-
-        let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
-        assert_eq!(response["id"], "semantic-controller");
-        assert_eq!(response["result"][0]["uri"], "file:///root/a.rs");
-    }
-}

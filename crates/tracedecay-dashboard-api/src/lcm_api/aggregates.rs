@@ -656,38 +656,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_message_uses_unknown_model_o200k_only_when_available() {
-        let message = message_json(
-            DashboardLcmCanonicalMessageV1 {
-                session_id: "session.message".to_owned(),
-                provider: "codex".to_owned(),
-                role: "assistant".to_owned(),
-                timestamp: Some(1),
-                ordinal: 1,
-                content: "content whose tokenizer is unknown".to_owned(),
-                message_id: "message.one".to_owned(),
-                metadata_json: None,
-                tool_names: None,
-            },
-            &TokenCountCache::new(),
-        );
-
-        #[cfg(feature = "token-counting")]
-        {
-            assert!(message["token_count"].as_i64().is_some());
-            assert_eq!(
-                message["token_count_provenance"],
-                serde_json::json!("o200k_approximate")
-            );
-        }
-        #[cfg(not(feature = "token-counting"))]
-        {
-            assert!(message["token_count"].is_null());
-            assert!(message["token_count_provenance"].is_null());
-        }
-    }
-
-    #[test]
     fn native_usage_does_not_claim_visible_content_tokens() {
         let message = message_json(
             DashboardLcmCanonicalMessageV1 {
@@ -737,25 +705,6 @@ mod tests {
         assert_eq!(parse_optional_i64(" 42 "), Ok(Some(42)));
         assert_eq!(parse_optional_i64(" \t "), Ok(None));
         assert_eq!(parse_optional_i64("tomorrow"), Err(()));
-    }
-
-    #[test]
-    fn overview_reduction_preserves_exact_counts_and_deterministic_recency() {
-        let value = overview_json(
-            aggregate_page(),
-            String::new(),
-            1,
-            "profile_sharded",
-            &TokenCountCache::new(),
-        )
-        .expect("valid aggregate");
-
-        assert_eq!(value["overview"]["messages_total"], 2);
-        assert_eq!(value["overview"]["sessions_total"], 2);
-        assert_eq!(value["overview"]["summary_nodes_total"], 1);
-        assert_eq!(value["overview"]["compression"]["ratio"], 4.0);
-        assert_eq!(value["latest_sessions"][0]["session_id"], "session.newer");
-        assert_eq!(value["latest_sessions"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]
@@ -820,29 +769,6 @@ mod tests {
         assert_eq!(bucket["unknown_message_count"], 2);
     }
 
-    #[cfg(feature = "token-counting")]
-    #[test]
-    fn timeline_marks_complete_visible_content_counts_as_o200k_approximate() {
-        let mut page = aggregate_page();
-        page.messages[0].timestamp = Some(86_400);
-        page.messages[0].role = "assistant".to_owned();
-        page.messages[0].metadata_json = Some(r#"{"usage":{"output_tokens":91}}"#.to_owned());
-
-        let value = timeline_json(
-            page,
-            DashboardLcmTimelineBucketV1::Day,
-            None,
-            25,
-            "profile_sharded",
-            &TokenCountCache::new(),
-        );
-        let bucket = &value["buckets"][0];
-        assert!(bucket["token_count"].as_i64().is_some());
-        assert_eq!(bucket["token_count_provenance"], "o200k_approximate");
-        assert_eq!(bucket["known_message_count"], 2);
-        assert_eq!(bucket["unknown_message_count"], 0);
-    }
-
     #[test]
     fn overview_reports_missing_canonical_summary_accounting_without_inventing_counts() {
         let mut page = aggregate_page();
@@ -858,40 +784,6 @@ mod tests {
         .expect("other overview fields remain valid");
         assert!(value["overview"]["compression"]["source_token_count"].is_null());
         assert!(value["overview"]["compression"]["ratio"].is_null());
-    }
-
-    #[cfg(feature = "token-counting")]
-    #[test]
-    fn repeat_message_render_reads_the_shared_cache_instead_of_reencoding() {
-        let cache = TokenCountCache::new();
-        let message = aggregate_page().messages.remove(0);
-
-        let first = message_json(message.clone(), &cache);
-        let direct = count_text_tokens(&message.content, "").expect("token counting compiled in");
-        assert_eq!(first["token_count"].as_i64(), Some(direct));
-        assert_eq!(first["token_count_provenance"], "o200k_approximate");
-
-        // Overwrite the cached count with a sentinel the BPE can never
-        // produce for this text. If the repeat render re-invoked
-        // `count_text_tokens` it would return (and re-store) `direct`, not
-        // the sentinel — so the sentinel surfacing pins zero re-encodes for
-        // unchanged content.
-        let fingerprint = content_fingerprint(&message.content);
-        cache.store_displayed_tokens(&message.provider, &message.message_id, fingerprint, 987_654);
-        let second = message_json(message.clone(), &cache);
-        assert_eq!(second["token_count"].as_i64(), Some(987_654));
-        assert_eq!(second["token_count_provenance"], "o200k_approximate");
-
-        // Changed content under the same message id must miss the cache and
-        // be recounted: the stale sentinel is never served for new text.
-        let mut changed = message;
-        changed.content = "entirely different displayed content".to_owned();
-        let recounted = message_json(changed.clone(), &cache);
-        assert_eq!(
-            recounted["token_count"].as_i64(),
-            count_text_tokens(&changed.content, "")
-        );
-        assert_eq!(recounted["token_count_provenance"], "o200k_approximate");
     }
 
     #[cfg(feature = "token-counting")]

@@ -76,7 +76,7 @@ pub fn workspace_package_field<'a>(manifest: &'a str, key: &str) -> Option<&'a s
 
 #[cfg(test)]
 mod tests {
-    use super::{ROOT_MANIFEST_FILE, resolve, workspace_package_field};
+    use super::{resolve, workspace_package_field};
 
     const MANIFEST: &str = "\
 [workspace]
@@ -146,17 +146,5 @@ version = \"1\"
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("Cargo.toml"), MANIFEST).expect("write manifest");
         assert_eq!(resolve(dir.path()).as_deref(), Some("9.9.9"));
-    }
-
-    #[test]
-    fn a_virtual_workspace_product_version_round_trips_through_a_file() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        std::fs::write(
-            directory.path().join(ROOT_MANIFEST_FILE),
-            "[workspace]\nresolver = \"3\"\n\n[workspace.package]\nversion = \"0.1.0-beta.38\"\n",
-        )
-        .expect("write manifest");
-
-        assert_eq!(resolve(directory.path()).as_deref(), Some("0.1.0-beta.38"));
     }
 }

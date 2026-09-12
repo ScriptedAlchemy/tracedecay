@@ -2,15 +2,15 @@
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::time::Instant;
 use tracedecay_private_fs::capability_dir::{
     remove_open_dir_all_nofollow, rename_noreplace, sync_directory,
 };
@@ -775,11 +775,6 @@ fn journal_cleanup_names(journal_name: &str, state: JournalCleanupState) -> [Str
     }
 }
 
-#[cfg(test)]
-pub(super) fn committed_journal_cleanup_names(journal_name: &str) -> [String; 3] {
-    journal_cleanup_names(journal_name, JournalCleanupState::DeletionConfirmed)
-}
-
 fn clear_journal_in_order(
     parent: &Dir,
     parent_path: &Path,
@@ -1035,7 +1030,7 @@ pub(super) fn recover_named_store_quarantine_controlled(
         quarantine_name,
         parent_path,
         None,
-        unbounded_collection_control(),
+        super::unbounded_collection_control(),
         after_rename,
     )
 }
@@ -1769,7 +1764,7 @@ pub(super) fn classify_recovery_journal_probe(
 pub(crate) fn read_pending_quarantine_receipts(
     profile_root: &Path,
 ) -> Result<Vec<PendingQuarantineReceiptV1>, CollectionFailureKind> {
-    read_pending_quarantine_receipts_controlled(profile_root, unbounded_collection_control())
+    read_pending_quarantine_receipts_controlled(profile_root, super::unbounded_collection_control())
 }
 
 #[cfg(test)]
@@ -1886,6 +1881,8 @@ fn receipt_actual_path(original_path: &Path, quarantine_path: &Path) -> PathBuf 
     }
 }
 
+// High-level registered/unregistered collection orchestration.
+
 /// Cooperative budget carried through every expensive retention read and
 /// apply boundary. The database writer is acquired only after content hashing
 /// and durable-memory inspection have completed under this control.
@@ -1954,7 +1951,7 @@ impl<'a> CollectionControl<'a> {
     }
 }
 
-pub(super) fn unbounded_collection_control() -> CollectionControl<'static> {
+pub(crate) fn unbounded_collection_control() -> CollectionControl<'static> {
     static CANCELLATION: std::sync::OnceLock<CancellationToken> = std::sync::OnceLock::new();
     CollectionControl::new(
         CANCELLATION.get_or_init(CancellationToken::new),
@@ -3527,9 +3524,6 @@ fn is_memory_table_identifier(table: &str) -> bool {
     })
 }
 
-/// Deletes unregistered directories through the same two-phase boundary:
-/// content/durable inspection and quarantine first, then a short final
-/// still-unregistered confirmation before the irreversible phase.
 #[cfg(test)]
 pub(crate) async fn execute_unregistered_collection(
     db: &RegisteredGlobalDb,

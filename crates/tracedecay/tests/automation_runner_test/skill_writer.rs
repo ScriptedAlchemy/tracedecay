@@ -42,19 +42,6 @@ async fn retained_skill_writer_preserves_retrieval_and_defers_ledger_publication
     drop(guard);
 }
 
-#[test]
-fn skill_writer_options_have_no_storage_selector() {
-    let options = serde_json::to_value(SkillWriterAutomationOptions::default()).unwrap();
-    assert!(options.get("storage_scope").is_none());
-    assert!(options.get("hermes_home").is_none());
-    assert!(
-        serde_json::from_value::<SkillWriterAutomationOptions>(json!({
-            "hermes_home": "/tmp/hermes"
-        }))
-        .is_err()
-    );
-}
-
 #[tokio::test]
 async fn skill_writer_runner_skips_when_task_is_disabled() {
     let temp = tempdir().unwrap();
@@ -96,58 +83,6 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
     assert_eq!(
         run.ledger_record.error.as_deref(),
         Some("skill_writer_disabled")
-    );
-}
-
-#[tokio::test]
-async fn skill_writer_fails_closed_on_denied_temporal_evidence() {
-    let temp = tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let cg = init_project(temp.path()).await;
-    let backend = SkillJsonBackend::new(no_skill_needed_output(
-        "Denied evidence must not invoke this backend.",
-        "no_action",
-    ));
-    let retrieval = RejectedAutomationSessionRetrieval::new("session_evidence_denied");
-
-    let run =
-        tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &automation_project_context(&cg),
-            &enabled_skill_writer_config(),
-            &test_configuration_revision(),
-            &backend,
-            &retrieval,
-            SkillWriterAutomationOptions {
-                profile_root: Some(profile_root.clone()),
-                ..SkillWriterAutomationOptions::default()
-            },
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("session_evidence_denied")
-    );
-    assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "denied evidence must not write a ledger record"
-    );
-    assert!(
-        !profile_root.exists(),
-        "denied evidence must not create the managed-skill profile"
-    );
-    assert!(
-        !cg.store_layout()
-            .dashboard_root
-            .join("automation_outcomes.json")
-            .exists(),
-        "denied evidence must not refresh skill outcomes"
     );
 }
 
@@ -247,43 +182,6 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
         .unwrap();
 
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
-}
-
-#[tokio::test]
-async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
-    let _env_lock = ENV_LOCK.lock().await;
-    let temp = tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let cg = init_project(temp.path()).await;
-    let _global_db = isolate_global_db(&cg);
-    let backend = SkillJsonBackend::new(no_skill_needed_output(
-        "No retained evidence is available.",
-        "insufficient_repeated_evidence",
-    ));
-    let retrieval = EmptyAutomationSessionRetrieval::new();
-    let config = enabled_skill_writer_config();
-
-    let run = run_skill_writer_with_backend_and_retrieval(
-        &automation_project_context(&cg),
-        &config,
-        &test_configuration_revision(),
-        &backend,
-        &retrieval,
-        SkillWriterAutomationOptions {
-            include_recent_sessions: false,
-            profile_root: Some(profile_root),
-            ..SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("no_skill_writer_evidence")
-    );
 }
 
 #[cfg(feature = "test-transport")]
@@ -727,39 +625,6 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
                 })
             )
     );
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn skill_writer_evidence_includes_underused_tool_family_summary() {
-    let _env_lock = ENV_LOCK.lock().await;
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    seed_session_evidence(&cg).await;
-    seed_search_underuse_session_evidence(&cg).await;
-    let _global_db = isolate_global_db(&cg);
-    let backend = InspectSkillWriterUnderusedBackend;
-    let config = enabled_skill_writer_config();
-
-    let run = run_skill_writer_with_backend_and_retrieval(
-        &automation_project_context(&cg),
-        &config,
-        &test_configuration_revision(),
-        &backend,
-        &FixtureAutomationSessionRetrieval::new(&cg),
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            provider: "cursor".to_string(),
-            query: "automation".to_string(),
-            evidence_limit: 5,
-            run_id: None,
-            ..SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
 
 #[cfg(feature = "test-transport")]

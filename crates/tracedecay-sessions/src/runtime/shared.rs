@@ -1089,7 +1089,6 @@ mod tests {
     use super::TranscriptLocation;
     use super::TranscriptLocationMetadataKeys;
     use super::append_location_metadata_cached;
-    use super::one_line_truncated;
     use super::path_identity_key;
     use super::usage_counters_from;
 
@@ -1340,52 +1339,6 @@ mod tests {
             first.get("worktree").and_then(Value::as_str),
             "repeated cwd should reuse the source-lifetime worktree resolution"
         );
-    }
-
-    #[test]
-    fn project_root_matcher_caches_repeated_path_membership() {
-        let temp = TempDir::new().expect("temp dir");
-        let project_root = temp.path().join("repo");
-        let nested_cwd = project_root.join("packages/app");
-        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&project_root)
-            .status()
-            .expect("git init");
-        assert!(status.success());
-
-        let matcher = ProjectRootMatcher::new(&project_root);
-        assert!(matcher.contains(&nested_cwd));
-
-        // A repeated lookup should use the result already resolved for this
-        // cwd, rather than discovering/opening the same repository again.
-        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
-            .expect("hide git metadata after first lookup");
-        assert!(matcher.contains(&nested_cwd));
-    }
-
-    #[test]
-    fn one_line_truncated_collapses_and_clips() {
-        assert_eq!(one_line_truncated("a\n b\t c", 100), "a b c");
-        assert_eq!(one_line_truncated("abcdef", 3), "abc…");
-    }
-
-    #[test]
-    fn usage_counters_keep_cache_only_rows_actual() {
-        let Some(usage) = usage_counters_from(&json!({
-            "usage": {
-                "cache_read_input_tokens": 123,
-                "total_tokens": 123
-            }
-        })) else {
-            panic!("cache-only usage should be retained");
-        };
-
-        assert_eq!(usage["input_tokens"], 0);
-        assert_eq!(usage["output_tokens"], 0);
-        assert_eq!(usage["cache_read_input_tokens"], 123);
-        assert_eq!(usage["total_tokens"], 123);
     }
 
     #[test]

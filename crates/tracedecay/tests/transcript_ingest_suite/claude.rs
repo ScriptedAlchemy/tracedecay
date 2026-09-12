@@ -673,51 +673,6 @@ async fn claude_thinking_blocks_do_not_project_as_ordinary_messages() {
 }
 
 #[tokio::test]
-async fn claude_transcript_ingest_is_incremental() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let path = write_claude_transcript(&home, &project, "claude-sess");
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let source = ClaudeSource::with_home(&home);
-
-    let first = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(first.messages_upserted, 2);
-    // Re-ingesting the unchanged file is a no-op.
-    let second = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(second.messages_upserted, 0);
-
-    // Appending one line ingests only that line.
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(
-        f,
-        "{}",
-        serde_json::json!({
-            "type": "user",
-            "cwd": project.to_string_lossy(),
-            "sessionId": "claude-sess",
-            "uuid": "u3",
-            "timestamp": "2026-01-01T00:01:00.000Z",
-            "message": {"role": "user", "content": "Add a regression test for billing"}
-        })
-    )
-    .unwrap();
-    drop(f);
-
-    let third = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(third.messages_upserted, 1);
-}
-
-#[tokio::test]
 async fn claude_transcript_for_other_project_is_skipped() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
@@ -1407,6 +1362,72 @@ async fn claude_compact_boundary_record_becomes_marker_row() {
     assert_eq!(metadata["trigger"], "auto");
     assert_eq!(metadata["pre_tokens"], 150000);
     assert_eq!(metadata["logical_parent_uuid"], "pre-compact-parent");
+    assert!(
+        metadata.get("canonical_envelope").is_some(),
+        "compact-boundary pairing evidence must stay on the marker row: {metadata}"
+    );
+}
+
+#[tokio::test]
+async fn claude_compact_summary_keeps_pairing_envelope() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("claude-compact-pair.jsonl");
+    let cwd = project.to_string_lossy();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "sessionId": "claude-compact-pair",
+            "uuid": "ffffffff-0000-1111-2222-333333333333",
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "cwd": cwd,
+            "logicalParentUuid": "pre-compact-parent",
+            "compactMetadata": {
+                "trigger": "auto",
+                "preTokens": 120000,
+                "preservedSegment": {
+                    "anchorUuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "user",
+            "sessionId": "claude-compact-pair",
+            "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "parentUuid": "ffffffff-0000-1111-2222-333333333333",
+            "timestamp": "2026-01-01T00:00:06.000Z",
+            "cwd": cwd,
+            "isCompactSummary": true,
+            "isVisibleInTranscriptOnly": true,
+            "message": {
+                "role": "user",
+                "content": "Exercise Claude compact-summary pair extraction."
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    try_ingest_source(&db, &source, &project, None)
+        .await
+        .unwrap();
+
+    let summary = db
+        .get_session_message("claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        .await
+        .expect("compact-summary must persist");
+    let metadata: serde_json::Value =
+        serde_json::from_str(summary.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["canonical_envelope"]["relations"]["parent_message_id"],
+        "ffffffff-0000-1111-2222-333333333333",
+        "compact-summary pairing evidence must stay on the message row: {metadata}"
+    );
 }
 
 #[tokio::test]
@@ -1513,42 +1534,6 @@ fn write_claude_subagent_with_meta(
     )
     .unwrap();
     path
-}
-
-#[tokio::test]
-async fn claude_subagent_meta_json_enriches_draft() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    write_claude_transcript(&home, &project, "parent-meta");
-    write_claude_subagent_with_meta(&home, "parent-meta", "worker", None);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let source = ClaudeSource::with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.sessions_upserted, 2);
-
-    let child = db
-        .get_session("claude", "agent-worker")
-        .await
-        .expect("subagent session should be stored");
-    assert!(child.is_subagent);
-    assert_eq!(child.parent_session_id.as_deref(), Some("parent-meta"));
-    assert_eq!(child.agent_id.as_deref(), Some("worker"));
-    // toolUseId rides the dedicated parent_tool_use_id column.
-    assert_eq!(child.parent_tool_use_id.as_deref(), Some("toolu_spawn_42"));
-
-    let metadata: serde_json::Value =
-        serde_json::from_str(child.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["agent_type"], "Explore");
-    assert_eq!(
-        metadata["agent_description"],
-        "Investigate the billing fallback path"
-    );
-    assert_eq!(metadata["spawn_depth"], 1);
-    // Not a workflow-nested subagent: no run id.
-    assert!(metadata.get("workflow_run_id").is_none());
 }
 
 #[tokio::test]

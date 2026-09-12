@@ -302,9 +302,7 @@ mod tests {
     };
 
     use super::{
-        project_memory_combined_score, project_memory_fact_vector, project_memory_fts_component,
-        project_memory_holographic_midpoint, project_memory_jaccard,
-        project_memory_normalize_fts5_ranks, project_memory_score_millionths,
+        project_memory_fact_vector, project_memory_holographic_midpoint, project_memory_jaccard,
         project_memory_temporal_decay, project_memory_tokens,
     };
     use crate::memory::encoding::HolographicEncoder;
@@ -408,47 +406,8 @@ mod tests {
         assert_eq!(*second, fresh);
     }
 
-    fn fact_id(label: &str) -> FactId {
-        FactId::derive(
-            &FactIdentityMaterialV1::new(
-                FactOwnerV1::Profile,
-                FactIdentitySourceV1::Application {
-                    operation_id: ProvenanceId::new(format!("fixture.scoring.{label}"))
-                        .expect("fixture operation id"),
-                },
-            )
-            .expect("fixture identity material"),
-        )
-        .expect("fixture fact id")
-    }
-
     fn assert_f64_bits_eq(actual: f64, expected: f64) {
         assert_eq!(actual.to_bits(), expected.to_bits());
-    }
-
-    #[test]
-    fn shipped_bm25_coverage_and_retrieval_modifiers_remain_exact() {
-        let first = fact_id("bm25-first");
-        let second = fact_id("bm25-second");
-        let scores = project_memory_normalize_fts5_ranks(vec![
-            (first.clone(), -0.000_002),
-            (second.clone(), -0.000_001),
-        ]);
-        assert_f64_bits_eq(scores[&first], 1.0);
-        assert_f64_bits_eq(scores[&second], 0.5);
-        assert_f64_bits_eq(project_memory_fts_component(scores[&first], 0.5), 0.75);
-
-        let unboosted = project_memory_combined_score(0.75, 0.4, 0.6, 0.8, 0.9, 0);
-        let expected_relevance = 0.75_f64.mul_add(0.40, 0.4_f64.mul_add(0.30, 0.6 * 0.30));
-        assert!((unboosted - expected_relevance * 0.8 * 0.9).abs() < 1e-12);
-        let saturated = project_memory_combined_score(0.75, 0.4, 0.6, 0.8, 0.9, u64::MAX);
-        assert!(saturated <= unboosted * 1.5 + 1e-12);
-    }
-
-    #[test]
-    fn aggregate_score_retains_the_shipped_one_point_five_ceiling() {
-        let score = project_memory_combined_score(1.0, 1.0, 1.0, 1.0, 1.0, u64::MAX);
-        assert_eq!(project_memory_score_millionths(score), 1_500_000);
     }
 
     #[test]

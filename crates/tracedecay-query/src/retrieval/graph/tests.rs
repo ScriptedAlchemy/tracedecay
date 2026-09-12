@@ -24,15 +24,14 @@ use tracedecay_domain::{
 };
 
 use super::{
-    RetrievalExecutionControl, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    GraphPathSegmentV1,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
+    RetrievalExecutionControl,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
 };
 
 mod control;
-mod measurement;
 mod projection;
 mod scale;
 mod storage;

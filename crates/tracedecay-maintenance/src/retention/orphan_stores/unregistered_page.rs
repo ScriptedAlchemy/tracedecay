@@ -21,7 +21,7 @@ use super::{
     CollectionOutcome, CollectionRecoveryAction, CollectionRecoveryReceipt, StoreContentFence,
     StoreDirectoryFence, UnregisteredCollectionPlan, UnregisteredStoreFinding,
     dir_size_bytes_controlled, execute_unregistered_collection_controlled,
-    newest_mtime_secs_controlled, plan_unregistered_collection,
+    manifest_names_abandoned_root, newest_mtime_secs_controlled, plan_unregistered_collection,
 };
 
 pub const DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT: usize = 8;
@@ -299,6 +299,7 @@ async fn census_unregistered_project_dirs_page(
                 Err(CollectionFailureKind::Cancelled) => return Ok(None),
                 Err(_) => return Ok(None),
             };
+            let abandoned_root = manifest_names_abandoned_root(&data_root, profile_root);
             findings.push(UnregisteredStoreFinding {
                 project_dir_name: name,
                 data_root,
@@ -307,6 +308,7 @@ async fn census_unregistered_project_dirs_page(
                 expected_payload_mtime_secs: last_write_secs,
                 expected_data_root_fence,
                 expected_content_fence,
+                abandoned_root,
             });
             continue;
         };

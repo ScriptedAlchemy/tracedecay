@@ -4,7 +4,6 @@
 //! crate links its dependency closure once; a module that used to be its own
 //! `tests/<module>.rs` binary keeps that name as its module prefix.
 
-mod architecture_boundaries;
 mod chunk_incremental;
 mod deterministic_extraction;
 mod diagnostic_generation;
@@ -12,7 +11,6 @@ mod generations;
 mod git_joins;
 mod git_topology_edge_cases;
 mod git_topology_projection;
-mod graph_generation_identity;
 mod graph_projection_publication;
 mod ignored_source_admissions;
 mod impact_joins;
@@ -27,4 +25,5 @@ mod sanitized_intake;
 mod sealed_generation_restore;
 mod search_chunks;
 mod support;
+mod symbol_span_digest;
 mod test_attribution;

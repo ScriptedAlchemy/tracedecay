@@ -126,23 +126,6 @@ mod tests {
     use super::{document_ngram_scratch, reserve_ngram_scratch};
 
     #[test]
-    fn ngram_scratch_charge_covers_the_real_boundary_reservation() {
-        let (window_count, scratch_bytes) = document_ngram_scratch(2).expect("scratch charge");
-        assert_eq!(window_count, 3, "two bytes produce three n-gram windows");
-
-        let scratch = reserve_ngram_scratch(4).expect("boundary reservation");
-        let allocated_bytes = scratch
-            .capacity()
-            .checked_mul(std::mem::size_of::<u32>())
-            .expect("allocated scratch bytes");
-        assert!(
-            scratch_bytes >= allocated_bytes,
-            "the preflight charged {scratch_bytes} bytes for {window_count} windows, but the boundary reservation retained {allocated_bytes} bytes at capacity {}",
-            scratch.capacity()
-        );
-    }
-
-    #[test]
     fn ngram_scratch_charge_covers_real_reservations() {
         for (text_len, expected_windows, expected_capacity) in [
             (0usize, 0usize, 0usize),

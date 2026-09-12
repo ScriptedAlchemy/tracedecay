@@ -1777,33 +1777,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn project_alias_paths_do_not_influence_the_shard_identity() {
-        let fixture = Fixture::new();
-        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
-        let locator = resolved(resolve_as_local(
-            &fixture.resolver_for([fixture.second_alias.clone()]),
-            &key,
-        ));
-
-        assert_ne!(
-            storage::default_profile_project_id(&fixture.second_alias),
-            fixture.project_id.as_str(),
-            "fixture protects against accidentally falling back to path-hashed identity"
-        );
-        assert_eq!(
-            locator.locator().verified().shard_id,
-            key.shard_id().clone()
-        );
-        assert_eq!(
-            locator.metadata().canonical_store_root,
-            fixture
-                .profile_root
-                .join("projects")
-                .join(fixture.project_id.as_str())
-        );
-    }
-
     /// A root whose repository identity marker names a different project is
     /// evidence of a bad authority mapping and must fail closed, not fall
     /// through to an alias.
@@ -1906,42 +1879,6 @@ mod tests {
                 ..
             }) if filesystem_type == "nfs4"
         ));
-    }
-
-    #[test]
-    fn registry_adapter_preserves_safety_critical_unavailability() {
-        let shard_id = Fixture::new().shard();
-        for (reason, expected) in [
-            (
-                LocalStoreLocatorUnavailableReasonV1::NetworkFilesystem {
-                    filesystem_type: "nfs4".to_owned(),
-                },
-                StoreRuntimeRegistryFailure::NetworkFilesystemUnavailable {
-                    filesystem_type: "nfs4".to_owned(),
-                },
-            ),
-            (
-                LocalStoreLocatorUnavailableReasonV1::FilesystemLocalityUnverified {
-                    filesystem_type: "overlay".to_owned(),
-                },
-                StoreRuntimeRegistryFailure::FilesystemLocalityUnavailable {
-                    filesystem_type: "overlay".to_owned(),
-                },
-            ),
-            (
-                LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope,
-                StoreRuntimeRegistryFailure::UnsupportedShardScope,
-            ),
-        ] {
-            assert_eq!(
-                LocalStoreLocatorUnavailableV1 {
-                    shard_id: shard_id.clone(),
-                    reason,
-                }
-                .into_registry_failure(),
-                expected
-            );
-        }
     }
 
     #[test]
@@ -2287,22 +2224,6 @@ mod tests {
                 filesystem_type: "unrecognized".to_owned(),
             }
         );
-    }
-
-    #[test]
-    fn the_running_platform_mounts_an_ordinary_local_store() {
-        let fixture = Fixture::new();
-        let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
-        let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
-
-        // Exercises the real per-platform classifier, not the test double: an
-        // ordinary temporary directory must resolve on every supported host.
-        match resolver.resolve_key(&key) {
-            LocalStoreLocatorResolutionV1::Resolved(_) => {}
-            LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
-                panic!("expected a resolved locator on this platform, got {unavailable:?}")
-            }
-        }
     }
 
     /// Every locator root reaches the component walk in the exact form

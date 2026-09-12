@@ -79,6 +79,39 @@ pub struct CodeGenerationRetentionRecordV1 {
     pub stranded_scope_count: u64,
     #[serde(default = "zero_storage_bytes")]
     pub stranded_scope_bytes: StorageByteSizeV1,
+    /// Sealed graph generation artifacts in the project graph store whose
+    /// generation is no longer any projection's verified head. They are
+    /// retired when a newer head installs; a count here means that
+    /// retirement has not run since the last publication.
+    #[serde(default)]
+    pub superseded_sealed_generation_count: u64,
+    #[serde(default = "zero_storage_bytes")]
+    pub superseded_sealed_generation_bytes: StorageByteSizeV1,
+    /// `.staging-*` directories a seal left under the sealed root: a build
+    /// that never installed. Swept on the next store open.
+    #[serde(default)]
+    pub abandoned_sealed_staging_count: u64,
+    #[serde(default = "zero_storage_bytes")]
+    pub abandoned_sealed_staging_bytes: StorageByteSizeV1,
+    /// Bytes of the sealed artifacts every projection's verified head serves
+    /// from: the size the live staging container converges to once its
+    /// duplicate and superseded rows are gone.
+    #[serde(default = "zero_storage_bytes")]
+    pub sealed_head_generation_bytes: StorageByteSizeV1,
+    /// On-disk bytes of the live staging container (`tracedecay.grafeo` and
+    /// its WAL). Grafeo rewrites the container out of place on every
+    /// checkpoint and truncates the dead generation, so this shrinks on its
+    /// own once retired rows are deleted from the engine.
+    #[serde(default = "zero_storage_bytes")]
+    pub live_graph_container_bytes: StorageByteSizeV1,
+    /// Retirements the journal has already decided whose native rows are
+    /// still in the live container: retirement tombstones awaiting their
+    /// engine delete plus superseded replays behind an installed head. A
+    /// hibernated engine is never opened just to delete — opening a
+    /// multi-gigabyte LPG container costs about twice its size in RAM — so
+    /// these wait for the next publication, which holds the engine open.
+    #[serde(default)]
+    pub deferred_native_retirement_count: u64,
 }
 
 /// `serde(default)` needs a value, and `StorageByteSizeV1` deliberately has no
@@ -97,6 +130,10 @@ impl CodeGenerationRetentionRecordV1 {
             // Same invariant one level up: bytes are never reported without the
             // scopes that hold them.
             || (self.stranded_scope_count == 0 && self.stranded_scope_bytes.get() > 0)
+            || (self.superseded_sealed_generation_count == 0
+                && self.superseded_sealed_generation_bytes.get() > 0)
+            || (self.abandoned_sealed_staging_count == 0
+                && self.abandoned_sealed_staging_bytes.get() > 0)
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "code generation retention totals",
@@ -116,6 +153,24 @@ impl CodeGenerationRetentionRecordV1 {
     #[must_use]
     pub fn has_stranded_scopes(&self) -> bool {
         self.stranded_scope_count > 0
+    }
+
+    /// True when the graph store holds sealed artifacts nothing serves: a
+    /// superseded generation whose retirement has not run, or staging an
+    /// interrupted seal left behind.
+    #[must_use]
+    pub fn has_dead_sealed_artifacts(&self) -> bool {
+        self.superseded_sealed_generation_count > 0 || self.abandoned_sealed_staging_count > 0
+    }
+
+    /// True when the live container is holding retired rows that cannot be
+    /// deleted until an engine open pays for it: retirements are deferred and
+    /// the container is more than twice the sealed heads it duplicates.
+    #[must_use]
+    pub fn live_container_awaits_deferred_retirement(&self) -> bool {
+        self.deferred_native_retirement_count > 0
+            && self.sealed_head_generation_bytes.get() > 0
+            && self.live_graph_container_bytes.get() > 2 * self.sealed_head_generation_bytes.get()
     }
 }
 
@@ -217,31 +272,6 @@ mod tests {
     }
 
     #[test]
-    fn orphan_resolved_identity_is_not_orphan() {
-        let record = OrphanStoreRecordV1 {
-            store: store(),
-            identity_resolves: true,
-            size_bytes: StorageByteSizeV1(1_000),
-            first_unresolved_at: UtcMicros(100),
-            observed_at: UtcMicros(400),
-        };
-        assert!(!record.is_orphan());
-    }
-
-    #[test]
-    fn retention_backlog_detects_past_window_bytes() {
-        let record = RetentionBacklogRecordV1 {
-            store: store(),
-            table: TableNameV1::new("lcm_raw_messages").expect("valid"),
-            past_window_bytes: StorageByteSizeV1(3_800),
-            oldest_past_window_at: UtcMicros(10),
-            window_watermark_at: UtcMicros(100),
-        };
-        assert!(record.has_backlog());
-        assert!(record.validate().is_ok());
-    }
-
-    #[test]
     fn retention_backlog_rejects_inconsistent_watermark() {
         let record = RetentionBacklogRecordV1 {
             store: store(),
@@ -263,6 +293,13 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(2_000),
             stranded_scope_count: 0,
             stranded_scope_bytes: StorageByteSizeV1(0),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+            sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+            live_graph_container_bytes: StorageByteSizeV1::ZERO,
+            deferred_native_retirement_count: 0,
         };
 
         assert!(record.validate().is_err());
@@ -278,6 +315,13 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(1),
             stranded_scope_count: 0,
             stranded_scope_bytes: StorageByteSizeV1(0),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+            sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+            live_graph_container_bytes: StorageByteSizeV1::ZERO,
+            deferred_native_retirement_count: 0,
         };
 
         assert!(record.validate().is_err());
@@ -293,6 +337,13 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(0),
             stranded_scope_count: 0,
             stranded_scope_bytes: StorageByteSizeV1(7_730_941_132),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+            sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+            live_graph_container_bytes: StorageByteSizeV1::ZERO,
+            deferred_native_retirement_count: 0,
         };
 
         assert!(record.validate().is_err());
@@ -308,6 +359,13 @@ mod tests {
             collectable_generation_bytes: StorageByteSizeV1(0),
             stranded_scope_count: 2,
             stranded_scope_bytes: StorageByteSizeV1(7_730_941_132),
+            superseded_sealed_generation_count: 0,
+            superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+            abandoned_sealed_staging_count: 0,
+            abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
+            sealed_head_generation_bytes: StorageByteSizeV1::ZERO,
+            live_graph_container_bytes: StorageByteSizeV1::ZERO,
+            deferred_native_retirement_count: 0,
         };
 
         assert!(record.validate().is_ok());

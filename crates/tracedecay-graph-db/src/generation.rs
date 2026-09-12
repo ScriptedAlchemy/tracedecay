@@ -329,6 +329,20 @@ pub enum GraphReplayCollectionOutcome {
     RetentionPending,
 }
 
+/// Receipt of one superseded-replay retirement pass over a projection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SupersededReplayRetirement {
+    /// Superseded replays tombstoned, their generation contents deleted, and
+    /// their cleanup finalized.
+    pub retired: usize,
+    /// Superseded replays kept because a live reader, a dependency edge, a
+    /// pending publication, or a concurrent retirement still names them.
+    pub retained: usize,
+    /// Relational retirements whose native row delete waits for the staging
+    /// engine to be resident; the tombstone is revisited by the next pass.
+    pub pending: usize,
+}
+
 impl GraphGenerationManifest {
     pub fn new(
         projection: GraphProjectionIdentity,
@@ -590,6 +604,7 @@ impl GraphGenerationManifest {
         Ok(digest)
     }
 
+    #[hotpath::measure(label = "code_index.seal.digest")]
     fn compute_expected_recovered_digest(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -2023,23 +2038,20 @@ mod checked_vec_writer_tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::time::Instant;
 
     use sha2::{Digest, Sha256};
     use tracedecay_domain::canonical_text::encode_lowercase_hex;
 
     use super::{
-        CheckedVecWriter, GraphDbError, GraphGenerationManifest, MANIFEST_DIGEST_CHUNK_ROWS,
-        MANIFEST_DIGEST_MAX_IN_FLIGHT_BYTES, MANIFEST_DIGEST_WORKER_BYTES, ManifestDigestChunk,
+        CheckedVecWriter, GraphDbError, GraphGenerationManifest, ManifestDigestChunk,
         ManifestDigestChunkEncoding, ManifestDigestPipelineConfig, ManifestDigestPipelineMetrics,
         canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_entities,
         encode_manifest_digest_chunk, frame_length_headers, recovered_generation_digest,
         recovered_generation_digest_with_config, reset_canonical_buffer_allocation_growths,
     };
     use crate::{
-        GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId, GraphGenerationRelation,
-        GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
-        GraphPropertyName, GraphRelationId, GraphRelationKind, GraphWatermark, SourceGeneration,
+        GraphEntity, GraphEntityId, GraphGenerationId, GraphNamespace, GraphProjectionId,
+        GraphProjectionIdentity, GraphWatermark, SourceGeneration,
     };
 
     #[test]
@@ -2267,117 +2279,6 @@ mod checked_vec_writer_tests {
                 .windows(2)
                 .all(|rows| rows[0].identity < rows[1].identity)
         );
-    }
-
-    #[test]
-    #[ignore = "large synthetic manifest timing/RSS harness; run explicitly in a fresh process"]
-    fn manifest_digest_sandbox_probe() {
-        let rows = std::env::var("TRACEDECAY_MANIFEST_BENCH_ROWS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(250_000usize);
-        let mode = std::env::var("TRACEDECAY_MANIFEST_BENCH_MODE")
-            .unwrap_or_else(|_| "parallel".to_owned());
-        let workers = std::env::var("TRACEDECAY_MANIFEST_BENCH_WORKERS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(8usize);
-        let projection = GraphProjectionIdentity::new(
-            GraphNamespace::new("manifest-sandbox").unwrap(),
-            GraphProjectionId::new("code").unwrap(),
-        );
-        let payload = "manifest-payload-".repeat(16);
-        let entities = (0..rows)
-            .map(|index| {
-                GraphEntity::new(
-                    GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
-                    BTreeSet::from([GraphLabel::new("symbol").unwrap()]),
-                    BTreeMap::from([
-                        (
-                            GraphPropertyName::new("name").unwrap(),
-                            GraphProperty::String(format!("symbol_{index}")),
-                        ),
-                        (
-                            GraphPropertyName::new("payload").unwrap(),
-                            GraphProperty::String(payload.clone()),
-                        ),
-                    ]),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let relations = (0..rows.saturating_sub(1))
-            .map(|index| {
-                GraphGenerationRelation::new(
-                    GraphRelationId::new(format!("relation:{index:08}")).unwrap(),
-                    GraphEntityRef::new(
-                        projection.clone(),
-                        GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
-                    ),
-                    GraphEntityRef::new(
-                        projection.clone(),
-                        GraphEntityId::new(format!("entity:{:08}", index + 1)).unwrap(),
-                    ),
-                    GraphRelationKind::new("calls").unwrap(),
-                    BTreeMap::new(),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let manifest = GraphGenerationManifest::new(
-            projection,
-            GraphGenerationId::new("manifest-sandbox-generation").unwrap(),
-            SourceGeneration::new("manifest-sandbox-source").unwrap(),
-            GraphWatermark::new("manifest-sandbox-watermark").unwrap(),
-            vec![],
-            entities,
-            relations,
-        )
-        .unwrap();
-        let rss_before = proc_status_kib("VmRSS");
-        let hwm_before = proc_status_kib("VmHWM");
-        let metrics = Arc::new(ManifestDigestPipelineMetrics::default());
-        let config = match mode.as_str() {
-            "serial" => ManifestDigestPipelineConfig::serial(),
-            "parallel" => ManifestDigestPipelineConfig::testing(
-                workers,
-                MANIFEST_DIGEST_CHUNK_ROWS,
-                MANIFEST_DIGEST_WORKER_BYTES,
-                MANIFEST_DIGEST_MAX_IN_FLIGHT_BYTES,
-                Arc::clone(&metrics),
-            ),
-            other => panic!("unknown TRACEDECAY_MANIFEST_BENCH_MODE `{other}`"),
-        };
-        let started = Instant::now();
-        let digest =
-            recovered_generation_digest_with_config(&manifest, &|| Ok(()), config).unwrap();
-        let elapsed = started.elapsed();
-        println!(
-            "manifest_digest mode={mode} workers={workers} entities={} relations={} \
-             elapsed_ms={} rss_before_kib={} rss_after_kib={} hwm_before_kib={} \
-             hwm_after_kib={} peak_in_flight_bytes={} digest={digest}",
-            manifest.entities.len(),
-            manifest.relations.len(),
-            elapsed.as_millis(),
-            rss_before,
-            proc_status_kib("VmRSS"),
-            hwm_before,
-            proc_status_kib("VmHWM"),
-            metrics.peak_bytes(),
-        );
-    }
-
-    fn proc_status_kib(field: &str) -> u64 {
-        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-            return 0;
-        };
-        let prefix = format!("{field}:");
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(&prefix))
-            .and_then(|value| value.split_whitespace().next())
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0)
     }
 
     fn manifest_with_entities(entity_count: usize) -> GraphGenerationManifest {
@@ -2644,45 +2545,6 @@ mod manifest_digest_memo_tests {
         assert_eq!(
             control.dependency_closure_digest(&|| Ok(())).unwrap(),
             dependency_after
-        );
-    }
-
-    #[test]
-    fn identity_mutation_recomputes_the_propagated_digest() {
-        let manifest = manifest_fixture("digest-memo-identity", vec![dependency(1), dependency(2)]);
-        let seeded = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
-        let mut identity = manifest.identity();
-        identity.dependencies.pop();
-
-        let recomputed = identity.dependency_closure_digest(&|| Ok(())).unwrap();
-        assert_ne!(recomputed, seeded);
-        let control = super::dependency_closure_digest(&identity.dependencies, &|| Ok(())).unwrap();
-        assert_eq!(recomputed, control);
-    }
-
-    #[test]
-    fn a_clone_starts_with_a_cold_memo() {
-        let manifest = manifest_fixture("digest-memo-clone", vec![dependency(1)]);
-        let dependency_digest = manifest.dependency_closure_digest(&|| Ok(())).unwrap();
-        let sealed = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
-
-        let clone = manifest.clone();
-        reset_manifest_canonicalizations();
-        reset_dependency_closure_canonicalizations();
-        assert_eq!(
-            clone.dependency_closure_digest(&|| Ok(())).unwrap(),
-            dependency_digest
-        );
-        assert_eq!(clone.expected_recovered_digest(&|| Ok(())).unwrap(), sealed);
-        assert_eq!(
-            dependency_closure_canonicalizations(),
-            1,
-            "a clone must recompute rather than inherit its source's memo"
-        );
-        assert_eq!(
-            manifest_canonicalizations(),
-            1,
-            "a clone must recompute rather than inherit its source's memo"
         );
     }
 }

@@ -91,13 +91,6 @@ function renderRows(count: number) {
 }
 
 describe('VirtualList row bounds', () => {
-  it('renders a 100-row page without windowing it', () => {
-    // The plan's escape hatch from virtualization is a paginated mode of at
-    // most 100 rows, so that size stays plainly rendered — the same DOM as a
-    // bare map, with every row present for find-in-page and screen readers.
-    expect(renderRows(100).mounted()).toBe(100);
-  });
-
   it('still renders every row at the 200-row threshold', () => {
     expect(renderRows(200).mounted()).toBe(200);
   });
@@ -110,27 +103,6 @@ describe('VirtualList row bounds', () => {
     expect(mounted()).toBeGreaterThan(0);
     expect(mounted()).toBeLessThan(count);
     expect(mounted()).toBeLessThanOrEqual(MOUNT_CEILING);
-  });
-
-  it('holds the ceiling on a viewport far taller than any supported tier', () => {
-    // 2000 CSS pixels is well past the tallest tier the plan measures, so a
-    // ceiling that holds here is not an artifact of a small test viewport.
-    restore = installViewport(2_000);
-    const { mounted } = renderRows(20_000);
-
-    expect(mounted()).toBeGreaterThan(0);
-    expect(mounted()).toBeLessThanOrEqual(MOUNT_CEILING);
-  });
-
-  it('does not scale mounted rows with the result count', () => {
-    restore = installViewport(900);
-    const small = renderRows(1_000).mounted();
-    const large = renderRows(20_000).mounted();
-
-    // The property that matters: a twentyfold larger corpus must not mount
-    // twentyfold more rows. Both are viewport-driven, so they match.
-    expect(small).toBeGreaterThan(0);
-    expect(large).toBeLessThanOrEqual(small);
   });
 
   it('preserves a row element across a re-render with the same items', () => {

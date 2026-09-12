@@ -101,6 +101,17 @@ impl RegisteredGlobalDb {
         SessionTemporalAccess::new(self).git_scope_session_ids(filter)
     }
 
+    pub fn git_scope_session_ids_bounded(
+        &self,
+        filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
+        maximum: usize,
+    ) -> Result<
+        Option<Vec<(String, String)>>,
+        tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+    > {
+        SessionTemporalAccess::new(self).git_scope_session_ids_bounded(filter, maximum)
+    }
+
     #[hotpath::measure(future = true, label = "global_db.session_temporal.doctor_health")]
     pub async fn session_temporal_doctor_health(
         &self,

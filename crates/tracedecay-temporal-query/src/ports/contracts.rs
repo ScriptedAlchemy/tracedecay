@@ -206,6 +206,13 @@ pub fn commit_prepared_candidate_pull(
     commit_pulled_page(state, page, CANDIDATE_READ_BUDGET)
 }
 
+/// Pull one page of the candidate cohort window.
+///
+/// Unlike the record and prepared-cohort pulls, filling the item or byte cap
+/// while the producer still holds rows is not incomplete coverage: the cohort
+/// is a bounded window over storage order and the page's continuation key is
+/// where the next window begins. The caller must stop pulling once
+/// [`CandidateReadState::is_exhausted`] and carry that key forward.
 pub async fn pull_candidate_page(
     port: &impl TemporalReadPort,
     snapshot: &TemporalExecutionSnapshot,
@@ -249,7 +256,8 @@ pub async fn pull_candidate_page(
     )
     .await?;
     let page = sink.finish(status)?;
-    commit_pulled_page(state, page, CANDIDATE_READ_BUDGET)
+    state.advanced_page(page.continuation.clone());
+    Ok(page)
 }
 
 pub async fn pull_temporal_record_page(

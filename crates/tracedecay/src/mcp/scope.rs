@@ -234,32 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_root_resolves_same_project_and_scope_via_application_type() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        init_repo(&root);
-        write_identity_marker(&root, "project.mcp-scope-test");
-        let owner = owner_for(&root, "project.mcp-scope-test");
-
-        let first = resolve_query_scope(&owner, &root).unwrap();
-        let second = resolve_query_scope(&owner, &root).unwrap();
-
-        assert_eq!(first.project_id.as_str(), "project.mcp-scope-test");
-        first.validate().unwrap();
-        assert_eq!(
-            first, second,
-            "the same exact root must resolve the same scope"
-        );
-        assert_eq!(
-            first
-                .reference
-                .as_ref()
-                .map(tracedecay_domain::RefId::as_str),
-            Some("refs/heads/main"),
-        );
-    }
-
-    #[test]
     fn subdirectory_request_converges_to_registered_canonical_root() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();

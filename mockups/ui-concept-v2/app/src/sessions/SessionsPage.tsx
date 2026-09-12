@@ -482,6 +482,7 @@ function Inspector(props: {
   page: number;
   pages: number;
   selected: PackSession | null;
+  fixture: boolean;
   onClose: () => void;
   onNavigate: (surface: string, params: Record<string, string>) => void;
 }) {
@@ -531,7 +532,7 @@ function Inspector(props: {
           </div>
           <div className="sn-kv">
             <span>Loaded source</span>
-            <b>mac profile export · exact</b>
+            <b>{props.fixture ? "synthetic session spine · fixture" : "mac profile export · exact"}</b>
           </div>
         </div>
         <div className="sn-block sn-sect">
@@ -596,6 +597,17 @@ function Inspector(props: {
           <p className="sn-copy sn-detail-note">
             Private chain-of-thought is unavailable by design. Only persisted visible artifacts may appear here.
           </p>
+        </div>
+        <div className="sn-block sn-sect sn-source-matrix">
+          <div className="k">SOURCE AVAILABILITY MATRIX</div>
+          <div className="sn-row"><span>Transcript</span><span className="r is-amber">unavailable · bodies not ingested</span></div>
+          <div className="sn-row"><span>Pagination</span><span className="r">loaded page {props.page + 1} of {props.pages}</span></div>
+          <div className="sn-row"><span>Redaction</span><span className="r">not reported by source</span></div>
+          <div className="sn-row"><span>Links</span><span className="r is-amber">spine relationship index unavailable</span></div>
+          <details className="sn-transcript-fallback" open>
+            <summary>EXACT EVENT FALLBACK</summary>
+            <p>Transcript and event bodies were not ingested for this session. Identity and recorded span remain exact; no transcript is reconstructed.</p>
+          </details>
         </div>
       </aside>
     );
@@ -674,7 +686,7 @@ function Inspector(props: {
 }
 
 export function SessionsPage(props: { initialSessionId?: string; onInspect?: unknown; state?: string; onState?: (id: string) => void } = {}) {
-  const { navigate } = useDemo();
+  const { navigate, mode } = useDemo();
   const initialSessionId = ALL_SESSIONS.find(s => s.id === props.initialSessionId)?.id ?? null;
   const arrival = useMemo(() => {
     if (initialSessionId) return { sessionId: initialSessionId, issue: null };
@@ -886,6 +898,7 @@ export function SessionsPage(props: { initialSessionId?: string; onInspect?: unk
         <section className="sn-pane sn-timeline" aria-label="Message volume timeline">
           <div className="sn-tl-head">
             <b>MESSAGE VOLUME TIMELINE — ALL SESSIONS</b>
+            <span className={`sn-mode is-${mode}`}>{mode === "fixture" ? "FIXTURE · SYNTHETIC SESSION SPINE" : "SNAPSHOT · RECORDED SESSION SPINE"}</span>
             <button
               type="button"
               className="sn-info"
@@ -1116,7 +1129,7 @@ export function SessionsPage(props: { initialSessionId?: string; onInspect?: unk
                 </tr>
               </thead>
               <tbody>
-                {slice.map((s) => {
+                {slice.map((s, rowIndex) => {
                   const expanded = open === s.id;
                   return (
                     <Fragment key={s.id}>
@@ -1130,6 +1143,12 @@ export function SessionsPage(props: { initialSessionId?: string; onInspect?: unk
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             pick(s.id, true);
+                          } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                            e.preventDefault();
+                            const next = slice[rowIndex + (e.key === "ArrowDown" ? 1 : -1)];
+                            if (!next) return;
+                            pick(next.id);
+                            window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(next.id)}"]`)?.focus());
                           }
                         }}
                       >
@@ -1291,6 +1310,7 @@ export function SessionsPage(props: { initialSessionId?: string; onInspect?: unk
         page={safePage}
         pages={pages}
         selected={ALL_SESSIONS.find((s) => s.id === detail) ?? null}
+        fixture={mode === "fixture"}
         onClose={closeDetail}
         onNavigate={navigate}
       />

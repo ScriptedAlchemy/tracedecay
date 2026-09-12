@@ -4,8 +4,8 @@ use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::{
-    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
-    import_module_kind,
+    ExtractedImportEvidenceV1, ExtractedSchemaEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1,
+    ImportNamespaceV1, SchemaEvidenceLanguageV1, SchemaEvidenceStatusV1, import_module_kind,
 };
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1, SourceSpan,
@@ -29,6 +29,10 @@ pub struct CodeIndexImportEvidenceV1 {
     pub module_specifier: String,
     pub imported_name: Option<String>,
     pub local_name: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
+    #[serde(default)]
+    pub is_glob: bool,
     pub namespace: ImportNamespaceV1,
     pub module_kind: ImportModuleKindV1,
     pub span: SourceSpan,
@@ -47,6 +51,8 @@ impl CodeIndexImportEvidenceV1 {
             module_specifier: row.module_specifier.clone(),
             imported_name: row.imported_name.clone(),
             local_name: row.local_name.clone(),
+            is_public: row.is_public,
+            is_glob: row.is_glob,
             namespace: row.namespace,
             module_kind: row.module_kind,
             span: row.span,
@@ -61,6 +67,8 @@ impl CodeIndexImportEvidenceV1 {
             module_specifier: self.module_specifier.clone(),
             imported_name: self.imported_name.clone(),
             local_name: self.local_name.clone(),
+            is_public: self.is_public,
+            is_glob: self.is_glob,
             namespace: self.namespace,
             module_kind: self.module_kind,
             span: self.span,
@@ -93,7 +101,10 @@ impl CodeIndexImportEvidenceV1 {
 
         let binding_shape_is_valid = match self.namespace {
             ImportNamespaceV1::SideEffect => {
-                self.imported_name.is_none() && self.local_name.is_none()
+                !self.is_glob && self.imported_name.is_none() && self.local_name.is_none()
+            }
+            ImportNamespaceV1::Type | ImportNamespaceV1::Value if self.is_glob => {
+                self.imported_name.as_deref() == Some("*") && self.local_name.is_none()
             }
             ImportNamespaceV1::Type | ImportNamespaceV1::Value => {
                 self.imported_name.is_some() && self.local_name.is_some()
@@ -157,6 +168,8 @@ pub struct CodeFileIndexArtifactsV1 {
     pub edges: Vec<CanonicalRelationEdgeV1>,
     pub edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     pub imports: Vec<CodeIndexImportEvidenceV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_evidence: Option<ExtractedSchemaEvidenceV1>,
     /// References this file could not bind locally, canonically ordered.
     /// Generation sealing derives cross-file edges from these against the
     /// whole staged file set; they never bind within one file alone.
@@ -208,6 +221,7 @@ impl CodeFileIndexArtifactsV1 {
             edges,
             edge_abstentions,
             imports,
+            artifact.schema_evidence.clone(),
             unresolved_references,
         )?;
         artifacts.validate_generation_import_authority(extraction)?;
@@ -224,6 +238,7 @@ impl CodeFileIndexArtifactsV1 {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            None,
             Vec::new(),
         )?;
         artifacts.validate_generation_import_authority(extraction)?;
@@ -236,9 +251,16 @@ impl CodeFileIndexArtifactsV1 {
         edges: Vec<CanonicalRelationEdgeV1>,
         edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
         mut imports: Vec<CodeIndexImportEvidenceV1>,
+        mut schema_evidence: Option<ExtractedSchemaEvidenceV1>,
         mut unresolved_references: Vec<CodeIndexUnresolvedReferenceV1>,
     ) -> Result<Self, ChunkingFailureV1> {
         imports.sort_by(canonical_import_order);
+        if let Some(evidence) = &mut schema_evidence {
+            evidence.issues.sort();
+            evidence.issues.dedup();
+            evidence.facts.sort();
+            evidence.facts.dedup();
+        }
         unresolved_references.sort();
         unresolved_references.dedup();
         let artifacts = Self {
@@ -247,6 +269,7 @@ impl CodeFileIndexArtifactsV1 {
             edges,
             edge_abstentions,
             imports,
+            schema_evidence,
             unresolved_references,
         };
         artifacts.validate()?;
@@ -260,6 +283,7 @@ impl CodeFileIndexArtifactsV1 {
     pub fn validate(&self) -> Result<(), ChunkingFailureV1> {
         self.chunks.validate()?;
         self.validate_imports()?;
+        self.validate_schema_evidence()?;
         if self
             .symbols
             .windows(2)
@@ -321,6 +345,43 @@ impl CodeFileIndexArtifactsV1 {
         Ok(())
     }
 
+    fn validate_schema_evidence(&self) -> Result<(), ChunkingFailureV1> {
+        let Some(evidence) = &self.schema_evidence else {
+            return Ok(());
+        };
+        if evidence.logical_path.is_empty()
+            || evidence.issues.windows(2).any(|pair| pair[0] >= pair[1])
+            || evidence.facts.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "schema evidence is not in strict canonical order".to_owned(),
+            ));
+        }
+        if matches!(evidence.status, SchemaEvidenceStatusV1::Complete) != evidence.issues.is_empty()
+            || (matches!(evidence.status, SchemaEvidenceStatusV1::Unsupported)
+                && !evidence.facts.is_empty())
+        {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "schema evidence status does not match its facts and issues".to_owned(),
+            ));
+        }
+        let indexed_end = self
+            .chunks
+            .chunks
+            .iter()
+            .map(|chunk| chunk.anchor.source_span.end_byte)
+            .max();
+        if evidence.facts.iter().any(|fact| {
+            let span = fact.span();
+            span.is_empty() || indexed_end.is_none_or(|end| span.end_byte > end)
+        }) {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "schema evidence exceeds the indexed file extent".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_generation_import_authority(
         &self,
         extraction: &ExtractionBatchV1,
@@ -352,6 +413,7 @@ impl CodeFileIndexArtifactsV1 {
                 IMPORT_AUTHORITY_MISMATCH.to_owned(),
             ));
         }
+        validate_schema_evidence_language(extraction.language.as_str(), &self.schema_evidence)?;
         Ok(())
     }
 
@@ -459,11 +521,35 @@ impl CodeFileIndexArtifactsV1 {
             edges,
             edge_abstentions: self.edge_abstentions.clone(),
             imports,
+            schema_evidence: self.schema_evidence.clone(),
             unresolved_references,
         };
         result.validate()?;
         Ok(result)
     }
+}
+
+fn validate_schema_evidence_language(
+    language: &str,
+    evidence: &Option<ExtractedSchemaEvidenceV1>,
+) -> Result<(), ChunkingFailureV1> {
+    match (language, evidence) {
+        ("protobuf", Some(evidence)) if evidence.language == SchemaEvidenceLanguageV1::Protobuf => {
+        }
+        ("sql", Some(evidence)) if evidence.language == SchemaEvidenceLanguageV1::Sql => {}
+        ("protobuf" | "sql", None) => {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "schema extraction is missing its typed evidence".to_owned(),
+            ));
+        }
+        (_, None) => {}
+        (_, Some(_)) => {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "schema evidence language does not match its extraction".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn rematerialized_occurrence(
@@ -492,6 +578,26 @@ fn canonical_import_order(
         .then(left.module_specifier.cmp(&right.module_specifier))
         .then(left.imported_name.cmp(&right.imported_name))
         .then(left.local_name.cmp(&right.local_name))
+        .then(left.is_public.cmp(&right.is_public))
+        .then(left.is_glob.cmp(&right.is_glob))
         .then(left.namespace.cmp(&right.namespace))
         .then(left.module_kind.cmp(&right.module_kind))
+}
+
+#[cfg(test)]
+mod schema_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_schema_evidence_for_a_foreign_language() {
+        let evidence = Some(ExtractedSchemaEvidenceV1 {
+            logical_path: "src/lib.rs".to_owned(),
+            language: SchemaEvidenceLanguageV1::Sql,
+            status: SchemaEvidenceStatusV1::Complete,
+            issues: Vec::new(),
+            facts: Vec::new(),
+        });
+
+        assert!(validate_schema_evidence_language("rust", &evidence).is_err());
+    }
 }

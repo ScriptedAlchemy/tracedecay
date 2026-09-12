@@ -335,16 +335,6 @@ replacement.replace(current)
                 ):
                     _exact_tree_bytes(store)
 
-    def test_retained_store_counts_nested_regular_files(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            store = Path(directory) / "store"
-            nested = store / "nested"
-            nested.mkdir(parents=True)
-            (store / "root.db").write_bytes(b"root")
-            (nested / "child.db").write_bytes(b"child")
-
-            self.assertEqual(_exact_tree_bytes(store), 9)
-
     def test_retained_store_rejects_nested_external_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)

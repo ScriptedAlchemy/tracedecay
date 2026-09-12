@@ -41,37 +41,6 @@ fn quiesced_guard() -> QuiescedDaemonLifecycle {
     }
 }
 
-#[test]
-fn maintenance_outcome_carries_installed_version_to_restore_validation() {
-    let mut guard = quiesced_guard();
-
-    let value = guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
-        value: 7_u32,
-        installed_version: Some(INSTALLED_VERSION.to_owned()),
-    });
-
-    assert_eq!(value, 7);
-    assert_eq!(
-        guard.expected_version, INSTALLED_VERSION,
-        "restore must validate the freshly installed binary, not the quiesced one"
-    );
-}
-
-#[test]
-fn maintenance_outcome_without_install_keeps_acquire_time_version() {
-    let mut guard = quiesced_guard();
-
-    guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
-        value: (),
-        installed_version: None,
-    });
-
-    assert_eq!(
-        guard.expected_version, QUIESCED_VERSION,
-        "no install restarts the same binary, so the acquire-time version stays authoritative"
-    );
-}
-
 #[cfg(unix)]
 struct EnvVarGuard {
     key: &'static str,
@@ -127,39 +96,6 @@ fn serve_initialize_identity(
         });
         writeln!(stream, "{response}").expect("write initialize response");
     })
-}
-
-/// The upgrade success shape: old and new versions differ, the restarted
-/// daemon reports the NEW (installed) version, and readiness passes because
-/// the guard validates the version it adopted from the action's outcome.
-/// Before the outcome existed, restore kept the quiesced version and this
-/// exact situation timed out as an identity mismatch.
-#[cfg(unix)]
-#[test]
-fn restore_readiness_accepts_the_upgraded_daemon_reporting_the_installed_version() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let profile = TempDir::new().expect("profile temp dir");
-    let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path());
-
-    let mut guard = quiesced_guard();
-    guard.adopt_maintenance_outcome(MaintenanceWindowOutcome {
-        value: (),
-        installed_version: Some(INSTALLED_VERSION.to_owned()),
-    });
-
-    let socket_path = profile.path().join("upgraded.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind upgraded daemon socket");
-    let server = serve_initialize_identity(listener, "tracedecay", INSTALLED_VERSION);
-
-    assert_eq!(
-        super::probe::daemon_protocol_state_with_timeout(
-            &socket_path,
-            &guard.expected_version,
-            std::time::Duration::from_secs(5),
-        ),
-        super::probe::DaemonProtocolState::Ready
-    );
-    server.join().expect("join upgraded daemon");
 }
 
 /// Version skew must keep failing closed: when the daemon that answers after

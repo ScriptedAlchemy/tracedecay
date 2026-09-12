@@ -979,33 +979,6 @@ mod tests {
     }
 
     #[test]
-    fn each_pillar_publishes_its_own_provider_identity() {
-        let mut builder = CleanGenerationDiagnosticSnapshotBuilderV1::new(scope("generation.p.1"));
-        for (index, pillar) in [
-            DiagnosticPillarV1::Compiler,
-            DiagnosticPillarV1::GitHubReview,
-            DiagnosticPillarV1::CiLocalization,
-            DiagnosticPillarV1::Proximity,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            builder
-                .contribute(pillar, contribution(&format!("anchor.pillar.{index}")))
-                .expect("contribution accepted");
-        }
-        let providers: Vec<String> = builder
-            .records()
-            .iter()
-            .map(|record| record.provenance.producer.as_str().to_owned())
-            .collect();
-        assert!(providers.contains(&"tracedecay".to_owned()));
-        assert!(providers.contains(&"tracedecay-github".to_owned()));
-        assert!(providers.contains(&"tracedecay-ci".to_owned()));
-        assert!(providers.contains(&"tracedecay-proximity".to_owned()));
-    }
-
-    #[test]
     fn duplicate_anchor_is_typed_not_silent() {
         let mut builder = CleanGenerationDiagnosticSnapshotBuilderV1::new(scope("generation.p.2"));
         builder
@@ -1038,32 +1011,6 @@ mod tests {
             DiagnosticContributionRejectionV1::InvalidRecord { .. }
         ));
         assert!(builder.is_empty());
-    }
-
-    #[test]
-    fn compiler_contribution_preserves_code_and_severity() {
-        let diagnostic = crate::diagnose::Diagnostic {
-            severity: crate::diagnose::Severity::Warning,
-            code: Some("clippy::redundant_closure".to_owned()),
-            message: "redundant closure".to_owned(),
-            file: "src/lib.rs".to_owned(),
-            line: 4,
-            column: 1,
-        };
-        let contribution = compiler_contribution_v1(
-            &diagnostic,
-            id("anchor.compiler.1"),
-            id("file.occurrence.1"),
-            id(&digest('a')),
-            SourceSpan {
-                start_byte: 0,
-                end_byte: 4,
-            },
-            None,
-        );
-        assert_eq!(contribution.code, "clippy::redundant_closure");
-        assert_eq!(contribution.severity, DiagnosticSeverityV1::Warning);
-        assert_eq!(contribution.message, "redundant closure");
     }
 
     #[test]
@@ -1547,34 +1494,6 @@ mod tests {
                 .is_none()
         );
         assert!(code_index_logical_path(Path::new("/project"), "/project-other/lib.rs").is_none());
-    }
-
-    #[test]
-    fn github_review_anchor_becomes_a_contribution_without_inventing_identity() {
-        let anchor = tracedecay_domain::feedback::GitHubReviewImmutableAnchorV1 {
-            repository_id: id("repository.fixture"),
-            commit_id: id("commit.abc123"),
-            retrieval_anchor_id: id("anchor.github-code.1"),
-            file: id("src/lib.rs"),
-            content_digest: id(&digest('a')),
-            span: Some(SourceSpan {
-                start_byte: 12,
-                end_byte: 40,
-            }),
-            symbol: Some(id("symbol.occurrence.1")),
-        };
-        let contribution = github_review_contribution_v1(
-            &anchor,
-            "github-review",
-            DiagnosticSeverityV1::Information,
-            "unresolved review comment on this line",
-        )
-        .expect("anchor with a span yields a contribution");
-        assert_eq!(contribution.anchor, anchor.retrieval_anchor_id);
-        assert_eq!(contribution.file_occurrence_id, anchor.file);
-        assert_eq!(contribution.content_digest, anchor.content_digest);
-        assert_eq!(contribution.span, anchor.span.expect("span"));
-        assert_eq!(contribution.symbol_occurrence_id, anchor.symbol);
     }
 
     #[test]

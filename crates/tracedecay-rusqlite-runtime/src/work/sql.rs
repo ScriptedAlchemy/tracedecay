@@ -1,5 +1,7 @@
 //! Shared registered exact-SQL plumbing for every Work table.
 
+use std::time::Duration;
+
 use super::*;
 
 pub(crate) use crate::exact_sql::{
@@ -31,7 +33,6 @@ pub(crate) fn authority_params(authority: &WorkAuthority) -> [&str; 5] {
         authority.policy_digest().as_str(),
     ]
 }
-
 pub(crate) fn authority_params_owned(authority: &WorkAuthority) -> Vec<ExactSqlValue> {
     authority_params(authority)
         .into_iter()
@@ -77,8 +78,4 @@ pub(crate) fn registered_work_query(
     params: Vec<ExactSqlValue>,
 ) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError> {
     source.work_query(exact_sql_statement(sql, params)?)
-}
-
-pub(crate) fn invalid_storage(message: &str) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(message.to_owned())
 }

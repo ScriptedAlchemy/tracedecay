@@ -25,6 +25,8 @@ mod authority;
 pub mod cursor_authority;
 mod rows;
 
+pub use authority::{REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS};
+
 use authority::{
     cursor_advance_receipt_matches, persist_repository_provenance, persist_retrieval_anchor,
     persist_sanitization_receipt, read_cursor, verify_observation_authority,
@@ -33,7 +35,7 @@ use cursor_authority::{
     COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, RECORD_CURSOR_ADVANCE_SQL,
 };
 use rows::{
-    OBSERVATION_ROW_PROJECTION, decode_nonnegative, decode_observation_row, encoded_observation_row,
+    decode_nonnegative, decode_observation_row, encoded_observation_row, observation_row_projection,
 };
 
 #[derive(Clone, Default)]
@@ -184,9 +186,7 @@ impl ObservationExecutor {
             if cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
                 return Ok(());
             }
-            return Err(
-                invalid("source cursor advance sanitization receipt identity collision").into(),
-            );
+            return Err(StorageOperationError::ObservationCursorAdvanceCollision);
         }
         if actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(observation_source_cursor_conflict(
@@ -216,9 +216,7 @@ impl ObservationExecutor {
             return Err(disagreement);
         }
         if !cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
-            return Err(
-                invalid("source cursor advance sanitization receipt identity collision").into(),
-            );
+            return Err(StorageOperationError::ObservationCursorAdvanceCollision);
         }
         savepoint.execute(
             COMMIT_SOURCE_CURSOR_SQL,
@@ -241,8 +239,9 @@ impl ObservationExecutor {
                 let row = snapshot
                     .query_row(
                         &format!(
-                            "{OBSERVATION_ROW_PROJECTION}
-                             WHERE observation.observation_id = ?1"
+                            "{}
+                             WHERE observation.observation_id = ?1",
+                            observation_row_projection()
                         ),
                         [observation_id.as_str()],
                         encoded_observation_row,
@@ -287,9 +286,10 @@ impl ObservationExecutor {
                 let after_sequence = i64::try_from(*after_sequence)
                     .map_err(|_| invalid("observation replay frontier exceeds SQLite integer"))?;
                 let mut statement = snapshot.prepare(&format!(
-                    "{OBSERVATION_ROW_PROJECTION}
+                    "{}
                      WHERE observation.sequence > ?1
-                     ORDER BY observation.sequence ASC LIMIT ?2"
+                     ORDER BY observation.sequence ASC LIMIT ?2",
+                    observation_row_projection()
                 ))?;
                 let rows = statement.query_map(
                     params![after_sequence, i64::from(*limit)],

@@ -1122,13 +1122,10 @@ fn test_annotations_in_file<'a>(
         let markers = symbols
             .iter()
             .filter(|symbol| {
-                symbol.metadata.as_ref().is_some_and(|metadata| {
-                    metadata.kind == "annotation_usage"
-                        && matches!(
-                            metadata.simple_name.as_str(),
-                            "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-                        )
-                })
+                symbol
+                    .metadata
+                    .as_ref()
+                    .is_some_and(tracedecay_code_index::is_test_marker)
             })
             .map(|symbol| symbol.occurrence.clone())
             .collect::<HashSet<_>>();

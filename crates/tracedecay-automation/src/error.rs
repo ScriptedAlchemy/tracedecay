@@ -16,7 +16,6 @@ impl AutomationError {
             message: message.into(),
         }
     }
-
 }
 
 pub type Result<T> = std::result::Result<T, AutomationError>;

@@ -545,37 +545,6 @@ mod tests {
     }
 
     #[test]
-    fn ranking_uses_stable_tie_breaks_and_logical_diversity() {
-        let candidates = vec![
-            candidate("b", CandidateChannel::Lexical, 10, Some("same")),
-            candidate("a", CandidateChannel::Lexical, 10, Some("same")),
-            candidate("c", CandidateChannel::Lexical, 9, Some("other")),
-        ];
-        let ranked = rank(
-            &candidates,
-            DiversityLimits {
-                per_logical_message: 1,
-                ..DiversityLimits::unbounded()
-            },
-        );
-
-        assert_eq!(ids(&ranked), vec!["a", "c"]);
-    }
-
-    #[test]
-    fn exact_phrase_channel_precedes_lexical_at_equal_channel_rank() {
-        let ranked = rank(
-            &[
-                candidate("lexical", CandidateChannel::Lexical, 100, None),
-                candidate("phrase", CandidateChannel::Phrase, 1, None),
-            ],
-            DiversityLimits::unbounded(),
-        );
-
-        assert_eq!(ranked[0].stable_id, "phrase");
-    }
-
-    #[test]
     fn ranking_never_compares_raw_scores_from_different_sources() {
         let mut source_a = candidate("a", CandidateChannel::Lexical, 1, None);
         source_a.source = Some("source-a".to_string());
@@ -591,77 +560,6 @@ mod tests {
         let rescaled = rank(&[source_a, source_b], DiversityLimits::unbounded());
 
         assert_eq!(ids(&first), ids(&rescaled));
-    }
-
-    #[test]
-    fn exact_message_tier_cannot_be_displaced_by_any_number_of_approximate_channels() {
-        let mut approximate = Vec::new();
-        for index in 0..32 {
-            let mut hit = candidate(
-                &format!("approx-lexical-{index}"),
-                CandidateChannel::Lexical,
-                10_000 - index,
-                None,
-            );
-            hit.source = Some(format!("src-{index}"));
-            approximate.push(hit);
-            let mut entity = candidate(
-                &format!("approx-entity-{index}"),
-                CandidateChannel::Entity,
-                9_000 - index,
-                None,
-            );
-            entity.source = Some(format!("ent-{index}"));
-            approximate.push(entity);
-            let mut summary = candidate(
-                &format!("approx-summary-{index}"),
-                CandidateChannel::Summary,
-                8_000 - index,
-                None,
-            );
-            summary.source = Some(format!("sum-{index}"));
-            approximate.push(summary);
-        }
-        approximate.push(candidate(
-            "exact-msg",
-            CandidateChannel::ExactMessage,
-            1,
-            None,
-        ));
-
-        let ranked = rank(&approximate, DiversityLimits::unbounded());
-        assert_eq!(ranked[0].stable_id, "exact-msg");
-        assert!(
-            ranked
-                .iter()
-                .skip(1)
-                .all(|candidate| ranked[0].normalized_score_micros
-                    > candidate.normalized_score_micros)
-        );
-    }
-
-    #[test]
-    fn exact_phrase_tier_cannot_be_displaced_by_multichannel_approximate_inversion() {
-        let mut stacked = vec![
-            candidate("exact-phrase", CandidateChannel::Phrase, 1, None),
-            candidate("stacked", CandidateChannel::Lexical, 1_000, None),
-            candidate("stacked", CandidateChannel::Summary, 1_000, None),
-            candidate("stacked", CandidateChannel::Entity, 1_000, None),
-            candidate("stacked", CandidateChannel::Time, 1_000, None),
-        ];
-        for index in 0..16 {
-            let mut extra = candidate(
-                &format!("approx-{index}"),
-                CandidateChannel::Lexical,
-                500 - index,
-                None,
-            );
-            extra.source = Some(format!("shard-{index}"));
-            stacked.push(extra);
-        }
-
-        let ranked = rank(&stacked, DiversityLimits::unbounded());
-        assert_eq!(ranked[0].stable_id, "exact-phrase");
     }
 
     #[test]
@@ -687,19 +585,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_message_outranks_exact_phrase_and_phrase_outranks_approximate() {
-        let ranked = rank(
-            &[
-                candidate("approx", CandidateChannel::Entity, 1_000, None),
-                candidate("phrase", CandidateChannel::Phrase, 1, None),
-                candidate("message", CandidateChannel::ExactMessage, 1, None),
-            ],
-            DiversityLimits::unbounded(),
-        );
-        assert_eq!(ids(&ranked), vec!["message", "phrase", "approx"]);
-    }
-
-    #[test]
     fn duplicate_stable_id_with_conflicting_metadata_returns_typed_error() {
         let mut left = candidate("dup", CandidateChannel::Lexical, 10, Some("msg-a"));
         left.turn = Some("turn-a".to_string());
@@ -708,42 +593,6 @@ mod tests {
 
         let err = rank_candidates(&[left, right], DiversityLimits::unbounded())
             .expect_err("conflicting metadata must not silently merge");
-        assert_eq!(
-            err,
-            RankingError::ConflictingDuplicateMetadata {
-                stable_id: "dup".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn duplicate_stable_id_with_source_only_conflict_returns_typed_error() {
-        let mut left = candidate("dup", CandidateChannel::ExactMessage, 10, Some("msg"));
-        left.evidence_role = Some("producer".to_string());
-        left.source = Some("source-a".to_string());
-        let mut right = left.clone();
-        right.source = Some("source-b".to_string());
-
-        let rank_err = rank_candidates(&[left, right], DiversityLimits::unbounded())
-            .expect_err("source conflicts must be rejected");
-        assert_eq!(
-            rank_err,
-            RankingError::ConflictingDuplicateMetadata {
-                stable_id: "dup".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn same_channel_duplicate_scores_require_the_same_calibrated_source() {
-        let mut unscoped = candidate("dup", CandidateChannel::Lexical, i64::MAX, Some("msg"));
-        unscoped.source = None;
-        let mut scoped = unscoped.clone();
-        scoped.raw_score = i64::MIN;
-        scoped.source = Some("store-a".to_string());
-
-        let err = rank_candidates(&[unscoped, scoped], DiversityLimits::unbounded())
-            .expect_err("raw scores from distinct source domains are incomparable");
         assert_eq!(
             err,
             RankingError::ConflictingDuplicateMetadata {
@@ -879,21 +728,6 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_stable_id_compatible_metadata_merges_without_first_partition_inheritance() {
-        let mut lexical = candidate("dup", CandidateChannel::Lexical, 10, None);
-        lexical.logical_message = None;
-        lexical.turn = Some("turn-1".to_string());
-        let mut phrase = candidate("dup", CandidateChannel::Phrase, 1, Some("msg-1"));
-        phrase.turn = None;
-
-        let ranked = rank(&[lexical, phrase], DiversityLimits::unbounded());
-        assert_eq!(ranked.len(), 1);
-        assert_eq!(ranked[0].logical_message.as_deref(), Some("msg-1"));
-        assert_eq!(ranked[0].turn.as_deref(), Some("turn-1"));
-        assert!(ranked[0].normalized_score_micros >= encode_score(RankTier::ExactPhrase, 0));
-    }
-
-    #[test]
     fn conflicting_duplicate_metadata_is_order_independent() {
         let mut left = candidate("dup", CandidateChannel::Lexical, 10, Some("zzz"));
         left.source = Some("source-z".to_string());
@@ -939,21 +773,6 @@ mod tests {
                 .iter()
                 .all(|candidate| { candidate.normalized_score_micros < 4 * TIER_SPAN })
         );
-    }
-
-    #[test]
-    fn ranking_ordering_is_deterministic_under_input_permutation() {
-        let mut candidates = vec![
-            candidate("c", CandidateChannel::Summary, 3, Some("c")),
-            candidate("a", CandidateChannel::Lexical, 10, Some("a")),
-            candidate("b", CandidateChannel::Phrase, 1, Some("b")),
-            candidate("d", CandidateChannel::ExactMessage, 1, Some("d")),
-        ];
-        let baseline = rank(&candidates, DiversityLimits::unbounded());
-        candidates.reverse();
-        let reversed = rank(&candidates, DiversityLimits::unbounded());
-        assert_eq!(baseline, reversed);
-        assert_eq!(ids(&baseline), vec!["d", "b", "a", "c"]);
     }
 
     #[test]

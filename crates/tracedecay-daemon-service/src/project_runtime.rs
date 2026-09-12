@@ -1592,20 +1592,6 @@ fn runtime_for_lookup<'a>(
 }
 
 impl ProjectRuntimeRegistryV1 {
-    #[cfg(test)]
-    fn component_with_canonical_fallback<C>(
-        runtimes: &BTreeMap<PathBuf, ProjectRuntime>,
-        project_root: &Path,
-        canonical_root: Option<&Path>,
-    ) -> Option<C>
-    where
-        C: ProjectRuntimeComponent + Clone,
-    {
-        runtime_for_lookup(runtimes, project_root, canonical_root)
-            .and_then(C::peek)
-            .cloned()
-    }
-
     #[hotpath::skip]
     pub async fn holds<C>(&self, project_root: &Path) -> bool
     where

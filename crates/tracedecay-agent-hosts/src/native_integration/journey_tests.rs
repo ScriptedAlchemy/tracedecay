@@ -11,15 +11,19 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::registry::DaemonNativeIntegrationServiceRegistry;
+use super::analysis::DaemonNativeIntegrationAnalysisV1;
+use super::registry::{DaemonNativeIntegrationServiceRegistry, NativeIntegrationTargetV1};
 use super::stack_signals::signal_from_preflight;
 use tracedecay_application::native_integration::{
-    GixNativeIntegrationAdapter, NativeApplyEffectV1, NativeIntegrationMechanics,
+    GixNativeIntegrationAdapter, NativeApplyEffectV1, NativeIntegrationAnalysisPort,
+    NativeIntegrationAnalysisRevalidationV1, NativeIntegrationMechanics,
 };
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, StackSignalDraftV1, StackSignalV1,
 };
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::code_index_scheduler::identity::IndexingIdentityV1;
 use tracedecay_contracts::git::{
     GITHUB_STACK_SIGNAL_EXPAND_OPERATION, GitHubStackSignalExpandPort,
     GitHubStackSignalExpandPortError, GitHubStackSignalExpandSurfaceRequest,
@@ -28,20 +32,21 @@ use tracedecay_contracts::git::{
 use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    NativeIntegrationApplyRequestV1, NativeIntegrationEvidenceRevisionsV1,
-    NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
-    NativeIntegrationSelectionBindingV1, NativeIntegrationStackResolutionOutcomeV1,
-    NativeIntegrationStackResolutionRequestV1, RegisteredRootLocatorV1, RequestContext, RequestId,
-    ResolvedScope, SharedProfileStoreLocatorV1, native_integration_surface_operation,
+    NativeIntegrationApplyRequestV1, NativeIntegrationPreflightOutcomeV1,
+    NativeIntegrationPreflightRequestV1, NativeIntegrationSelectionBindingV1,
+    NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionRequestV1,
+    RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
+    native_integration_surface_operation,
 };
 use tracedecay_domain::{
     ActorId, AuthorityRef, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1,
     BranchStackRevisionId, BranchStackRevisionV1, BranchStackSourceV1, CapabilityId, CommitId,
     ConfigurationRevisionId, FrozenBranchStackSnapshotV1, LocatorDigest, ManifestDigest,
-    MechanicalIntegrationModeV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    MechanicalIntegrationModeV1, NativeIntegrationAnalysisCoverageV1,
+    NativeIntegrationAnalysisGapV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationDirectionV1, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewId, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
-    NativeIntegrationTransactionId, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
+    NativeIntegrationTransactionId, ProjectId, RefId, ScopeSetId, ScopeSetRevision,
     ScopeSourceBinding, SourceBindingId, SourceKindV1, StackNodeId, StackSignalKindV1, UtcMicros,
     WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId, canonical_sha256,
 };
@@ -54,6 +59,37 @@ use tracedecay_store::NativeIntegrationStore;
 
 const OBSERVED_AT: UtcMicros = UtcMicros(100);
 const EXPIRES_AT: UtcMicros = UtcMicros(10_000);
+
+struct UnexpectedAnalysis;
+
+impl NativeIntegrationAnalysisPort for UnexpectedAnalysis {
+    fn analyze(
+        &self,
+        _selection: &NativeIntegrationSelectionV1,
+        _native: &tracedecay_runtime_core::git_repository::GitNativePreflight,
+        _candidate: &tracedecay_runtime_core::git_repository::GitNativeCandidateTreeV1<'_>,
+        _deadline: &Deadline,
+        _cancellation_signal: &CancellationSignal,
+        _cancellation: &CancellationToken,
+    ) -> Result<
+        tracedecay_domain::NativeIntegrationAnalysisReportV1,
+        tracedecay_contracts::NativeIntegrationPortError,
+    > {
+        panic!("semantic analysis must not run for a native conflict")
+    }
+
+    fn revalidate(
+        &self,
+        _report: &tracedecay_domain::NativeIntegrationAnalysisReportV1,
+        _deadline: &Deadline,
+        _cancellation: &CancellationSignal,
+    ) -> Result<
+        NativeIntegrationAnalysisRevalidationV1,
+        tracedecay_contracts::NativeIntegrationPortError,
+    > {
+        panic!("semantic revalidation must not run without a candidate")
+    }
+}
 
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
@@ -90,23 +126,59 @@ fn initialized_repository(root: &Path) {
     ] {
         git(root, arguments);
     }
-    write_and_commit(root, "seed.txt", "seed\n", "seed");
+    std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
+    write_and_commit(root, "src/lib.rs", "pub fn shared_seed() {}\n", "seed");
 }
 
 fn prepare_pair(root: &Path, mode: MechanicalIntegrationModeV1) {
     initialized_repository(root);
     git(root, &["checkout", "-b", "destination"]);
     if mode != MechanicalIntegrationModeV1::FastForward {
-        write_and_commit(root, "destination.txt", "destination\n", "destination");
+        write_and_commit(
+            root,
+            "src/destination.rs",
+            "pub fn destination_value() {}\n",
+            "destination",
+        );
     }
     git(root, &["checkout", "main"]);
     git(root, &["checkout", "-b", "source"]);
-    write_and_commit(root, "source-1.txt", "source one\n", "source one");
+    write_and_commit(
+        root,
+        "src/source_1.rs",
+        "pub fn source_one() {}\n",
+        "source one",
+    );
     if mode == MechanicalIntegrationModeV1::CherryPickExactCommits {
-        write_and_commit(root, "source-2.txt", "source two\n", "source two");
+        write_and_commit(
+            root,
+            "src/source_2.rs",
+            "pub fn source_two() {}\n",
+            "source two",
+        );
     }
     // Neither selected branch is checked out, so the production adapter can
     // prove that this journey does not materialize a selected worktree.
+    git(root, &["checkout", "main"]);
+}
+
+fn prepare_generated_only_pair(root: &Path) {
+    initialized_repository(root);
+    std::fs::create_dir_all(root.join("dist")).expect("generated fixture directory");
+    write_and_commit(
+        root,
+        "dist/generated.js",
+        "export const generated = 1;\n",
+        "generated base",
+    );
+    git(root, &["branch", "destination"]);
+    git(root, &["checkout", "-b", "source"]);
+    write_and_commit(
+        root,
+        "dist/generated.js",
+        "export const generated = 2;\n",
+        "generated source",
+    );
     git(root, &["checkout", "main"]);
 }
 
@@ -132,14 +204,14 @@ fn prepare_checked_out_conflict(root: &Path, source_root: &Path) {
     git(source_root, &["commit", "-m", "dependency conflict"]);
 }
 
-fn exact_pair_scopes() -> (ResolvedScope, ResolvedScope) {
+fn exact_pair_scopes(repository_root: &Path) -> (ResolvedScope, ResolvedScope) {
     let project = ProjectId::new("project.native.journey").expect("project id");
-    let repository = RepositoryId::new("repository.native.journey").expect("repository id");
+    let identity = IndexingIdentityV1::resolve(repository_root).expect("indexing identity");
     let authority = ResolvedScope::new(
         project,
-        repository,
-        WorktreeId::new("worktree.native.authority").expect("authority worktree id"),
-        Some(RefId::new("refs/heads/main").expect("authority ref")),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
     )
     .expect("authority scope");
     (authority.clone(), authority)
@@ -183,7 +255,12 @@ fn context(destination: ResolvedScope, request_id: &str) -> RequestContext {
         destination,
         grant,
         RequestId::new(request_id).expect("request id"),
-        Deadline::new(EXPIRES_AT).expect("deadline"),
+        Deadline::new(UtcMicros(
+            tracedecay_contracts::clock::now_micros()
+                .0
+                .saturating_add(60_000_000),
+        ))
+        .expect("deadline"),
         CancellationContext::active(format!("cancel.{request_id}")).expect("cancellation"),
     )
     .expect("request context")
@@ -216,10 +293,11 @@ fn authorized_scope_set(
 }
 
 fn preflight_request(
+    repository_root: &Path,
     mode: MechanicalIntegrationModeV1,
     request_id: &str,
 ) -> NativeIntegrationPreflightRequestV1 {
-    let (source, destination) = exact_pair_scopes();
+    let (source, destination) = exact_pair_scopes(repository_root);
     let context = context(destination.clone(), request_id);
     let authorized_scope_set =
         authorized_scope_set(source.clone(), destination.clone(), request_id);
@@ -241,12 +319,6 @@ fn preflight_request(
             policy_digest: digest('d'),
             observed_at: OBSERVED_AT,
         },
-        evidence: NativeIntegrationEvidenceRevisionsV1 {
-            graph_revision_digest: digest('e'),
-            test_revision_digest: digest('f'),
-            schema_revision_digest: digest('1'),
-            migration_revision_digest: digest('2'),
-        },
         preview_id: NativeIntegrationPreviewId::new(format!("preview.native.{request_id}"))
             .expect("preview id"),
         preferred_mode: Some(mode),
@@ -262,7 +334,10 @@ fn declared_preflight_request(
     request_id: &str,
 ) -> NativeIntegrationPreflightRequestV1 {
     let project_id = ProjectId::new("project.native.journey").expect("project id");
-    let repository_id = RepositoryId::new("repository.native.journey").expect("repository id");
+    let repository_id = IndexingIdentityV1::resolve(repository_root)
+        .expect("indexing identity")
+        .repository_id()
+        .clone();
     let source = ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
@@ -348,7 +423,7 @@ fn declared_preflight_request(
         OBSERVED_AT,
     )
     .expect("registered authorized scope set");
-    let mut request = preflight_request(mode, request_id);
+    let mut request = preflight_request(repository_root, mode, request_id);
     request.context = context(destination.clone(), request_id);
     request.topology.source = source;
     request.topology.destination = destination;
@@ -397,20 +472,58 @@ async fn mount(
 ) -> (
     DaemonNativeIntegrationServiceRegistry,
     super::registry::DaemonNativeIntegrationOwner,
+    Arc<DaemonNativeIntegrationAnalysisV1>,
 ) {
+    let project_id = ProjectId::new("project.native.journey").expect("project id");
+    let identity = IndexingIdentityV1::resolve(&repository_root).expect("indexing identity");
+    let analysis_scope = ResolvedScope::new(
+        project_id.clone(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("analysis scope");
+    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
+    let index_store = repository_root
+        .parent()
+        .expect("repository parent")
+        .join("native-code-index");
+    schedulers
+        .mount_worktree(project_id.clone(), &repository_root, index_store, None)
+        .await
+        .expect("mount canonical code-index scheduler");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while schedulers
+            .latest_generation_id(&repository_root)
+            .await
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial code-index generation seat");
+    let analysis = Arc::new(DaemonNativeIntegrationAnalysisV1::new(
+        schedulers,
+        analysis_scope,
+        tokio::runtime::Handle::current(),
+    ));
     let registry = DaemonNativeIntegrationServiceRegistry::default();
     let owner = registry
         .ensure(
             database,
-            repository_root,
-            ProjectId::new("project.native.journey").expect("project id"),
-            RepositoryId::new("repository.native.journey").expect("repository id"),
-            digest('d'),
+            NativeIntegrationTargetV1 {
+                repository_root,
+                project_id,
+                repository_id: identity.repository_id().clone(),
+                policy_digest: digest('d'),
+            },
             OBSERVED_AT,
+            analysis.clone(),
         )
         .await
         .expect("mount native integration owner");
-    (registry, owner)
+    (registry, owner, analysis)
 }
 
 async fn preflight(
@@ -452,18 +565,26 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     prepare_checked_out_conflict(&repository_root, &source_root);
 
     let project_id = ProjectId::new("project.native.journey").expect("project id");
-    let repository_id = RepositoryId::new("repository.native.journey").expect("repository id");
+    let destination_identity =
+        IndexingIdentityV1::resolve(&repository_root).expect("destination indexing identity");
+    let source_identity =
+        IndexingIdentityV1::resolve(&source_root).expect("source indexing identity");
+    assert_eq!(
+        source_identity.repository_id(),
+        destination_identity.repository_id()
+    );
+    let repository_id = destination_identity.repository_id().clone();
     let source_scope = ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
-        WorktreeId::new("worktree.native.dependency").expect("source worktree id"),
+        source_identity.worktree_id().clone(),
         Some(RefId::new("refs/heads/dependency").expect("source ref")),
     )
     .expect("source scope");
     let destination_scope = ResolvedScope::new(
         project_id.clone(),
         repository_id.clone(),
-        WorktreeId::new("worktree.native.dependent").expect("destination worktree id"),
+        destination_identity.worktree_id().clone(),
         Some(RefId::new("refs/heads/dependent").expect("destination ref")),
     )
     .expect("destination scope");
@@ -546,12 +667,6 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
             policy_digest: digest('d'),
             observed_at: OBSERVED_AT,
         },
-        evidence: NativeIntegrationEvidenceRevisionsV1 {
-            graph_revision_digest: digest('e'),
-            test_revision_digest: digest('f'),
-            schema_revision_digest: digest('1'),
-            migration_revision_digest: digest('2'),
-        },
         preview_id: NativeIntegrationPreviewId::new("preview.native.journey.declared-conflict")
             .expect("preview id"),
         preferred_mode: Some(MechanicalIntegrationModeV1::TwoParentMerge),
@@ -562,12 +677,15 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         project_id.clone(),
         repository_id.clone(),
         &repository_root,
+        Arc::new(UnexpectedAnalysis),
     )
     .expect("native adapter");
     let preview = adapter
         .preflight(
             &selection,
             &request,
+            &CancellationSignal::active("cancel.native.journey.declared-conflict")
+                .expect("cancellation signal"),
             &CancellationToken::for_application_request("declared-conflict"),
         )
         .expect("native conflict preview");
@@ -595,7 +713,7 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     let database = runtime
         .registered_database_lease(HostAdmissionScope::Project)
         .expect("registered project database");
-    let (registry, owner) = mount(database.clone(), repository_root.clone()).await;
+    let (registry, owner, _analysis) = mount(database.clone(), repository_root.clone()).await;
     let now = UtcMicros(
         i64::try_from(
             SystemTime::now()
@@ -827,12 +945,12 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
             .registered_database_lease(HostAdmissionScope::Project)
             .expect("registered project database");
 
-        let (registry, owner) = mount(database.clone(), repository_root.clone()).await;
+        let (registry, owner, analysis) = mount(database.clone(), repository_root.clone()).await;
         let request_id = format!("request.native.journey.{index}");
         let request = if index == 0 {
             declared_preflight_request(&repository_root, &database, mode, &request_id)
         } else {
-            preflight_request(mode, &request_id)
+            preflight_request(&repository_root, mode, &request_id)
         };
         let context = request.context.clone();
         let destination_scope = request.context.scope().clone();
@@ -862,15 +980,23 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
                 destination_scope.project_id.clone(),
                 destination_scope.repository_id.clone(),
                 &repository_root,
+                analysis.clone(),
             )
             .expect("native adapter");
-            let preview = adapter
-                .preflight(
-                    &selection,
-                    &request,
+            let preflight_selection = selection.clone();
+            let preflight_request = request.clone();
+            let preview = tokio::task::spawn_blocking(move || {
+                adapter.preflight(
+                    &preflight_selection,
+                    &preflight_request,
+                    &CancellationSignal::active("cancel.native.journey.declared-terminal")
+                        .expect("cancellation signal"),
                     &CancellationToken::for_application_request("declared-terminal"),
                 )
-                .expect("declared eligible preview");
+            })
+            .await
+            .expect("declared preflight join")
+            .expect("declared eligible preview");
             (selection, preview)
         } else {
             let selection = stack_snapshot(owner.clone(), request.topology.clone()).await;
@@ -883,7 +1009,9 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
             preview.disposition,
             tracedecay_domain::NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(
                 mode
-            )
+            ),
+            "ordinary independent Rust changes must have complete analysis: {:#?}",
+            preview.analysis
         );
         assert!(
             preview
@@ -924,12 +1052,18 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
                 destination_scope.project_id.clone(),
                 destination_scope.repository_id.clone(),
                 &repository_root,
+                analysis.clone(),
             )
             .expect("native adapter");
-            let refused = adapter.apply(
-                &preview,
-                &CancellationToken::for_application_request("late-destination-refusal"),
-            );
+            let refusal_preview = preview.clone();
+            let refused = tokio::task::spawn_blocking(move || {
+                adapter.apply(
+                    &refusal_preview,
+                    &CancellationToken::for_application_request("late-destination-refusal"),
+                )
+            })
+            .await
+            .expect("linked checkout refusal join");
             assert_eq!(
                 refused,
                 Ok(NativeApplyEffectV1::FailedNoChange),
@@ -1149,7 +1283,8 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         }
 
         registry.shutdown().await.expect("shutdown owner registry");
-        let (restarted_registry, restarted_owner) = mount(database, repository_root).await;
+        let (restarted_registry, restarted_owner, _analysis) =
+            mount(database, repository_root).await;
         let durable = tokio::task::spawn_blocking(move || {
             restarted_owner.service().status(
                 tracedecay_contracts::NativeIntegrationStatusRequestV1 {
@@ -1173,6 +1308,50 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn generated_only_change_requires_semantic_review() {
+    let directory = tempfile::tempdir().expect("temporary project directory");
+    let repository_root = directory.path().join("repo");
+    std::fs::create_dir_all(&repository_root).expect("repository root");
+    prepare_generated_only_pair(&repository_root);
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        directory.path().join("profile"),
+        &repository_root,
+        ProjectId::new("project.native.journey").expect("project id"),
+    )
+    .await
+    .expect("canonical project test runtime");
+    let database = runtime
+        .registered_database_lease(HostAdmissionScope::Project)
+        .expect("registered project database");
+    let (registry, owner, _analysis) = mount(database, repository_root.clone()).await;
+
+    let preview = preflight(
+        owner,
+        preflight_request(
+            &repository_root,
+            MechanicalIntegrationModeV1::FastForward,
+            "request.native.journey.generated-only",
+        ),
+    )
+    .await;
+
+    assert!(matches!(
+        preview.disposition,
+        NativeIntegrationPreviewDispositionV1::SemanticReviewRequired { .. }
+    ));
+    let analysis = preview.analysis.expect("semantic analysis");
+    assert_eq!(
+        analysis.graph.coverage,
+        NativeIntegrationAnalysisCoverageV1::Partial
+    );
+    assert_eq!(
+        analysis.graph.gaps,
+        vec![NativeIntegrationAnalysisGapV1::WithheldSource]
+    );
+    registry.shutdown().await.expect("shutdown owner registry");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_tip() {
     let directory = tempfile::tempdir().expect("temporary project directory");
     let repository_root = directory.path().join("repo");
@@ -1189,8 +1368,9 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
     let database = runtime
         .registered_database_lease(HostAdmissionScope::Project)
         .expect("registered project database");
-    let (registry, owner) = mount(database, repository_root.clone()).await;
+    let (registry, owner, _analysis) = mount(database, repository_root.clone()).await;
     let request = preflight_request(
+        &repository_root,
         MechanicalIntegrationModeV1::FastForward,
         "request.native.journey.drift",
     );
@@ -1203,7 +1383,12 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
         .expect("durably issue approval");
 
     git(&repository_root, &["checkout", "-b", "foreign"]);
-    write_and_commit(&repository_root, "foreign.txt", "foreign\n", "foreign");
+    write_and_commit(
+        &repository_root,
+        "src/foreign.rs",
+        "pub fn foreign_value() {}\n",
+        "foreign",
+    );
     let foreign_tip = git(&repository_root, &["rev-parse", "HEAD"]);
     git(&repository_root, &["checkout", "main"]);
     git(
@@ -1245,6 +1430,7 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
     let fresh_preview = preflight(
         owner,
         preflight_request(
+            &repository_root,
             MechanicalIntegrationModeV1::TwoParentMerge,
             "request.native.journey.after-drift",
         ),

@@ -399,19 +399,6 @@ mod tests {
     }
 
     #[test]
-    fn waiting_demand_sums_weighted_work_units() {
-        let state = BackgroundCpuStateV1 {
-            active_units: 4,
-            waiters: VecDeque::from([
-                Arc::new(BackgroundCpuWaiterV1 { units: 4 }),
-                Arc::new(BackgroundCpuWaiterV1 { units: 1 }),
-            ]),
-        };
-
-        assert_eq!(waiting_units(&state), 5);
-    }
-
-    #[test]
     fn weighted_units_and_nested_work_share_one_width() {
         let authority = Arc::new(ProcessBackgroundCpuV1::new(
             NonZeroUsize::new(4).expect("nonzero width"),

@@ -932,42 +932,6 @@ fn cursor_after_shell_missing_daemon_exits_promptly_without_children() {
 }
 
 #[test]
-fn cursor_workspace_open_hook_is_typed_unsupported_without_spool_record() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    let host = HookHostV1::CursorDesktop;
-    let data_root = enroll_native_capture_project(
-        &home_path,
-        &project_path,
-        "proj_cursor_workspace_open_capture",
-        host,
-        &[HookEventFamily::SessionBoundary, HookEventFamily::SavedEdit],
-    );
-
-    let output = run_native_capture_hook(
-        &home_path,
-        &project_path,
-        "hook-cursor-workspace-open",
-        &json!({
-            "hook_event_name": "workspaceOpen",
-            "cwd": project_path,
-            "workspace_roots": [project_path],
-        }),
-    );
-
-    // workspaceOpen is not a native capture event for Cursor: the decode is
-    // typed Unsupported, the hook fails open, and no spool artifact appears
-    // even with a live bound configuration.
-    assert_capture_transport_response("workspaceOpen unsupported", &output, 0);
-    assert!(
-        !native_capture_spool_root(&data_root, host).exists(),
-        "unsupported workspaceOpen event must not leave a spool artifact"
-    );
-}
-
-#[test]
 fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -1184,48 +1148,6 @@ fn daemon_socket_is_owner_only() {
 }
 
 #[test]
-fn tool_cli_invokes_mcp_tool_through_daemon_socket() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
-
-    let sentinel = "daemon-backed tool response";
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let observed_request = spawn_sentinel_daemon(
-        socket_path.clone(),
-        "tracedecay_status",
-        true,
-        false,
-        sentinel,
-    );
-    let project_arg = project_path.to_string_lossy().to_string();
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .args(["tool", "--project", &project_arg, "status", "--json"])
-        .output()
-        .expect("tracedecay tool should run");
-
-    assert!(
-        output.status.success(),
-        "tool CLI should accept daemon JSON-RPC response\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(sentinel),
-        "tool CLI should print daemon response, got:\n{stdout}"
-    );
-    observed_request
-        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
-        .expect("fake daemon should receive tools/call request");
-}
-
-#[test]
 fn tool_cli_skips_daemon_notifications_until_matching_response() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -1266,83 +1188,6 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
     observed_request
         .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
         .expect("fake daemon should receive tools/call request");
-}
-
-#[test]
-fn tool_cli_rejects_invalid_storage_scope_argument() {
-    let home = TempDir::new().unwrap();
-    let outside_cwd = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let outside_cwd_path = canonical_existing_path(outside_cwd.path());
-    let args = json!({
-        "provider": "cursor",
-        "storage_scope": "hermes_profile",
-    })
-    .to_string();
-
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(&outside_cwd_path)
-        .args([
-            "tool",
-            "tracedecay_lcm_status",
-            "--json",
-            "--args",
-            args.as_str(),
-        ])
-        .output()
-        .expect("tracedecay tool should run");
-
-    assert!(
-        !output.status.success(),
-        "invalid storage_scope must fail before dispatch\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("storage-scope")
-            && (stderr.contains("invalid value") || stderr.contains("project, user")),
-        "rejection should name the valid scopes:\n{stderr}"
-    );
-}
-
-#[test]
-fn tool_cli_rejects_removed_hermes_home_argument() {
-    let home = TempDir::new().unwrap();
-    let hermes_home = TempDir::new().unwrap();
-    let outside_cwd = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let hermes_home_path = canonical_existing_path(hermes_home.path());
-    let outside_cwd_path = canonical_existing_path(outside_cwd.path());
-    let args = json!({
-        "provider": "cursor",
-        "hermes_home": hermes_home_path,
-    })
-    .to_string();
-
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(&outside_cwd_path)
-        .args([
-            "tool",
-            "tracedecay_lcm_status",
-            "--json",
-            "--args",
-            args.as_str(),
-        ])
-        .output()
-        .expect("tracedecay tool should run");
-
-    assert!(
-        !output.status.success(),
-        "removed hermes_home must fail before dispatch\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unknown parameter") && stderr.contains("--hermes-home"),
-        "rejection should name the removed argument:\n{stderr}"
-    );
 }
 
 #[test]

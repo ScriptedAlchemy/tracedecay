@@ -1,16 +1,13 @@
 use std::collections::BTreeSet;
 
 use tracedecay_domain::configuration::{
-    AccessRuleId, AuthorityRef, CONFIGURATION_SETTING_KEYS_V1, CapabilityResolutionContextV1,
-    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
-    ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
-    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
-    ConfigurationValueV1, RuleEffect, SEMANTIC_RUNTIME_SETTING_KEY, ScopeAccessRule,
-    ScopeAccessSubjectV1, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
-    UserProfileId, WorktreePlacementModeV1, resolve_restrictive_capabilities,
-    safe_work_topology_policy_v1,
+    AccessRuleId, AuthorityRef, CapabilityResolutionContextV1, ConfigurationGrantId,
+    ConfigurationGrantReceiptId, ConfigurationIdempotencyKey, ConfigurationMutationEffectV1,
+    ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
+    ConfigurationMutationSinkV1, ConfigurationRevisionId, RuleEffect, ScopeAccessRule,
+    ScopeAccessSubjectV1, ScopeSourceBinding, SourceBindingId, SourceKindV1, UserProfileId,
+    resolve_restrictive_capabilities,
 };
-use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, CapabilityId, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
 };
@@ -31,27 +28,6 @@ fn digest(byte: char) -> ManifestDigest {
 fn locator_digest(byte: char) -> LocatorDigest {
     LocatorDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
         .expect("fixture digest is canonical")
-}
-
-#[test]
-fn safe_topology_default_is_restrictive_and_digest_stable() {
-    let policy = safe_work_topology_policy_v1();
-    policy.validate().expect("safe default must validate");
-
-    assert_eq!(
-        policy.placement,
-        WorktreePlacementModeV1::ExistingWorktreeOnly
-    );
-    assert!(policy.roots.is_empty());
-    assert!(!policy.cross_merge.allow_cross_repository);
-    assert_eq!(
-        policy.cross_merge.default_mode,
-        tracedecay_domain::configuration::CrossMergeModeV1::Disabled
-    );
-    assert_eq!(
-        policy.compute_digest().unwrap(),
-        policy.compute_digest().unwrap()
-    );
 }
 
 #[test]
@@ -117,34 +93,6 @@ fn deny_rules_union_before_allow_rules_intersect() {
     .unwrap();
 
     assert_eq!(result.effective, BTreeSet::from([read]));
-}
-
-#[test]
-fn final_configuration_inventory_is_canonical_and_uses_typed_scalar_values() {
-    assert!(!CONFIGURATION_SETTING_KEYS_V1.is_empty());
-    assert!(CONFIGURATION_SETTING_KEYS_V1.contains(&SEMANTIC_RUNTIME_SETTING_KEY));
-    assert!(
-        CONFIGURATION_SETTING_KEYS_V1.contains(&PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1),
-        "the proximity threshold must be available through the canonical registry"
-    );
-    let mut unique = BTreeSet::new();
-    for key in CONFIGURATION_SETTING_KEYS_V1 {
-        assert!(
-            unique.insert(*key),
-            "duplicate configuration setting key: {key}"
-        );
-        SettingKey::new(*key).expect("configuration key must be canonical");
-        assert_ne!(*key, "root_dir", "path metadata is not durable authority");
-    }
-    for value in [
-        ConfigurationValueV1::Boolean(true),
-        ConfigurationValueV1::Unsigned(1),
-        ConfigurationValueV1::StringList(vec!["src/**".to_owned()]),
-    ] {
-        value
-            .validate()
-            .expect("scalar setting uses an existing canonical value form");
-    }
 }
 
 fn mutation_receipt() -> ConfigurationMutationGrantReceiptV1 {

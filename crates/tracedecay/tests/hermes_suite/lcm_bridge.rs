@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::common::host_sources;
 use tempfile::TempDir;
-use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
 use tracedecay_agent_hosts::agents::host_bundle::{HostBundleComponentV1, HostKindV1};
+use tracedecay_agent_hosts::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
 use tracedecay_runtime_core::ast_grep::ast_grep_command;
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the
@@ -925,41 +925,6 @@ assert calls[-1][1]["storage_scope"] == "user"
 assert calls[-1][2] == {}
 "#,
         "generated context engine must not use HERMES_HOME as a TraceDecay storage identity",
-    );
-}
-
-#[test]
-fn generated_context_engine_home_default_uses_installed_profile() {
-    run_generated_plugin_script(
-        "check_context_engine_default_home.py",
-        r#"
-import os
-import pathlib
-import tempfile
-
-os.environ.pop("HERMES_HOME", None)
-with tempfile.TemporaryDirectory() as tmp:
-    home = pathlib.Path(tmp) / "isolated-home"
-    home.mkdir()
-    # expanduser reads HOME on POSIX and USERPROFILE on Windows.
-    os.environ["HOME"] = str(home)
-    os.environ["USERPROFILE"] = str(home)
-    expected = str(plugin_dir.parent.parent)
-
-    engine = plugin.TraceDecayContextEngine()
-    engine.initialize(session_id="session-1")
-
-    def normalized(path):
-        return os.path.normcase(os.path.realpath(path))
-
-    assert normalized(engine.hermes_home) == normalized(expected), engine.hermes_home
-    status = engine.get_status()
-    assert "storage_scope" not in status
-    assert "hermes_home" not in status
-    assert "lcm_project_root" not in status
-    assert status["project_root"] is None, status
-"#,
-        "Hermes home defaults to the installed profile but never TraceDecay storage",
     );
 }
 

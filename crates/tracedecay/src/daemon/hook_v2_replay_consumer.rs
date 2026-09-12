@@ -18,7 +18,8 @@ use tracedecay_hooks::{
 };
 
 use crate::mcp::tools::handlers::{
-    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, hook_v2_pending_work_envelopes,
+    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
+    admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_pending_work_envelopes,
 };
 
 /// How often a project's spools are drained after the project-open pass.
@@ -109,6 +110,8 @@ async fn drain_all_hosts(
     graph: &crate::tracedecay::TraceDecay,
     data_root: &Path,
     delivery_settlements: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
+    project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
+    background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) {
     let _sweep = HookReplaySweepObservation::begin();
     let project_id =
@@ -122,6 +125,7 @@ async fn drain_all_hosts(
             }
             let _ = admit_replayed_envelope_with_authoritative_session(
                 envelope,
+                None,
                 |project_id, worktree_id, protected_session_id| async move {
                     crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
                         project_id,
@@ -140,7 +144,16 @@ async fn drain_all_hosts(
         let Some(project_id) = project_id else {
             continue;
         };
-        let report = drain_admitted_host_spool(data_root, *host, project_id, now, graph).await;
+        let report = drain_admitted_host_spool(
+            data_root,
+            *host,
+            project_id,
+            now,
+            graph,
+            project_sessions,
+            background_cpu,
+        )
+        .await;
         if let Some(report) = report
             && (report.committed > 0 || report.duplicates > 0 || report.tombstoned > 0)
         {
@@ -163,9 +176,19 @@ async fn drain_admitted_host_spool(
     project_id: [u8; 16],
     now: UtcMicros,
     graph: &crate::tracedecay::TraceDecay,
+    project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
+    background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> Option<HookReplayPassReportV1> {
     let root = hook_v2_spool_root(data_root, host);
     if !root.is_dir() {
+        return None;
+    }
+    // An absent/empty records file needs neither recovery nor replay, so do
+    // not acquire the cross-process writer lease merely to prove it again.
+    // A hook that appends after this observation publishes a durable record
+    // and is picked up by the next bounded sweep; non-empty spools still take
+    // the lease before interpreting acknowledgement or recovery state.
+    if !HookSpoolV1::has_durable_records(&root).ok()? {
         return None;
     }
     let (spool, _report) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now).ok()?;
@@ -176,10 +199,12 @@ async fn drain_admitted_host_spool(
             project_id,
             binding.as_ref(),
             now,
-            |envelope| async move {
+            |envelope, native_lifecycle| async move {
+                let lifecycle_for_admission = native_lifecycle.clone();
                 replay_admission_outcome(
                     admit_replayed_envelope_with_authoritative_session(
                         envelope,
+                        native_lifecycle,
                         |project_id, worktree_id, protected_session_id| async move {
                             crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
                                 project_id,
@@ -189,10 +214,13 @@ async fn drain_admitted_host_spool(
                             .await
                         },
                         |envelope, native_session_id| async move {
-                            admit_hook_v2_envelope(
+                            admit_hook_v2_replayed_envelope_with_lifecycle(
                                 graph,
                                 &envelope,
                                 native_session_id,
+                                lifecycle_for_admission,
+                                project_sessions,
+                                background_cpu,
                                 hook_replay_now(),
                             )
                             .await
@@ -243,6 +271,8 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
 pub(crate) fn register_hook_v2_replay_consumer(
     graph: Arc<crate::tracedecay::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
+    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> bool {
     let data_root = graph.hook_store_layout().data_root.clone();
     let graph = Arc::downgrade(&graph);
@@ -269,6 +299,8 @@ pub(crate) fn register_hook_v2_replay_consumer(
     let task_data_root = data_root.clone();
     let task_graph = graph.clone();
     let task_delivery_settlements = delivery_settlements.clone();
+    let task_project_sessions = project_sessions;
+    let task_background_cpu = background_cpu;
     let task = tokio::spawn(async move {
         loop {
             let (Some(graph_owner), Some(delivery_settlements)) =
@@ -276,7 +308,14 @@ pub(crate) fn register_hook_v2_replay_consumer(
             else {
                 break;
             };
-            drain_all_hosts(&graph_owner, &task_data_root, delivery_settlements.as_ref()).await;
+            drain_all_hosts(
+                &graph_owner,
+                &task_data_root,
+                delivery_settlements.as_ref(),
+                &task_project_sessions,
+                &task_background_cpu,
+            )
+            .await;
             drop(graph_owner);
             drop(delivery_settlements);
             // Retained records wait exactly this interval for their next

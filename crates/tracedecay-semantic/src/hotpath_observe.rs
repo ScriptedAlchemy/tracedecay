@@ -75,6 +75,7 @@ pub(crate) fn embed_error_class(error: &EmbedError) -> &'static str {
         EmbedError::EmptyBatch => "empty_batch",
         EmbedError::TooManyTexts { .. } => "too_many_texts",
         EmbedError::BatchBytesExceeded { .. } => "batch_bytes_exceeded",
+        EmbedError::AttentionBudgetExceeded { .. } => "attention_budget_exceeded",
         EmbedError::DimensionMismatch { .. } => "dimension_mismatch",
         EmbedError::NonFiniteVectorValue => "non_finite_vector",
         EmbedError::Runtime(failure) => runtime_failure_class(failure.kind),
@@ -162,6 +163,23 @@ pub(crate) fn rerank_failure_class(error: &LocalRerankFailureV1) -> &'static str
 pub(crate) fn record_model_state(name: &'static str) {
     #[cfg(feature = "hotpath")]
     hotpath::val!("semantic_model_state").set(&name);
+    #[cfg(not(feature = "hotpath"))]
+    let _ = name;
+}
+
+/// The execution provider this process *offers* ONNX Runtime, recorded once
+/// the build, platform, and environment have resolved it.
+///
+/// Deliberately not "the provider that executed": ORT registers execution
+/// providers with `error_on_failure: false`, so a provider that fails to
+/// register is silently replaced by the next one — or by CPU — inside the
+/// session constructor, with no signal this crate can observe. Reading this
+/// value as proof that CUDA or WebGPU ran would therefore be wrong.
+#[cfg(all(feature = "semantic-fastembed", not(windows)))]
+#[inline(always)]
+pub(crate) fn record_offered_embed_execution_provider(name: &'static str) {
+    #[cfg(feature = "hotpath")]
+    hotpath::val!("semantic_embed_execution_provider_offered").set(&name);
     #[cfg(not(feature = "hotpath"))]
     let _ = name;
 }

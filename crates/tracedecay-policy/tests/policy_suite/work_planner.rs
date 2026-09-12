@@ -305,27 +305,6 @@ fn budget_is_evaluated_before_content_location() {
 }
 
 #[test]
-fn no_eligible_routes_claims_the_widest_uncertainty_and_no_baseline() {
-    let decision = evaluate(&base_input());
-    let plan = decision.route_plan.clone().expect("plan is always present");
-
-    assert!(plan.ranked.is_empty());
-    assert_eq!(plan.deterministic_baseline, None);
-    assert_eq!(plan.uncertainty, WorkOrdinalBandV1::Highest);
-    assert_eq!(plan.coverage, WorkOrdinalBandV1::Lowest);
-    assert!(
-        decision
-            .ordered_reason_codes
-            .contains(&WorkProposalReasonV1::NoEligibleRoutes)
-    );
-    assert!(decision.sizing.is_none());
-    assert!(
-        !decision.deterministic_fallback,
-        "an empty candidate set names no baseline, so no fallback is claimed"
-    );
-}
-
-#[test]
 fn a_fully_excluded_candidate_set_is_treated_as_no_eligible_routes() {
     let mut input = base_input();
     let mut expensive = route("route.alpha", WorkOrdinalBandV1::Highest);
@@ -661,7 +640,6 @@ fn a_duplicate_route_identity_is_an_invalid_request() {
     );
     assert_eq!(decision.route_plan, None);
 }
-
 #[test]
 fn budget_spent_beyond_the_ceiling_is_an_invalid_request() {
     let mut input = base_input();

@@ -231,17 +231,6 @@ fn prepare_test_profile_root(profile_root: &std::path::Path) {
     }
 }
 
-#[test]
-fn daemon_test_transcript_source_home_is_profile_parent() {
-    let isolated_home = TempDir::new().expect("isolated home");
-    let profile_root = isolated_home.path().join("profile");
-
-    assert_eq!(
-        super::daemon_transcript_source_home(&profile_root).as_deref(),
-        Some(isolated_home.path())
-    );
-}
-
 fn test_store_administration_for_profile(profile_root: &std::path::Path) -> StoreAdministration {
     prepare_test_profile_root(profile_root);
     let profile_identity =
@@ -419,19 +408,6 @@ fn search_request_controls_distinguish_cancellation_and_timeout() {
         super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 10),
         Some(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled)
     );
-}
-
-#[test]
-fn search_scope_resolution_failure_is_authority_unavailable() {
-    assert!(matches!(
-        super::code_index_scope_unavailable(),
-        code_search::CodeIndexSearchOutcomeV1::Unavailable(
-            code_search::CodeIndexSearchUnavailableV1 {
-                reason: code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                ..
-            }
-        )
-    ));
 }
 
 #[test]

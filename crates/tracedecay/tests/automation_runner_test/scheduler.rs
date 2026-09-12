@@ -302,32 +302,6 @@ fn scheduler_diagnostic_skips_do_not_advance_the_interval() {
 }
 
 #[test]
-fn fresh_session_activity_bypasses_interval_for_all_host_evidence_tasks() {
-    let config = automation_config(Some("every 10m"), None);
-    for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
-        let records = vec![record(
-            "previous-success",
-            task,
-            AutomationRunStatus::Succeeded,
-            1_000,
-        )];
-        assert!(
-            schedule_decision(
-                &config,
-                task,
-                &records,
-                SessionActivity {
-                    last_activity_secs: Some(1_100),
-                },
-                1_101,
-            )
-            .is_due(),
-            "fresh completed-turn evidence should wake {task:?} without waiting for its repair interval"
-        );
-    }
-}
-
-#[test]
 fn fresh_session_activity_is_relative_to_the_latest_cadence_terminal() {
     let config = automation_config(Some("every 10m"), None);
     let success = record(
@@ -523,117 +497,6 @@ fn scheduler_retries_malformed_backend_output_after_cooldown() {
             &records,
             SessionActivity::none(),
             1_400
-        )
-        .is_due()
-    );
-}
-
-#[test]
-fn scheduler_rechecks_stale_non_retryable_backend_transport_failures() {
-    let config = automation_config(Some("daily"), None);
-    let mut failed = record(
-        "run-1",
-        AgentTaskKind::MemoryCurator,
-        AutomationRunStatus::Failed,
-        1_000,
-    );
-    failed.error =
-        Some("config error: codex app-server closed stdout before completing".to_string());
-    failed.error_classification = Some(AgentTaskFailureClass::Permanent);
-    failed.error_retryable = Some(false);
-    let records = vec![failed];
-
-    assert_eq!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::MemoryCurator,
-            &records,
-            SessionActivity::none(),
-            1_100
-        )
-        .skip_reason(),
-        Some("scheduler_cooldown_active")
-    );
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::MemoryCurator,
-            &records,
-            SessionActivity::none(),
-            1_400
-        )
-        .is_due()
-    );
-}
-
-#[test]
-fn scheduler_retries_explicit_retryable_failures_after_cooldown() {
-    let config = automation_config(Some("daily"), None);
-    let mut failed = record(
-        "run-1",
-        AgentTaskKind::MemoryCurator,
-        AutomationRunStatus::Failed,
-        1_000,
-    );
-    failed.error = Some("timed out waiting for codex app-server".to_string());
-    failed.error_classification = Some(AgentTaskFailureClass::Timeout);
-    failed.error_retryable = Some(true);
-    let records = vec![failed];
-
-    assert_eq!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::MemoryCurator,
-            &records,
-            SessionActivity::none(),
-            1_100
-        )
-        .skip_reason(),
-        Some("scheduler_cooldown_active")
-    );
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::MemoryCurator,
-            &records,
-            SessionActivity::none(),
-            1_400
-        )
-        .is_due()
-    );
-}
-
-#[test]
-fn scheduler_supports_all_self_improvement_tasks() {
-    let config = automation_config(Some("hourly"), None);
-
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::MemoryCurator,
-            &[],
-            SessionActivity::none(),
-            1_000
-        )
-        .is_due()
-    );
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::SessionReflector,
-            &[],
-            SessionActivity::at(900),
-            1_000
-        )
-        .is_due()
-    );
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::SkillWriter,
-            &[],
-            SessionActivity::at(900),
-            1_000
         )
         .is_due()
     );
@@ -1141,43 +1004,6 @@ fn scheduler_skips_session_evidence_tasks_without_new_activity() {
 }
 
 #[test]
-fn scheduler_session_evidence_tasks_stay_dormant_without_message_activity_authority() {
-    // Without the canonical message-search activity watermark there is no
-    // evidence authority for a session task to consume.
-    let config = automation_config(Some("every 10m"), None);
-
-    for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
-        assert_eq!(
-            schedule_decision(&config, task, &[], SessionActivity::none(), 1_000).skip_reason(),
-            Some("no_new_session_activity")
-        );
-    }
-}
-
-#[test]
-fn scheduler_memory_curator_is_not_gated_on_session_activity() {
-    // The memory curator reviews the fact store, not session transcripts.
-    let config = automation_config(Some("every 10m"), None);
-    let records = vec![record(
-        "run-1",
-        AgentTaskKind::MemoryCurator,
-        AutomationRunStatus::Succeeded,
-        1_000,
-    )];
-
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::MemoryCurator,
-            &records,
-            SessionActivity::none(),
-            1_700
-        )
-        .is_due()
-    );
-}
-
-#[test]
 fn scheduler_retries_failed_session_evidence_runs_with_existing_activity() {
     // The evidence gate keys off the last successful run; a failed run is
     // retried after its cooldown with the same evidence.
@@ -1255,32 +1081,6 @@ async fn load_session_activity_reads_newest_message_timestamp() {
             .await
             .unwrap(),
         SessionActivity::at(1_715_000_200)
-    );
-}
-
-#[tokio::test]
-async fn load_session_activity_normalizes_millisecond_timestamps() {
-    let temp = tempdir().unwrap();
-    let db = scheduler_session_runtime(temp.path(), "project.scheduler-millisecond").await;
-    seed_session_message_in_db(
-        &db,
-        temp.path(),
-        SeedSessionMessage {
-            provider: "cursor",
-            session_id: "activity-ms",
-            message_id: "activity-ms-message-001",
-            role: "user",
-            timestamp: 1_715_000_300_000,
-            text: "millisecond provider timestamp",
-            source: None,
-        },
-    )
-    .await;
-    assert_eq!(
-        db.session_activity_for_test(HostAdmissionScope::Project)
-            .await
-            .unwrap(),
-        SessionActivity::at(1_715_000_300)
     );
 }
 

@@ -6,14 +6,14 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, Ordering},
         mpsc::{Receiver, RecvTimeoutError},
     },
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior};
+use rusqlite::{Connection, DropBehavior, ErrorCode, Transaction, TransactionBehavior};
 
 use super::guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
 use super::{
@@ -39,7 +39,7 @@ pub(crate) enum WriterCommand {
         receiver: Receiver<TransactionCommand>,
         reply: async_channel::Sender<Result<(), ExactSqlError>>,
         last_insert_rowid: Arc<AtomicI64>,
-        expired: Arc<AtomicBool>,
+        lease: Arc<TransactionLeaseState>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
     CheckpointWalTruncate {
@@ -139,6 +139,48 @@ fn lease_now() -> Instant {
 #[cfg(test)]
 use lease_clock::lease_now;
 
+/// Terminal state of one interactive transaction, shared with its caller.
+///
+/// The writer thread owns the `SQLite` transaction, so when a lease, a
+/// shutdown, or an authority revocation ends it, the writer is the side that
+/// rolls back. It publishes that rollback's real receipt here *before* it
+/// drops the command channel, so a caller holding the failed statement's
+/// error learns its work was discarded instead of being told that its own
+/// rollback failed.
+#[derive(Default)]
+pub(crate) struct TransactionLeaseState {
+    expired: AtomicBool,
+    settled: Mutex<Option<Result<ExactSqlRollbackReceipt, ExactSqlError>>>,
+}
+
+impl TransactionLeaseState {
+    pub(super) fn is_expired(&self) -> bool {
+        self.expired.load(Ordering::Acquire)
+    }
+
+    fn expire(&self) {
+        self.expired.store(true, Ordering::Release);
+    }
+
+    fn settle(&self, outcome: Result<ExactSqlRollbackReceipt, ExactSqlError>) {
+        *self
+            .settled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+    }
+
+    /// The rollback the writer already performed, for a caller whose own
+    /// rollback arrived after the transaction was released.
+    pub(super) fn settled_rollback(
+        &self,
+    ) -> Option<Result<ExactSqlRollbackReceipt, ExactSqlError>> {
+        self.settled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 pub(crate) enum TransactionCommand {
     Attach {
         attachment: ExactSqlAttachment,
@@ -203,7 +245,7 @@ pub(crate) fn run_writer_command(
             receiver,
             reply,
             last_insert_rowid,
-            expired,
+            lease,
             authority,
         } => {
             if policy == TransactionPolicy::AuthorizedLongLease && authority.is_none() {
@@ -235,7 +277,7 @@ pub(crate) fn run_writer_command(
                                 before,
                                 shutdown_requested,
                                 &last_insert_rowid,
-                                &expired,
+                                &lease,
                                 authority,
                                 policy,
                             )
@@ -259,7 +301,7 @@ pub(crate) fn run_writer_command(
             };
             if let Some(completion) = completion {
                 crate::hotpath_observe::record_exact_sql_transaction_outcome(
-                    completion.outcome(expired.load(Ordering::Acquire)),
+                    completion.outcome(lease.is_expired()),
                 );
                 if completion.finish(connection).is_err() {
                     shutdown_requested.store(true, Ordering::Release);
@@ -377,6 +419,48 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
     }
 }
 
+/// Discards the writer-owned transaction, reporting the rollback `SQLite` may
+/// already have performed.
+///
+/// `sqlite3_interrupt` on a write statement inside an explicit transaction
+/// rolls that whole transaction back itself and returns the connection to
+/// autocommit. A `ROLLBACK` issued afterwards fails with "cannot rollback - no
+/// transaction is active", which is not a durability problem — the work is
+/// already discarded — so the autocommit state is what decides here rather
+/// than a second statement.
+fn discard_transaction(
+    mut transaction: Transaction<'_>,
+    before: u64,
+) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
+    let receipt = ExactSqlRollbackReceipt {
+        discarded_changed_rows: transaction.total_changes().saturating_sub(before),
+    };
+    if transaction.is_autocommit() {
+        transaction.set_drop_behavior(DropBehavior::Ignore);
+        return Ok(receipt);
+    }
+    transaction
+        .rollback()
+        .map(|()| receipt)
+        .map_err(|error| sqlite_error("rollback write transaction", error))
+}
+
+/// Releases the writer-owned transaction and publishes the receipt for it.
+///
+/// Every path that ends a transaction without a caller-issued terminal comes
+/// through here, so the rollback is always durable — and its outcome always
+/// readable — before the command channel is dropped and the writer released.
+fn release_rolled_back(
+    transaction: Transaction<'_>,
+    before: u64,
+    lease: &TransactionLeaseState,
+    attachments: Vec<ExactSqlAttachment>,
+    previous_attachment_limit: Option<i32>,
+) -> TransactionCompletion {
+    lease.settle(discard_transaction(transaction, before));
+    TransactionCompletion::abandoned(attachments, previous_attachment_limit)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_transaction(
     transaction: Transaction<'_>,
@@ -384,7 +468,7 @@ fn run_transaction(
     before: u64,
     shutdown_requested: &Arc<AtomicBool>,
     last_insert_rowid: &AtomicI64,
-    expired: &AtomicBool,
+    lease: &TransactionLeaseState,
     authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     policy: TransactionPolicy,
 ) -> TransactionCompletion {
@@ -394,14 +478,24 @@ fn run_transaction(
     let mut transaction_deadline = lease_now() + EXACT_SQL_TRANSACTION_LIMIT;
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
-            let _ = transaction.rollback();
-            return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
+            return release_rolled_back(
+                transaction,
+                before,
+                lease,
+                attachments,
+                previous_attachment_limit,
+            );
         }
         let now = lease_now();
         if now >= idle_deadline || now >= transaction_deadline {
-            expired.store(true, Ordering::Release);
-            let _ = transaction.rollback();
-            return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
+            lease.expire();
+            return release_rolled_back(
+                transaction,
+                before,
+                lease,
+                attachments,
+                previous_attachment_limit,
+            );
         }
         let wait = idle_deadline
             .saturating_duration_since(now)
@@ -417,10 +511,12 @@ fn run_transaction(
         match command {
             TransactionCommand::Attach { attachment, reply } => {
                 if lease_now() >= transaction_deadline {
-                    expired.store(true, Ordering::Release);
-                    let _ = transaction.rollback();
+                    lease.expire();
                     let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -436,9 +532,11 @@ fn run_transaction(
                 if let Err(error) =
                     verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Execute)
                 {
-                    let _ = transaction.rollback();
                     let _ = reply.try_send(Err(error));
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -449,12 +547,17 @@ fn run_transaction(
                     {
                         Ok(previous) => previous_attachment_limit = Some(previous),
                         Err(error) => {
-                            let _ = transaction.rollback();
                             let _ = reply.try_send(Err(sqlite_error(
                                 "open exact SQL attachment limit",
                                 error,
                             )));
-                            return TransactionCompletion::abandoned(attachments, None);
+                            return release_rolled_back(
+                                transaction,
+                                before,
+                                lease,
+                                attachments,
+                                None,
+                            );
                         }
                     }
                 }
@@ -472,9 +575,11 @@ fn run_transaction(
                             authority.as_deref(),
                             ExactSqlWriteIntent::Execute,
                         ) {
-                            let _ = transaction.rollback();
                             let _ = reply.try_send(Err(error));
-                            return TransactionCompletion::abandoned(
+                            return release_rolled_back(
+                                transaction,
+                                before,
+                                lease,
                                 attachments,
                                 previous_attachment_limit,
                             );
@@ -483,9 +588,11 @@ fn run_transaction(
                         idle_deadline = lease_now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
                     }
                     Err(error) => {
-                        let _ = transaction.rollback();
                         let _ = reply.try_send(Err(error));
-                        return TransactionCompletion::abandoned(
+                        return release_rolled_back(
+                            transaction,
+                            before,
+                            lease,
                             attachments,
                             previous_attachment_limit,
                         );
@@ -498,18 +605,22 @@ fn run_transaction(
                 reply,
             } => {
                 if lease_now() >= transaction_deadline {
-                    expired.store(true, Ordering::Release);
-                    let _ = transaction.rollback();
+                    lease.expire();
                     let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
-                    let _ = transaction.rollback();
                     let _ = reply.try_send(Err(error));
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -527,12 +638,14 @@ fn run_transaction(
                 let repeated_authority =
                     if execution_policy == ExecutionPolicy::AuthorityRevalidated {
                         let Some(authority) = authority.as_ref() else {
-                            let _ = transaction.rollback();
                             let _ = reply.try_send(Err(ExactSqlError::AuthorityDenied(
                                 "authority-revalidated batch requires attached write authority"
                                     .to_owned(),
                             )));
-                            return TransactionCompletion::abandoned(
+                            return release_rolled_back(
+                                transaction,
+                                before,
+                                lease,
                                 attachments,
                                 previous_attachment_limit,
                             );
@@ -552,26 +665,38 @@ fn run_transaction(
                     execution_policy == ExecutionPolicy::Bounded,
                     repeated_authority,
                 );
-                if shutdown_requested.load(Ordering::Acquire) {
-                    let _ = transaction.rollback();
+                if shutdown_requested.load(Ordering::Acquire) || transaction.is_autocommit() {
+                    // An interrupted write statement takes the whole
+                    // transaction with it (see `discard_transaction`).
+                    // Dispatching further commands would run the caller's
+                    // remaining statements outside any transaction, so the
+                    // caller keeps its own error and the transaction is
+                    // released with the rollback already performed.
                     let _ = reply.try_send(result);
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 if let Err(error) = verify_write_authority(authority.as_deref(), intent) {
-                    let _ = transaction.rollback();
                     let _ = reply.try_send(Err(error));
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 if matches!(&result, Err(ExactSqlError::AuthorityDenied(_))) {
-                    let _ = transaction.rollback();
                     let _ = reply.try_send(result);
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -579,10 +704,12 @@ fn run_transaction(
                 if execution_policy == ExecutionPolicy::Bounded
                     && lease_now() >= transaction_deadline
                 {
-                    expired.store(true, Ordering::Release);
-                    let _ = transaction.rollback();
+                    lease.expire();
                     let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -595,25 +722,31 @@ fn run_transaction(
                 );
                 let succeeded = result.is_ok();
                 let _ = reply.try_send(result);
-                if succeeded {
-                    let renewed_at = lease_now();
-                    idle_deadline = renewed_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
-                    // A long-lease transaction earns its next lease by
-                    // committing progress: full-index replacement writes far
-                    // more rows than one fixed lease can carry, but it never
-                    // stalls. Idleness, shutdown, and authority revocation
-                    // still cancel it, and `Ordinary` never renews.
-                    if policy == TransactionPolicy::AuthorizedLongLease {
-                        transaction_deadline = renewed_at + EXACT_SQL_TRANSACTION_LIMIT;
-                    }
+                let renewed_at = lease_now();
+                // The idle limit bounds a caller that sends nothing, so every
+                // completed round trip renews it. A statement that ran to its
+                // own execution deadline and then failed kept the writer busy
+                // for that whole span; charging it to idleness released the
+                // transaction before the caller — still holding the error —
+                // could roll it back.
+                idle_deadline = renewed_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+                // A long-lease transaction earns its next lease by committing
+                // progress: full-index replacement writes far more rows than
+                // one fixed lease can carry, but it never stalls. Idleness,
+                // shutdown, and authority revocation still cancel it, and
+                // `Ordinary` never renews.
+                if succeeded && policy == TransactionPolicy::AuthorizedLongLease {
+                    transaction_deadline = renewed_at + EXACT_SQL_TRANSACTION_LIMIT;
                 }
             }
             TransactionCommand::Commit { reply } => {
                 if lease_now() >= transaction_deadline {
-                    expired.store(true, Ordering::Release);
-                    let _ = transaction.rollback();
+                    lease.expire();
                     let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -621,9 +754,11 @@ fn run_transaction(
                 if let Err(error) =
                     verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Commit)
                 {
-                    let _ = transaction.rollback();
                     let _ = reply.try_send(Err(error));
-                    return TransactionCompletion::abandoned(
+                    return release_rolled_back(
+                        transaction,
+                        before,
+                        lease,
                         attachments,
                         previous_attachment_limit,
                     );
@@ -642,13 +777,7 @@ fn run_transaction(
                 };
             }
             TransactionCommand::Rollback { reply } => {
-                let discarded_changed_rows = transaction.total_changes().saturating_sub(before);
-                let result = transaction
-                    .rollback()
-                    .map(|()| ExactSqlRollbackReceipt {
-                        discarded_changed_rows,
-                    })
-                    .map_err(|error| sqlite_error("rollback immediate transaction", error));
+                let result = discard_transaction(transaction, before);
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,

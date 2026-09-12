@@ -13,7 +13,9 @@ fn semantic_defaults_cover_the_cataloged_fastembed_model() {
         .expect("default semantic model is cataloged");
     let model_bytes = model.members.get("model").expect("model member").length;
     assert!(config.semantic.resources.max_model_bytes >= model_bytes);
-    assert!(config.semantic.resources.max_resident_bytes >= model_bytes.saturating_mul(2));
+    // The shipped configuration pins no resident ceiling: composition derives
+    // it from the host's admitted process memory.
+    assert_eq!(config.semantic.resources.max_resident_bytes, None);
     assert_eq!(
         config.semantic.resources.max_concurrent_sessions,
         tracedecay_semantic::embedding_parallelism::default_max_concurrent_sessions(),

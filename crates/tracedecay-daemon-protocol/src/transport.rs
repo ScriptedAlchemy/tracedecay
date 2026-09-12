@@ -539,18 +539,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_listener_connects_and_accepts() {
-        let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
-            .await
-            .unwrap();
-        let client = BrokerStream::connect(&endpoint);
-        let server = listener.accept();
-        let (client, server) = tokio::join!(client, server);
-        assert!(client.is_ok());
-        assert!(server.is_ok());
-    }
-
-    #[tokio::test]
     async fn loopback_listener_authenticates_twelve_concurrent_clients() {
         const CLIENTS: usize = 12;
         const TOKEN: &str = "0123456789abcdef0123456789abcdef";

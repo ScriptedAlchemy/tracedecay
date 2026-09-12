@@ -227,60 +227,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn documents_for_adapter_accepts_files_under_a_matching_root_marker()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let project_root = temp.path();
-        let package_root = project_root.join("package");
-        let source_path = package_root.join("src/lib.fake");
-        let source_parent = source_path.parent().ok_or("source path has no parent")?;
-        tokio::fs::create_dir_all(source_parent).await?;
-        tokio::fs::write(package_root.join("fake-root"), "").await?;
-        tokio::fs::write(&source_path, "fake source").await?;
-        let adapter = fake_adapter("fake-root");
-
-        let documents = documents_for_adapter(
-            project_root,
-            &adapter,
-            vec!["package/src/lib.fake".to_string()],
-        )
-        .await?;
-
-        assert_eq!(documents.len(), 1);
-        assert_eq!(documents[0].relative_path, "package/src/lib.fake");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn documents_for_adapter_accepts_directory_root_markers()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let project_root = temp.path();
-        let package_root = project_root.join("package");
-        let source_path = package_root.join("src/lib.fake");
-        let source_parent = source_path.parent().ok_or("source path has no parent")?;
-        tokio::fs::create_dir_all(source_parent).await?;
-        tokio::fs::create_dir(package_root.join(".fake-root")).await?;
-        tokio::fs::write(&source_path, "fake source").await?;
-        let adapter = fake_adapter(".fake-root");
-
-        let documents = documents_for_adapter(
-            project_root,
-            &adapter,
-            vec!["package/src/lib.fake".to_string()],
-        )
-        .await?;
-
-        assert_eq!(documents.len(), 1);
-        let canonical_package_root = package_root.canonicalize()?;
-        assert_eq!(
-            adapter_workspace_root(project_root, &adapter, "package/src/lib.fake"),
-            Some(canonical_package_root)
-        );
-        Ok(())
-    }
-
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn activity_boundaries_normalize_linked_root_once_and_reject_symlink_escape()

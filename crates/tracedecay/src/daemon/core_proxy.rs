@@ -58,7 +58,7 @@ pub async fn should_proxy_serve_to_daemon(socket_path: &Path) -> bool {
     .await
 }
 
-#[cfg(any(test, not(unix)))]
+#[cfg(not(unix))]
 pub(crate) fn proxy_required_by_platform(transport_supported: bool, endpoint_exists: bool) -> bool {
     !transport_supported || endpoint_exists
 }
@@ -852,18 +852,6 @@ fn proxy_initialize_metadata_for_request(
         }
     }
     metadata
-}
-
-/// The warning to surface when the daemon behind an `initialize` response is
-/// running a different binary version than this client.
-#[cfg(all(test, unix))]
-pub(crate) fn daemon_version_skew_warning(
-    request_line: &str,
-    responses: &[String],
-    client_version: &str,
-) -> Option<String> {
-    let request = DaemonProxyRequest::new(request_line);
-    daemon_version_skew_warning_for_request(request.parsed.as_ref(), responses, client_version)
 }
 
 #[cfg(unix)]

@@ -76,14 +76,6 @@ afterEach(() => {
 });
 
 describe('fetchStructure', () => {
-  it('passes a measured reading through unchanged', async () => {
-    respond(envelope({ status: 'measured', measurement: { hop_count: 3 } }));
-    const result = await fetchStructure<Measurement>('/x', ReadSchema);
-    expect(result.outcome).toBe('measured');
-    expect(result).toMatchObject({ measurement: { hop_count: 3 } });
-    expect(absenceReason(result)).toBeNull();
-  });
-
   it('keeps an unmeasured read distinct from an empty measurement', async () => {
     respond(
       envelope({

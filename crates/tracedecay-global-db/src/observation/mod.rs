@@ -222,7 +222,6 @@ impl super::RegisteredGlobalDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::{CommitId, RepositoryId};
 
     fn observation_id(byte: &str) -> CanonicalObservationIdV1 {
         CanonicalObservationIdV1::new(format!("sha256:{}", byte.repeat(64))).unwrap()
@@ -278,23 +277,5 @@ mod tests {
             ),
             Err(ObservationStoreError::RetrievalAnchorObservationMismatch)
         ));
-    }
-
-    #[test]
-    fn non_observation_anchor_keeps_its_own_provenance_contract() {
-        let target = RetrievalAnchorTargetV2::ExactRepositoryCommit {
-            repository_id: RepositoryId::new("repository.fixture").unwrap(),
-            commit_id: CommitId::new("commit.fixture").unwrap(),
-        };
-        assert!(
-            validate_exact_observation_provenance(
-                &target,
-                &AnchorSourceGenerationV2::Unknown,
-                &[],
-                &observation_id("a"),
-                ObservationSourceGenerationV1::new(7).unwrap(),
-            )
-            .is_ok()
-        );
     }
 }

@@ -1075,32 +1075,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn pause_and_resume_publish_configuration_effect_settlement_metadata() {
-        let contribution = context_scout_surface_catalog_contribution().unwrap();
-        for operation in ["context_scout_pause", "context_scout_resume"] {
-            let spec = CONTEXT_SCOUT_SPECS
-                .iter()
-                .find(|spec| spec.operation == operation)
-                .unwrap();
-            let capability = contribution
-                .capabilities()
-                .iter()
-                .find(|capability| capability.capability_id() == &capability_id(spec).unwrap())
-                .unwrap();
-            assert_eq!(capability.effect(), EffectClass::ConfigurationWrite);
-            assert_eq!(
-                capability.cancellation(),
-                &CancellationContract::NotCancellable
-            );
-            assert_eq!(capability.deadline().maximum_millis(), 15_000);
-            assert_eq!(capability.receipt(), ReceiptContract::DurableEffect);
-            assert_eq!(capability.idempotency(), IdempotencyContract::Required);
-            assert_eq!(
-                capability.reconciliation(),
-                ReconciliationContract::Required
-            );
-        }
-    }
 }

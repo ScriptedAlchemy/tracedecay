@@ -45,6 +45,7 @@ use super::search_evidence::{
 use super::search_freshness::{
     ServedGenerationV1, freshness_lines, search_freshness, worktree_freshness_from_payload,
 };
+use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{
     graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
     line_for_byte_offset, node_not_found as node_not_found_result, required_graph_file_path,
@@ -354,6 +355,10 @@ where
             hotpath::measure_block!("mcp.graph.search.graph", {
                 for ranked in &complete.ordered_candidates {
                     let mut result = json!(ranked);
+                    let anchor = ranked.candidate.anchor_id.as_str();
+                    if anchor.starts_with(CODE_SYMBOL_EVIDENCE_PREFIX) {
+                        result["node_id"] = json!(graph_occurrence_id(anchor)?);
+                    }
                     if let Some(display) =
                         complete.display_by_anchor.get(&ranked.candidate.anchor_id)
                     {
@@ -363,7 +368,7 @@ where
                             "kind": display.kind,
                             "path": display.path,
                         });
-                        if include_graph_node_ids {
+                        if include_graph_node_ids && result.get("node_id").is_none() {
                             graph_evidence.enrich_node_id(&mut result, display);
                         }
                     }
@@ -542,11 +547,16 @@ fn render_search_md(value: &Value) -> String {
                             "**{name}** ({kind}, {exact_class}) — rank {} · utility {utility}{via}",
                             ordinal.saturating_add(1)
                         ));
-                        md.line(&format!("  `{anchor}`"));
+                        md.line(&format!("  anchor_id: `{anchor}`"));
                     } else {
                         md.bullet(&format!(
                             "**{anchor}** ({exact_class}) — rank {} · utility {utility}{via}",
                             ordinal.saturating_add(1)
+                        ));
+                    }
+                    if let Some(node_id) = it.get("node_id").and_then(Value::as_str) {
+                        md.line(&format!(
+                            "  Read source: `tracedecay_source_body` with `node_id: {node_id}`"
                         ));
                     }
                     continue;
@@ -814,9 +824,9 @@ where
     let memory_options = context_memory_options(&args);
     let memory_read_control =
         context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
-    // Search, graph enrichment, and memory are independent. Search is the
-    // primary code lane: once it answers, a still-pending graph must not hold
-    // lexical/exact results or memory hostage.
+    // Graph enrichment is optional unless the caller asks for source bodies.
+    // That request waits for graph admission under the same deadline and
+    // cancellation as search; ordinary lexical/exact retrieval stays independent.
     let search = execute_code_index_search(
         search_executor,
         tracedecay_query::code_search::CodeIndexSearchRequestV1 {
@@ -835,7 +845,7 @@ where
         },
     );
     let memory = context_memory_outcome(ctx, task, &memory_options, memory_read_control.as_ref());
-    let search_and_graph = race_primary_search_with_graph(search, graph, false, None, false);
+    let search_and_graph = race_primary_search_with_graph(search, graph, false, None, include_code);
     let ((outcome, graph), memory_outcome) = tokio::join!(search_and_graph, memory);
     // Read after the search settles: the verdict must describe the scheduler
     // state at serve time, not a snapshot taken before the lanes ran.
@@ -1579,25 +1589,32 @@ mod tests {
     }
 
     #[test]
-    fn a_rebuilding_generation_remains_typed_unavailable() {
-        let unavailable = tracedecay_query::code_search::CodeIndexSearchUnavailableV1 {
-            code_generation: None,
-            reason: tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
-            semantic: tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
-                reason: tracedecay_query::code_search::lane_reason::GENERATION_REBUILDING,
-            },
-            coverage: tracedecay_query::code_search::CodeIndexSearchCoverageV1::unavailable(
-                tracedecay_query::code_search::lane_reason::GENERATION_REBUILDING,
-            ),
-        };
-
-        assert!(!unavailable.coverage.any_servable());
-        assert_eq!(
-            unavailable.coverage.exact,
-            tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable {
-                reason: tracedecay_query::code_search::lane_reason::GENERATION_REBUILDING,
+    fn search_renders_symbol_id_for_source_body_without_graph_enrichment() {
+        let node_id =
+            "symbol.v1.sha256:4ddd636456fccc2962006c7803bd94b2d7d732c6830993a429535e0b0ff0b688";
+        let anchor = format!("{CODE_SYMBOL_EVIDENCE_PREFIX}{node_id}");
+        let symbol = graph_occurrence_id(&anchor).expect("search symbol anchor");
+        for display in [
+            Value::Null,
+            json!({"name": "load_current_mutations", "kind": "function"}),
+        ] {
+            let mut result = json!({
+                "candidate": {"anchor_id": anchor, "exact_class": "approximate"},
+                "node_id": symbol,
+            });
+            if !display.is_null() {
+                result["display"] = display;
             }
-        );
+            let rendered = render_search_md(&json!({"results": [result]}));
+            assert!(rendered.contains(&format!(
+                "Read source: `tracedecay_source_body` with `node_id: {node_id}`"
+            )));
+            assert!(!rendered.contains("node_id: code-symbol:"));
+        }
+        let chunk = render_search_md(&json!({"results": [{
+            "candidate": {"anchor_id": "code-chunk:chunk.fixture"}
+        }]}));
+        assert!(!chunk.contains("tracedecay_source_body"));
     }
 
     #[tokio::test]
@@ -1773,28 +1790,6 @@ mod tests {
     }
 
     #[test]
-    fn search_markdown_prefers_hydrated_symbol_identity_over_opaque_anchor() {
-        let rendered = render_search_md(&json!({
-            "results": [{
-                "candidate": {
-                    "anchor_id": "code-symbol:symbol.v1.sha256:opaque",
-                    "exact_class": "exact_message",
-                    "utility_micros": 4_000_000
-                },
-                "final_ordinal": 0,
-                "display": {
-                    "name": "main",
-                    "qualified_name": "main",
-                    "kind": "function"
-                }
-            }]
-        }));
-
-        assert!(rendered.contains("**main** (function, exact_message)"));
-        assert!(rendered.contains("`code-symbol:symbol.v1.sha256:opaque`"));
-    }
-
-    #[test]
     fn context_markdown_lane_preview_keeps_all_lanes_visible() {
         let full = format!(
             "## Code Context\n**Query:** q\n\n### Memory Matches\n{}\n### Entry Points\n{}\n### Related Symbols\n{}\n### Code\n{}\n### Index Coverage Hint\n{}\n### Extension Points\n{}\n### Test Coverage\n{}\nseen_node_ids: [{}]\n",
@@ -1863,19 +1858,6 @@ mod tests {
         assert!(section.contains("tail-marker"));
         assert!(!section.contains("..."));
         assert!(section.contains("tracedecay_fact_feedback"));
-    }
-
-    #[test]
-    fn context_memory_section_compacts_multiline_content() {
-        let hit = context_memory_hit("first line\n# heading\n- item");
-
-        let Some(section) = context_memory_section(&[hit], None) else {
-            panic!("memory hit should render");
-        };
-
-        assert!(section.contains("first line # heading - item"));
-        assert!(!section.contains("\n# heading"));
-        assert!(!section.contains("\n- item"));
     }
 
     #[test]

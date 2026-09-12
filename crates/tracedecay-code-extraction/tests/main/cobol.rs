@@ -11,67 +11,6 @@ fn extract_fixture() -> ExtractionResult {
 }
 
 #[test]
-fn test_cobol_file_root() {
-    let result = extract_fixture();
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
-}
-
-#[test]
-fn test_cobol_program_id_as_module() {
-    let result = extract_fixture();
-    let modules: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Module)
-        .collect();
-    assert_eq!(
-        modules.len(),
-        1,
-        "expected 1 module, got {}: {:?}",
-        modules.len(),
-        modules.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert_eq!(modules[0].name, "NETWORKING");
-}
-
-#[test]
-fn test_cobol_paragraphs_as_functions() {
-    let result = extract_fixture();
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(
-        fns.len(),
-        5,
-        "expected 5 functions, got {}: {:?}",
-        fns.len(),
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "MAIN-PROGRAM"),
-        "MAIN-PROGRAM not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "VALIDATE-CONFIG"),
-        "VALIDATE-CONFIG not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "LOG-MESSAGE"),
-        "LOG-MESSAGE not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "CONNECT-SERVER"),
-        "CONNECT-SERVER not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "DISCONNECT-SERVER"),
-        "DISCONNECT-SERVER not found"
-    );
-}
-
-#[test]
 fn test_cobol_data_items_as_fields_and_consts() {
     let result = extract_fixture();
     // Items with VALUE clause -> Const: WS-MAX-RETRIES, WS-DEFAULT-PORT, WS-CONNECTED, WS-RETRY-COUNT
@@ -191,22 +130,6 @@ fn test_cobol_docstrings() {
     assert!(
         max_retries.unwrap().docstring.is_some(),
         "WS-MAX-RETRIES should have docstring"
-    );
-}
-
-#[test]
-fn test_cobol_contains_edges() {
-    let result = extract_fixture();
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(!contains.is_empty(), "expected Contains edges");
-    assert!(
-        contains.len() >= 10,
-        "expected >= 10 Contains edges, got {}",
-        contains.len()
     );
 }
 

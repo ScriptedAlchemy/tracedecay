@@ -413,12 +413,14 @@ mod tests {
             ],
         )
         .await;
-        assert_scoped_index_plan(&activity_plan, "idx_session_messages_session_activity");
+        assert_scoped_index_plan(&activity_plan, "idx_session_messages_session_activity_v2");
+        // The index orders the scan; `metadata_json` is fetched from the table
+        // for the bounded page rather than duplicated into the index.
         assert!(
-            activity_plan
+            !activity_plan
                 .iter()
                 .any(|detail| detail.contains("COVERING INDEX")),
-            "activity query plan is not covering: {activity_plan:?}"
+            "activity index must not carry the metadata blob: {activity_plan:?}"
         );
     }
 }

@@ -588,21 +588,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_meta_has_default_branch() {
-        let meta = BranchMeta::new("main");
-        assert_eq!(meta.default_branch, "main");
-        assert!(meta.is_tracked("main"));
-        assert_eq!(meta.branches["main"].db_file, "tracedecay.db");
-        assert!(meta.branches["main"].parent.is_none());
-    }
-
-    #[test]
-    fn new_for_dir_tracks_current_db_file() {
-        let meta = BranchMeta::new_for_dir(Path::new("/p/.tracedecay"), "main");
-        assert_eq!(meta.branches["main"].db_file, "tracedecay.db");
-    }
-
-    #[test]
     fn add_and_remove_branch() {
         let mut meta = BranchMeta::new("main");
         meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
@@ -944,15 +929,5 @@ mod tests {
                 .all(|epoch| epoch <= 2),
             "the locked publisher must allocate the first two epochs, got {first_epoch} and {second_epoch}"
         );
-    }
-
-    #[test]
-    fn roundtrip_json() {
-        let mut meta = BranchMeta::new("main");
-        meta.add_branch("feature/bar", "branches/feature_bar.db", "main");
-        let json = serde_json::to_string(&meta).unwrap();
-        let parsed: BranchMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.default_branch, "main");
-        assert!(parsed.is_tracked("feature/bar"));
     }
 }

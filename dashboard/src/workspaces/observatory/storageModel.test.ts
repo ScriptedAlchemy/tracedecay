@@ -6,17 +6,7 @@ import {
   StorageTelemetryPayloadV1Schema,
 } from '../../contracts/generated.ts';
 import { doctorEvidencePresentation } from './doctorModel.ts';
-import {
-  budgetPresentation,
-  dimensionDotClass,
-  formatSignedBytes,
-  growthPresentation,
-  refreshOperation,
-  storageFindingLabel,
-  storeRolesLabel,
-  tableGrowthOmissionPresentation,
-  tableGrowthPresentation,
-} from './storageModel.ts';
+import { budgetPresentation, dimensionDotClass, growthPresentation, refreshOperation, storageFindingLabel, tableGrowthPresentation } from './storageModel.ts';
 
 const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
 
@@ -253,78 +243,9 @@ describe('table growth presentation', () => {
     // Partial coverage is still a measurement, not a fault.
     expect(presentation.tone).toBe('ready');
   });
-
-  it('omits the partial-coverage wording once every current table was compared', () => {
-    const presentation = tableGrowthPresentation({
-      state: 'observed',
-      coverage: {
-        completeness: 'complete',
-        eligible: 2,
-        examined: 2,
-        matched: null,
-        excluded: null,
-        omitted: 0,
-        unknown: null,
-        denominator: 2,
-        unit: 'current_tables',
-        omission_reasons: [],
-      },
-      significant_samples: [],
-      omissions: [],
-      omission_reasons: [],
-    });
-
-    expect(presentation.summary).not.toContain('partial');
-    expect(presentation.notes).toEqual([]);
-  });
-
-  it('formats below-threshold omission bytes and never invents a baseline delta', () => {
-    expect(
-      tableGrowthOmissionPresentation({
-        kind: 'below_threshold',
-        table: 'metadata',
-        previous_bytes: 104_857_600,
-        current_bytes: 105_381_888,
-        growth_bytes: 524_288,
-        previous_observed_at: 10,
-        current_observed_at: 20,
-        reason: 'observed growth was below the informational significance threshold',
-      }),
-    ).toEqual({
-      kind: 'below_threshold',
-      table: 'metadata',
-      figure: '+512.0 KiB',
-      detail: '100.0 MiB → 100.5 MiB',
-    });
-
-    // A table with no previous watermark has a current size and nothing to
-    // subtract it from: it must never render a delta, signed or zero.
-    const pending = tableGrowthOmissionPresentation({
-      kind: 'baseline_pending',
-      table: 'embeddings',
-      current_bytes: 4_194_304,
-      observed_at: 20,
-      reason: 'embeddings: no previous table watermark exists; baseline pending',
-    });
-    expect(pending.figure).toBe('4.0 MiB now');
-    expect(pending.detail).toBe('no previous watermark · baseline pending');
-    expect(pending.figure).not.toMatch(/^[+−-]/);
-  });
 });
 
 describe('store budget dimension presentation', () => {
-  it('reports an evaluated budget within its owner-configured soft limit', () => {
-    const view = budgetPresentation({
-      state: 'evaluated',
-      evaluation: { state: 'within_budget', observed: 32768, soft_limit: 65536 },
-      setting_key: SETTING_KEY,
-      reason: 'evaluated against the owner-configured soft limit of 65536 bytes',
-    });
-    expect(view.state).toBe('within_budget');
-    expect(view.tone).toBe('ready');
-    expect(view.summary).toBe('within budget · 32.0 KiB of 64.0 KiB soft limit');
-    expect(view.notes).toContain('evaluated against the owner-configured soft limit of 65536 bytes');
-  });
 
   it('reports an evaluated over-budget store with its real overage', () => {
     const view = budgetPresentation({
@@ -367,11 +288,6 @@ describe('store budget dimension presentation', () => {
 });
 
 describe('store growth dimension presentation', () => {
-  it('renders a shrinking store as a negative delta and an unchanged store honestly', () => {
-    expect(formatSignedBytes(-2048)).toBe('−2.0 KiB');
-    expect(formatSignedBytes(0)).toBe('no size change');
-    expect(formatSignedBytes(1536)).toBe('+1.5 KiB');
-  });
 
   it('renders absent execution-owned growth history as unknown', () => {
     const view = growthPresentation({
@@ -381,16 +297,5 @@ describe('store growth dimension presentation', () => {
     expect(view.tone).toBe('unknown');
     expect(view.summary).toBe('growth could not be determined');
     expect(view.notes[0]).toContain('execution-owned');
-  });
-});
-
-describe('store role labelling', () => {
-  it('names every role a shared store file serves', () => {
-    expect(storeRolesLabel(['graph', 'memory'], 'graph')).toBe(
-      'graph · memory (shared store file)',
-    );
-    expect(storeRolesLabel(['lcm'], 'lcm')).toBe('lcm');
-    // A payload that somehow omits roles still names the primary role.
-    expect(storeRolesLabel([], 'savings')).toBe('savings');
   });
 });

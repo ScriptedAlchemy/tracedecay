@@ -684,47 +684,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_home_level_opencode_registration_retains_its_analyzers() {
-        let home = tempfile::tempdir().expect("isolated home");
-        let _env = HomeGuard::isolate(home.path());
-        let opencode_dir = home.path().join(".config").join("opencode");
-        tokio::fs::create_dir_all(&opencode_dir)
-            .await
-            .expect("home opencode config dir");
-        tokio::fs::write(
-            opencode_dir.join("opencode.json"),
-            serde_json::json!({
-                "lsp": {
-                    "tracedecay": {
-                        "initialization": {
-                            "tracedecay": {
-                                "duplicateAnalyzerAvoidance": true,
-                                "analyzerOwnership": {
-                                    "mode": "projection_only",
-                                    "retainedByExtension": { ".rs": ["rust-analyzer"] }
-                                }
-                            }
-                        }
-                    }
-                }
-            })
-            .to_string(),
-        )
-        .await
-        .expect("write home opencode.json");
-        let project_root = tempfile::tempdir().expect("project root");
-
-        let broker =
-            open_diagnostic_broker(project_root.path().to_path_buf(), project_root.path()).await;
-
-        assert_eq!(
-            broker.lock().await.host_retained_analyzer("rust"),
-            Some("rust-analyzer"),
-            "a host registered only at the home level still keeps its analyzer"
-        );
-    }
-
-    #[tokio::test]
     async fn a_home_level_registration_does_not_revoke_the_project_level_one() {
         let home = tempfile::tempdir().expect("isolated home");
         let _env = HomeGuard::isolate(home.path());

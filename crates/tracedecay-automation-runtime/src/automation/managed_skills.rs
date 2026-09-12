@@ -10,13 +10,13 @@ use tracedecay_automation::run_labels::SKILL_OVERLAP_REMOVAL_TOMBSTONE;
 use tracedecay_domain::errors::Result;
 use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
+pub use tracedecay_automation::managed_skills::validate_managed_support_files;
 pub use tracedecay_automation::managed_skills::{
     MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
     ManagedSkill, ManagedSkillDraft, ManagedSkillMaterializationScope, ManagedSkillMetadata,
     ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
     ManagedSupportFile, SkillInstallTarget, default_managed_skill_targets,
 };
-pub use tracedecay_automation::managed_skills::validate_managed_support_files;
 use tracedecay_automation::managed_skills::{
     validate_managed_skill, validate_managed_skill_update, validate_skill_id,
 };

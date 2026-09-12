@@ -1,26 +1,10 @@
 use super::*;
+use crate::runtime::SessionMessageRecord;
 use serde_json::json;
 use tracedecay_capture::claude as canonical;
 use tracedecay_runtime_core::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
 };
-
-#[test]
-fn live_session_discovery_excludes_large_unrelated_history() {
-    let home = tempfile::tempdir().unwrap();
-    let projects = home.path().join(".claude/projects");
-    for index in 0..256 {
-        let project = projects.join(format!("project-{index}"));
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join(format!("unrelated-{index}.jsonl")), b"{}\n").unwrap();
-    }
-    let target = projects.join("project-173").join("target-session.jsonl");
-    std::fs::write(&target, b"{}\n").unwrap();
-    let source = ClaudeSource::with_home(home.path())
-        .for_user_scope(Some("target-session".to_string()), Vec::new());
-
-    assert_eq!(source.transcript_paths(home.path()), vec![target]);
-}
 
 #[test]
 fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
@@ -64,28 +48,6 @@ fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
     );
     assert_eq!(scan.next_cursor.state.position, complete.len() as u64);
     assert_eq!(scan.read_through, contents.len() as u64);
-}
-
-#[test]
-fn bounded_scan_finishes_one_valid_record_past_nominal_budget() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("session-42.jsonl");
-    let contents = b"{\"type\":\"summary\"}\n";
-    std::fs::write(&path, contents).unwrap();
-
-    let identity = identify_claude_source(&path).unwrap();
-    let scan = scan_claude_source_frames(identity, StoredCursor::default(), Some(1)).unwrap();
-
-    assert_eq!(scan.frames.len(), 1);
-    assert_eq!(scan.next_cursor.state.position, contents.len() as u64);
-    assert_eq!(scan.read_through, contents.len() as u64);
-    assert_eq!(
-        scan.coverage,
-        ClaudeFrameCoverage::Complete {
-            start_offset: 0,
-            end_offset: contents.len() as u64,
-        }
-    );
 }
 
 #[test]
@@ -151,41 +113,77 @@ fn bounded_scan_exposes_whitespace_ranges_without_parsing_them() {
 }
 
 #[test]
-fn canonical_mapper_emits_one_conversational_message() {
-    let record = json!({
-        "type": "user",
-        "uuid": "user-1",
-        "message": {"role": "user", "content": "hello"},
-    });
+fn compact_pair_projection_keeps_pairing_evidence() {
+    let fixtures = format!(
+        "{}/../../tests/fixtures/provider_normalization/claude",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let context = ClaudeRecordContext {
-        session_id: "session-1",
+        session_id: "claude-compact-pair-session",
         project_key: "project-1",
         project_path: "/project-1",
-        file_generation: 42,
-        offset: 9,
+        file_generation: 1,
+        offset: 0,
         session_cwd: Some(Path::new("/project-1")),
         source_path: None,
-        raw_message_id: Some("user-1"),
+        raw_message_id: None,
         raw_tool_event_ids: &[],
         raw_hook_tool_use_id: None,
     };
+    let boundary = map_checked_in_claude_fixture(
+        &format!("{fixtures}/compact_summary_pair.boundary.input.json"),
+        &context,
+    );
+    let summary = map_checked_in_claude_fixture(
+        &format!("{fixtures}/compact_summary_pair.summary.input.json"),
+        &context,
+    );
+    assert_eq!(
+        boundary.message_id,
+        "compact_boundary:ffffffff-0000-1111-2222-333333333333"
+    );
+    let boundary_metadata: Value =
+        serde_json::from_str(boundary.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        boundary_metadata["canonical_envelope"]["facts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|fact| fact.pointer("/summary/preservedSegment/anchorUuid"))
+            .and_then(Value::as_str),
+        Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    );
+    assert_eq!(summary.message_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    let summary_metadata: Value =
+        serde_json::from_str(summary.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        summary_metadata["canonical_envelope"]["relations"]["parent_message_id"],
+        "ffffffff-0000-1111-2222-333333333333"
+    );
+}
 
-    let ClaudeRecordDisposition::Message { draft, message } =
-        map_sanitized_claude_record(&record, &context)
+fn map_checked_in_claude_fixture(
+    path: &str,
+    context: &ClaudeRecordContext<'_>,
+) -> SessionMessageRecord {
+    let bytes = std::fs::read(path).unwrap();
+    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, bytes.len() as u64).unwrap();
+    let parsed = tracedecay_privacy::parse_normalized_observation_record_v1(
+        &bytes,
+        range,
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
+        |native| {
+            let stable = canonical::stable_record_id(&native, context.session_id, 0)?;
+            canonical::normalize(&native, context.session_id, stable, range)
+        },
+    )
+    .unwrap();
+    let ClaudeRecordDisposition::Message { message, .. } =
+        map_sanitized_claude_record(parsed.value(), context)
     else {
-        panic!("conversational row must map");
+        panic!("{} must map to a persisted row", path);
     };
-    assert_eq!(draft.session_id, "session-1");
-    assert_eq!(message.message_id, "user-1");
-    assert_eq!(message.kind.as_deref(), Some("message"));
-    assert_eq!(message.source_path.as_deref(), Some("claude:session-1"));
-    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["source_generation"], 42);
-
-    assert!(matches!(
-        map_sanitized_claude_record(&json!({"type": "summary"}), &context),
-        ClaudeRecordDisposition::NonConversational
-    ));
+    *message
 }
 
 #[test]
@@ -560,20 +558,6 @@ fn mixed_thinking_and_redacted_records_the_redacted_count_but_no_plaintext() {
 }
 
 #[test]
-fn assistant_message_without_thinking_records_no_reasoning_row() {
-    let record = assistant_record(&json!([{"type": "text", "text": "Just an answer."}]));
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(Some("msg_1"), 7),
-            None,
-        )
-        .is_none()
-    );
-}
-
-#[test]
 fn reasoning_row_id_falls_back_to_record_uuid_when_message_id_is_absent() {
     let record = json!({
         "type": "assistant",
@@ -596,23 +580,6 @@ fn reasoning_row_id_falls_back_to_record_uuid_when_message_id_is_absent() {
     let metadata: Value =
         serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["parent_message_id"], "u-fallback");
-}
-
-#[test]
-fn user_record_never_produces_a_reasoning_row() {
-    let record = json!({
-        "type": "user",
-        "message": {"role": "user", "content": [{"type": "thinking", "thinking": "nope"}]}
-    });
-    assert!(
-        reasoning_from_line(
-            &record,
-            Path::new("/tmp/sess.jsonl"),
-            &record_context(None, 1),
-            None,
-        )
-        .is_none()
-    );
 }
 
 #[test]

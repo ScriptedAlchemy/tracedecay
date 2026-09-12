@@ -18,13 +18,13 @@ use tracedecay_daemon_protocol::{
 use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
 use tracedecay_tool_catalog::BindingId;
 
+use crate::analyzer::broker::DiagnosticSeverity;
 use crate::bridge::DaemonLspSessionTransport;
 use crate::capabilities::{
     CapabilityAvailability, CapabilityParseError, ClientCapabilities, EffectiveCapabilities,
     GatewayCapabilities, UpstreamCapabilities, is_supported_context_projection,
     negotiate_capabilities,
 };
-use crate::analyzer::broker::DiagnosticSeverity;
 use crate::catalog::{LspCatalogAdmission, LspCatalogAdmissionError};
 use crate::context::{
     ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,

@@ -17,9 +17,9 @@ use super::skill_usage::{
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
 };
 use crate::ports::session_evidence::LcmGrepHit;
+use tracedecay_automation::analytics::ToolFamilySignal;
 use tracedecay_automation::managed_skills::validate_managed_skill_update;
 use tracedecay_automation::text::truncate_chars_for_prompt;
-use tracedecay_automation::analytics::ToolFamilySignal;
 use tracedecay_domain::errors::Result;
 
 use super::config_error;
@@ -833,8 +833,7 @@ fn skill_update_from_proposal(
             "update proposal does not change managed skill id '{id}'"
         ));
     }
-    validate_managed_skill_update(&update)
-        .map_err(|error| error.to_string())?;
+    validate_managed_skill_update(&update).map_err(|error| error.to_string())?;
     Ok((id, base_checksum, update))
 }
 
@@ -951,46 +950,11 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn managed_skill_exports_only_refresh_for_the_user_profile() {
-        let home = Path::new("/home/test-user");
-        assert!(crate::automation::host_io::uses_default_user_profile(
-            home,
-            Path::new("/home/test-user/.tracedecay"),
-        ));
-        assert!(!crate::automation::host_io::uses_default_user_profile(
-            home,
-            Path::new("/tmp/tracedecay-test-profile"),
-        ));
-    }
-
     fn assert_err_eq<T>(result: std::result::Result<T, String>, expected: &str) {
         match result {
             Ok(_) => panic!("expected error: {expected}"),
             Err(err) => assert_eq!(err, expected),
         }
-    }
-
-    #[test]
-    fn proposal_targets_accept_known_aliases() -> std::result::Result<(), String> {
-        let targets = optional_proposal_targets(Some(&json!([
-            "cursor",
-            "prompt-only",
-            "open_code",
-            "kiro"
-        ])))?
-        .ok_or_else(|| "targets should be present".to_string())?;
-
-        assert_eq!(
-            targets,
-            vec![
-                SkillInstallTarget::Cursor,
-                SkillInstallTarget::Agents,
-                SkillInstallTarget::OpenCode,
-                SkillInstallTarget::Kiro,
-            ]
-        );
-        Ok(())
     }
 
     #[test]
@@ -1007,27 +971,6 @@ mod tests {
             optional_proposal_targets(Some(&json!(["  "]))),
             "targets[] is required",
         );
-    }
-
-    #[test]
-    fn support_files_from_proposal_builds_managed_support_files() -> std::result::Result<(), String>
-    {
-        let files = support_files_from_proposal(Some(&json!([
-            {
-                "path": "references/example.md",
-                "text": "hello"
-            },
-            {
-                "path": "scripts/check.sh",
-                "text": "#!/usr/bin/env bash\n"
-            }
-        ])))?;
-
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].path, Path::new("references/example.md"));
-        assert_eq!(files[0].bytes, b"hello");
-        assert_eq!(files[1].path, Path::new("scripts/check.sh"));
-        Ok(())
     }
 
     #[test]

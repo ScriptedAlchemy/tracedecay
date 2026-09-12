@@ -1,46 +1,43 @@
-//! Opt-in GPU execution-provider selection for the FastEmbed/ORT session
-//! builder (owner request: CoreML on macOS, CUDA on Linux — both strictly
-//! opt-in over the default CPU-only build).
+//! GPU execution-provider selection for the FastEmbed/ORT session builder
+//! (CUDA or WebGPU on Linux).
 //!
-//! Two independent switches must both agree before anything other than ONNX
-//! Runtime's own default CPU execution provider is even attempted:
+//! A compiled `semantic-gpu-cuda` or `semantic-gpu-webgpu` feature enables
+//! automatic probing of that provider. `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu`
+//! opts out; `cuda` or `webgpu` explicitly requests that provider; `auto` (or
+//! unset) probes the compiled providers in order.
 //!
-//! 1. **Compile-time**: the `semantic-gpu-coreml` / `semantic-gpu-cuda`
-//!    cargo feature (off in `default`; each forwards to the matching `ort`
-//!    execution-provider feature so the *same* compiled `ort` instance
-//!    FastEmbed's session builder uses gets it too — see the crate's
-//!    `Cargo.toml`).
-//! 2. **Run-time**: `TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml|cuda`. Unset,
-//!    empty, `cpu`, or any unrecognized value all mean CPU.
+//! An unavailable automatic provider is normal and quietly falls back to ONNX
+//! Runtime's CPU provider. An unavailable explicitly requested provider also
+//! falls back, but warns the operator. This module only narrows to CPU; it
+//! never fails a session open.
 //!
-//! With either switch off, or the platform/host/runtime unable to serve the
-//! requested provider, [`requested_execution_providers`] returns an empty
-//! list — FastEmbed/ORT's own default CPU EP — after one `tracing::warn!`.
-//! This module can only narrow the requested provider back to CPU; it never
-//! produces an error, so a GPU-provider mismatch can never fail a session
-//! open. ONNX Runtime itself layers its own CPU fallback beneath this: even
-//! a provider this module *did* admit (host reported it available, driver
-//! then failed to initialize at session-build time) still degrades to CPU
-//! rather than failing the session.
+//! CoreML is deliberately absent. A matched A/B on Apple Silicon (2026-09-12,
+//! Jina embeddings v2 base code, same binary and corpus) measured 109 units/s
+//! with dynamic shapes and 70.7 units/s with fully static shapes against
+//! 322 units/s on the CPU provider, so it was removed rather than shipped as a
+//! slower opt-in.
 
 use fastembed::ExecutionProviderDispatch;
+use tracedecay_domain::EmbeddingExecutionProviderV1;
 
-/// `coreml`, `cuda`, or `cpu` (default, and every unrecognized value).
+/// `auto` (default), `cuda`, `webgpu`, or `cpu`.
 const EXECUTION_PROVIDER_ENV: &str = "TRACEDECAY_EMBED_EXECUTION_PROVIDER";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestedExecutionProviderV1 {
+    Auto,
     Cpu,
-    CoreMl,
     Cuda,
+    WebGpu,
 }
 
 fn requested_execution_provider() -> RequestedExecutionProviderV1 {
     match std::env::var(EXECUTION_PROVIDER_ENV) {
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" | "cpu" => RequestedExecutionProviderV1::Cpu,
-            "coreml" => RequestedExecutionProviderV1::CoreMl,
+            "" | "auto" => RequestedExecutionProviderV1::Auto,
+            "cpu" => RequestedExecutionProviderV1::Cpu,
             "cuda" => RequestedExecutionProviderV1::Cuda,
+            "webgpu" => RequestedExecutionProviderV1::WebGpu,
             _ => {
                 tracing::warn!(
                     env = EXECUTION_PROVIDER_ENV,
@@ -50,96 +47,207 @@ fn requested_execution_provider() -> RequestedExecutionProviderV1 {
                 RequestedExecutionProviderV1::Cpu
             }
         },
-        Err(_) => RequestedExecutionProviderV1::Cpu,
+        Err(_) => RequestedExecutionProviderV1::Auto,
     }
 }
 
 /// Execution providers to register on the FastEmbed session builder, most
 /// preferred first. An empty vector means ONNX Runtime's own default CPU EP,
-/// which is always what a default (no env, no GPU feature) build produces.
+/// which is what a build without a usable automatic provider produces.
+#[cfg(test)]
 pub(crate) fn requested_execution_providers() -> Vec<ExecutionProviderDispatch> {
-    match requested_execution_provider() {
-        RequestedExecutionProviderV1::Cpu => Vec::new(),
-        RequestedExecutionProviderV1::CoreMl => coreml_dispatch(),
-        RequestedExecutionProviderV1::Cuda => cuda_dispatch(),
-    }
+    execution_providers(resolved_execution_provider())
 }
 
-#[cfg(feature = "semantic-gpu-coreml")]
-fn coreml_dispatch() -> Vec<ExecutionProviderDispatch> {
-    use ort::execution_providers::{CoreML, ExecutionProvider};
-
-    // `CoreML::supported_by_platform()` is `cfg!(target_vendor = "apple")` in
-    // `ort` itself; checking it here (rather than only inside `register`)
-    // keeps the WARN in our own log shape instead of ORT's silent
-    // `RegisterError::MissingFeature` path.
-    let provider = CoreML::default();
-    if !provider.supported_by_platform() {
-        tracing::warn!(
-            "TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml requested on a non-Apple build; using cpu"
-        );
-        return Vec::new();
-    }
-    match provider.is_available() {
-        Ok(true) => vec![provider.build()],
-        Ok(false) => {
-            tracing::warn!(
-                "the CoreML execution provider is unavailable in this ONNX Runtime build; using cpu"
-            );
-            Vec::new()
+pub(crate) fn resolved_execution_provider() -> EmbeddingExecutionProviderV1 {
+    let provider = match requested_execution_provider() {
+        RequestedExecutionProviderV1::Auto => automatic_provider(),
+        RequestedExecutionProviderV1::Cpu => EmbeddingExecutionProviderV1::Cpu,
+        RequestedExecutionProviderV1::Cuda => {
+            cuda_provider(true).unwrap_or(EmbeddingExecutionProviderV1::Cpu)
         }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "failed to probe CoreML execution provider availability; using cpu"
-            );
-            Vec::new()
+        RequestedExecutionProviderV1::WebGpu => {
+            webgpu_provider(true).unwrap_or(EmbeddingExecutionProviderV1::Cpu)
         }
-    }
+    };
+    // Every provider reports on the same condition — resolution, not
+    // registration — so the four are comparable with each other.
+    crate::hotpath_observe::record_offered_embed_execution_provider(match provider {
+        EmbeddingExecutionProviderV1::Cpu => "cpu",
+        EmbeddingExecutionProviderV1::Cuda => "cuda",
+        EmbeddingExecutionProviderV1::WebGpu => "webgpu",
+    });
+    provider
 }
 
-#[cfg(not(feature = "semantic-gpu-coreml"))]
-fn coreml_dispatch() -> Vec<ExecutionProviderDispatch> {
-    tracing::warn!(
-        "TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml requested but this build was compiled without the semantic-gpu-coreml feature; using cpu"
-    );
-    Vec::new()
+fn automatic_provider() -> EmbeddingExecutionProviderV1 {
+    if cfg!(all(feature = "semantic-gpu-cuda", target_os = "linux"))
+        && let Some(provider) = cuda_provider(false)
+    {
+        return provider;
+    }
+    if cfg!(feature = "semantic-gpu-webgpu")
+        && let Some(provider) = webgpu_provider(false)
+    {
+        return provider;
+    }
+    EmbeddingExecutionProviderV1::Cpu
 }
 
 #[cfg(feature = "semantic-gpu-cuda")]
-fn cuda_dispatch() -> Vec<ExecutionProviderDispatch> {
+fn cuda_provider(explicit: bool) -> Option<EmbeddingExecutionProviderV1> {
     use ort::execution_providers::{CUDA, ExecutionProvider};
 
     let provider = CUDA::default();
-    if !provider.supported_by_platform() {
-        tracing::warn!(
-            "TRACEDECAY_EMBED_EXECUTION_PROVIDER=cuda requested on an unsupported platform; using cpu"
-        );
-        return Vec::new();
+    // Platform predicate rc.12's CUDA provider implemented before rc.13
+    // removed `supported_by_platform`.
+    if !cfg!(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(target_os = "windows", target_arch = "x86_64")
+    )) {
+        if explicit {
+            tracing::warn!(
+                "TRACEDECAY_EMBED_EXECUTION_PROVIDER=cuda requested on an unsupported platform; using cpu"
+            );
+        } else {
+            tracing::debug!("CUDA execution provider is unsupported; using cpu");
+        }
+        return None;
     }
     match provider.is_available() {
-        Ok(true) => vec![provider.build()],
+        Ok(true) => {
+            tracing::info!("using CUDA execution provider for embeddings");
+            Some(EmbeddingExecutionProviderV1::Cuda)
+        }
         Ok(false) => {
-            tracing::warn!(
-                "the CUDA execution provider is unavailable in this ONNX Runtime build (no CUDA driver/toolkit found); using cpu"
-            );
-            Vec::new()
+            if explicit {
+                tracing::warn!(
+                    "the CUDA execution provider is unavailable in this ONNX Runtime build (no CUDA driver/toolkit found); using cpu"
+                );
+            } else {
+                tracing::info!("CUDA execution provider is unavailable; using cpu");
+            }
+            None
         }
         Err(error) => {
-            tracing::warn!(
-                %error,
-                "failed to probe CUDA execution provider availability; using cpu"
-            );
-            Vec::new()
+            if explicit {
+                tracing::warn!(
+                    %error,
+                    "failed to probe CUDA execution provider availability; using cpu"
+                );
+            } else {
+                tracing::info!(
+                    %error,
+                    "failed to probe CUDA execution provider availability; using cpu"
+                );
+            }
+            None
         }
     }
 }
 
 #[cfg(not(feature = "semantic-gpu-cuda"))]
-fn cuda_dispatch() -> Vec<ExecutionProviderDispatch> {
+fn cuda_provider(_explicit: bool) -> Option<EmbeddingExecutionProviderV1> {
     tracing::warn!(
         "TRACEDECAY_EMBED_EXECUTION_PROVIDER=cuda requested but this build was compiled without the semantic-gpu-cuda feature; using cpu"
     );
+    None
+}
+
+#[cfg(feature = "semantic-gpu-webgpu")]
+fn webgpu_provider(explicit: bool) -> Option<EmbeddingExecutionProviderV1> {
+    use ort::execution_providers::{ExecutionProvider, WebGPU};
+
+    let provider = WebGPU::default();
+    // Platform predicate rc.12's WebGPU provider implemented before rc.13
+    // removed `supported_by_platform`.
+    if !cfg!(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_arch = "wasm32"
+    )) {
+        if explicit {
+            tracing::warn!(
+                "TRACEDECAY_EMBED_EXECUTION_PROVIDER=webgpu requested on an unsupported platform; using cpu"
+            );
+        } else {
+            tracing::debug!("WebGPU execution provider is unsupported; using cpu");
+        }
+        return None;
+    }
+    match provider.is_available() {
+        Ok(true) => {
+            tracing::info!("using WebGPU execution provider for embeddings");
+            Some(EmbeddingExecutionProviderV1::WebGpu)
+        }
+        Ok(false) => {
+            if explicit {
+                tracing::warn!(
+                    "the WebGPU execution provider is unavailable in this ONNX Runtime build; using cpu"
+                );
+            } else {
+                tracing::info!("WebGPU execution provider is unavailable; using cpu");
+            }
+            None
+        }
+        Err(error) => {
+            if explicit {
+                tracing::warn!(
+                    %error,
+                    "failed to probe WebGPU execution provider availability; using cpu"
+                );
+            } else {
+                tracing::info!(
+                    %error,
+                    "failed to probe WebGPU execution provider availability; using cpu"
+                );
+            }
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "semantic-gpu-webgpu"))]
+fn webgpu_provider(_explicit: bool) -> Option<EmbeddingExecutionProviderV1> {
+    tracing::warn!(
+        "TRACEDECAY_EMBED_EXECUTION_PROVIDER=webgpu requested but this build was compiled without the semantic-gpu-webgpu feature; using cpu"
+    );
+    None
+}
+
+/// Execution providers to register for `provider`.
+pub(crate) fn execution_providers(
+    provider: EmbeddingExecutionProviderV1,
+) -> Vec<ExecutionProviderDispatch> {
+    match provider {
+        EmbeddingExecutionProviderV1::Cpu => Vec::new(),
+        EmbeddingExecutionProviderV1::Cuda => cuda_dispatch(),
+        EmbeddingExecutionProviderV1::WebGpu => webgpu_dispatch(),
+    }
+}
+
+#[cfg(feature = "semantic-gpu-cuda")]
+fn cuda_dispatch() -> Vec<ExecutionProviderDispatch> {
+    use ort::execution_providers::CUDA;
+    vec![CUDA::default().build()]
+}
+
+#[cfg(not(feature = "semantic-gpu-cuda"))]
+fn cuda_dispatch() -> Vec<ExecutionProviderDispatch> {
+    Vec::new()
+}
+
+#[cfg(feature = "semantic-gpu-webgpu")]
+fn webgpu_dispatch() -> Vec<ExecutionProviderDispatch> {
+    use ort::execution_providers::WebGPU;
+    vec![WebGPU::default().build()]
+}
+
+#[cfg(not(feature = "semantic-gpu-webgpu"))]
+fn webgpu_dispatch() -> Vec<ExecutionProviderDispatch> {
     Vec::new()
 }
 
@@ -168,41 +276,37 @@ mod tests {
     }
 
     #[test]
-    fn unset_env_defaults_to_cpu() {
+    fn unset_or_empty_env_defaults_to_auto() {
         with_env(None, || {
             assert_eq!(
                 requested_execution_provider(),
-                RequestedExecutionProviderV1::Cpu
+                RequestedExecutionProviderV1::Auto
+            );
+        });
+        with_env(Some(" \n"), || {
+            assert_eq!(
+                requested_execution_provider(),
+                RequestedExecutionProviderV1::Auto
             );
         });
     }
 
     #[test]
-    fn explicit_cpu_is_cpu() {
-        with_env(Some("cpu"), || {
+    fn explicit_auto_matches_unset() {
+        with_env(Some("auto"), || {
             assert_eq!(
                 requested_execution_provider(),
-                RequestedExecutionProviderV1::Cpu
+                RequestedExecutionProviderV1::Auto
             );
         });
     }
 
     #[test]
-    fn coreml_is_case_and_whitespace_insensitive() {
-        with_env(Some(" CoreML \n"), || {
+    fn webgpu_is_recognized() {
+        with_env(Some(" WebGPU "), || {
             assert_eq!(
                 requested_execution_provider(),
-                RequestedExecutionProviderV1::CoreMl
-            );
-        });
-    }
-
-    #[test]
-    fn cuda_is_recognized() {
-        with_env(Some("cuda"), || {
-            assert_eq!(
-                requested_execution_provider(),
-                RequestedExecutionProviderV1::Cuda
+                RequestedExecutionProviderV1::WebGpu
             );
         });
     }
@@ -218,9 +322,18 @@ mod tests {
     }
 
     #[test]
-    fn default_env_produces_no_execution_providers() {
+    fn auto_without_a_compiled_provider_uses_cpu() {
         with_env(None, || {
-            assert!(requested_execution_providers().is_empty());
+            if !cfg!(any(
+                all(feature = "semantic-gpu-cuda", target_os = "linux"),
+                feature = "semantic-gpu-webgpu"
+            )) {
+                assert_eq!(
+                    resolved_execution_provider(),
+                    EmbeddingExecutionProviderV1::Cpu
+                );
+                assert!(requested_execution_providers().is_empty());
+            }
         });
     }
 
@@ -228,23 +341,20 @@ mod tests {
     // provider must still resolve without panicking and must never register
     // an execution provider it does not have compiled support for.
     #[test]
-    fn requesting_coreml_without_the_feature_or_platform_falls_back_to_cpu() {
-        with_env(Some("coreml"), || {
+    fn requesting_cuda_without_the_feature_falls_back_to_cpu() {
+        with_env(Some("cuda"), || {
             let providers = requested_execution_providers();
-            if !cfg!(all(
-                feature = "semantic-gpu-coreml",
-                target_vendor = "apple"
-            )) {
+            if !cfg!(feature = "semantic-gpu-cuda") {
                 assert!(providers.is_empty());
             }
         });
     }
 
     #[test]
-    fn requesting_cuda_without_the_feature_falls_back_to_cpu() {
-        with_env(Some("cuda"), || {
+    fn requesting_webgpu_without_the_feature_falls_back_to_cpu() {
+        with_env(Some("webgpu"), || {
             let providers = requested_execution_providers();
-            if !cfg!(feature = "semantic-gpu-cuda") {
+            if !cfg!(feature = "semantic-gpu-webgpu") {
                 assert!(providers.is_empty());
             }
         });

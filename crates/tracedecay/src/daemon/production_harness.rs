@@ -1607,3 +1607,6 @@ mod semantic_restart_journey_test;
 
 #[cfg(test)]
 mod semantic_index_fixture_check_test;
+
+#[cfg(test)]
+mod lcm_preserved_profile_journey_test;

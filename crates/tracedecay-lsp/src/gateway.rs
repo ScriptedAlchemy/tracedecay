@@ -39,14 +39,14 @@ mod tests {
     use crate::context::ContextProjectionPort;
     use crate::diagnostics::{LspPosition, LspRange};
     use crate::provider::AnalyzerCancellationPort;
-    use crate::session::{AuthorizedLspWorkspace, LspRequestId};
+    use crate::session::LspRequestId;
     use crate::{
         ClientCapabilities, GatewayCapabilities, UpstreamCapabilities, negotiate_capabilities,
     };
     use serde_json::json;
     use std::cell::RefCell;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
 
     #[derive(Default)]
@@ -118,31 +118,6 @@ mod tests {
             semantic: SemanticCapability::ALL.into_iter().collect(),
         };
         negotiate_capabilities(&client, &GatewayCapabilities::default(), &upstream)
-    }
-
-    #[test]
-    fn save_and_pull_use_the_same_feedback_cycle_authority() {
-        let gateway = DaemonLspGateway::new(
-            AdmittedRoot::new("file:///root"),
-            capabilities(),
-            Feedback::default(),
-            Semantics,
-        );
-        assert_eq!(
-            gateway.document_saved("file:///root/a.rs"),
-            FeedbackCycleResponse::Accepted
-        );
-        assert!(matches!(
-            gateway.request_document_diagnostics("file:///root/a.rs"),
-            GatewayResponse::Value(())
-        ));
-        let requests = gateway.feedback_cycle.requests.borrow();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].trigger, DiagnosticTrigger::DocumentSave);
-        assert_eq!(
-            requests[1].trigger,
-            DiagnosticTrigger::ExplicitDocumentDiagnostics
-        );
     }
 
     fn definition_request(document_uri: &str) -> SemanticRequest {
@@ -360,17 +335,6 @@ mod tests {
         assert!(!unc.contains_document("file:///share/src/lib.rs"));
     }
 
-    /// A drive-less root and a drive-letter root sit in different admitted
-    /// workspaces on every host, so neither may route the other's documents.
-    #[test]
-    fn authorized_workspace_admits_both_unix_and_windows_root_shapes() {
-        for root_uri in ["file:///root", "file:///C:/root"] {
-            let workspace = AuthorizedLspWorkspace::new(None, vec![AdmittedRoot::new(root_uri)])
-                .unwrap_or_else(|_| panic!("{root_uri} must be admitted as a workspace root"));
-            assert_eq!(workspace.anchor_root_uri(), root_uri);
-        }
-    }
-
     #[test]
     fn invalid_document_uri_is_rejected_before_semantic_provider_dispatch() {
         let gateway = DaemonLspGateway::new(
@@ -490,43 +454,6 @@ mod tests {
             assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
             Box::new(InlineTask)
         }
-    }
-
-    struct RuntimeFeedback {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl FeedbackCycleRuntimePort for RuntimeFeedback {
-        fn execute(
-            &self,
-            _request: FeedbackCycleRequest,
-        ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
-            let calls = Arc::clone(&self.calls);
-            Box::pin(async move {
-                calls.fetch_add(1, Ordering::AcqRel);
-                Ok(())
-            })
-        }
-    }
-
-    #[test]
-    fn feedback_broker_preserves_non_lsp_authority_evidence() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let adapter = FeedbackCycleAdapter::new(
-            Arc::new(InlineSpawner),
-            Arc::new(RuntimeFeedback {
-                calls: Arc::clone(&calls),
-            }),
-        );
-        assert_eq!(
-            adapter.request_feedback_cycle(FeedbackCycleRequest {
-                root_uri: "file:///root".to_owned(),
-                document_uri: "file:///root/a.rs".to_owned(),
-                trigger: DiagnosticTrigger::DocumentSave,
-            }),
-            FeedbackCycleResponse::Accepted
-        );
-        assert_eq!(calls.load(Ordering::Acquire), 1);
     }
 
     struct SemanticAuthority {

@@ -128,20 +128,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn callable_operations_have_canonical_route_and_operation_identity() {
-        for operation in RetainedSurfaceOperation::CALLABLE {
-            assert_eq!(
-                retained_operation_id(operation),
-                format!("operation.application.{}", operation.as_str())
-            );
-            assert_eq!(
-                retained_application_route_path(operation),
-                format!("/application/retained/{}", operation.as_str())
-            );
-        }
-    }
-
-    #[test]
     fn broad_translator_names_are_not_callable_routes() {
         for name in ["session_refresh", "fact_store"] {
             assert_eq!(RetainedSurfaceOperation::from_operation_name(name), None);

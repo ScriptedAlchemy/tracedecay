@@ -76,7 +76,7 @@
         let result = open_local_semantic_evaluation_lifecycle(
             lifecycle_root.path(),
             package.path(),
-            SemanticResourceCeilings::default(),
+            pinned_ceilings(),
             10,
         );
 
@@ -615,7 +615,7 @@
                         .to_owned(),
             },
             expected_dimensions: 1,
-            max_length: 512,
+            max_length: 4096,
             members,
         };
         let mut catalog = FastEmbedModelCatalogV1::production();
@@ -659,7 +659,7 @@
             package_bytes.saturating_sub(manifest.payload.model_member.byte_length);
         manifest.payload.resource_ceiling.max_resident_bytes = package_bytes.saturating_mul(4);
         manifest.payload.resource_ceiling.max_batch_size = 8;
-        manifest.payload.resource_ceiling.max_sequence_length = 512;
+        manifest.payload.resource_ceiling.max_sequence_length = 4096;
         let pins = reranker_pins(&manifest);
         owner
             .import_local_reranker_artifact(pins.clone(), &manifest, &fixture, 10)
@@ -1236,7 +1236,7 @@
             crate::LoadedSemanticArtifactV1::from_lifecycle_projection(
                 &reopened,
                 &projection,
-                SemanticResourceCeilings::default(),
+                pinned_ceilings(),
             ),
             Err(crate::SemanticRuntimeScheduleFailureV1::Runtime)
         ));
@@ -1466,13 +1466,6 @@
 
         let selected = owner.select_model(None, false).unwrap();
         assert!(selected.selected_model.is_none());
-    }
-
-    #[test]
-    fn publication_lease_is_send_for_daemon_owned_commit_work() {
-        fn assert_send<T: Send>() {}
-
-        assert_send::<SemanticModelLifecycleEvaluationPublicationLeaseV1>();
     }
 
     #[test]

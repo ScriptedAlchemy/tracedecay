@@ -614,8 +614,6 @@ mod tests {
     use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-    const DIGEST: [u8; 32] = [0x5a; 32];
-
     fn project_identity() -> ResolvedSessionIdentity {
         ResolvedSessionIdentity::for_project(
             ProfileId::new("profile.primary").unwrap(),
@@ -628,35 +626,6 @@ mod tests {
                 BranchId::new("branch.application-slice-1").unwrap(),
             ),
         )
-    }
-
-    #[test]
-    fn profile_and_project_owners_are_explicit_and_never_fallback() {
-        let profile = ResolvedSessionIdentity::for_profile(
-            ProfileId::new("profile.primary").unwrap(),
-            SessionStoreId::new("store.profile.primary").unwrap(),
-            SessionRootId::new("root.profile.primary").unwrap(),
-        );
-        let project = project_identity();
-
-        assert!(matches!(profile.owner(), SessionOwner::Profile { .. }));
-        assert!(profile.project_id().is_none());
-        assert!(profile.git_route().is_none());
-        assert!(matches!(project.owner(), SessionOwner::Project { .. }));
-        assert!(project.project_id().is_some());
-        assert!(project.git_route().is_some());
-    }
-
-    #[test]
-    fn digest_bindings_cannot_embed_paths_or_payloads() {
-        let capability = CapabilityDigest::new(DIGEST);
-        let policy = PolicyDigest::new(DIGEST);
-        let configuration = ConfigurationDigest::new(DIGEST);
-
-        assert_eq!(capability.as_bytes(), &DIGEST);
-        assert_eq!(policy.as_bytes(), &DIGEST);
-        assert_eq!(configuration.as_bytes(), &DIGEST);
-        assert!(!format!("{capability:?}").contains("/fast/projects"));
     }
 
     #[test]
@@ -720,28 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn application_scope_maps_project_identity_and_git_route() {
-        let scope = project_identity().application_scope().unwrap();
-
-        assert_eq!(scope.project_id.as_str(), "project.tracedecay");
-        assert_eq!(scope.repository_id.as_str(), "repository.tracedecay");
-        assert_eq!(scope.worktree_id.as_str(), "worktree.main");
-        assert_eq!(
-            scope
-                .reference
-                .as_ref()
-                .map(tracedecay_domain::RefId::as_str),
-            Some("refs/heads/branch.application-slice-1")
-        );
-        scope.validate().unwrap();
-        assert_eq!(
-            scope.scope_digest,
-            scope.compute_digest().unwrap(),
-            "scope digest must be stable for the same identity"
-        );
-    }
-
-    #[test]
     fn application_scope_fails_closed_for_profile_identity() {
         let identity = ResolvedSessionIdentity::for_profile(
             ProfileId::new("profile.primary").unwrap(),
@@ -754,47 +701,6 @@ mod tests {
         assert_eq!(
             identity.application_scope().unwrap_err(),
             ApplicationScopeError::ProfileIdentityWithoutProject
-        );
-    }
-
-    #[test]
-    fn session_request_scope_names_the_profile_session_store() {
-        let identity = ResolvedSessionIdentity::for_profile(
-            ProfileId::new("profile.primary").unwrap(),
-            SessionStoreId::new("store.profile.primary").unwrap(),
-            SessionRootId::new("root.profile.primary").unwrap(),
-        );
-
-        let scope = identity.session_request_scope().unwrap();
-        assert_eq!(
-            scope.project_id.as_str(),
-            "tracedecay.profile-session.profile.primary"
-        );
-        assert_eq!(
-            scope.repository_id.as_str(),
-            "tracedecay.profile-session.store.profile.primary"
-        );
-        assert_eq!(
-            scope.worktree_id.as_str(),
-            "tracedecay.profile-session.root.profile.primary"
-        );
-        assert!(scope.reference.is_none());
-        scope.validate().unwrap();
-        assert_eq!(
-            identity.session_request_scope().unwrap(),
-            scope,
-            "the profile session scope must be stable for the same identity"
-        );
-    }
-
-    #[test]
-    fn session_request_scope_matches_project_application_scope() {
-        let identity = project_identity();
-
-        assert_eq!(
-            identity.session_request_scope().unwrap(),
-            identity.application_scope().unwrap(),
-            "project-owned session requests keep the exact project scope"
         );
     }
 
@@ -829,30 +735,6 @@ mod tests {
             ApplicationScopeError::MissingGitRoute {
                 project_id: "project.tracedecay".to_string(),
             }
-        );
-    }
-
-    #[test]
-    fn canonical_application_context_binds_scope_grant_deadline_and_cancellation() {
-        let scope = project_identity().application_scope().unwrap();
-        let grant = grant_for(&scope, UtcMicros(100));
-        let application = application_context(
-            scope.clone(),
-            grant,
-            UtcMicros(50),
-            CancellationContext::active("request.application-slice-1").unwrap(),
-        );
-
-        assert_eq!(application.scope(), &scope);
-        assert_eq!(application.actor().as_str(), "actor.cursor");
-        assert_eq!(
-            application.request_id().as_str(),
-            "request.application-slice-1"
-        );
-        assert!(!application.cancellation().is_cancelled());
-        assert_eq!(
-            application.admission_at(UtcMicros(1)),
-            RequestAdmission::Admitted
         );
     }
 

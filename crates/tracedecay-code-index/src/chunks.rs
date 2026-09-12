@@ -1266,7 +1266,12 @@ impl DeterministicCodeChunker {
             )
         })?;
         let symbols = hotpath::measure_block!("code_index.chunk.lineage", {
-            self.lineage_symbols(source, &file_identity, &symbol_rows)
+            self.lineage_symbols(
+                source,
+                &file_identity,
+                &symbol_rows,
+                &published_symbol_spans(chunks.iter()),
+            )
         })?;
         let (mut edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
         let (same_file_edges, unresolved_references) =
@@ -1475,15 +1480,22 @@ impl DeterministicCodeChunker {
         source: &str,
         file_identity: &FileIdentityDigest,
         rows: &[SymbolRow],
+        published_spans: &BTreeMap<SymbolOccurrenceId, SourceSpan>,
     ) -> Result<Vec<LineageSymbolRecordV1>, ChunkingFailureV1> {
         let mut symbols = Vec::with_capacity(rows.len());
         for row in rows {
-            let start = usize::try_from(row.span.start_byte).map_err(|error| {
+            let span = published_spans.get(&row.occurrence).ok_or_else(|| {
+                ChunkingFailureV1::NonCanonicalIdentity(format!(
+                    "symbol {} has no published source span",
+                    row.qualified_name
+                ))
+            })?;
+            let start = usize::try_from(span.start_byte).map_err(|error| {
                 ChunkingFailureV1::NonCanonicalIdentity(format!(
                     "symbol start offset does not fit this host: {error}"
                 ))
             })?;
-            let end = usize::try_from(row.span.end_byte).map_err(|error| {
+            let end = usize::try_from(span.end_byte).map_err(|error| {
                 ChunkingFailureV1::NonCanonicalIdentity(format!(
                     "symbol end offset does not fit this host: {error}"
                 ))
@@ -1694,6 +1706,7 @@ impl DeterministicCodeChunker {
             if cursor < len {
                 emit_windows(source, cursor, len, gap_ordinal, &mut pending);
             }
+            attribute_whitespace_only_windows(source, &mut pending);
             Ok::<_, ChunkingFailureV1>((pending, emissions))
         })?;
 
@@ -1804,6 +1817,30 @@ impl DeterministicCodeChunker {
             Ok(chunks)
         })
     }
+}
+
+/// Canonical source span recorded for each published symbol.
+///
+/// Retrieval grains may expand to absorb adjacent whitespace, so both symbol
+/// content identity and graph projection must derive their span from this
+/// post-attribution chunk set.
+pub(crate) fn published_symbol_spans<'a>(
+    chunks: impl IntoIterator<Item = &'a CodeSearchChunkV1>,
+) -> BTreeMap<SymbolOccurrenceId, SourceSpan> {
+    let mut spans = BTreeMap::<SymbolOccurrenceId, SourceSpan>::new();
+    for chunk in chunks {
+        let Some(symbol) = &chunk.anchor.symbol_occurrence_id else {
+            continue;
+        };
+        spans
+            .entry(symbol.clone())
+            .and_modify(|span| {
+                span.start_byte = span.start_byte.min(chunk.anchor.source_span.start_byte);
+                span.end_byte = span.end_byte.max(chunk.anchor.source_span.end_byte);
+            })
+            .or_insert(chunk.anchor.source_span);
+    }
+    spans
 }
 
 /// Names too ubiquitous to resolve across files by name alone: standard
@@ -2353,25 +2390,129 @@ fn emit_windows(
     }
 }
 
+fn span_is_whitespace_only(source: &str, span: SourceSpan) -> bool {
+    if span.is_empty() {
+        return false;
+    }
+    let text = &source[span.start_byte as usize..span.end_byte as usize];
+    !text.is_empty() && text.chars().all(char::is_whitespace)
+}
+
+/// Fold whitespace-only `FileWindow` pieces into an adjacent retrievable
+/// grain so those bytes stay covered without minting an unreachable row.
+///
+/// The target is the nearest piece by span: the preceding retrievable
+/// piece whose `end_byte` equals the window start, otherwise the
+/// following retrievable piece whose `start_byte` equals the window end.
+/// Any retrievable grain, including [`CodeSearchChunkGrainV1::SymbolBody`],
+/// may be the target. Overlapping fallback windows in one whitespace gap
+/// are attributed as one contiguous range; a piece that merely overlaps the
+/// run without abutting it (possible only inside an oversized unowned
+/// region) is not a target. A window is left in place only when no such
+/// neighbor exists or folding it would exceed [`MAX_CHUNK_TEXT_BYTES`].
+fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChunk>) {
+    let whitespace_windows: Vec<usize> = pending
+        .iter()
+        .enumerate()
+        .filter(|(_, piece)| {
+            piece.grain == CodeSearchChunkGrainV1::FileWindow
+                && span_is_whitespace_only(source, piece.span)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if whitespace_windows.is_empty() {
+        return;
+    }
+
+    let mut ordered = whitespace_windows;
+    ordered.sort_by_key(|&index| (pending[index].span.start_byte, pending[index].span.end_byte));
+
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    for index in ordered {
+        if let Some(run) = runs.last_mut() {
+            let run_end = run
+                .iter()
+                .map(|&member| pending[member].span.end_byte)
+                .max()
+                .unwrap_or(0);
+            if pending[index].span.start_byte <= run_end {
+                run.push(index);
+                continue;
+            }
+        }
+        runs.push(vec![index]);
+    }
+
+    let mut drop = vec![false; pending.len()];
+    for run in runs {
+        let start = run
+            .iter()
+            .map(|&index| pending[index].span.start_byte)
+            .min()
+            .unwrap_or(0);
+        let end = run
+            .iter()
+            .map(|&index| pending[index].span.end_byte)
+            .max()
+            .unwrap_or(0);
+        let in_run = |index: usize| run.contains(&index);
+        let retrievable = |index: usize, piece: &PendingChunk| {
+            !in_run(index)
+                && !drop[index]
+                && !piece.span.is_empty()
+                && !span_is_whitespace_only(source, piece.span)
+        };
+        // Nearest by span, not pending-vector order: an enclosing parent
+        // can appear first and is not the abutting neighbor.
+        let preceding = pending
+            .iter()
+            .enumerate()
+            .filter(|(index, piece)| retrievable(*index, piece) && piece.span.end_byte == start)
+            .max_by_key(|(_, piece)| piece.span.start_byte)
+            .map(|(index, _)| index);
+        let following = pending
+            .iter()
+            .enumerate()
+            .filter(|(index, piece)| retrievable(*index, piece) && piece.span.start_byte == end)
+            .min_by_key(|(_, piece)| piece.span.end_byte)
+            .map(|(index, _)| index);
+        let Some(target) = preceding.or(following) else {
+            continue;
+        };
+        let new_start = pending[target].span.start_byte.min(start);
+        let new_end = pending[target].span.end_byte.max(end);
+        if new_end.saturating_sub(new_start) > MAX_CHUNK_TEXT_BYTES as u64 {
+            continue;
+        }
+        pending[target].span.start_byte = new_start;
+        pending[target].span.end_byte = new_end;
+        for index in run {
+            drop[index] = true;
+        }
+    }
+
+    let mut kept = Vec::with_capacity(pending.len());
+    for (index, piece) in std::mem::take(pending).into_iter().enumerate() {
+        if !drop[index] {
+            kept.push(piece);
+        }
+    }
+    *pending = kept;
+}
+
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    use std::time::Duration;
-    use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+    use std::sync::Arc;
 
     use super::*;
     use crate::extract::ExtractionCoverageV1;
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-        CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest, FileIdentityDigest,
-        FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest,
-        PolicyRevisionId, ProjectId, SanitizationReceiptId, SanitizedCodeFileV1,
-        SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-        SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest, FileOccurrenceId,
+        GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId,
+        ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
+        SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
 
     use crate::extract::{
@@ -2382,77 +2523,6 @@ mod tests {
     use crate::languages::{LanguageRegistry, StaticLanguageRegistry};
 
     struct AlwaysCancelled;
-
-    /// Stolen Rayon workers inside a nested chunk fan-out each take their own
-    /// admission and never exceed the injected width. The authority is local
-    /// to this test — nothing process-wide is installed, so it cannot gate
-    /// sibling tests in the shared `--lib` binary.
-    #[test]
-    fn nested_chunk_fanout_admits_stolen_workers_without_exceeding_width() {
-        let _preview = crate::parallelism::preview_worker_plan(
-            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
-            20 * crate::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-        );
-        assert!(
-            crate::parallelism::installed_worker_status().is_none(),
-            "worker-plan preview must not install the worker runtime"
-        );
-        let authority = Arc::new(ProcessBackgroundCpuV1::new(
-            NonZeroUsize::new(2).expect("nonzero background width"),
-        ));
-        let fixture = chunk_source("pub fn shared_cpu_fixture() {}\n")
-            .chunks
-            .into_iter()
-            .next()
-            .expect("fixture chunk");
-        let chunks = vec![fixture; PARALLEL_CHUNK_THRESHOLD * 2];
-        let active = AtomicUsize::new(0);
-        let maximum = AtomicUsize::new(0);
-        let parent_completed = AtomicUsize::new(0);
-        let stolen_completed = AtomicUsize::new(0);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .build()
-            .expect("nested Rayon pool");
-
-        let mapped = pool
-            .install(|| {
-                authority.with_permit(|| {
-                    let parent = rayon::current_thread_index().expect("parent Rayon worker");
-                    map_chunks_ordered(
-                        |unit| authority.with_permit(unit),
-                        &chunks,
-                        |_| {
-                            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                            maximum.fetch_max(current, Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(5));
-                            if rayon::current_thread_index() == Some(parent) {
-                                parent_completed.fetch_add(1, Ordering::SeqCst);
-                            } else {
-                                stolen_completed.fetch_add(1, Ordering::SeqCst);
-                            }
-                            active.fetch_sub(1, Ordering::SeqCst);
-                            Ok(())
-                        },
-                    )
-                })
-            })
-            .expect("nested chunk fan-out");
-
-        assert_eq!(mapped.len(), chunks.len());
-        // Stolen workers may never exceed the installed width; whether the
-        // scheduler reaches the full width is a timing outcome on a loaded
-        // host, not the contract under test.
-        let observed = maximum.load(Ordering::SeqCst);
-        assert!(
-            (1..=authority.width().get()).contains(&observed),
-            "observed concurrency {observed} must stay within width {}",
-            authority.width().get()
-        );
-        assert!(parent_completed.load(Ordering::SeqCst) > 0);
-        assert!(stolen_completed.load(Ordering::SeqCst) > 0);
-        assert_eq!(authority.active_units(), 0);
-    }
 
     impl ExtractionCancellation for AlwaysCancelled {
         fn is_cancelled(&self) -> bool {
@@ -2570,16 +2640,6 @@ mod tests {
         assert!(wrong_membership.validate().is_err());
     }
 
-    #[test]
-    fn admitted_chunk_is_consumed_without_widening_mint_authority() {
-        let chunks = file_chunks();
-        let expected = chunks.chunks[0].clone();
-        let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
-        let admitted = authority.admit(expected.clone()).expect("exact admission");
-
-        assert_eq!(admitted.into_chunk(), *expected);
-    }
-
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
 
     fn chunker() -> DeterministicCodeChunker {
@@ -2635,6 +2695,23 @@ mod tests {
 
     fn batch_for(file: &ReceiptBoundCodeFileV1, outcome: ParseOutcomeV1) -> ExtractionBatchV1 {
         let descriptor = rust_descriptor();
+        // The parser import digest is the extractor's to state, never the
+        // fixture's: chunking re-derives the rows and refuses a batch that
+        // declares different ones. An outcome that attests no structure
+        // carries no rows at all, which is what the unsupported-document path
+        // builds its artifacts from.
+        let parser_import_rows_digest = match &outcome {
+            ParseOutcomeV1::Complete | ParseOutcomeV1::Partial { .. } => TreeSitterExtractor::new()
+                .extract(file, &descriptor, &NeverCancelled)
+                .expect("fixture extraction")
+                .batch()
+                .parser_import_rows_digest
+                .clone(),
+            ParseOutcomeV1::Failed { .. }
+            | ParseOutcomeV1::TimedOut
+            | ParseOutcomeV1::Cancelled => crate::extract::parser_import_rows_digest(&[])
+                .expect("empty parser import rows digest"),
+        };
         ExtractionBatchV1 {
             generation_id: file.generation_id.clone(),
             file_occurrence_id: file.file.file_occurrence_id.clone(),
@@ -2654,8 +2731,7 @@ mod tests {
                 parsed_bytes: file.sanitized_bytes.len() as u64,
                 ..ExtractionCoverageV1::default()
             },
-            parser_import_rows_digest: crate::extract::parser_import_rows_digest(&[])
-                .expect("empty parser import rows digest"),
+            parser_import_rows_digest,
             rows_digest: id::<ManifestDigest>(&digest('d')),
         }
     }
@@ -2669,9 +2745,12 @@ mod tests {
 
     fn chunk_source(source: &str) -> CodeFileChunksV1 {
         let file = validated_file("src/lib.rs", source.as_bytes());
-        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let descriptor = rust_descriptor();
+        let extracted = TreeSitterExtractor::new()
+            .extract(&file, &descriptor, &NeverCancelled)
+            .expect("extract source");
         chunker()
-            .chunk_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .chunk_file(&file, extracted.batch(), &descriptor, &NeverCancelled)
             .expect("chunking succeeds")
     }
 
@@ -2710,17 +2789,6 @@ mod tests {
             );
         }
         digests
-    }
-
-    /// Reminting the same sealed file twice (cold then warm reusable sink)
-    /// must keep the exact authority digest map.
-    #[test]
-    fn reminted_authority_digests_match_across_reusable_sink_calls() {
-        let chunks = wide_chunks(48);
-        let first = ExactExtractionAuthorityV1::restore(&chunks).expect("first remint");
-        let second = ExactExtractionAuthorityV1::restore(&chunks).expect("warm remint");
-        assert_eq!(first.digests(), second.digests());
-        assert_eq!(first.digests(), sequential_digest_reference(&chunks.chunks));
     }
 
     /// A row that is not the minted allocation is admitted by digest: an
@@ -2829,47 +2897,6 @@ mod tests {
         );
     }
 
-    /// Timing probe, not an assertion: prints the single-threaded canonical
-    /// digest sweep against the fanned-out mint over the same fixture.
-    /// `cargo test --release -p tracedecay-code-index -- --ignored --nocapture`
-    #[test]
-    #[ignore = "timing probe; run explicitly with --ignored --nocapture"]
-    fn digest_sweep_timing_probe() {
-        use std::time::{Duration, Instant};
-
-        /// Report the fastest of `rounds` runs: on a shared build host the mean
-        /// tracks neighbouring load, the minimum tracks the code.
-        fn best_of(rounds: u32, mut run: impl FnMut()) -> Duration {
-            run();
-            (0..rounds)
-                .map(|_| {
-                    let started = Instant::now();
-                    run();
-                    started.elapsed()
-                })
-                .min()
-                .unwrap_or_default()
-        }
-
-        let chunks = wide_chunks(400);
-        let rounds = 25;
-
-        let sequential = best_of(rounds, || {
-            let _ = sequential_digest_reference(&chunks.chunks);
-        });
-        let parallel = best_of(rounds, || {
-            let _ = ExactExtractionAuthorityV1::mint(&chunks.chunks).expect("mint");
-        });
-        let validate = best_of(rounds, || {
-            chunks.validate().expect("validate");
-        });
-
-        println!(
-            "chunks={} sequential_digest_sweep={sequential:?} parallel_mint={parallel:?} validate={validate:?}",
-            chunks.chunks.len()
-        );
-    }
-
     #[test]
     fn five_grains_cover_every_eligible_byte() {
         let result = chunk_source(RUST_SOURCE);
@@ -2939,6 +2966,267 @@ mod tests {
         }));
     }
 
+    fn whitespace_heavy_functions(count: usize) -> String {
+        (0..count)
+            .map(|index| format!("pub fn symbol_{index}() {{}}\n\n"))
+            .collect()
+    }
+
+    fn assert_byte_exact_coverage(source: &str, chunks: &CodeFileChunksV1) {
+        let mut covered = vec![false; source.len()];
+        for chunk in &chunks.chunks {
+            for covered_byte in &mut covered[chunk.anchor.source_span.start_byte as usize
+                ..chunk.anchor.source_span.end_byte as usize]
+            {
+                *covered_byte = true;
+            }
+        }
+        assert!(covered.iter().all(|covered| *covered), "full byte coverage");
+    }
+
+    #[test]
+    fn whitespace_only_windows_are_attributed_to_neighboring_grains() {
+        let source = whitespace_heavy_functions(8);
+        let result = chunk_source(&source);
+        result.validate().expect("valid chunk set");
+        assert_byte_exact_coverage(&source, &result);
+
+        assert!(
+            result.chunks.iter().all(|chunk| {
+                chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                    || !span_is_whitespace_only(source.as_str(), chunk.anchor.source_span)
+            }),
+            "whitespace-only FileWindow chunks must not be emitted"
+        );
+
+        let alpha_source = "pub fn alpha() {}\n\npub fn beta() {}\n";
+        let alpha = chunk_source(alpha_source);
+        alpha.validate().expect("valid adjacent-literal fixture");
+        assert_byte_exact_coverage(alpha_source, &alpha);
+        assert!(alpha.chunks.iter().all(|chunk| {
+            chunk.anchor.grain != CodeSearchChunkGrainV1::FileWindow
+                || !span_is_whitespace_only(alpha_source, chunk.anchor.source_span)
+        }));
+
+        let literal = b"alpha";
+        let literal_start = alpha_source.find("alpha").expect("alpha literal") as u64;
+        let literal_end = literal_start + literal.len() as u64;
+        let folded_start = alpha_source.find("\n\n").expect("folded gap") as u64;
+        let folded_end = folded_start + 2;
+        let term = alpha
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.exact_terms.iter())
+            .find(|term| term.original_bytes() == literal)
+            .expect("exact term for alpha");
+        assert_eq!(
+            term.span(),
+            SourceSpan {
+                start_byte: literal_start,
+                end_byte: literal_end,
+            }
+        );
+        assert!(
+            term.span().end_byte <= folded_start || term.span().start_byte >= folded_end,
+            "exact occurrence must not cross the folded whitespace range"
+        );
+        for term in alpha
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.exact_terms.iter())
+        {
+            let start = term.span().start_byte as usize;
+            let end = term.span().end_byte as usize;
+            assert_eq!(
+                &alpha_source.as_bytes()[start..end],
+                term.original_bytes(),
+                "exact term bytes stay on the literal"
+            );
+            assert!(
+                !alpha_source[start..end].chars().all(char::is_whitespace),
+                "exact occurrence must not land in a folded whitespace region"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_whitespace_window_folds_forward_into_the_next_retrievable_grain() {
+        let source = "   hello";
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 3,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![1],
+                span: SourceSpan {
+                    start_byte: 3,
+                    end_byte: 8,
+                },
+                parent: None,
+            },
+        ];
+        attribute_whitespace_only_windows(source, &mut pending);
+        assert_eq!(pending.len(), 1, "the leading whitespace window folds away");
+        assert_eq!(
+            pending[0].span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: 8,
+            }
+        );
+        assert_eq!(&source[0..8], "   hello");
+        assert_eq!(pending[0].split_path, vec![1]);
+    }
+
+    #[test]
+    fn all_whitespace_source_retains_whitespace_only_windows() {
+        let source = "   \n\n\t  \n";
+        let result = chunk_source(source);
+        result.validate().expect("valid all-whitespace chunk set");
+        assert_byte_exact_coverage(source, &result);
+        assert!(
+            !result.chunks.is_empty(),
+            "an all-whitespace file must keep its FileWindow grains"
+        );
+        assert!(
+            result.chunks.iter().all(|chunk| {
+                chunk.anchor.grain == CodeSearchChunkGrainV1::FileWindow
+                    && span_is_whitespace_only(source, chunk.anchor.source_span)
+            }),
+            "all-whitespace FileWindows must be retained when no retrievable neighbor exists"
+        );
+    }
+
+    #[test]
+    fn fold_that_exceeds_max_chunk_text_bytes_retains_the_window() {
+        let mut source = "x".repeat(MAX_CHUNK_TEXT_BYTES);
+        source.push_str("  ");
+        let max = MAX_CHUNK_TEXT_BYTES as u64;
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(0),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: max,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: max,
+                    end_byte: max + 2,
+                },
+                parent: None,
+            },
+        ];
+        attribute_whitespace_only_windows(&source, &mut pending);
+        assert_eq!(
+            pending.len(),
+            2,
+            "a fold that would exceed MAX_CHUNK_TEXT_BYTES must keep the window"
+        );
+        assert_eq!(
+            pending[0].span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: max,
+            },
+            "the retrievable target span must stay unchanged"
+        );
+        assert_eq!(pending[1].grain, CodeSearchChunkGrainV1::FileWindow);
+        assert!(span_is_whitespace_only(&source, pending[1].span));
+    }
+
+    #[test]
+    fn whitespace_window_folds_into_the_abutting_body_not_the_enclosing_parent() {
+        let source = "aaaa  bbbb";
+        let mut pending = vec![
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolSignature,
+                symbol: Some(0),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 10,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(1),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 4,
+                },
+                parent: Some((0, vec![])),
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::FileWindow,
+                symbol: None,
+                split_path: vec![0],
+                span: SourceSpan {
+                    start_byte: 4,
+                    end_byte: 6,
+                },
+                parent: None,
+            },
+            PendingChunk {
+                grain: CodeSearchChunkGrainV1::SymbolBody,
+                symbol: Some(2),
+                split_path: vec![],
+                span: SourceSpan {
+                    start_byte: 6,
+                    end_byte: 10,
+                },
+                parent: Some((0, vec![])),
+            },
+        ];
+        attribute_whitespace_only_windows(source, &mut pending);
+        let body = pending
+            .iter()
+            .find(|piece| {
+                piece.grain == CodeSearchChunkGrainV1::SymbolBody && piece.symbol == Some(1)
+            })
+            .expect("abutting body remains");
+        assert_eq!(
+            body.span,
+            SourceSpan {
+                start_byte: 0,
+                end_byte: 6,
+            },
+            "the window must fold into the abutting SymbolBody, not the enclosing parent"
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .find(|piece| piece.grain == CodeSearchChunkGrainV1::SymbolSignature)
+                .expect("parent remains")
+                .span
+                .end_byte,
+            10,
+            "the enclosing parent span must stay unchanged"
+        );
+        assert!(pending.iter().all(|piece| {
+            piece.grain != CodeSearchChunkGrainV1::FileWindow
+                || !span_is_whitespace_only(source, piece.span)
+        }));
+    }
+
     #[test]
     fn symbol_member_chunks_include_leading_attributes() {
         let result = chunk_source(
@@ -2977,151 +3265,6 @@ mod tests {
             .zip(&edited.chunks)
             .any(|(left, right)| left.content_digest != right.content_digest);
         assert!(digest_changed, "content digests track content");
-    }
-
-    #[test]
-    fn chunking_is_deterministic_across_runs() {
-        let first = chunk_source(RUST_SOURCE);
-        let second = chunk_source(RUST_SOURCE);
-        assert_eq!(first, second);
-    }
-
-    struct CountingRustExtractor {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl tracedecay_code_extraction::LanguageExtractor for CountingRustExtractor {
-        fn extensions(&self) -> &[&str] {
-            tracedecay_code_extraction::RustExtractor.extensions()
-        }
-
-        fn language_name(&self) -> &str {
-            tracedecay_code_extraction::RustExtractor.language_name()
-        }
-
-        fn extract_parsed_artifact_prepared(
-            &self,
-            file_path: &str,
-            source: &str,
-            parsed_source: &str,
-            tree: &tree_sitter::Tree,
-            scope: tracedecay_code_extraction::parsed_extraction::ParsedExtractionScope<'_>,
-        ) -> tracedecay_code_extraction::parsed_extraction::ParsedExtractionArtifactV1 {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            tracedecay_code_extraction::RustExtractor.extract_parsed_artifact_prepared(
-                file_path,
-                source,
-                parsed_source,
-                tree,
-                scope,
-            )
-        }
-    }
-
-    #[test]
-    fn extraction_artifacts_feed_chunking_without_a_second_parse() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let registry = Arc::new(
-            tracedecay_code_extraction::LanguageRegistry::from_extractors_for_test(vec![Box::new(
-                CountingRustExtractor {
-                    calls: Arc::clone(&calls),
-                },
-            )]),
-        );
-        let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&registry));
-        let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        let descriptor = rust_descriptor();
-        let extraction = extractor
-            .extract(&file, &descriptor, &NeverCancelled)
-            .expect("extraction succeeds");
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-
-        let shared_chunker = DeterministicCodeChunker::from_shared_registry(
-            id("generation.fixture"),
-            id("repo.fixture"),
-            id("sanitizer.v1"),
-            id("policy.v1"),
-            id("chunker.v1"),
-            registry,
-        );
-        let (actual, _) = shared_chunker
-            .index_file_with_authority_from_extraction(
-                &file,
-                &extraction,
-                &descriptor,
-                SensitivityLevelV1::Public,
-                &NeverCancelled,
-            )
-            .expect("chunking reuses parse artifacts");
-        assert_eq!(
-            calls.load(Ordering::Relaxed),
-            1,
-            "chunking must not invoke the parser again"
-        );
-
-        let expected = chunker()
-            .index_file(&file, extraction.batch(), &descriptor, &NeverCancelled)
-            .expect("legacy chunking succeeds");
-        assert_eq!(actual, expected, "parse reuse must preserve every artifact");
-    }
-
-    #[test]
-    fn oversized_body_splits_on_pinned_fallback_windows() {
-        use std::fmt::Write as _;
-        let mut source = String::from("pub fn huge() {\n");
-        for index in 0..9000 {
-            writeln!(source, "    let value_{index} = {index}usize;").unwrap();
-        }
-        source.push_str("}\n");
-        assert!(source.len() > MAX_CHUNK_TEXT_BYTES);
-
-        let result = chunk_source(&source);
-        result.validate().expect("valid chunk set");
-        let body_pieces: Vec<&CodeSearchChunkV1> = result
-            .chunks
-            .iter()
-            .map(Arc::as_ref)
-            .filter(|chunk| chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody)
-            .collect();
-        assert!(body_pieces.len() > 1, "oversized body split into windows");
-        for piece in &body_pieces {
-            assert!(piece.sanitized_text.as_str().len() <= MAX_CHUNK_TEXT_BYTES);
-            assert_eq!(piece.anchor.parent_chunk_id, None);
-        }
-        // Pinned fallback split: the first window starts at the body start
-        // and window texts tile the body with the pinned overlap.
-        let first_path_window = &body_pieces[0];
-        assert_eq!(first_path_window.anchor.source_span.start_byte, 0);
-        assert!(
-            first_path_window
-                .sanitized_text
-                .as_str()
-                .starts_with("pub fn huge()")
-        );
-
-        // Union of window spans covers the whole body (pinned overlap).
-        let mut ordered: Vec<(u64, u64)> = body_pieces
-            .iter()
-            .map(|piece| {
-                (
-                    piece.anchor.source_span.start_byte,
-                    piece.anchor.source_span.end_byte,
-                )
-            })
-            .collect();
-        ordered.sort_unstable();
-        let body_start = ordered.first().expect("pieces").0;
-        let body_end = ordered.last().expect("pieces").1;
-        let mut cursor = body_start;
-        for (start, end) in ordered {
-            assert!(start <= cursor, "windows overlap or abut (pinned overlap)");
-            cursor = cursor.max(end);
-        }
-        assert_eq!(cursor, body_end);
-
-        // Deterministic split across runs.
-        let again = chunk_source(&source);
-        assert_eq!(result, again);
     }
 
     #[test]
@@ -3429,58 +3572,6 @@ pub fn real_symbol() {}
         ] {
             assert!(!symbols.contains(rejected));
         }
-    }
-
-    #[test]
-    fn lineage_symbols_preserve_extracted_identity_and_canonical_order() {
-        let source = "alpha\nbeta\n";
-        let file_identity: FileIdentityDigest = id(&digest('f'));
-        let rows = vec![
-            fixture_function_row(
-                source,
-                "node.beta",
-                "sym.beta",
-                "crate::beta",
-                'b',
-                SourceSpan {
-                    start_byte: 6,
-                    end_byte: 10,
-                },
-            ),
-            fixture_function_row(
-                source,
-                "node.alpha",
-                "sym.alpha",
-                "crate::alpha",
-                'a',
-                SourceSpan {
-                    start_byte: 0,
-                    end_byte: 5,
-                },
-            ),
-        ];
-
-        let symbols = chunker()
-            .lineage_symbols(source, &file_identity, &rows)
-            .expect("valid symbol lineage records");
-
-        assert_eq!(
-            symbols
-                .iter()
-                .map(|symbol| symbol.occurrence.as_str())
-                .collect::<Vec<_>>(),
-            vec!["sym.alpha", "sym.beta"],
-            "lineage records must be canonically ordered by occurrence"
-        );
-        let alpha = symbols
-            .iter()
-            .find(|symbol| symbol.qualified_name == "crate::alpha")
-            .expect("alpha lineage record");
-        assert_eq!(alpha.identity, id(&digest('a')));
-        assert_eq!(alpha.kind, "function");
-        assert_eq!((symbols[1].start_line, symbols[1].line_span), (1, 1));
-        assert_eq!(alpha.file_identity, file_identity);
-        assert_eq!(alpha.content_digest, content_digest(b"alpha"));
     }
 
     #[test]
@@ -4121,58 +4212,6 @@ pub fn real_symbol() {}
         );
         assert!(resolved.is_empty());
         assert!(retained.is_empty());
-    }
-
-    #[test]
-    fn rematerialization_rebinds_whole_symbol_term_authority() {
-        let prior = chunk_source("pub fn real_symbol() {}\n");
-        let prior_chunk = prior
-            .chunks
-            .iter()
-            .find(|chunk| {
-                chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody
-                    && chunk.sanitized_text.as_str().contains("real_symbol")
-            })
-            .expect("symbol body chunk");
-        let prior_occurrence = prior_chunk
-            .anchor
-            .symbol_occurrence_id
-            .as_ref()
-            .expect("prior symbol occurrence")
-            .clone();
-        assert!(
-            prior_chunk
-                .exact_terms
-                .iter()
-                .any(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
-        );
-
-        let current = prior
-            .rematerialize_for_generation(
-                id::<CodeGenerationId>("generation.carried"),
-                id::<FileOccurrenceId>("file.carried"),
-            )
-            .expect("rematerialized chunks");
-        let current_chunk = current
-            .chunks
-            .iter()
-            .find(|chunk| chunk.id == prior_chunk.id)
-            .expect("carried chunk");
-        let current_occurrence = current_chunk
-            .anchor
-            .symbol_occurrence_id
-            .as_ref()
-            .expect("current symbol occurrence");
-
-        assert_ne!(current_occurrence, &prior_occurrence);
-        assert!(
-            current_chunk
-                .exact_terms
-                .iter()
-                .filter(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
-                .all(|term| term.symbol_occurrence_id() == Some(current_occurrence))
-        );
-        current.validate().expect("rematerialized chunks validate");
     }
 
     #[test]

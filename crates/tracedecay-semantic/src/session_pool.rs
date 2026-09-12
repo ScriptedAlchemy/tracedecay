@@ -57,9 +57,55 @@ const COLD_LOAD_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 /// both breach a ceiling a single open fits under. Taking turns keeps the
 /// measurement attributable to the open it bounds and caps the transient peak
 /// to one load. Waiting for a turn is admission, not load time: the load
-/// deadline starts when this open begins, and a turn is held only until the
-/// open returns or its own deadline/resident verdict fires.
-static COLD_LOAD_TURN: Mutex<()> = Mutex::new(());
+/// deadline starts when this open begins. The turn is owned by the loader
+/// thread and released only when the runtime's constructor actually returns.
+/// A caller's deadline or resident verdict abandons the open with a typed
+/// error, but FastEmbed's published constructor cannot be interrupted while
+/// ORT builds the graph, so the abandoned native load still occupies memory
+/// until it exits — and the next cold open must not start beside it.
+static COLD_LOAD_TURN: ColdLoadTurnV1 = ColdLoadTurnV1 {
+    held: Mutex::new(false),
+    released: Condvar::new(),
+};
+
+/// Process-wide single-holder permit for cold model opens. Unlike a
+/// `MutexGuard`, the permit is `Send`, so the loader thread that runs the
+/// native constructor can own it and release it when that thread exits.
+struct ColdLoadTurnV1 {
+    held: Mutex<bool>,
+    released: Condvar,
+}
+
+impl ColdLoadTurnV1 {
+    fn acquire(&'static self) -> ColdLoadPermitV1 {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        while *held {
+            held = self
+                .released
+                .wait(held)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *held = true;
+        ColdLoadPermitV1 { turn: self }
+    }
+}
+
+struct ColdLoadPermitV1 {
+    turn: &'static ColdLoadTurnV1,
+}
+
+impl Drop for ColdLoadPermitV1 {
+    fn drop(&mut self) {
+        let mut held = self
+            .turn
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *held = false;
+        drop(held);
+        self.turn.released.notify_one();
+    }
+}
 
 /// Process-resident sampler consulted while a cold model open is in flight.
 /// Production uses the canonical kernel sampler
@@ -805,11 +851,13 @@ where
     /// between slices instead of trusting the manifest estimate alone. Both
     /// verdicts fire the load's interruption signal so the runtime abandons
     /// the open at its next stage boundary. An abandoned loader keeps the
-    /// slot and byte reservation until the runtime actually returns (its
-    /// memory is genuinely in use until then), then releases both and
-    /// discards the session. A successful open returns with its load time as
-    /// the pool clock measured it from the moment the load began — after its
-    /// turn was taken, so waiting for another load is never charged to it.
+    /// process-wide cold-load turn, its slot, and its byte reservation until
+    /// the runtime actually returns (its memory is genuinely in use until
+    /// then — the published FastEmbed constructor cannot be interrupted while
+    /// ORT builds the graph), then releases all three and discards the
+    /// session. A successful open returns with its load time as the pool
+    /// clock measured it from the moment the load began — after its turn was
+    /// taken, so waiting for another load is never charged to it.
     #[hotpath::measure(label = "semantic.session_pool.open_bounded")]
     fn open_session_bounded(
         &self,
@@ -818,11 +866,10 @@ where
         reserved_bytes: u64,
         tracked_resident_before_open: u64,
     ) -> Result<(R::Session, Duration), SessionAcquireError> {
-        let _cold_load_turn = hotpath::measure_block!("semantic.session_pool.cold_load_turn", {
-            COLD_LOAD_TURN
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-        });
+        let cold_load_turn = hotpath::measure_block!(
+            "semantic.session_pool.cold_load_turn",
+            COLD_LOAD_TURN.acquire()
+        );
         let (result_tx, result_rx) = channel::<Result<R::Session, EmbedError>>();
         let inner = Arc::clone(&self.inner);
         let loader_authority = authority.clone();
@@ -836,6 +883,10 @@ where
         let spawned = thread::Builder::new()
             .name("td-semantic-model-load".to_owned())
             .spawn(move || {
+                // The loader owns the turn: it is released when this closure
+                // ends, after the constructor returned and any abandoned
+                // result was dropped — never at the caller's wait deadline.
+                let _cold_load_turn = cold_load_turn;
                 let load_started = inner.clock.now();
                 let result = hotpath::measure_block!("semantic.model.load", {
                     inner
@@ -1263,7 +1314,7 @@ pub mod test_support {
                 pooling: ManifestPoolingV1::Mean,
                 truncation: TruncationPolicyV1 {
                     side: TruncationSideV1::Right,
-                    max_length: 512,
+                    max_length: 4096,
                 },
                 precision: ManifestPrecisionV1::Fp32,
                 runtime: RuntimeCompatibilityV1 {
@@ -1281,7 +1332,7 @@ pub mod test_support {
                     max_resident_bytes,
                     max_threads: 4,
                     max_batch_size: 8,
-                    max_sequence_length: 512,
+                    max_sequence_length: 4096,
                     load_deadline_ms,
                 },
                 upstream: UpstreamSourceV1 {
@@ -1311,7 +1362,7 @@ pub mod test_support {
             document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
-            truncation_length: 512,
+            truncation_length: 4096,
             inference_batch_size: payload.resource_ceiling.max_batch_size,
             inference_batch_bytes: payload
                 .resource_ceiling
@@ -1321,6 +1372,7 @@ pub mod test_support {
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "ort-test-rev-1".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
             dimensions: 8,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,

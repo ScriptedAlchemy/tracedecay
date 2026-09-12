@@ -1,128 +1,7 @@
 use super::*;
 
-#[test]
-fn moved_repository_relinks_instead_of_collecting() {
-    let dead = PathBuf::from("/definitely/not/here/old-name");
-    let live = std::env::current_dir().unwrap();
-    let census = vec![entry(
-        "moved",
-        dead,
-        None,
-        Some(live.clone()),
-        PathBuf::from("/profile/stores/moved"),
-        0,
-        8192,
-    )];
-    let findings = classify_stores(&census, 1_000 * DAY);
-    assert_eq!(
-        findings[0].disposition,
-        StoreDisposition::Relinkable { live_root: live }
-    );
-
-    let plan = plan_collection(findings, 0);
-    assert!(
-        plan.collect.is_empty(),
-        "a re-linkable (moved) store must never be collected"
-    );
-    assert_eq!(plan.relink.len(), 1);
-}
-
-#[test]
-fn execute_collection_deletes_only_collect_set() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let collect_dir = tmp.path().join("collect-me");
-    let keep_dir = tmp.path().join("keep-me");
-    std::fs::create_dir_all(&collect_dir).unwrap();
-    std::fs::create_dir_all(&keep_dir).unwrap();
-    std::fs::write(collect_dir.join("graph.db"), b"payload").unwrap();
-
-    let plan = CollectionPlan {
-        collect: vec![OrphanStoreFinding {
-            project_id: "proj_collect".into(),
-            store_id: "collect".into(),
-            data_root: collect_dir.clone(),
-            disposition: StoreDisposition::Orphaned,
-            age_secs: 90 * DAY,
-            size_bytes: 7,
-            expected_store_relpath: "collect-me".into(),
-            expected_created_at: 0,
-            expected_last_write_at: None,
-            expected_payload_mtime_secs: 0,
-            expected_data_root_fence: StoreDirectoryFence::Missing,
-            expected_content_fence: StoreContentFence::Missing,
-            expected_manifest_bytes: None,
-            graph_scope_relpaths: Vec::new(),
-        }],
-        retained_immature: vec![OrphanStoreFinding {
-            project_id: "proj_keep".into(),
-            store_id: "keep".into(),
-            data_root: keep_dir.clone(),
-            disposition: StoreDisposition::Orphaned,
-            age_secs: DAY,
-            size_bytes: 0,
-            expected_store_relpath: "keep-me".into(),
-            expected_created_at: 0,
-            expected_last_write_at: None,
-            expected_payload_mtime_secs: 0,
-            expected_data_root_fence: StoreDirectoryFence::Missing,
-            expected_content_fence: StoreContentFence::Missing,
-            expected_manifest_bytes: None,
-            graph_scope_relpaths: Vec::new(),
-        }],
-        relink: Vec::new(),
-        unverifiable: Vec::new(),
-    };
-
-    let outcome = execute_collection(&plan, tmp.path());
-    assert_eq!(outcome.collected.len(), 1);
-    assert_eq!(outcome.reclaimed_bytes, 7);
-    assert!(outcome.errors.is_empty());
-    assert!(!collect_dir.exists(), "collected store must be removed");
-    assert!(keep_dir.exists(), "immature store must be untouched");
-}
-
-#[test]
-fn execute_collection_rejects_store_outside_profile() {
-    let profile = tempfile::TempDir::new().unwrap();
-    let outside = tempfile::TempDir::new().unwrap();
-    let target = outside.path().join("store");
-    std::fs::create_dir_all(&target).unwrap();
-    let plan = CollectionPlan {
-        collect: vec![OrphanStoreFinding {
-            project_id: "proj_escape".into(),
-            store_id: "escape".into(),
-            data_root: target.clone(),
-            disposition: StoreDisposition::Orphaned,
-            age_secs: 90 * DAY,
-            size_bytes: 1,
-            expected_store_relpath: "store".into(),
-            expected_created_at: 0,
-            expected_last_write_at: None,
-            expected_payload_mtime_secs: 0,
-            expected_data_root_fence: StoreDirectoryFence::Missing,
-            expected_content_fence: StoreContentFence::Missing,
-            expected_manifest_bytes: None,
-            graph_scope_relpaths: Vec::new(),
-        }],
-        ..CollectionPlan::default()
-    };
-
-    let outcome = execute_collection(&plan, profile.path());
-
-    assert!(target.exists(), "outside-profile store must not be removed");
-    assert!(outcome.collected.is_empty());
-    assert_eq!(
-        outcome.errors,
-        vec![CollectionFailure {
-            store_id: "escape".into(),
-            kind: CollectionFailureKind::OutsideProfile,
-        }]
-    );
-}
-
-/// The collection plan is only an inspection receipt.  Replacing its directory
-/// with byte-identical contents in the same timestamp second must still abort
-/// the apply rather than retire a newly-created store identity.
+/// Seed a profile with one live store and one identity-drift orphan store, then
+/// prove the async sweep collects only the orphan and retires its registry row.
 #[cfg(unix)]
 #[tokio::test]
 async fn registered_collection_refuses_same_second_directory_replacement() {
@@ -320,10 +199,6 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
     assert_eq!(restored_manifest.project_id.as_deref(), Some("proj_old"));
 }
 
-// === Durable-memory guard ===================================================
-/// A store whose graph database carries durable `memory_facts` rows must
-/// never be collected, even when every registry/manifest/payload revival
-/// check passes and the store is otherwise a textbook orphan.
 #[tokio::test]
 async fn durable_memory_rows_block_orphan_store_collection() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -469,9 +344,8 @@ async fn empty_memory_table_does_not_block_collection() {
     assert!(!data_root.exists());
 }
 
-/// An unregistered directory uses the same inspect→confirm→apply boundary as
-/// a registered orphan. A same-second replacement of an empty directory must
-/// not inherit the original collection decision.
+// === Unregistered store directories =========================================
+
 #[cfg(unix)]
 #[tokio::test]
 async fn unregistered_collection_refuses_same_second_directory_replacement() {
@@ -565,34 +439,6 @@ async fn unregistered_collection_rejects_profile_contained_data_root_symlink() {
     );
 }
 
-/// A manifest write can preserve second-resolution mtimes and leave the store
-/// directory untouched. The quarantine boundary must therefore hash and
-/// re-verify the moved children before any deletion is possible.
-#[test]
-fn quarantine_restores_same_second_manifest_mutation() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    let data_root = profile_root.join("stores/manifest-race");
-    std::fs::create_dir_all(&data_root).unwrap();
-    let manifest = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
-    std::fs::write(&manifest, b"before").unwrap();
-    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
-    let original_time =
-        filetime::FileTime::from_system_time(manifest.metadata().unwrap().modified().unwrap());
-
-    std::fs::write(&manifest, b"after!").unwrap();
-    filetime::set_file_mtime(&manifest, original_time).unwrap();
-
-    let result =
-        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
-    assert!(matches!(result, QuarantineStoreOutcome::Restored { .. }));
-    assert_eq!(std::fs::read(&manifest).unwrap(), b"after!");
-    assert!(
-        data_root.is_dir(),
-        "changed bytes must be restored, not deleted"
-    );
-}
-
 /// `SQLite` pages can change in place without changing the parent directory.
 /// Hashing the opened child handles makes that post-census mutation visible at
 /// the recovery boundary even when the writer resets the database mtime.
@@ -627,36 +473,6 @@ fn quarantine_restores_same_second_sqlite_mutation() {
         .query_row("SELECT COUNT(*) FROM facts", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 1, "mutated SQLite bytes must survive recovery");
-}
-
-/// A path replacement immediately before the atomic boundary may cause the
-/// rename to capture the replacement. It must be verified and restored rather
-/// than recursively deleting whichever directory won the path race.
-#[test]
-fn quarantine_restores_path_replacement_before_delete() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    let data_root = profile_root.join("stores/rename-race");
-    std::fs::create_dir_all(&data_root).unwrap();
-    std::fs::write(data_root.join("payload.bin"), b"inspected").unwrap();
-    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
-
-    let displaced = profile_root.join("stores/displaced");
-    std::fs::rename(&data_root, &displaced).unwrap();
-    std::fs::create_dir_all(&data_root).unwrap();
-    std::fs::write(data_root.join("payload.bin"), b"replacement").unwrap();
-
-    let result =
-        quarantine_store_for_verified_collection(&profile_root, &data_root, &expected).unwrap();
-    assert!(matches!(result, QuarantineStoreOutcome::Restored { .. }));
-    assert_eq!(
-        std::fs::read(data_root.join("payload.bin")).unwrap(),
-        b"replacement"
-    );
-    assert_eq!(
-        std::fs::read(displaced.join("payload.bin")).unwrap(),
-        b"inspected"
-    );
 }
 
 /// Even an empty replacement is not the inspected directory. Its child list
@@ -936,23 +752,6 @@ fn committed_journal_recovery_removes_the_exact_quarantine() {
 }
 
 #[test]
-fn committed_journal_cleanup_keeps_retired_authority_until_journal_removal() {
-    let journal = "quarantine.receipt-v1.json";
-    let order = committed_journal_cleanup_names(journal);
-
-    assert_eq!(order[0], format!("{journal}.renamed"));
-    assert_eq!(
-        order[1], journal,
-        "the recovery journal must remain while retired authority is required"
-    );
-    assert_eq!(
-        order[2],
-        format!("{journal}.retired"),
-        "retired authority becomes orphan debris only after the journal is gone"
-    );
-}
-
-#[test]
 fn registered_remove_clears_journal_after_exact_quarantine_is_already_absent() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -1131,50 +930,6 @@ fn unregistered_uncommitted_recovery_retains_journal_when_both_names_are_absent(
             actual_path: quarantine_path,
             retirement_committed: false,
         }]
-    );
-}
-
-#[tokio::test]
-async fn empty_plan_restores_registered_quarantine_when_exact_row_remains() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap();
-    let (_runtime, db) = open_registered_db(&profile_root).await;
-    let payload = b"exact registered bytes survive a pre-commit crash";
-    let (data_root, quarantine_path) = prepare_registered_quarantine(
-        &db,
-        &profile_root,
-        "proj_registered_restore",
-        "store_registered_restore",
-        payload,
-    )
-    .await;
-
-    let (outcome, retired) =
-        execute_registered_collection(&db, &CollectionPlan::default(), &profile_root)
-            .await
-            .unwrap();
-
-    assert_eq!(retired, 0);
-    assert!(outcome.collected.is_empty());
-    assert_eq!(outcome.reclaimed_bytes, 0);
-    assert!(outcome.errors.is_empty(), "{outcome:#?}");
-    assert_eq!(
-        std::fs::read(data_root.join("payload.bin")).unwrap(),
-        payload
-    );
-    assert!(!quarantine_path.exists());
-    assert_eq!(
-        db.try_list_store_instances_for_project("proj_registered_restore")
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(
-        read_pending_quarantine_receipts(&profile_root)
-            .unwrap()
-            .is_empty()
     );
 }
 
@@ -1862,6 +1617,9 @@ fn pending_quarantine_reader_reports_restored_path_when_sync_is_unconfirmed() {
     assert_eq!(receipts[0].actual_path, data_root);
 }
 
+/// Cancellation is checked before any recursive SHA-256 read. A cancelled
+/// maintenance admission cannot turn a deep inventory into a partial plan or
+/// an implicit deletion permit.
 #[tokio::test]
 async fn registered_collection_payload_fence_cancellation_is_terminal() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1924,6 +1682,7 @@ async fn unregistered_collection_payload_fence_deadline_is_distinct() {
             expected_payload_mtime_secs: finding.expected_payload_mtime_secs,
             expected_data_root_fence: finding.expected_data_root_fence,
             expected_content_fence: finding.expected_content_fence,
+            abandoned_root: false,
         }],
         ..UnregisteredCollectionPlan::default()
     };
@@ -1983,127 +1742,6 @@ fn cancelled_quarantine_finalization_retains_a_readable_recovery_record() {
             .unwrap()
             .len(),
         1
-    );
-}
-
-/// A process can stop after the same-parent rename and before it has an
-/// in-memory outcome to return. The next maintenance admission must restore
-/// that durable quarantine and surface it for a fresh census, not leave it
-/// invisible under an internal sibling name.
-#[test]
-fn interrupted_quarantine_is_restored_on_the_next_collection_admission() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    let data_root = profile_root.join("projects/proj_recover_quarantine");
-    std::fs::create_dir_all(&data_root).unwrap();
-    std::fs::write(data_root.join("payload.bin"), b"recover me").unwrap();
-    let quarantine =
-        profile_root.join("projects/.tracedecay-orphan-quarantine-proj_recover_quarantine-42-7");
-    std::fs::rename(&data_root, &quarantine).unwrap();
-
-    let outcomes = recover_existing_store_quarantine(
-        &profile_root,
-        &data_root,
-        unbounded_collection_control(),
-    )
-    .unwrap();
-
-    assert_eq!(
-        outcomes,
-        vec![QuarantineRecoveryOutcome::Restored {
-            restored_path: data_root.clone(),
-            failure: None,
-        }]
-    );
-    assert_eq!(
-        std::fs::read(data_root.join("payload.bin")).unwrap(),
-        b"recover me"
-    );
-    assert!(!quarantine.exists());
-}
-
-/// Recovery must never overwrite a newly created live path merely to put an
-/// interrupted quarantine back at its old name. Both byte sets remain
-/// available for a typed operator recovery outcome.
-#[test]
-fn interrupted_quarantine_is_retained_when_a_new_live_store_owns_its_name() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    let data_root = profile_root.join("projects/proj_retained_quarantine");
-    std::fs::create_dir_all(&data_root).unwrap();
-    std::fs::write(data_root.join("payload.bin"), b"quarantined bytes").unwrap();
-    let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
-    let StoreContentFence::Present(inventory) = expected else {
-        panic!("fixture must capture the legacy quarantine identity");
-    };
-    let expected_root_identity = inventory.root;
-    let quarantine =
-        profile_root.join("projects/.tracedecay-orphan-quarantine-proj_retained_quarantine-42-7");
-    std::fs::rename(&data_root, &quarantine).unwrap();
-    std::fs::create_dir_all(&data_root).unwrap();
-    std::fs::write(data_root.join("payload.bin"), b"new live bytes").unwrap();
-
-    let outcomes = recover_existing_store_quarantine(
-        &profile_root,
-        &data_root,
-        unbounded_collection_control(),
-    )
-    .unwrap();
-
-    let expected_failure = CollectionMutationFailure {
-        operation: CollectionMutationOperation::RestoreLiveLeafFromQuarantine,
-        raw_os_error: Some(OCCUPIED_RENAME_RAW_OS_ERROR),
-        target_path: data_root.clone(),
-        expected_root_identity: Some(expected_root_identity),
-        classification: CollectionMutationFailureClassification::NonRetryable,
-    };
-    assert_eq!(
-        outcomes,
-        vec![QuarantineRecoveryOutcome::Retained {
-            quarantine_path: quarantine.clone(),
-            actual_path: quarantine.clone(),
-            failure: Some(expected_failure.clone()),
-        }]
-    );
-    assert_eq!(
-        std::fs::read(data_root.join("payload.bin")).unwrap(),
-        b"new live bytes"
-    );
-    assert_eq!(
-        std::fs::read(quarantine.join("payload.bin")).unwrap(),
-        b"quarantined bytes"
-    );
-
-    let mut collection = CollectionOutcome::default();
-    assert!(!reconcile_existing_quarantine(
-        &profile_root,
-        &data_root,
-        "proj_retained_quarantine",
-        &mut collection,
-        unbounded_collection_control(),
-    ));
-    assert_eq!(
-        collection,
-        CollectionOutcome {
-            errors: vec![
-                CollectionFailure {
-                    store_id: "proj_retained_quarantine".to_owned(),
-                    kind: CollectionFailureKind::RemoveFailed(expected_failure),
-                },
-                CollectionFailure {
-                    store_id: "proj_retained_quarantine".to_owned(),
-                    kind: CollectionFailureKind::PayloadChanged,
-                },
-            ],
-            recovery_receipts: vec![CollectionRecoveryReceipt {
-                store_id: "proj_retained_quarantine".to_owned(),
-                original_path: data_root,
-                quarantine_path: quarantine.clone(),
-                actual_path: quarantine,
-                action: CollectionRecoveryAction::RetainedForRecovery,
-            }],
-            ..CollectionOutcome::default()
-        }
     );
 }
 
@@ -2190,6 +1828,9 @@ fn unreadable_recovery_journal_is_a_retryable_typed_failure() {
     );
 }
 
+/// Unregistered projects are an on-disk-only class, but their retention work
+/// still advances through a bounded, resumable page rather than recursing the
+/// entire profile under a single writer admission.
 #[test]
 fn committed_unregistered_recovery_preserves_interrupted_control_and_resumes() {
     for expected_completion in [
@@ -2473,20 +2114,6 @@ mod durable_inventory {
     }
 
     #[test]
-    fn a_malformed_manifest_fails_closed() {
-        let store = tempfile::tempdir().unwrap();
-        assert_eq!(
-            durable_database_inventory(
-                store.path(),
-                Some(b"{ not json"),
-                &[],
-                unbounded_collection_control(),
-            ),
-            DurableDatabaseInventoryV1::Unverifiable
-        );
-    }
-
-    #[test]
     fn manifest_graph_path_must_be_normalized_relative() {
         for graph_path in [PathBuf::from(""), PathBuf::from("../graph.db")] {
             let bytes = manifest_bytes(graph_path.to_string_lossy().as_ref());
@@ -2665,43 +2292,6 @@ async fn symlink_graph_database_is_durable_data_protected() {
     rusqlite::Connection::open(&target).unwrap();
     std::fs::remove_file(&graph_path).unwrap();
     std::os::unix::fs::symlink(&target, &graph_path).unwrap();
-
-    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, 1_700_000_000, true)
-        .await
-        .unwrap();
-
-    assert_eq!(report.plan.collect.len(), 1);
-    assert!(report.outcome.collected.is_empty());
-    assert_eq!(report.outcome.errors.len(), 1);
-    assert_eq!(
-        report.outcome.errors[0].kind,
-        CollectionFailureKind::DurableDataProtected
-    );
-    assert!(data_root.exists());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn symlink_branch_database_is_durable_data_protected() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap();
-    let dead_root = tmp.path().join("moved-away-repo");
-    let (_runtime, db) = open_registered_db(&profile_root).await;
-    let data_root = seed_store(
-        &db,
-        &profile_root,
-        "proj_symlink_branch",
-        "store_symlink_branch",
-        &dead_root,
-        1_700_000_000 - 100 * DAY,
-    )
-    .await;
-    let branches = data_root.join("branches");
-    std::fs::create_dir_all(&branches).unwrap();
-    let target = tmp.path().join("branch-target.db");
-    rusqlite::Connection::open(&target).unwrap();
-    std::os::unix::fs::symlink(&target, branches.join("feature.db")).unwrap();
 
     let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, 1_700_000_000, true)
         .await

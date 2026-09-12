@@ -559,7 +559,7 @@ fn representative_language_walks_allocate_by_changed_region() {
             grammar_key: "bash",
             source: regional_fixture("tiny() { :; }\n"),
             needle: "tiny()",
-            expected_digest: "0b6dc46dcc1aa39ee5e93ab7b7380922ca2299c3090679be0d9f8084d5dbbb3f",
+            expected_digest: "d1b8003a5b51fbeaa81bc03dc58ff38ad4f8ebd7af74533882cbabe8c47a2eb1",
         },
         Case {
             tier: "full",

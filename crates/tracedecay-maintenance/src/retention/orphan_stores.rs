@@ -31,14 +31,8 @@ pub use fence::{
     StoreContentEntry, StoreContentEntryKind, StoreContentFence, StoreContentInventory,
     StoreDirectoryFence, StoreFileIdentity, StoreRootIdentity,
 };
-pub use pages::{
-    OrphanSweepReport, StoreCensusPageV1, UnregisteredCollectionPlan, UnregisteredStoreFinding,
-    build_store_census, build_store_census_page, plan_unregistered_collection,
-    sweep_unregistered_stores,
-};
-pub(crate) use pages::{dir_size_bytes, dir_size_bytes_controlled, newest_mtime_secs_controlled};
-pub use quarantine::execute_registered_collection;
-pub(crate) use quarantine::{CollectionControl, execute_unregistered_collection_controlled};
+#[cfg(test)]
+pub(crate) use quarantine::read_pending_quarantine_receipts;
 pub use unregistered_page::UnregisteredSweepCompletionV1;
 pub use unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
@@ -427,6 +421,25 @@ pub enum CollectionCompletionV1 {
     Cancelled,
     DeadlineExceeded,
 }
+
+pub use pages::{
+    OrphanSweepReport, StoreCensusPageV1, UnregisteredCollectionPlan, UnregisteredStoreFinding,
+    build_store_census, build_store_census_page, plan_unregistered_collection,
+    sweep_unregistered_stores,
+};
+#[cfg(test)]
+pub(crate) use pages::{census_unregistered_project_dirs, sweep_orphan_stores};
+pub(crate) use pages::{
+    dir_size_bytes, dir_size_bytes_controlled, manifest_names_abandoned_root,
+    newest_mtime_secs_controlled,
+};
+pub use quarantine::execute_registered_collection;
+pub(crate) use quarantine::{CollectionControl, execute_unregistered_collection_controlled};
+#[cfg(test)]
+pub(crate) use quarantine::{
+    execute_registered_collection_controlled, execute_unregistered_collection,
+    unbounded_collection_control,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

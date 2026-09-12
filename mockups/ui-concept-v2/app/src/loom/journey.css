@@ -259,6 +259,8 @@
 }
 @media(max-width:1099px) {
  .journey[data-workspace=feedback] .journey-stage.compact,.journey[data-workspace=gaps] .journey-stage.compact { grid-template-rows:200px auto; min-height:614px; }
+ .journey:has(.journey-stage.compact) .journey-bottom { position:relative; z-index:2; }
+ .journey:has(.journey-stage.compact) .journey-fallbacks { position:relative; z-index:2; }
  .journey-story-event { width:70px; margin-left:-35px; }
  .journey-story-event svg { display:none; }
  .journey-story-event strong { font-size:9px; }

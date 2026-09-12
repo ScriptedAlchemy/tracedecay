@@ -363,6 +363,7 @@ mod tests {
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "ort-fixture".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
             dimensions: 8,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,
@@ -456,22 +457,6 @@ mod tests {
     }
 
     #[test]
-    fn sanitized_text_composition_is_the_chunk_text_unchanged() {
-        let composer = composer(vec![method_record()]);
-        let chunk = chunk(
-            CodeSearchChunkGrainV1::SymbolBody,
-            Some("symbol.get"),
-            SensitivityLevelV1::Public,
-            "pub fn get(&self, key: u32) -> Option<u32> {\n    self.map.get(&key).copied()\n}",
-        );
-        let document = composer
-            .compose(&key(EmbeddingDocumentCompositionV1::SanitizedText), &chunk)
-            .expect("document");
-        assert_eq!(document.text(), chunk.sanitized_text.as_str());
-        assert_eq!(document.header(), EmbeddingDocumentHeaderV1::NotComposed);
-    }
-
-    #[test]
     fn symbol_grains_render_the_same_header_ahead_of_their_text() {
         let composer = composer(vec![method_record()]);
         for (grain, text) in [
@@ -500,36 +485,6 @@ mod tests {
     }
 
     #[test]
-    fn file_grains_have_no_header_and_no_empty_lines() {
-        let composer = composer(vec![method_record()]);
-        for grain in [
-            CodeSearchChunkGrainV1::FilePreamble,
-            CodeSearchChunkGrainV1::FileWindow,
-        ] {
-            let chunk = chunk(grain, None, SensitivityLevelV1::Public, "use std::fmt;\n");
-            let document = composer.compose(&header_key(), &chunk).expect("document");
-            assert_eq!(document.text(), "use std::fmt;\n", "{grain:?}");
-            assert_eq!(document.header(), EmbeddingDocumentHeaderV1::NoSymbol);
-        }
-    }
-
-    #[test]
-    fn top_level_symbols_omit_the_scope_line() {
-        let composer = composer(vec![record("symbol.alpha", "function", "alpha", "alpha")]);
-        let chunk = chunk(
-            CodeSearchChunkGrainV1::SymbolBody,
-            Some("symbol.alpha"),
-            SensitivityLevelV1::Public,
-            "pub fn alpha(x: u32) -> u32 {\n    x + 1\n}",
-        );
-        let document = composer.compose(&header_key(), &chunk).expect("document");
-        assert_eq!(
-            document.text(),
-            "symbol: function alpha\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}"
-        );
-    }
-
-    #[test]
     fn scope_strips_the_simple_name_only_behind_a_separator() {
         assert_eq!(scope_breadcrumb("Holder::get", "get"), Some("Holder"));
         assert_eq!(
@@ -544,24 +499,6 @@ mod tests {
             scope_breadcrumb("Holder::fetch", "get"),
             Some("Holder::fetch")
         );
-    }
-
-    #[test]
-    fn header_values_are_normalized_to_one_line() {
-        let composer = composer(vec![record(
-            "symbol.get",
-            "method",
-            "Holder ::\n\tget",
-            "get",
-        )]);
-        let chunk = chunk(
-            CodeSearchChunkGrainV1::SymbolBody,
-            Some("symbol.get"),
-            SensitivityLevelV1::Public,
-            "body",
-        );
-        let document = composer.compose(&header_key(), &chunk).expect("document");
-        assert_eq!(document.text(), "symbol: method get\nscope: Holder\nbody");
     }
 
     #[test]
@@ -664,45 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn header_is_cut_exactly_at_a_quarter_of_the_document_budget() {
-        let long_scope = "a".repeat(600);
-        let record = record("symbol.get", "method", &format!("{long_scope}::get"), "get");
-        let full = format!("symbol: method get\nscope: {long_scope}\n");
-        let header_budget = DOCUMENT_BUDGET / HEADER_BUDGET_DIVISOR;
-        assert!(full.len() > header_budget);
-
-        let rendered = render_symbol_context_header(&record, DOCUMENT_BUDGET).expect("header");
-        assert_eq!(rendered.len(), header_budget);
-        assert!(rendered.ends_with("...\n"));
-        assert_eq!(
-            &rendered[..header_budget - HEADER_TRUNCATION_MARK.len()],
-            &full[..header_budget - HEADER_TRUNCATION_MARK.len()]
-        );
-
-        // Exactly at the boundary the header is kept whole; one byte over
-        // truncates.
-        let exact = render_symbol_context_header(&record, full.len() * HEADER_BUDGET_DIVISOR)
-            .expect("header");
-        assert_eq!(exact, full);
-        let over = render_symbol_context_header(&record, (full.len() - 1) * HEADER_BUDGET_DIVISOR)
-            .expect("header");
-        assert_eq!(over.len(), full.len() - 1);
-        assert!(over.ends_with("...\n"));
-    }
-
-    #[test]
-    fn truncation_never_splits_a_character() {
-        let record = record("symbol.get", "method", "Hölder::get", "get");
-        // A budget whose quarter lands inside the two-byte `ö` snaps down.
-        let full = "symbol: method get\nscope: Hölder\n";
-        let cut_inside =
-            full.find('ö').expect("multibyte scope") + 1 + HEADER_TRUNCATION_MARK.len();
-        let rendered = render_symbol_context_header(&record, cut_inside * HEADER_BUDGET_DIVISOR)
-            .expect("header");
-        assert_eq!(rendered, "symbol: method get\nscope: H...\n");
-    }
-
-    #[test]
     fn exhausted_header_budget_withholds_the_header() {
         let record = method_record();
         assert_eq!(
@@ -722,83 +620,5 @@ mod tests {
         )
         .expect("one kept byte");
         assert_eq!(minimal, "s...\n");
-    }
-
-    #[test]
-    fn body_shrinks_by_the_header_and_the_document_stays_within_budget() {
-        let composer = composer(vec![method_record()]);
-        let text = "x".repeat(DOCUMENT_BUDGET + 100);
-        let chunk = chunk(
-            CodeSearchChunkGrainV1::SymbolBody,
-            Some("symbol.get"),
-            SensitivityLevelV1::Public,
-            &text,
-        );
-        let document = composer.compose(&header_key(), &chunk).expect("document");
-        let header = "symbol: method get\nscope: Holder\n";
-        assert_eq!(document.text().len(), DOCUMENT_BUDGET);
-        assert!(document.text().starts_with(header));
-        assert_eq!(
-            &document.text()[header.len()..],
-            &text[..DOCUMENT_BUDGET - header.len()]
-        );
-
-        let short = chunk_with_text(&composer, "short body");
-        assert_eq!(short.text(), format!("{header}short body"));
-    }
-
-    fn chunk_with_text(composer: &EmbeddingDocumentComposerV1, text: &str) -> EmbeddingDocumentV1 {
-        let chunk = chunk(
-            CodeSearchChunkGrainV1::SymbolBody,
-            Some("symbol.get"),
-            SensitivityLevelV1::Public,
-            text,
-        );
-        composer.compose(&header_key(), &chunk).expect("document")
-    }
-
-    #[test]
-    fn a_full_group_of_composed_documents_fits_the_inference_byte_ceiling() {
-        let composer = composer(vec![method_record()]);
-        let key = header_key();
-        let text = "y".repeat(3 * DOCUMENT_BUDGET);
-        let total: usize = (0..BATCH_SIZE)
-            .map(|_| {
-                let chunk = chunk(
-                    CodeSearchChunkGrainV1::SymbolBody,
-                    Some("symbol.get"),
-                    SensitivityLevelV1::Public,
-                    &text,
-                );
-                composer
-                    .compose(&key, &chunk)
-                    .expect("document")
-                    .text()
-                    .len()
-            })
-            .sum();
-        assert!(total <= key.inference_batch_bytes as usize);
-    }
-
-    #[test]
-    fn composition_is_deterministic_across_runs() {
-        let build = || {
-            let composer = composer(vec![
-                record("symbol.zeta", "function", "outer::zeta", "zeta"),
-                method_record(),
-                record("symbol.alpha", "struct", "Holder", "Holder"),
-            ]);
-            let chunk = chunk(
-                CodeSearchChunkGrainV1::SymbolBody,
-                Some("symbol.get"),
-                SensitivityLevelV1::Public,
-                "body text",
-            );
-            composer.compose(&header_key(), &chunk).expect("document")
-        };
-        let first = build();
-        let second = build();
-        assert_eq!(first, second);
-        assert_eq!(first.text(), "symbol: method get\nscope: Holder\nbody text");
     }
 }

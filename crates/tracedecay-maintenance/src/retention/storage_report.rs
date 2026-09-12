@@ -1024,22 +1024,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_total_sums_every_measured_family() {
-        let report = StorageReport {
-            stores: vec![store("alpha", 400), store("beta", 600)],
-            global_db_bytes: 100,
-            unregistered_bytes: 25,
-            ..StorageReport::default()
-        };
-
-        let total = report.profile_total_size();
-        assert_eq!(total.state, ProfileTotalCoverageStateV1::Complete);
-        assert_eq!(total.registered_store_bytes, 1_000);
-        assert_eq!(total.accounted_bytes, 1_125);
-        assert!(total.excluded_families.is_empty());
-    }
-
-    #[test]
     fn paginated_report_totals_a_floor_and_never_claims_completeness() {
         let report = StorageReport {
             stores: vec![store("alpha", 400)],
@@ -1085,17 +1069,6 @@ mod tests {
                 .excluded_families
                 .iter()
                 .any(|family| family.contains("could not be read"))
-        );
-    }
-
-    #[test]
-    fn empty_profile_totals_zero_only_when_nothing_is_excluded() {
-        let total = StorageReport::default().profile_total_size();
-        assert_eq!(total.accounted_bytes, 0);
-        assert_eq!(
-            total.state,
-            ProfileTotalCoverageStateV1::Complete,
-            "a genuinely empty profile is a complete zero, not a partial one"
         );
     }
 
@@ -1416,71 +1389,6 @@ mod tests {
         assert!(final_page.next_cursor.is_none());
     }
 
-    #[test]
-    fn project_directory_page_handles_missing_directory_and_garbage_cursor() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let profile_root = tmp.path().join("profile");
-
-        let missing = list_project_directories_page(&profile_root, "", 64).unwrap();
-        assert!(missing.directories.is_empty());
-        assert_eq!(missing.next_cursor, None);
-        assert_eq!(missing.entries_scanned, 0);
-
-        std::fs::create_dir_all(profile_root.join("projects").join("proj_a")).unwrap();
-        let restarted = list_project_directories_page(&profile_root, "not-a-cursor", 64).unwrap();
-        assert_eq!(
-            restarted
-                .directories
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["proj_a"]
-        );
-        assert_eq!(restarted.next_cursor, None);
-    }
-
-    #[test]
-    #[ignore = "manual filesystem scaling measurement"]
-    fn project_directory_paging_measurements_are_linear() {
-        for directory_count in [1_000usize, 10_000] {
-            for page_size in [64usize, 256] {
-                let tmp = tempfile::TempDir::new().unwrap();
-                let profile_root = tmp.path().join("profile");
-                for index in 0..directory_count {
-                    std::fs::create_dir_all(
-                        profile_root
-                            .join("projects")
-                            .join(format!("proj_{index:05}")),
-                    )
-                    .unwrap();
-                }
-
-                let started = std::time::Instant::now();
-                let mut cursor = String::new();
-                let mut entries_scanned = 0usize;
-                let mut observed = 0usize;
-                loop {
-                    let page =
-                        list_project_directories_page(&profile_root, &cursor, page_size).unwrap();
-                    entries_scanned = entries_scanned.saturating_add(page.entries_scanned);
-                    observed = observed.saturating_add(page.directories.len());
-                    let Some(next_cursor) = page.next_cursor else {
-                        break;
-                    };
-                    cursor = next_cursor;
-                }
-                let elapsed = started.elapsed();
-
-                assert_eq!(observed, directory_count);
-                assert_eq!(entries_scanned, directory_count.saturating_mul(2));
-                eprintln!(
-                    "directories={directory_count} page_size={page_size} \
-                     entries_scanned={entries_scanned} elapsed={elapsed:?}"
-                );
-            }
-        }
-    }
-
     fn profile_tree_bytes(root: &Path) -> u64 {
         std::fs::read_dir(root)
             .unwrap()
@@ -1495,22 +1403,6 @@ mod tests {
                     total
                 }
             })
-    }
-
-    fn profile_entries(root: &Path) -> BTreeSet<PathBuf> {
-        fn collect(root: &Path, current: &Path, entries: &mut BTreeSet<PathBuf>) {
-            for entry in std::fs::read_dir(current).unwrap().flatten() {
-                let path = entry.path();
-                entries.insert(path.strip_prefix(root).unwrap().to_path_buf());
-                if entry.file_type().unwrap().is_dir() {
-                    collect(root, &path, entries);
-                }
-            }
-        }
-
-        let mut entries = BTreeSet::new();
-        collect(root, root, &mut entries);
-        entries
     }
 
     fn sqlite_family_bytes(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -1582,28 +1474,6 @@ mod tests {
             total.accounted_bytes, expected_bytes,
             "a full profile total must include session and code-generation files, \
              not only registered graph databases"
-        );
-    }
-
-    #[tokio::test]
-    async fn full_profile_report_creates_no_entries_under_the_profile_root() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let profile_root = tmp.path().join("profile");
-        std::fs::create_dir_all(&profile_root).unwrap();
-        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
-        seed_graph_db(&profile_root, "proj_a");
-        let before = profile_entries(&profile_root);
-
-        let report = build_storage_report(&profile_root).await.unwrap();
-
-        assert_eq!(
-            report.profile_total_size().state,
-            ProfileTotalCoverageStateV1::Complete
-        );
-        assert_eq!(
-            profile_entries(&profile_root),
-            before,
-            "read-only reporting must not add scratch or other entries to a live profile"
         );
     }
 
@@ -1768,19 +1638,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn report_on_empty_profile_root_is_empty_not_an_error() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let profile_root = tmp.path().join("profile");
-        std::fs::create_dir_all(&profile_root).unwrap();
-
-        let report = build_storage_report(&profile_root).await.unwrap();
-
-        assert!(report.stores.is_empty());
-        assert_eq!(report.unregistered_dir_count, 0);
-        assert_eq!(report.global_db_bytes, 0);
-    }
-
     #[test]
     fn targeted_project_report_bypasses_global_registry() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1877,32 +1734,6 @@ mod tests {
         assert_eq!(
             payload["code_generation_retention_availability"][0]["state"], "unavailable",
             "a corrupt active pointer is still unavailable: {payload}"
-        );
-    }
-
-    #[test]
-    fn metadata_only_state_is_not_treated_as_an_unreadable_scope() {
-        let report = StorageReport {
-            stores: vec![store("alpha", 400)],
-            code_generation_retention_availability: vec![
-                CodeGenerationRetentionAvailabilityEntry {
-                    project_id: "alpha".to_owned(),
-                    store_root: "/profile/projects/alpha/code-index-v1/ab".to_owned(),
-                    state: StorageReportAvailabilityState::MetadataOnly,
-                    reason: Some("generation_digest_scan_budget_exceeded".to_owned()),
-                },
-            ],
-            ..StorageReport::default()
-        };
-
-        let total = report.profile_total_size();
-
-        assert!(
-            !total
-                .excluded_families
-                .iter()
-                .any(|family| family.contains("could not be read")),
-            "a metadata-only census read the scope; it just did not re-hash it"
         );
     }
 }

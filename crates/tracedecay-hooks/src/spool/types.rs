@@ -5,6 +5,7 @@ use tracedecay_domain::UtcMicros;
 use crate::{
     HookContractError, HookEventEnvelopeV2, HookHostV1, MAX_SPOOL_BYTES_PER_HOST,
     MAX_SPOOL_BYTES_PER_SESSION, MAX_SPOOL_RECORDS_PER_HOST, MAX_SPOOL_RECORDS_PER_SESSION,
+    NativeContextScoutLifecycleV1,
 };
 
 use super::{FRAME_CHECKSUM_BYTES, FRAME_HEADER_BYTES, FRAME_LENGTH_BYTES};
@@ -85,6 +86,8 @@ pub struct HookSpoolRecordV1 {
     pub protected_session_id: [u8; 32],
     pub queued_at: UtcMicros,
     pub envelope: HookEventEnvelopeV2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_lifecycle: Option<NativeContextScoutLifecycleV1>,
     pub encoded_len: u32,
     pub checksum: [u8; 32],
     pub framed_len: u32,
@@ -315,14 +318,6 @@ pub(super) struct AcknowledgedSequenceV1 {
     pub(super) disposition: HookSpoolAckDispositionV1,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct LeaseFileV1 {
-    pub(super) version: u16,
-    pub(super) token: [u8; 16],
-    pub(super) expires_at: UtcMicros,
-}
-
 #[derive(Debug)]
 pub(super) struct ScanResult {
     pub(super) records: Vec<PendingRecordV1>,
@@ -343,6 +338,7 @@ pub(super) struct PendingRecordV1 {
     pub(super) event_id: [u8; 16],
     pub(super) checksum: [u8; 32],
     pub(super) envelope: Option<HookEventEnvelopeV2>,
+    pub(super) native_lifecycle: Option<NativeContextScoutLifecycleV1>,
 }
 
 impl PendingRecordV1 {
@@ -356,6 +352,7 @@ impl PendingRecordV1 {
             event_id: record.envelope.event_id,
             checksum: record.checksum,
             envelope: Some(record.envelope.clone()),
+            native_lifecycle: record.native_lifecycle.clone(),
         }
     }
 
@@ -367,6 +364,7 @@ impl PendingRecordV1 {
             protected_session_id: self.protected_session_id,
             queued_at: self.queued_at,
             envelope: self.envelope.clone()?,
+            native_lifecycle: self.native_lifecycle.clone(),
             encoded_len: self.framed_len.checked_sub(frame_overhead)?,
             checksum: self.checksum,
             framed_len: self.framed_len,
@@ -379,6 +377,8 @@ impl PendingRecordV1 {
             && self.queued_at == record.queued_at
             && self.framed_len == record.framed_len
             && self.event_id == record.envelope.event_id
+            && self.envelope.as_ref() == Some(&record.envelope)
             && self.checksum == record.checksum
+            && self.native_lifecycle == record.native_lifecycle
     }
 }

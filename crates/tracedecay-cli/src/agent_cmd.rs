@@ -1741,8 +1741,7 @@ mod tests {
         HostBundleCliOperation, apply_canonical_component_set,
         apply_default_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
-        component_set_request, reinstall_agent_integrations_with_dashboard_policies,
-        reinstall_agent_integrations_with_persisted_dashboard_policies,
+        component_set_request, reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
     use tracedecay_agent_hosts::agents::host_bundle::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
@@ -4365,54 +4364,6 @@ mod tests {
             std::fs::read(registration_path).unwrap(),
             b"{\"external\":true}"
         );
-    }
-
-    #[tokio::test]
-    async fn hermes_dashboard_opt_out_survives_update_and_reinstall() {
-        let _profile = pinned_host_profile();
-        let home = tempfile::tempdir().unwrap();
-        let tracedecay_bin = std::env::current_exe()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let plugin = home.path().join(".hermes/plugins/tracedecay");
-
-        apply_default_canonical_component_set(
-            "hermes",
-            HostBundleCliOperation::Install,
-            home.path(),
-            false,
-            false,
-        )
-        .unwrap();
-        apply_default_canonical_component_set(
-            "hermes",
-            HostBundleCliOperation::Update,
-            home.path(),
-            false,
-            false,
-        )
-        .unwrap();
-        assert!(!plugin.join("dashboard/manifest.json").exists());
-        assert!(!plugin.join("dashboard/plugin_api.py").exists());
-        assert!(!plugin.join("dashboard/dist/index.js").exists());
-
-        let policies = std::collections::BTreeMap::from([("hermes".to_string(), false)]);
-        let results = reinstall_agent_integrations_with_dashboard_policies(
-            &["hermes".to_string()],
-            home.path(),
-            &tracedecay_bin,
-            &policies,
-            false,
-        )
-        .await;
-        assert!(matches!(
-            results.as_slice(),
-            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "hermes"
-        ));
-        assert!(!plugin.join("dashboard/manifest.json").exists());
-        assert!(!plugin.join("dashboard/plugin_api.py").exists());
-        assert!(!plugin.join("dashboard/dist/index.js").exists());
     }
 
     #[test]

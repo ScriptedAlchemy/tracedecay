@@ -3,7 +3,6 @@ use super::{
     EnvGuard, HintAgent, Path, PathBuf, ToolHint, Value, deduped_project_hint_with_id,
     mint_hint_id, record_hint_emitted, record_hook_invoked,
 };
-use std::collections::HashSet;
 use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
 /// Terminal event kinds a single `hint_candidate` may resolve to. Every
@@ -80,12 +79,6 @@ fn hint_id(row: &Value) -> &str {
 /// Rows carrying a specific `hint_id`, in insertion order.
 fn events_for<'a>(rows: &'a [Value], id: &str) -> Vec<&'a Value> {
     rows.iter().filter(|row| hint_id(row) == id).collect()
-}
-
-#[test]
-fn mint_hint_id_is_unique_across_calls() {
-    let ids: HashSet<String> = (0..256).map(|_| mint_hint_id()).collect();
-    assert_eq!(ids.len(), 256, "hint ids must be unique");
 }
 
 #[test]

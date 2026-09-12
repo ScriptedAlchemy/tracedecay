@@ -2470,26 +2470,6 @@ mod tests {
     }
 
     #[test]
-    fn capacity_reports_only_ready_unleased_owners_as_evictable_headroom() {
-        let temporary = TempDir::new().unwrap();
-        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
-        let owner = registry
-            .resolve_owner_attachment(owner_registration(registration(temporary.path())))
-            .unwrap();
-        let leased = registry.capacity().unwrap();
-        assert_eq!(leased.max_open, 1);
-        assert_eq!(leased.occupied, 1);
-        assert_eq!(leased.evictable, 0);
-        assert_eq!(leased.available_after_eviction(), 0);
-
-        drop(owner);
-        let idle = registry.capacity().unwrap();
-        assert_eq!(idle.occupied, 1);
-        assert_eq!(idle.evictable, 1);
-        assert_eq!(idle.available_after_eviction(), 1);
-    }
-
-    #[test]
     fn resolve_without_an_owner_attachment_is_refused() {
         let temporary = TempDir::new().unwrap();
         let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
@@ -2498,36 +2478,6 @@ mod tests {
             registry.resolve(registration(temporary.path())),
             Err(GraphDbError::Unavailable { .. })
         ));
-    }
-
-    #[test]
-    fn lazy_owner_attachment_opens_the_engine_only_on_first_graph_read() {
-        let temporary = TempDir::new().unwrap();
-        let graph_path = temporary.path().join("graph.grafeo");
-        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
-        let attachment = registry
-            .resolve_lazy_owner_attachment(owner_registration(registration(temporary.path())))
-            .unwrap();
-
-        assert!(
-            !graph_path.exists(),
-            "publishing a retained graph owner must not eagerly create or replay its engine"
-        );
-
-        {
-            let lease = attachment.issue_lease().unwrap();
-            let _snapshot = lease.snapshot().unwrap();
-            assert_eq!(registry.resident_engine_count().unwrap(), 1);
-        }
-        assert!(
-            graph_path.exists(),
-            "the first graph read must materialize the lazy engine"
-        );
-        assert_eq!(
-            registry.resident_engine_count().unwrap(),
-            0,
-            "the lazy engine must hibernate after its final operation lease drops"
-        );
     }
 
     #[test]

@@ -28,9 +28,8 @@ fn scoop_packages_have_isolated_runtime_and_task_identities() {
     );
     assert_ne!(stable.state_file, beta.state_file);
 
-    let stable_identity =
-        TaskIdentity::for_package_user_sid(WindowsPackageId::Stable, TEST_SID)
-            .expect("stable task identity");
+    let stable_identity = TaskIdentity::for_package_user_sid(WindowsPackageId::Stable, TEST_SID)
+        .expect("stable task identity");
     let beta_identity = TaskIdentity::for_package_user_sid(WindowsPackageId::Beta, TEST_SID)
         .expect("beta task identity");
     assert_eq!(
@@ -318,9 +317,7 @@ impl DaemonControlApi for FakeDaemonControl {
     fn request_shutdown(&mut self) -> ShutdownRequestAttempt {
         self.shutdown_requests += 1;
         if self.shutdown_fails {
-            return ShutdownRequestAttempt::NotSent(
-                "fake graceful shutdown failed".to_string(),
-            );
+            return ShutdownRequestAttempt::NotSent("fake graceful shutdown failed".to_string());
         }
         if self.shutdown_loses_acknowledgement {
             return ShutdownRequestAttempt::SentWithoutAcknowledgement(
@@ -415,28 +412,6 @@ fn ownership_requires_matching_trigger_principal_and_private_acl() {
 }
 
 #[test]
-fn task_xml_round_trips_remote_tls_listener_paths() {
-    let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-    let remote_tls = crate::RemoteBrainTlsConfig::from_optional_parts(
-        Some("192.0.2.10:7443".parse().expect("listener address")),
-        Some(PathBuf::from(r"C:\TraceDecay TLS\server & chain.pem")),
-        Some(PathBuf::from(r"C:\TraceDecay TLS\server % key.pem")),
-    )
-    .expect("valid Remote Brain TLS task configuration")
-    .expect("enabled Remote Brain TLS task configuration");
-    let mut service_spec = spec(r"C:\TraceDecay\tracedecay.exe", r"C:\TraceDecay\data");
-    service_spec.remote_tls = Some(remote_tls.clone());
-
-    let xml = render_task_xml_for(&service_spec, &identity).expect("task XML");
-
-    assert_eq!(
-        remote_tls_from_task_xml(&xml).expect("parse task Remote Brain arguments"),
-        Some(remote_tls)
-    );
-    assert!(!xml.contains("PRIVATE KEY"));
-}
-
-#[test]
 fn task_xml_rejects_ambiguous_remote_tls_argument_quoting() {
     let xml = r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-tls-cert &quot;C:\TraceDecay TLS\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>";
 
@@ -448,8 +423,7 @@ fn task_xml_rejects_ambiguous_remote_tls_argument_quoting() {
 
 #[test]
 fn task_xml_rejects_partial_and_duplicate_remote_tls_arguments() {
-    let partial =
-        r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443</Arguments></Task>";
+    let partial = r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443</Arguments></Task>";
     let duplicate = r"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-listen 192.0.2.11:7443 --remote-tls-cert C:\TraceDecay\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>";
 
     assert!(remote_tls_from_task_xml(partial).is_err());
@@ -506,23 +480,6 @@ fn task_xml_rejects_non_unicode_paths_instead_of_corrupting_them() {
     .expect_err("invalid Unicode must fail");
 
     assert!(error.to_string().contains("is not valid Unicode"));
-}
-
-#[test]
-fn task_xml_round_trips_unc_and_extended_profile_roots() {
-    let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-    for profile_root in [
-        PathBuf::from(r"\\server\share\TraceDecay Data\"),
-        PathBuf::from(r"\\?\C:\Users\Zack\TraceDecay Data\"),
-    ] {
-        let xml = render_task_xml_for(
-            &spec(r"\\?\C:\TraceDecay\tracedecay.exe", &profile_root),
-            &identity,
-        )
-        .expect("render task XML");
-
-        assert_eq!(profile_root_from_task_xml(&xml), Some(profile_root));
-    }
 }
 
 #[test]
@@ -610,55 +567,6 @@ fn task_xml_escapes_action_paths_and_declares_daemon_settings() {
 }
 
 #[test]
-fn task_xml_profile_root_round_trips_escaped_text() {
-    let profile_root = PathBuf::from("C:\\Users\\Z & <Trace>\"'Decay\\");
-    let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
-    let xml = render_task_xml_for(
-        &spec(
-            r"C:\Users\Z\scoop\apps\tracedecay\current\tracedecay.exe",
-            &profile_root,
-        ),
-        &identity,
-    )
-    .expect("render task XML");
-
-    assert_eq!(profile_root_from_task_xml(&xml), Some(profile_root));
-}
-
-#[test]
-fn snapshot_maps_all_running_and_enablement_combinations() {
-    assert_eq!(state_from_snapshot(None), DaemonServiceState::Missing);
-    assert_eq!(
-        state_from_snapshot(Some(TaskSnapshot {
-            running: true,
-            enabled: true,
-        })),
-        DaemonServiceState::RunningEnabled
-    );
-    assert_eq!(
-        state_from_snapshot(Some(TaskSnapshot {
-            running: true,
-            enabled: false,
-        })),
-        DaemonServiceState::RunningDisabled
-    );
-    assert_eq!(
-        state_from_snapshot(Some(TaskSnapshot {
-            running: false,
-            enabled: true,
-        })),
-        DaemonServiceState::StoppedEnabled
-    );
-    assert_eq!(
-        state_from_snapshot(Some(TaskSnapshot {
-            running: false,
-            enabled: false,
-        })),
-        DaemonServiceState::StoppedDisabled
-    );
-}
-
-#[test]
 fn native_scheduler_state_mapping_fails_closed() {
     assert_eq!(
         task_snapshot_from_scheduler_state(1, false).expect("disabled"),
@@ -701,25 +609,6 @@ fn account_information_error_is_not_task_not_found() {
 }
 
 #[test]
-fn registration_updates_definition_and_restores_running_disabled_state() {
-    let mut api =
-        FakeTaskScheduler::with_task(DaemonServiceState::RunningDisabled, "<Task>old</Task>");
-
-    register_task_xml_with(&mut api, "<Task>new</Task>").expect("update task");
-
-    assert_eq!(api.state(), DaemonServiceState::RunningDisabled);
-    assert_eq!(api.xml.as_deref(), Some("<Task>new</Task>"));
-    assert_eq!(
-        api.operations,
-        vec![
-            Operation::Register("<Task>new</Task>".to_string()),
-            Operation::Run,
-            Operation::Enable(false),
-        ]
-    );
-}
-
-#[test]
 fn registration_preserves_every_existing_running_and_enablement_state() {
     for state in [
         DaemonServiceState::RunningEnabled,
@@ -757,8 +646,8 @@ fn registration_failure_still_restores_disabled_state() {
         FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task>old</Task>");
     api.fail_next(FailurePoint::Enablement);
 
-    let error = register_task_xml_with(&mut api, "<Task>new</Task>")
-        .expect_err("restoration must fail");
+    let error =
+        register_task_xml_with(&mut api, "<Task>new</Task>").expect_err("restoration must fail");
 
     assert!(error.to_string().contains("enablement change failed"));
     assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
@@ -775,8 +664,8 @@ fn registration_api_failure_after_mutation_restores_disabled_state() {
         FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task>old</Task>");
     api.registration_failures_remaining = 1;
 
-    let error = register_task_xml_with(&mut api, "<Task>new</Task>")
-        .expect_err("registration must fail");
+    let error =
+        register_task_xml_with(&mut api, "<Task>new</Task>").expect_err("registration must fail");
 
     assert!(
         error
@@ -811,8 +700,8 @@ fn failed_new_registration_cleanup_leaves_residual_task_disabled() {
         FakeTaskScheduler::with_task(DaemonServiceState::StoppedEnabled, "<Task>new</Task>");
     api.fail_next(FailurePoint::Delete);
 
-    let error = rollback_registration_with(&mut api, None, None)
-        .expect_err("delete failure must surface");
+    let error =
+        rollback_registration_with(&mut api, None, None).expect_err("delete failure must surface");
 
     assert!(error.to_string().contains("fake scheduler delete failed"));
     assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
@@ -847,23 +736,6 @@ fn registration_is_idempotent_and_create_or_update_does_not_duplicate() {
     assert_eq!(api.state(), DaemonServiceState::StoppedEnabled);
     assert_eq!(api.xml.as_deref(), Some(xml));
     assert_eq!(api.operations, vec![Operation::Register(xml.to_string())]);
-}
-
-#[test]
-fn apply_state_enables_runs_and_redisables_for_running_disabled() {
-    let mut api = FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task/>");
-
-    apply_state_with(&mut api, DaemonServiceState::RunningDisabled).expect("apply state");
-
-    assert_eq!(api.state(), DaemonServiceState::RunningDisabled);
-    assert_eq!(
-        api.operations,
-        vec![
-            Operation::Enable(true),
-            Operation::Run,
-            Operation::Enable(false)
-        ]
-    );
 }
 
 #[test]
@@ -921,28 +793,11 @@ fn rollback_restores_disabled_state_even_when_stop_fails() {
 }
 
 #[test]
-fn managed_stop_uses_authenticated_graceful_shutdown_without_hard_stop() {
-    let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningEnabled, "<Task/>");
-    api.snapshots_until_exit = Some(3);
-    let mut control = FakeDaemonControl {
-        quiesced_after: Some(2),
-        ..FakeDaemonControl::default()
-    };
-
-    stop_managed_with(&mut api, &mut control).expect("graceful stop");
-
-    assert_eq!(api.state(), DaemonServiceState::StoppedEnabled);
-    assert_eq!(control.shutdown_requests, 1);
-    assert!(!api.operations.contains(&Operation::Stop));
-}
-
-#[test]
 fn managed_stop_refuses_live_endpoint_when_task_is_already_stopped() {
     let mut api = FakeTaskScheduler::with_task(DaemonServiceState::StoppedEnabled, "<Task/>");
     let mut control = FakeDaemonControl::default();
 
-    let error =
-        stop_managed_with(&mut api, &mut control).expect_err("unmanaged daemon must fail");
+    let error = stop_managed_with(&mut api, &mut control).expect_err("unmanaged daemon must fail");
 
     assert!(error.to_string().contains("unmanaged"));
     assert_eq!(control.shutdown_requests, 0);

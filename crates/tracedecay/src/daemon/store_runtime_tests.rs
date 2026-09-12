@@ -190,71 +190,75 @@ const LCM_STATUS_PERFORMANCE_INDEX_NAMES: [&str; 4] = [
 ];
 const SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX: &str = "idx_lcm_external_payloads_owner";
 
-async fn installed_lcm_status_index_names(
+/// The `SQLite` scalar one query returns, for the fixtures that assert on a
+/// single count or marker.
+async fn scalar_i64(connection: &(impl QueryExecutor + ?Sized), sql: &str) -> i64 {
+    let mut rows = connection.query(sql, ()).await.expect("read scalar");
+    rows.next()
+        .await
+        .expect("step scalar")
+        .expect("scalar row")
+        .get::<i64>(0)
+        .expect("decode scalar")
+}
+
+/// Which of `candidates` the store currently carries, in name order. A
+/// migration that replaces an index is observable here as the set changing.
+async fn installed_index_names(
     connection: &(impl QueryExecutor + ?Sized),
+    candidates: &[&str],
 ) -> Vec<String> {
+    let quoted = candidates
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut rows = connection
         .query(
-            "SELECT name
-             FROM sqlite_master
-             WHERE type = 'index'
-               AND name IN (
-                   'idx_lcm_raw_legacy_truncated',
-                   'idx_lcm_raw_lossy_ingest',
-                   'idx_lcm_summary_nodes_depth_tokens',
-                   'idx_lcm_external_payloads_owner_bytes',
-                   'idx_lcm_external_payloads_owner'
-               )
-             ORDER BY name",
+            &format!(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name IN ({quoted})
+                 ORDER BY name"
+            ),
             (),
         )
         .await
-        .expect("read LCM status index names");
+        .expect("read installed index names");
     let mut names = Vec::new();
-    while let Some(row) = rows.next().await.expect("read LCM status index name") {
-        names.push(row.get::<String>(0).expect("decode LCM status index name"));
+    while let Some(row) = rows.next().await.expect("step installed index name") {
+        names.push(row.get::<String>(0).expect("decode installed index name"));
     }
     names
 }
 
+async fn installed_lcm_status_index_names(
+    connection: &(impl QueryExecutor + ?Sized),
+) -> Vec<String> {
+    let mut candidates = LCM_STATUS_PERFORMANCE_INDEX_NAMES.to_vec();
+    candidates.push(SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX);
+    installed_index_names(connection, &candidates).await
+}
+
 async fn deferred_lcm_fixture_row_count(connection: &(impl QueryExecutor + ?Sized)) -> i64 {
-    let mut rows = connection
-        .query(
-            "SELECT COUNT(*)
-             FROM sessions AS session
-             JOIN lcm_raw_messages AS message
-               ON message.provider = session.provider
-              AND message.session_id = session.session_id
-             WHERE session.session_id = 'deferred-index-session'
-               AND message.message_id = 'deferred-index-message'",
-            (),
-        )
-        .await
-        .expect("read seeded session and LCM row");
-    rows.next()
-        .await
-        .expect("read seeded session and LCM count")
-        .expect("seeded session and LCM count row")
-        .get::<i64>(0)
-        .expect("decode seeded session and LCM count")
+    scalar_i64(
+        connection,
+        "SELECT COUNT(*)
+         FROM sessions AS session
+         JOIN lcm_raw_messages AS message
+           ON message.provider = session.provider
+          AND message.session_id = session.session_id
+         WHERE session.session_id = 'deferred-index-session'
+           AND message.message_id = 'deferred-index-message'",
+    )
+    .await
 }
 
 async fn lcm_migration_applied_at(connection: &(impl QueryExecutor + ?Sized)) -> i64 {
-    let mut rows = connection
-        .query(
-            "SELECT applied_at
-             FROM session_schema_migrations
-             WHERE name = 'lcm'",
-            (),
-        )
-        .await
-        .expect("read LCM migration applied_at");
-    rows.next()
-        .await
-        .expect("read LCM migration row")
-        .expect("LCM migration row")
-        .get::<i64>(0)
-        .expect("decode LCM migration applied_at")
+    scalar_i64(
+        connection,
+        "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
+    )
+    .await
 }
 
 fn accepting_memory_write_control() -> FactWriteControl {
@@ -879,6 +883,169 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
         lcm_migration_applied_at(&snapshot).await,
         123,
         "background convergence must not rewrite the current LCM migration marker"
+    );
+}
+
+/// The two activity indexes a store can carry: the blob-covering predecessor
+/// and the replacement that leaves `metadata_json` in the table.
+const SESSION_ACTIVITY_INDEX_NAMES: [&str; 2] = [
+    "idx_session_messages_session_activity",
+    "idx_session_messages_session_activity_v2",
+];
+
+/// Rows still in the retired external-source table, or `None` once the
+/// migration has dropped it.
+async fn retired_external_source_rows(connection: &(impl QueryExecutor + ?Sized)) -> Option<i64> {
+    let present = scalar_i64(
+        connection,
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'external_source_objects_v1'",
+    )
+    .await
+        > 0;
+    if !present {
+        return None;
+    }
+    Some(
+        scalar_i64(
+            connection,
+            "SELECT COUNT(*) FROM external_source_objects_v1",
+        )
+        .await,
+    )
+}
+
+async fn migrating_session_row_count(connection: &(impl QueryExecutor + ?Sized)) -> i64 {
+    scalar_i64(
+        connection,
+        "SELECT COUNT(*) FROM sessions WHERE session_id = 'migrating-session'",
+    )
+    .await
+}
+
+/// The incident, end to end. Both of these migrations once ran inside the
+/// open's leased schema transaction: on a large store each outran its
+/// execution deadline, the batch was interrupted, and the daemon exited — so
+/// systemd restarted it into the same failure forever.
+///
+/// Admission must therefore leave both alone and complete, the store must
+/// serve while they are outstanding, Doctor must report which store is
+/// migrating rather than claiming health, and background convergence must be
+/// what actually retires them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn store_sized_migrations_are_reported_and_converge_after_admission() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_pending_convergence("project.schema-store-sized").await;
+    let seed = TestConnection::open(&sessions_path);
+    seed.execute_batch(
+        r"INSERT INTO sessions(provider, session_id, project_key, project_path)
+           VALUES ('cursor', 'migrating-session', 'project.schema-store-sized', '/migrating');
+           DROP INDEX IF EXISTS idx_session_messages_session_activity_v2;
+           CREATE INDEX idx_session_messages_session_activity
+               ON session_messages(
+                   provider, session_id, timestamp, ordinal, message_id, kind,
+                   tool_names, metadata_json
+               );
+           CREATE TABLE external_source_objects_v1 (
+               binding_id TEXT NOT NULL, native_object_digest TEXT NOT NULL,
+               partition_digest TEXT NOT NULL, mutation_digest TEXT NOT NULL,
+               mutation_json TEXT NOT NULL,
+               PRIMARY KEY (binding_id, native_object_digest));
+           INSERT INTO external_source_objects_v1 VALUES
+               ('b', 'sha256:obj', 'sha256:part', 'sha256:mut', '{}');",
+    )
+    .await
+    .expect("seed a store carrying both pre-migration shapes");
+    drop(seed);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("admission must complete on a store with migrations outstanding");
+    convergence_gate.wait_until_blocked().await;
+
+    {
+        let snapshot = database
+            .read_snapshot()
+            .await
+            .expect("ordinary read snapshot while migrations are outstanding");
+        assert_eq!(
+            installed_index_names(&snapshot, &SESSION_ACTIVITY_INDEX_NAMES).await,
+            vec!["idx_session_messages_session_activity".to_owned()],
+            "admission must not rebuild the activity index inside its write lease"
+        );
+        assert_eq!(
+            retired_external_source_rows(&snapshot).await,
+            Some(1),
+            "admission must not rewrite the retired external-source table"
+        );
+        assert_eq!(
+            migrating_session_row_count(&snapshot).await,
+            1,
+            "the store must serve ordinary reads while its migrations are outstanding"
+        );
+    }
+
+    let unconverged = registry.unconverged_registered_schemas();
+    assert_eq!(
+        unconverged,
+        vec![(shard_id.clone(), RegisteredSchemaConvergenceStatus::Running)],
+        "the shard still migrating must be the one reported"
+    );
+    let report = crate::daemon::doctor_kernel::pending_schema_migration_read(&unconverged);
+    let tracedecay_contracts::doctor::DoctorStorageFamilyReadV1::Observed { findings } = report
+    else {
+        panic!("a store mid-migration must be reported, not omitted: {report:?}");
+    };
+    let [finding] = findings.as_slice() else {
+        panic!("one outstanding shard is one finding: {findings:?}");
+    };
+    assert_eq!(
+        finding.kind(),
+        tracedecay_contracts::doctor::DoctorStorageFindingKindV1::PendingSchemaMigration
+    );
+    assert_eq!(
+        finding.finding().state(),
+        tracedecay_contracts::doctor::DoctorEvidenceStateV1::Stale,
+        "a readable store behind its schema is stale, never healthy"
+    );
+
+    convergence_gate.release();
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    assert!(
+        registry.unconverged_registered_schemas().is_empty(),
+        "a converged shard must stop being reported"
+    );
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .expect("ordinary read snapshot after convergence");
+    assert_eq!(
+        installed_index_names(&snapshot, &SESSION_ACTIVITY_INDEX_NAMES).await,
+        vec!["idx_session_messages_session_activity_v2".to_owned()],
+        "convergence must install the replacement and drop the blob-covering index"
+    );
+    assert_eq!(
+        retired_external_source_rows(&snapshot).await,
+        None,
+        "convergence must retire the external-source predecessor once it is empty"
+    );
+    assert_eq!(
+        migrating_session_row_count(&snapshot).await,
+        1,
+        "convergence must preserve the seeded rows"
     );
 }
 

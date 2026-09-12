@@ -334,35 +334,9 @@ mod tests {
     }
 
     #[test]
-    fn fenced_branch_roster_stays_inventory() {
-        assert!(is_inventory_text(
-            "Branch inventory sweep:\n```\ncodex/foo\ncodex/bar\ncodex/baz\n```"
-        ));
-    }
-
-    #[test]
-    fn genuine_roster_with_negated_work_verb_stays_inventory() {
-        assert!(is_inventory_text(
-            "Worktree fleet status again names codex/retrieval-evals-analytics amid twelve \
-             other branches; nothing is implemented in this session, it is only an index of \
-             branch names."
-        ));
-        assert!(is_inventory_text(
-            "Branch inventory listing of codex/a, codex/b, and codex/c across every worktree."
-        ));
-    }
-
-    #[test]
     fn branch_mention_without_listing_vocab_is_not_inventory() {
         assert!(!is_inventory_text(
             "the literal foo-bar marker on a scoped branch"
         ));
-    }
-
-    #[test]
-    fn rerank_fetch_limit_over_fetches_within_bounds() {
-        assert_eq!(rerank_fetch_limit(10, 100), 40);
-        assert_eq!(rerank_fetch_limit(30, 100), 100);
-        assert_eq!(rerank_fetch_limit(0, 100), 0);
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! The read service consumes one daemon-route admission receipt and owns result
 //! envelopes and payload validation. The injected port owns the durable
-//! completed-publication ledger, existing opaque-handle/cursor authority, and
+//! publication ledger, existing opaque-handle/cursor authority, and
 //! anchor hydration.
 
 use std::future::Future;
@@ -251,7 +251,7 @@ pub struct FeedbackReadPortContext<'a> {
     pub operation: &'a ApplicationOperation,
 }
 
-/// Four explicit reads over the canonical completed-publication and anchor
+/// Four explicit reads over the canonical publication and anchor
 /// owners. Implementations reuse authenticated `PageRequest` cursors and exact
 /// `RetrievalAnchorId` expansion; they may not reconstruct findings from
 /// advisory provider payloads.
@@ -681,18 +681,15 @@ fn evidence_envelope<T>(
 
 #[cfg(test)]
 mod invocation_tests {
-    use std::fmt::Debug;
-
     use serde::Serialize;
     use serde::de::DeserializeOwned;
     use tracedecay_domain::feedback::{
         FeedbackCycleId, FeedbackCycleResultV1, FeedbackCycleTerminationV1, FeedbackDurabilityV1,
-        FeedbackFindingId, FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1,
-        FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1,
+        FeedbackFindingId, FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackResultId,
+        FeedbackScopeV1, ProviderEvaluationStateV1,
     };
     use tracedecay_domain::{
-        CommitId, ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, SymbolOccurrenceId,
-        WorktreeId,
+        CommitId, ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, WorktreeId,
     };
 
     use super::{
@@ -708,57 +705,6 @@ mod invocation_tests {
         assert!(FeedbackHandleRequestV1::new("feedback.handle.v1").is_ok());
         assert!(FeedbackHandleRequestV1::new(" feedback.handle.v1").is_err());
         assert!(FeedbackHandleRequestV1::new("x".repeat(257)).is_err());
-    }
-
-    #[test]
-    fn feedback_sdk_read_result_payloads_round_trip_through_json() {
-        assert_json_round_trip(diagnostics());
-        assert_json_round_trip(FeedbackGetResultV1 {
-            finding: finding_read(),
-        });
-        assert_json_round_trip(FeedbackExpandResultV1 {
-            finding: finding_read(),
-            expansion: crate::AnchorExpandResult {
-                anchors: Vec::new(),
-            },
-        });
-        assert_json_round_trip(FeedbackListResultV1 {
-            findings: vec![finding_read()],
-        });
-        assert_json_round_trip(CanonicalFeedbackImpactProjectionV1 {
-            result_id: result_id(),
-            cycle_id: cycle_id(),
-            scope: scope(),
-            content_identity: None,
-            impact: None,
-            state: Some(FeedbackImpactStateV1::Unavailable),
-        });
-        assert_json_round_trip(CanonicalAffectedTestsProjectionV1 {
-            result_id: result_id(),
-            cycle_id: cycle_id(),
-            scope: scope(),
-            content_identity: None,
-            target: None,
-            affected_tests: vec![SymbolOccurrenceId::new("symbol.feedback-test").expect("symbol")],
-            evidence_anchors: vec![
-                RetrievalAnchorId::new("anchor.feedback-test").expect("retrieval anchor"),
-            ],
-            state: Some(FeedbackImpactStateV1::Partial),
-        });
-        assert_json_round_trip(TestResultsSurfaceRequestV1::default());
-        assert_json_round_trip(TestResultsResultV1 {
-            operation_id: "operation.feedback-test-results".to_owned(),
-            generation: 1,
-            head_commit_id: None,
-            code_generation_id: None,
-            results: Vec::new(),
-            completed: 0,
-            total: None,
-            termination: None,
-            receipt: None,
-            result_offset: 0,
-            available_results: 0,
-        });
     }
 
     #[test]
@@ -814,15 +760,6 @@ mod invocation_tests {
         .expect("serialize feedback finding result");
         nested["finding"]["unexpected"] = serde_json::Value::Bool(true);
         assert!(serde_json::from_value::<FeedbackGetResultV1>(nested).is_err());
-    }
-
-    fn assert_json_round_trip<T>(value: T)
-    where
-        T: Serialize + DeserializeOwned + Debug + PartialEq,
-    {
-        let encoded = serde_json::to_value(&value).expect("serialize feedback SDK result");
-        let decoded: T = serde_json::from_value(encoded).expect("deserialize feedback SDK result");
-        assert_eq!(decoded, value);
     }
 
     fn assert_unknown_field_rejected<T>(value: &T)

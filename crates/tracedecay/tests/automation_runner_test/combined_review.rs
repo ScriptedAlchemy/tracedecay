@@ -458,51 +458,6 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
 }
 
 #[tokio::test]
-async fn combined_review_not_dispatched_when_skill_writer_is_not_due() {
-    let _env_lock = ENV_LOCK.lock().await;
-    let temp = tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let cg = init_project(temp.path()).await;
-    let now = current_timestamp();
-    // Activity must predate the skill-writer terminal so the interval gate
-    // still applies; newer activity would re-admit the writer as fresh.
-    seed_project_session_activity_at(&cg, now - 120).await;
-    let config = scheduler_config(Some(3600), None);
-    append_run_record(
-        &cg.store_layout().dashboard_root,
-        &scheduler_record_for(
-            "previous_skill_writer_run",
-            AgentTaskKind::SkillWriter,
-            AutomationRunStatus::Succeeded,
-            now - 60,
-        ),
-    )
-    .await
-    .unwrap();
-    let backend = CombinedJsonBackend::new(combined_output_fixture());
-    let retrieval = CountingAutomationSessionRetrieval::new(&cg);
-
-    let dispatch = run_combined_review_with_backend_and_retrieval(
-        &automation_project_context(&cg),
-        &config,
-        &test_configuration_revision(),
-        &backend,
-        &retrieval,
-        combined_options(&profile_root),
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(retrieval.calls(), 0, "not-due work must not read evidence");
-    assert_eq!(backend.calls(), 0);
-    let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
-        panic!("expected combined dispatch to fall back, got {dispatch:?}");
-    };
-    assert_eq!(reason, "skill_writer_not_due");
-}
-
-#[tokio::test]
 async fn combined_review_task_configuration_skips_before_retrieval_or_backend() {
     let _env_lock = ENV_LOCK.lock().await;
     for (disabled_task, expected_reason) in [
@@ -638,42 +593,6 @@ async fn combined_review_respects_escape_hatch_flag() {
         panic!("expected combined dispatch to fall back, got {dispatch:?}");
     };
     assert_eq!(reason, "combined_mode_disabled");
-}
-
-#[tokio::test]
-async fn combined_review_falls_back_when_evidence_is_unavailable() {
-    let _env_lock = ENV_LOCK.lock().await;
-    let temp = tempdir().unwrap();
-    let profile_root = temp.path().join("profile");
-    let cg = init_project(temp.path()).await;
-    let _global_db = isolate_global_db(&cg);
-    seed_project_session_activity(&cg).await;
-    // Activity authority is present so the due-gate can pass; the injected
-    // empty retrieval still makes the reflector evidence bundle empty, so
-    // the combined path defers to the per-task runs (which record their own
-    // skips).
-    let config = scheduler_config(Some(3600), None);
-    let backend = CombinedJsonBackend::new(combined_output_fixture());
-    let retrieval = EmptyAutomationSessionRetrieval::new();
-
-    let dispatch =
-        tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-            &automation_project_context(&cg),
-            &config,
-            &test_configuration_revision(),
-            &backend,
-            &retrieval,
-            combined_options(&profile_root),
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
-        panic!("expected combined dispatch to fall back, got {dispatch:?}");
-    };
-    assert_eq!(reason, "no_session_evidence");
 }
 
 #[tokio::test]

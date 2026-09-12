@@ -52,6 +52,26 @@ try {
   });
   console.log("PASS Sessions rejects malformed persisted camera and camera-history values");
 
+  const fixtureSessionUrl = new URL(baseUrl);
+  fixtureSessionUrl.searchParams.set("surface", "sessions");
+  fixtureSessionUrl.searchParams.set("data", "fixture");
+  fixtureSessionUrl.searchParams.set("session", target.id);
+  await page.goto(fixtureSessionUrl.href);
+  assert.match(await page.locator(".sn-mode").innerText(), /FIXTURE · SYNTHETIC SESSION SPINE/);
+  assert.match(
+    await page.getByLabel("Selected session provenance inspector").innerText(),
+    /SOURCE AVAILABILITY MATRIX[\s\S]*TRANSCRIPT[\s\S]*PAGINATION[\s\S]*REDACTION[\s\S]*LINKS/i,
+  );
+  assert.match(await page.locator(".sn-transcript-fallback").innerText(), /EXACT EVENT FALLBACK[\s\S]*not ingested/);
+  await page.getByLabel("Search session index (not transcript FTS)").fill("");
+  await page.locator(".sn-table tbody tr").nth(1).waitFor();
+  await page.locator(".sn-table tbody tr").first().focus();
+  await page.keyboard.press("ArrowDown");
+  assert.equal(
+    await page.locator(":focus").getAttribute("data-session-id"),
+    await page.locator(".sn-table tbody tr").nth(1).getAttribute("data-session-id"),
+  );
+
   await page.evaluate((sessionId) => {
     sessionStorage.setItem("td:view:snapshot:sessions.selection", JSON.stringify(sessionId));
     sessionStorage.setItem("td:view:snapshot:sessions.query", JSON.stringify(sessionId));

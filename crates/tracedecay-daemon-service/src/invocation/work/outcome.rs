@@ -1,7 +1,6 @@
 //! Work invocation response, evidence, and effect construction.
 
 use serde::Serialize;
-use tracedecay_application::work::work_topology::WorkTopologyError;
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblem, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantSnapshot,
@@ -9,7 +8,7 @@ use tracedecay_contracts::{
     EvidenceDomain, EvidenceIdentity, EvidencePacket, OperationBudgetUsage, OperationReceipt,
     PageState, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext, RequestId,
     RetryDirective, SafeDiagnostic, TemporalState, WorkProductApplicationErrorV1,
-    WorkProjectionApplicationError, WorkflowEffectTerminalV1,
+    WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
@@ -193,78 +192,6 @@ pub(crate) fn work_blocked_interval_recovery_context(
         deadline,
         cancellation,
     )
-}
-
-/// Maps a verified Work topology failure to the typed application problem the
-/// attempt-list read reports. Absence of any Work events is the only
-/// non-error state: it names an empty scope, not a failing authority.
-pub(super) fn work_topology_problem(
-    error: WorkTopologyError,
-) -> Result<tracedecay_contracts::WorkAttemptTopologyStateV1, ApplicationProblem> {
-    match error {
-        WorkTopologyError::EmptyEvents => {
-            Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Absent)
-        }
-        WorkTopologyError::Cancelled => Err(ApplicationProblem::Cancelled {
-            stage: tracedecay_contracts::CancellationStage::DuringRead,
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        }),
-        WorkTopologyError::BudgetExhausted => Err(ApplicationProblem::TimedOut {
-            stage: tracedecay_contracts::CancellationStage::DuringRead,
-            retry: RetryDirective::AfterDelay,
-            legal_actions: Vec::new(),
-        }),
-        WorkTopologyError::GenerationMismatch => Err(ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.topology_generation_superseded".to_owned(),
-            message: "The verified Work topology generation was superseded during the read"
-                .to_owned(),
-        })),
-        WorkTopologyError::MixedAuthority
-        | WorkTopologyError::NonCanonicalTasks
-        | WorkTopologyError::DependencyCycle(_)
-        | WorkTopologyError::Contract(_)
-        | WorkTopologyError::Corrupt(_)
-        | WorkTopologyError::Unavailable(_) => Err(work_topology_unavailable_problem(
-            "the verified Work topology could not be served",
-        )),
-    }
-}
-
-pub(super) fn work_topology_unavailable_problem(message: &str) -> ApplicationProblem {
-    ApplicationProblem::unavailable(SafeDiagnostic {
-        code: "work.topology_unavailable".to_owned(),
-        message: message.to_owned(),
-    })
-}
-
-pub(super) fn work_projection_problem(error: WorkProjectionApplicationError) -> ApplicationProblem {
-    match error {
-        WorkProjectionApplicationError::Admission(problem) => problem,
-        WorkProjectionApplicationError::InvalidPageSize => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "work.invalid_page_size".to_owned(),
-                message: "The Work projection page size is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-        },
-        WorkProjectionApplicationError::Port(
-            tracedecay_contracts::WorkProjectionPortError::StaleCursor,
-        ) => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.stale_cursor".to_owned(),
-            message: "The Work projection cursor is stale".to_owned(),
-        }),
-        WorkProjectionApplicationError::Port(
-            tracedecay_contracts::WorkProjectionPortError::Unavailable,
-        ) => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work.projection_unavailable".to_owned(),
-            message: "The Work projection authority is unavailable".to_owned(),
-        }),
-        WorkProjectionApplicationError::Port(
-            tracedecay_contracts::WorkProjectionPortError::NotFoundOrNotAuthorized,
-        ) => ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -236,14 +236,25 @@ pub struct ReadState<T> {
 impl<T> ReadState<T> {
     #[hotpath::skip]
     pub const fn new(limits: PageLimits) -> Self {
+        Self::resumed(limits, None)
+    }
+
+    /// Start a bounded read after `keyset` instead of at the beginning of
+    /// storage order, so a continuation seeks past what earlier pages read.
+    #[hotpath::skip]
+    pub const fn resumed(limits: PageLimits, keyset: Option<PageKey>) -> Self {
         Self {
             limits,
             consumed_items: 0,
             consumed_bytes: 0,
             page_index: 0,
-            keyset: None,
+            keyset,
             marker: PhantomData,
         }
+    }
+
+    pub fn keyset(&self) -> Option<&PageKey> {
+        self.keyset.as_ref()
     }
 
     #[hotpath::skip]

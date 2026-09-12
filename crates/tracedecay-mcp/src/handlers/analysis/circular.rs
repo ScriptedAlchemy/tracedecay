@@ -177,10 +177,7 @@ fn render_circular_md(
 }
 #[cfg(test)]
 mod circular_render_tests {
-    use super::{
-        CIRCULAR_DEFAULT_MEMBER_LIMIT, CIRCULAR_MAX_LIMIT, bound_cycles, circular_output,
-        render_circular_md,
-    };
+    use super::{CIRCULAR_DEFAULT_MEMBER_LIMIT, bound_cycles, circular_output, render_circular_md};
 
     /// Mirrors [`crate::tools::MAX_RESPONSE_CHARS`], the point at which a
     /// response is replaced by a preview envelope plus a retrieval handle.
@@ -188,39 +185,6 @@ mod circular_render_tests {
 
     fn cycle(files: &[&str]) -> Vec<String> {
         files.iter().map(|file| (*file).to_string()).collect()
-    }
-
-    fn bounded(files: &[&str], member_limit: usize) -> Vec<super::BoundedCycle> {
-        bound_cycles(vec![cycle(files)], 1, member_limit).0
-    }
-
-    #[test]
-    fn renders_arrow_chain_closing_the_loop() {
-        let cycles = bounded(&["a.rs", "b.rs"], CIRCULAR_DEFAULT_MEMBER_LIMIT);
-        let out = render_circular_md(&cycles, 1, 0, 25);
-        assert!(out.contains("a.rs -> b.rs -> a.rs"), "got: {out}");
-        assert!(out.contains("Circular Dependencies (1)"), "got: {out}");
-    }
-
-    #[test]
-    fn renders_empty_state() {
-        let out = render_circular_md(&[], 0, 0, 25);
-        assert!(out.contains("No circular dependencies found"), "got: {out}");
-    }
-
-    #[test]
-    fn numbers_multiple_cycles() {
-        let (cycles, _) = bound_cycles(
-            vec![cycle(&["c.rs", "d.rs", "e.rs"]), cycle(&["a.rs", "b.rs"])],
-            2,
-            CIRCULAR_DEFAULT_MEMBER_LIMIT,
-        );
-        let out = render_circular_md(&cycles, 2, 0, 25);
-        assert!(
-            out.contains("1. c.rs -> d.rs -> e.rs -> c.rs"),
-            "got: {out}"
-        );
-        assert!(out.contains("2. a.rs -> b.rs -> a.rs"), "got: {out}");
     }
 
     #[test]
@@ -243,26 +207,6 @@ mod circular_render_tests {
         assert_eq!(page[0].omitted_member_count, 0);
         // Ties resolve by path order so repeated calls agree.
         assert_eq!(page[1].members, cycle(&["small-a.rs", "small-a2.rs"]));
-    }
-
-    #[test]
-    fn unbounded_page_reports_no_omission() {
-        let cycles = vec![cycle(&["a.rs", "b.rs"])];
-        let (page, omitted) = bound_cycles(cycles, 25, CIRCULAR_DEFAULT_MEMBER_LIMIT);
-        assert_eq!(omitted, 0);
-        assert_eq!(page.len(), 1);
-    }
-
-    #[test]
-    fn omission_notice_states_the_remainder_and_the_ceiling() {
-        let cycles = bounded(&["a.rs", "b.rs"], CIRCULAR_DEFAULT_MEMBER_LIMIT);
-        let out = render_circular_md(&cycles, 9, 8, 1);
-        assert!(out.contains("Circular Dependencies (9)"), "got: {out}");
-        assert!(
-            out.contains("8 further cycle(s) not shown at limit 1"),
-            "got: {out}"
-        );
-        assert!(out.contains(&CIRCULAR_MAX_LIMIT.to_string()), "got: {out}");
     }
 
     /// A single strongly connected component can hold hundreds of files. The

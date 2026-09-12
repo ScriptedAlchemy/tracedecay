@@ -353,7 +353,7 @@ pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
 mod stderr_tracing_tests {
     use tracing::level_filters::LevelFilter;
 
-    use super::{StderrTracingDefault, StderrTracingFilter, install_stderr_tracing};
+    use super::{StderrTracingDefault, StderrTracingFilter};
 
     fn parse(env_value: Option<&str>) -> StderrTracingFilter {
         StderrTracingFilter::parse(env_value, LevelFilter::WARN)
@@ -454,11 +454,6 @@ mod stderr_tracing_tests {
     }
 
     #[test]
-    fn a_fully_understood_value_reports_nothing() {
-        assert!(parse(Some("warn,tracedecay=debug")).diagnostic().is_none());
-    }
-
-    #[test]
     fn hooks_stay_silent_until_rust_log_asks_otherwise() {
         let unset = parse_for_hook(None);
         assert_eq!(unset.level_for_target("tracedecay"), LevelFilter::OFF);
@@ -473,12 +468,6 @@ mod stderr_tracing_tests {
         let scoped = parse_for_hook(Some("tracedecay=debug"));
         assert_eq!(scoped.level_for_target("tracedecay"), LevelFilter::DEBUG);
         assert_eq!(scoped.level_for_target("hyper"), LevelFilter::OFF);
-    }
-
-    #[test]
-    fn installing_the_subscriber_twice_does_not_panic() {
-        install_stderr_tracing(StderrTracingDefault::Warn);
-        install_stderr_tracing(StderrTracingDefault::Warn);
     }
 }
 

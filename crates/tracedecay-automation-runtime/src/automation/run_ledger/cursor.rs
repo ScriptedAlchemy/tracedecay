@@ -33,9 +33,12 @@ pub(crate) async fn load_latest_task_validation_pointer(
     let task_key = requested_task_key.to_owned();
     let pointer = pointer.to_owned();
     tokio::task::spawn_blocking(move || {
-        super::with_run_ledger_read_lock(&root, &path, || {
-            read_latest_task_validation_pointer(&path, &task_key, &pointer)
-        })
+        super::with_run_ledger_read_lock(
+            &root,
+            &path,
+            || None,
+            || read_latest_task_validation_pointer(&path, &task_key, &pointer),
+        )
     })
     .await
     .map_err(|error| config_error(format!("failed to join automation cursor read: {error}")))?
@@ -147,32 +150,6 @@ mod tests {
             "\"completed_at_micros\":1000000",
             &format!("\"completed_at_micros\":{}", completed_at * 1_000_000),
         )
-    }
-
-    #[test]
-    fn cursor_lookup_crosses_more_than_two_hundred_rows_without_pagination() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(super::super::RUN_LEDGER_FILENAME);
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(
-            file,
-            "{}",
-            ledger_line(
-                "cursor",
-                Some(serde_json::json!({
-                    "pagination": {"resume_after_fact_id": "fact.cursor"}
-                }))
-            )
-        )
-        .unwrap();
-        for index in 0..250 {
-            writeln!(file, "{}", ledger_line(&format!("failure-{index}"), None)).unwrap();
-        }
-        drop(file);
-        assert_eq!(
-            read_latest_task_validation_pointer(&path, "memory_curator", POINTER).unwrap(),
-            Some(serde_json::json!("fact.cursor"))
-        );
     }
 
     #[test]

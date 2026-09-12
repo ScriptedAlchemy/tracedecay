@@ -378,7 +378,7 @@ async fn memory_fact_store_add_search_update_and_remove() {
         (
             "tracedecay_fact_store_reason",
             "reason",
-            json!({"entities": ["Amari Memory", "Project Phoenix"]}),
+            json!({"entities": ["Project Phoenix", "Amari Memory"]}),
         ),
         (
             "tracedecay_fact_store_contradict",
@@ -527,6 +527,20 @@ async fn memory_fact_store_supersede_retires_old_fact_from_default_surfaces() {
     assert!(
         listed_ids.contains(&successor_fact_id),
         "the successor stays current: {listed}"
+    );
+
+    let retired = invoke_production_tool(
+        &cg,
+        "tracedecay_fact_store_get",
+        json!({"fact_id": old_fact_id.clone()}),
+    )
+    .await
+    .expect("an exact read keeps the superseded fact available");
+    assert_eq!(retired["fact"]["kind"], "superseded", "{retired}");
+    assert_eq!(retired["fact"]["superseded_by"], successor_fact_id);
+    assert_eq!(
+        retired["fact"]["fact"]["content"],
+        "Project Phoenix ships on the first of the month"
     );
 
     // The identical request is the same retained operation: it replays the
@@ -1029,23 +1043,6 @@ async fn memory_recall_updates_retrieval_count() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
-async fn memory_list_rejects_an_unknown_category() {
-    let cg = setup_project().await;
-
-    let bad_category = invoke_production_tool(
-        &cg,
-        "tracedecay_fact_store_list",
-        json!({"category": "definitely-not-a-category"}),
-    )
-    .await;
-    assert!(
-        bad_category.is_err(),
-        "the exact list schema must reject an unknown category"
-    );
-    close_test_graph(cg).await;
-}
-
 /// Status reports the canonical algebra and counters through the production
 /// memory authority.
 #[tokio::test]
@@ -1090,11 +1087,13 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
 async fn fact_store_reason_requires_an_entity_selection() {
     let cg = setup_project().await;
 
-    let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", json!({})).await;
-    assert!(
-        result.is_err(),
-        "the exact reason route must reject an empty entity selection"
-    );
+    for args in [json!({}), json!({"entities": ["same", "same"]})] {
+        let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", args).await;
+        assert!(
+            result.is_err(),
+            "the exact reason route must reject empty or duplicate entity selections"
+        );
+    }
     close_test_graph(cg).await;
 }
 

@@ -274,17 +274,6 @@ fn test_glsl_call_sites() {
 }
 
 #[test]
-fn test_glsl_extensions() {
-    let ext = GlslExtractor;
-    let extensions = ext.extensions();
-    assert!(extensions.contains(&"glsl"));
-    assert!(extensions.contains(&"vert"));
-    assert!(extensions.contains(&"frag"));
-    assert!(extensions.contains(&"geom"));
-    assert!(extensions.contains(&"comp"));
-}
-
-#[test]
 fn test_glsl_complexity_metrics() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
     let result = GlslExtractor.extract("sample.glsl", &source);

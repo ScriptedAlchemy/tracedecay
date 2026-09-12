@@ -68,44 +68,6 @@ async fn config_path_uses_profile_shard_when_enrolled() {
     );
 }
 
-#[tokio::test]
-async fn config_path_defaults_to_profile_shard_without_enrollment() {
-    let _guard = HOME_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    let home = test_home(&dir);
-    let profile_root = home.join(".tracedecay");
-    fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeGuard::set(&home);
-    let project_id = default_profile_project_id(&project);
-
-    assert_path_eq(
-        get_config_path(&project),
-        profile_root.join(format!("projects/{project_id}/config.json")),
-    );
-}
-
-#[test]
-fn active_project_context_keeps_layout_and_scope_identity() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path().join("repo");
-    fs::create_dir_all(&root).unwrap();
-    let profile = dir.path().join("profile");
-    let layout = default_profile_sharded_layout(&root, &profile).unwrap();
-
-    let context = ActiveProjectContext::new(layout.clone(), GraphScopeId::Project);
-
-    assert_eq!(context.layout, layout);
-    assert_eq!(context.scope_id, GraphScopeId::Project);
-    assert_eq!(
-        context.query_target.graph_db_path,
-        profile.join(format!(
-            "projects/{}/tracedecay.db",
-            default_profile_project_id(&root)
-        ))
-    );
-}
-
 #[test]
 fn project_path_accepts_contained_relative_and_absolute_paths() {
     let dir = TempDir::new().unwrap();

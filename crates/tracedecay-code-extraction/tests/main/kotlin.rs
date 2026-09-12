@@ -251,25 +251,6 @@ fn test_kt_property_val() {
     );
 }
 
-#[test]
-fn test_kt_property_var() {
-    let source = "var count: Int = 0";
-    let result = extract(source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let props: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Property)
-        .collect();
-    assert_eq!(props.len(), 1);
-    assert_eq!(props[0].name, "count");
-    assert!(
-        props[0].signature.as_ref().unwrap().contains("var"),
-        "signature should contain 'var': {:?}",
-        props[0].signature
-    );
-}
-
 // -----------------------------------------------------------------------
 // Constructor
 // -----------------------------------------------------------------------

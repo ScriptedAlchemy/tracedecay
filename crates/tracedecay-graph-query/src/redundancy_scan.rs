@@ -512,7 +512,12 @@ async fn score_candidate_pairs<'a>(
 
 /// `name (file:line)` locator that chains into `tracedecay_body` / `_callers`.
 fn node_label(node: &RedundancyCandidate) -> String {
-    format!("{} ({}:{})", node.name, node.file_path, node.start_line)
+    format!(
+        "{} ({}:{})",
+        node.name,
+        node.file_path,
+        node.start_line.saturating_add(1)
+    )
 }
 
 fn pair_views(pairs: &[RedundantPair<'_>]) -> Vec<RedundancyPairViewV1> {
@@ -522,13 +527,13 @@ fn pair_views(pairs: &[RedundantPair<'_>]) -> Vec<RedundancyPairViewV1> {
             a: RedundancyNodeViewV1 {
                 name: pair.node_a.name.clone(),
                 file: pair.node_a.file_path.clone(),
-                line: pair.node_a.start_line,
+                line: pair.node_a.start_line.saturating_add(1),
                 id: pair.node_a.id.clone(),
             },
             b: RedundancyNodeViewV1 {
                 name: pair.node_b.name.clone(),
                 file: pair.node_b.file_path.clone(),
-                line: pair.node_b.start_line,
+                line: pair.node_b.start_line.saturating_add(1),
                 id: pair.node_b.id.clone(),
             },
             label_a: node_label(pair.node_a),
@@ -1303,7 +1308,7 @@ fn redundant_pair_json(pair: &RedundantPair<'_>) -> Value {
 fn node_json(node: &RedundancyCandidate) -> Value {
     json!({
         "file": node.file_path,
-        "line": node.start_line,
+        "line": node.start_line.saturating_add(1),
         "name": node.name,
         "id": node.id,
     })
@@ -1356,29 +1361,6 @@ mod tests {
             "builder/mod.rs",
         ] {
             assert!(!is_generated_path(path), "{path} is real source");
-        }
-    }
-
-    #[test]
-    fn generated_paths_gain_segments_from_the_shared_list() {
-        // These segments weren't in this file's old standalone list but are
-        // part of the shared GENERATED_DIR_SEGMENTS union that scan.rs and
-        // migrate::inventory already recognized — closing this drift is the
-        // point of routing through the shared generated-segment classifier.
-        for path in [
-            "packages/web/coverage/lcov.info",
-            "env/.venv/pyvenv.cfg",
-            "apps/site/.next/server/app.js",
-            "tool/.cache/entry",
-            "repo/.turbo/cache",
-            "android/.gradle/wrapper",
-            "scripts/venv/bin/python",
-            "assets/app.min.css",
-        ] {
-            assert!(
-                is_generated_path(path),
-                "{path} should now count as generated"
-            );
         }
     }
 

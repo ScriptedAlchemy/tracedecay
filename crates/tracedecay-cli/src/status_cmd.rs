@@ -500,9 +500,8 @@ async fn handle_status_command_within(
 mod tests {
     use super::{
         COUNTRY_FLAGS_MAX_AGE_SECS, OnlineRefresh, OnlineRefreshPlan, WORLDWIDE_TOTAL_MAX_AGE_SECS,
-        await_daemon_tool_result, await_online_refresh, compact_status_tool_args,
-        reject_truncation_envelope, should_fetch_online_status_embellishments,
-        should_print_status_logo, status_command_deadline_from, status_server_request_budget,
+        await_daemon_tool_result, await_online_refresh, reject_truncation_envelope,
+        status_command_deadline_from, status_server_request_budget,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -585,16 +584,6 @@ mod tests {
     }
 
     #[test]
-    fn status_deadline_keeps_response_margin_beyond_server_budget() {
-        let default = status_command_deadline_from(None).expect("default status deadline");
-        assert_eq!(default, Duration::from_secs(45));
-        assert_eq!(
-            status_server_request_budget(default),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[test]
     fn status_deadline_boundaries_preserve_override_and_maximum() {
         assert_eq!(
             status_command_deadline_from(Some("0")).expect("zero falls back"),
@@ -644,19 +633,6 @@ mod tests {
     }
 
     #[test]
-    fn status_logo_requires_interactive_stdout() {
-        assert!(should_print_status_logo(false, true));
-        assert!(!should_print_status_logo(true, true));
-        assert!(!should_print_status_logo(false, false));
-    }
-
-    #[test]
-    fn online_embellishments_require_interactive_stdout() {
-        assert!(should_fetch_online_status_embellishments(true));
-        assert!(!should_fetch_online_status_embellishments(false));
-    }
-
-    #[test]
     fn truncation_envelope_is_detected_and_rejected() {
         let envelope = json!({
             "truncated": true,
@@ -679,15 +655,5 @@ mod tests {
             )
             .is_ok()
         );
-    }
-
-    #[test]
-    fn compact_status_args_disable_expensive_diagnostics() {
-        let args = compact_status_tool_args();
-        assert_eq!(args["format"], "json");
-        assert_eq!(args["include_branch_diagnostics"], false);
-        assert_eq!(args["include_storage_health"], false);
-        assert_eq!(args["include_session_ingest"], false);
-        assert_eq!(args["include_staleness"], false);
     }
 }

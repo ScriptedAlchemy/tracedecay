@@ -122,6 +122,26 @@ impl ProductionProjectCompositionRuntime {
             } => *startup_catch_up,
         }
     }
+
+    pub(super) fn resident_memory_admission_limit_bytes(&self) -> u64 {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(engine) => {
+                engine
+                    .invocation
+                    .code_index_schedulers
+                    .process_resident_memory()
+                    .snapshot()
+                    .limit_bytes
+            }
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
+            Self::Portable { .. } => {
+                tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1(
+                )
+                .get()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
