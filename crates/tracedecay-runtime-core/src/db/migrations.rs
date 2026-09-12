@@ -11,6 +11,7 @@ use std::pin::Pin;
 use crate::db::connection::DatabaseEngineWriteConnection;
 use crate::db::engine::{Connection, Executor, QueryExecutor, params};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_rusqlite_runtime::runtime_ledger;
 
 mod final_shape;
 
@@ -217,36 +218,76 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
             message: format!("failed to create handoff-open schema: {e}"),
             operation: "create_schema".to_string(),
         })?;
-    install_runtime_writer_ledger(conn, "create_schema").await?;
+    conn.execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create runtime writer ledger: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
     final_shape::require_exact_final_shape(conn).await?;
     set_version(conn, SCHEMA_VERSION).await?;
     Ok(())
 }
 
-/// Installs the runtime-writer ledger into the canonical store and folds the
-/// retired idempotency table into the current shape. Idempotent: a store that
-/// already carries the ledger is untouched.
+/// Installs the runtime-writer ledger into a canonical store that predates it
+/// and folds a retired `idempotency_v1` table into the current one with the
+/// same bounded statements the registered stores converge with. Idempotent: a
+/// store already at the current ledger shape is untouched.
 async fn install_runtime_writer_ledger(
     conn: &(impl Executor + Sync),
     operation: &str,
 ) -> Result<()> {
-    conn.execute_batch(tracedecay_rusqlite_runtime::LEDGER_SCHEMA)
+    let failure = |message: String| TraceDecayError::Database {
+        message,
+        operation: operation.to_owned(),
+    };
+    conn.execute_batch(runtime_ledger::RUNTIME_LEDGER_SCHEMA)
         .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to create runtime-writer ledger schema: {e}"),
-            operation: operation.to_owned(),
+        .map_err(|e| {
+            failure(format!(
+                "failed to create runtime-writer ledger schema: {e}"
+            ))
         })?;
-    if runtime_writer_ledger_retired_table_present(conn, operation).await? {
-        conn.execute_batch(tracedecay_rusqlite_runtime::MIGRATE_IDEMPOTENCY_V1)
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!(
-                    "failed to migrate retired runtime-writer idempotency ledger: {e}"
-                ),
-                operation: operation.to_owned(),
-            })?;
+    if !runtime_writer_ledger_retired_table_present(conn, operation).await? {
+        return Ok(());
     }
-    Ok(())
+    loop {
+        let copied = conn
+            .execute(runtime_ledger::COPY_RETIRED_IDEMPOTENCY_LEDGER_PAGE_SQL, ())
+            .await
+            .map_err(|e| failure(format!("failed to copy retired idempotency page: {e}")))?;
+        let retired = conn
+            .execute(
+                runtime_ledger::DELETE_CONVERGED_IDEMPOTENCY_LEDGER_PAGE_SQL,
+                (),
+            )
+            .await
+            .map_err(|e| failure(format!("failed to retire converged idempotency page: {e}")))?;
+        let remaining = sqlite_master_probe(
+            conn,
+            "SELECT 1 FROM td_runtime_writer_idempotency_v1 LIMIT 1",
+            operation,
+        )
+        .await?;
+        if !remaining {
+            break;
+        }
+        if copied == 0 && retired == 0 {
+            // A key present in both tables with different receipts: neither
+            // side may be chosen silently.
+            return Err(failure(
+                "retired runtime-writer idempotency receipts diverge from the current ledger"
+                    .to_owned(),
+            ));
+        }
+    }
+    conn.execute_batch(runtime_ledger::DROP_RETIRED_IDEMPOTENCY_LEDGER_SQL)
+        .await
+        .map_err(|e| {
+            failure(format!(
+                "failed to drop the retired idempotency ledger: {e}"
+            ))
+        })
 }
 
 /// Runs a `SELECT 1 ... LIMIT 1`-shaped probe against `sqlite_master` and
@@ -279,7 +320,7 @@ async fn runtime_writer_ledger_retired_table_present(
 ) -> Result<bool> {
     sqlite_master_probe(
         conn,
-        tracedecay_rusqlite_runtime::RETIRED_IDEMPOTENCY_LEDGER_PRESENT,
+        runtime_ledger::RETIRED_IDEMPOTENCY_LEDGER_PRESENT_SQL,
         operation,
     )
     .await

@@ -4,6 +4,8 @@ use std::time::{Duration, SystemTime};
 use serde_json::Value;
 use tempfile::TempDir;
 
+use crate::admission::test_support::MemoryHostAdmission;
+
 fn write_session_messages(root: &Path, name: &str, mtime_secs: u64) -> PathBuf {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -140,4 +142,61 @@ fn vibe_workflow_lookalike_stays_ordinary_message_without_goal_kind() {
             "{rejected} must not survive Vibe message metadata shaping"
         );
     }
+}
+
+#[tokio::test]
+async fn accepted_prefixed_session_and_nonmessage_prefix_share_canonical_cursor_identity() {
+    crate::runtime::observation::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    let session_id = "session_280d6113-53d5-460d-b519-9cf819759a28";
+    let session = tmp.path().join(".vibe/logs/session").join(session_id);
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        session.join("meta.json"),
+        serde_json::json!({
+            "session_id": session_id,
+            "environment": {"working_directory": project}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        session.join("messages.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type": "metadata"}),
+            serde_json::json!({"role": "assistant", "content": "visible after metadata"})
+        ),
+    )
+    .unwrap();
+    let source = VibeSource::with_home(tmp.path());
+    let admission = MemoryHostAdmission::default();
+
+    let outcome = capture_vibe_observations(
+        &admission,
+        &source,
+        &project,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(!outcome.deferred);
+    let observations = admission.observations();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(
+        observations[0].observation().source().session_id().as_str(),
+        tracedecay_privacy::protect_sensitive_structural_id(session_id).unwrap()
+    );
+    assert!(
+        observations[0]
+            .observation()
+            .payload()
+            .to_string()
+            .contains("visible after metadata")
+    );
 }

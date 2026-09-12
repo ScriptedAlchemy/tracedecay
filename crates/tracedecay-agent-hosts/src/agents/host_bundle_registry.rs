@@ -193,6 +193,28 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
     }
 }
 
+/// Every component the canonical host descriptor admits for lifecycle use.
+///
+/// This differs from [`default_components`]: a supported optional component
+/// remains applicable when an operator selects it explicitly.
+pub fn supported_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
+    host.descriptor()
+        .components()
+        .iter()
+        .copied()
+        .map(|component| match component {
+            tracedecay_domain::integration::HostComponentV1::Core => HostBundleComponentV1::Core,
+            tracedecay_domain::integration::HostComponentV1::Agent => HostBundleComponentV1::Agent,
+            tracedecay_domain::integration::HostComponentV1::ContextMcp => {
+                HostBundleComponentV1::ContextMcp
+            }
+            tracedecay_domain::integration::HostComponentV1::OperatorMcp => {
+                HostBundleComponentV1::OperatorMcp
+            }
+        })
+        .collect()
+}
+
 /// Build the canonical default set for a host. Unsupported hosts return their
 /// catalog reason instead of fabricating an empty successful install.
 pub fn verified_embedded_default_host_component_set(
@@ -1041,6 +1063,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn supported_component_projection_preserves_optional_components() {
+        assert_eq!(
+            supported_components(HostKindV1::Cline),
+            vec![HostBundleComponentV1::ContextMcp]
+        );
+        assert_eq!(
+            supported_components(HostKindV1::ClaudeCode),
+            vec![
+                HostBundleComponentV1::Core,
+                HostBundleComponentV1::ContextMcp,
+                HostBundleComponentV1::OperatorMcp,
+            ]
+        );
+        assert!(
+            !default_components(HostKindV1::ClaudeCode)
+                .contains(&HostBundleComponentV1::OperatorMcp)
+        );
     }
 
     #[test]

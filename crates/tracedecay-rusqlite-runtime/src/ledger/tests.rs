@@ -52,11 +52,10 @@ fn ledger_records_share_the_callers_transaction_boundary() {
     );
 }
 
-/// A store that still carries the WITHOUT ROWID ledger keeps every receipt
-/// across the cutover: the rows move into the rowid table, the old table is
-/// gone, and a replay of a migrated key is still recognized.
+/// Ordinary writer initialization installs the current target without doing
+/// store-sized work, while the retained receipt remains available to lookup.
 #[test]
-fn initialize_schema_migrates_the_without_rowid_ledger_in_place() {
+fn initialize_schema_leaves_retired_idempotency_for_background_convergence() {
     let mut connection = Connection::open_in_memory().unwrap();
     let metadata = metadata("operation.migrated", "key.migrated", 'a');
     let binding = binding(&metadata);
@@ -65,10 +64,7 @@ fn initialize_schema_migrates_the_without_rowid_ledger_in_place() {
     // temporarily giving the old table the current name.
     let transaction = connection.transaction().unwrap();
     initialize_schema(&transaction).unwrap();
-    assert!(matches!(
-        record_commit(&transaction, &metadata, &scope(&metadata), None).unwrap(),
-        LedgerDisposition::Committed(_)
-    ));
+    let receipt = commit(&transaction, &metadata);
     transaction
         .execute_batch(
             "CREATE TABLE td_runtime_writer_idempotency_v1 (
@@ -101,7 +97,7 @@ fn initialize_schema_migrates_the_without_rowid_ledger_in_place() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(retired_present, 0, "the WITHOUT ROWID ledger is dropped");
+    assert_eq!(retired_present, 1, "ordinary initialization retains V1");
     let migrated: i64 = transaction
         .query_row(
             "SELECT COUNT(*) FROM td_runtime_writer_idempotency_v2",
@@ -109,15 +105,12 @@ fn initialize_schema_migrates_the_without_rowid_ledger_in_place() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(migrated, 1);
-    assert!(
-        matches!(
-            record_commit(&transaction, &metadata, &scope(&metadata), None).unwrap(),
-            LedgerDisposition::Replay(_)
-        ),
-        "a receipt written before the cutover still dedupes its replay"
+    assert_eq!(migrated, 0, "ordinary initialization does not copy history");
+    assert_eq!(
+        lookup_receipt(&transaction, &binding, &metadata.idempotency, true).unwrap(),
+        Some(receipt),
+        "the writer can replay from V1 while convergence is pending"
     );
-    // Re-running the initializer on the migrated store is a no-op.
     initialize_schema(&transaction).unwrap();
     assert!(current_watermark(&transaction, &binding).unwrap().is_some());
 }
@@ -162,7 +155,7 @@ fn malformed_canonical_json_fails_closed() {
 
     let transaction = connection.transaction().unwrap();
     assert!(matches!(
-        lookup_receipt(&transaction, &binding, &metadata.idempotency),
+        lookup_receipt(&transaction, &binding, &metadata.idempotency, false),
         Err(LedgerError::Corrupt { .. })
     ));
 }

@@ -141,12 +141,6 @@ pub trait CallableCodeQueryPort: Send + Sync {
         request: &'a CodeNavigationRequest,
     ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
 
-    fn definition<'a>(
-        &'a self,
-        context: RetrievalPortContext<'a>,
-        request: &'a CodeNavigationRequest,
-    ) -> CallableCodeQueryFuture<'a, SymbolPrimitiveRecord>;
-
     fn type_definition<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
@@ -444,13 +438,6 @@ where
         CodeNavigationRequest,
         SymbolPrimitiveRecord,
         declaration
-    );
-    callable_code_service_method!(
-        definition,
-        Definition,
-        CodeNavigationRequest,
-        SymbolPrimitiveRecord,
-        definition
     );
     callable_code_service_method!(
         type_definition,

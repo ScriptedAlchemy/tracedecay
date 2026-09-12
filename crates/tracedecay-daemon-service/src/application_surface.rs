@@ -27,14 +27,17 @@ use tracedecay_contracts::handlers::CanonicalApplicationDispatcher;
 use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_contracts::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
-    ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
-    CancellationContext, CancellationSignal, CancellationStage, Deadline, LegalAction,
-    OperationTermination, PageRequest, ProblemOwningLayer, RequestContext, RequestId,
-    ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
-    configuration_surface_catalog_contribution,
+    ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
+    ApplicationProblemKind, CancellationContext, CancellationSignal, CancellationStage, Deadline,
+    LegalAction, Omission, OmissionReason, OperationTermination, PageRequest, ProblemOwningLayer,
+    RequestContext, RequestId, ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic,
+    StreamEvent, StreamEventKind, configuration_surface_catalog_contribution,
 };
 pub use tracedecay_daemon_protocol::GitReadSurfaceRequest;
-use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    ManifestDigest, ProjectId, ScopeOutcome, ScopePartialReasonV1, ScopeUnavailableReasonV1,
+    UtcMicros, canonical_sha256,
+};
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId,
     ProfileId, RouteExposureV1, SchemaId, SurfaceOperationName, UseCaseId,
@@ -201,7 +204,7 @@ pub async fn invoke_multi_root_surface_request(
     deadline: Deadline,
     cancellation: tracedecay_contracts::CancellationSignal,
     body: Value,
-) -> Result<Value, ApplicationSurfaceAdapterError> {
+) -> Result<ScopeOutcome<Value>, ApplicationSurfaceAdapterError> {
     let request = parse_application_surface_request(operation, body)?;
     let dispatched = resolve_application_surface_dispatch_with_controls(
         BindingSurface::Http,
@@ -215,13 +218,60 @@ pub async fn invoke_multi_root_surface_request(
     )?;
     let response =
         execute_application_surface(operation, dispatched, Some(executor.as_ref())).await?;
-    let envelope = response
-        .result
-        .map_err(|_| ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
-    serde_json::to_value(envelope.outcome)
-        .ok()
-        .and_then(|value| value.get("value")?.get("payload").cloned())
-        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)
+    let envelope = match response.result {
+        Ok(envelope) => envelope,
+        Err(problem) if problem.problem.kind == ApplicationProblemKind::NotFoundOrNotAuthorized => {
+            return Ok(ScopeOutcome::Denied);
+        }
+        Err(_) => {
+            return Ok(ScopeOutcome::Unavailable {
+                reason: ScopeUnavailableReasonV1::AuthorityUnavailable,
+            });
+        }
+    };
+    let ApplicationOutcome::Evidence(packet) = envelope.outcome else {
+        return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+    };
+    let Some(payload) = packet.payload else {
+        return Ok(ScopeOutcome::Unavailable {
+            reason: ScopeUnavailableReasonV1::AuthorityUnavailable,
+        });
+    };
+    Ok(match packet.execution.termination {
+        OperationTermination::Completed => ScopeOutcome::Exact(payload),
+        OperationTermination::Partial => ScopeOutcome::Partial {
+            value: payload,
+            reason: multi_root_partial_reason(&packet.omissions),
+        },
+        OperationTermination::Cancelled
+        | OperationTermination::TimedOut
+        | OperationTermination::Failed
+        | OperationTermination::Unavailable
+        | OperationTermination::EffectUnknown => ScopeOutcome::Unavailable {
+            reason: ScopeUnavailableReasonV1::AuthorityUnavailable,
+        },
+    })
+}
+
+fn multi_root_partial_reason(omissions: &[Omission]) -> ScopePartialReasonV1 {
+    if omissions
+        .iter()
+        .any(|omission| omission.reason == OmissionReason::Budget)
+    {
+        ScopePartialReasonV1::BudgetExceeded
+    } else if omissions
+        .iter()
+        .any(|omission| omission.reason == OmissionReason::Stale)
+    {
+        ScopePartialReasonV1::Stale
+    } else if omissions
+        .iter()
+        .any(|omission| omission.reason == OmissionReason::Unavailable)
+    {
+        ScopePartialReasonV1::RootUnavailable
+    } else {
+        ScopePartialReasonV1::Incomplete
+    }
 }
 
 fn work_application_router_with_executor(
@@ -2393,7 +2443,6 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::CodeFacets
         | ApplicationSurfaceOperation::CodeTimeline
         | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
         | ApplicationSurfaceOperation::CodeTypeDefinition
         | ApplicationSurfaceOperation::CodeReferences
         | ApplicationSurfaceOperation::SessionLookup
@@ -2801,7 +2850,6 @@ fn http_page_projection(operation: ApplicationSurfaceOperation) -> HttpPageProje
         | ApplicationSurfaceOperation::CodeFacets
         | ApplicationSurfaceOperation::CodeTimeline
         | ApplicationSurfaceOperation::CodeDeclaration
-        | ApplicationSurfaceOperation::CodeDefinition
         | ApplicationSurfaceOperation::CodeTypeDefinition
         | ApplicationSurfaceOperation::CodeReferences => HttpPageProjection::MetaCursor,
         ApplicationSurfaceOperation::DiagnosticsRead => HttpPageProjection::BodyPageControls,

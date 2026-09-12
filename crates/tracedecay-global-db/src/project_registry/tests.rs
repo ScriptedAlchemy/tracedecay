@@ -12,6 +12,25 @@ use tracedecay_runtime_core::db::engine::{
 use crate::RegisteredGlobalDb;
 use crate::tests::harness::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime};
 
+#[cfg(unix)]
+#[test]
+fn ephemeral_admission_resolves_missing_profiles_through_symlinked_parents() {
+    let temporary = tempfile::tempdir().unwrap();
+    let alias = temporary.path().join("alias");
+    std::os::unix::fs::symlink(temporary.path(), &alias).unwrap();
+    let profile = alias.join("not-created/profile");
+    assert!(!profile.exists());
+    assert!(super::ephemeral_root_rejection(temporary.path(), &profile).is_none());
+
+    let outside = temporary.path().join("outside");
+    std::os::unix::fs::symlink("/", &outside).unwrap();
+    let profile = outside
+        .join(temporary.path().file_name().unwrap())
+        .join("not-created/profile");
+    assert!(!profile.exists());
+    assert!(super::ephemeral_root_rejection(temporary.path(), &profile).is_some());
+}
+
 struct RegistryQueryPlans {
     recent: Vec<String>,
     git_common_dir: Vec<String>,

@@ -203,11 +203,6 @@ fn callable_code_executable_schemas(
         SymbolPrimitiveRecord
     );
     add!(
-        Definition,
-        CodeNavigationSurfaceRequest,
-        SymbolPrimitiveRecord
-    );
-    add!(
         TypeDefinition,
         CodeNavigationSurfaceRequest,
         SymbolPrimitiveRecord
@@ -265,7 +260,6 @@ fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'sta
         | CallableCodeOperationKind::Facets
         | CallableCodeOperationKind::Timeline
         | CallableCodeOperationKind::Declaration
-        | CallableCodeOperationKind::Definition
         | CallableCodeOperationKind::TypeDefinition
         | CallableCodeOperationKind::References
         | CallableCodeOperationKind::SourceMetadata => None,
@@ -284,7 +278,6 @@ fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'stat
         CallableCodeOperationKind::Facets => Some("code_facets"),
         CallableCodeOperationKind::Timeline => Some("code_timeline"),
         CallableCodeOperationKind::Declaration => Some("code_declaration"),
-        CallableCodeOperationKind::Definition => Some("code_definition"),
         CallableCodeOperationKind::TypeDefinition => Some("code_type_definition"),
         CallableCodeOperationKind::References => Some("code_references"),
         CallableCodeOperationKind::SymbolSearch

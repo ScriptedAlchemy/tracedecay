@@ -643,7 +643,6 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(
         "tracedecay_code_callees",
         "tracedecay_code_callers",
         "tracedecay_code_declaration",
-        "tracedecay_code_definition",
         "tracedecay_code_references",
         "tracedecay_code_type_definition",
         "tracedecay_code_type_hierarchy",

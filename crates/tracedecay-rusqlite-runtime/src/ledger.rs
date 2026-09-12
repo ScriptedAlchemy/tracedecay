@@ -24,8 +24,12 @@ pub(crate) use idempotency::{LedgerDisposition, lookup_receipt};
 pub(crate) use inbox::lookup as lookup_inbox;
 #[cfg(test)]
 pub(crate) use outbox::outbox_entry;
-pub(crate) use schema::initialize_schema;
-pub use schema::{LEDGER_SCHEMA, MIGRATE_IDEMPOTENCY_V1, RETIRED_IDEMPOTENCY_LEDGER_PRESENT};
+pub use schema::{
+    COPY_RETIRED_IDEMPOTENCY_LEDGER_PAGE_SQL, DELETE_CONVERGED_IDEMPOTENCY_LEDGER_PAGE_SQL,
+    DROP_RETIRED_IDEMPOTENCY_LEDGER_SQL, RETIRED_IDEMPOTENCY_LEDGER_PRESENT_SQL,
+    RUNTIME_LEDGER_SCHEMA,
+};
+pub(crate) use schema::{initialize_schema, retired_idempotency_ledger_present};
 
 #[cfg(test)]
 mod tests;
