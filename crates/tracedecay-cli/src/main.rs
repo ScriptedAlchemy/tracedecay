@@ -1305,13 +1305,22 @@ fn open_dashboard_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     let status = Command::new("open").arg(url).status()?;
     #[cfg(target_os = "windows")]
-    let status = Command::new("cmd").args(["/C", "start", "", url]).status()?;
+    let status = Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .status()?;
     #[cfg(all(unix, not(target_os = "macos")))]
     let status = Command::new("xdg-open").arg(url).status()?;
     #[cfg(not(any(unix, target_os = "windows")))]
-    return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no platform opener"));
+    return Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no platform opener",
+    ));
     #[cfg(any(unix, target_os = "windows"))]
-    if status.success() { Ok(()) } else { Err(std::io::Error::other(format!("opener exited {status}"))) }
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("opener exited {status}")))
+    }
 }
 
 async fn dispatch_runtime_command(command: Commands) -> tracedecay_domain::errors::Result<()> {
