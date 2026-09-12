@@ -14,6 +14,12 @@ const OBSERVABILITY_ROLLUP_RETENTION_SECONDS: i64 = 395 * 86_400;
 const MAX_OBSERVABILITY_OUTBOX_JSON_BYTES: usize = 1_048_576;
 const OBSERVABILITY_RETENTION_ROWS_PER_CLASS: usize = 512;
 pub(crate) const ANALYTICS_INSERT_ROWS_PER_STATEMENT: usize = 500;
+
+#[derive(Clone, Copy)]
+enum AnalyticsAppendKind {
+    General,
+    Observability,
+}
 const ACTIVE_DIRTY_ROLLUP_SOURCE_EXCLUSION_SQL: &str = r#"
 NOT (
     analytics_events.event_kind IN (
@@ -139,17 +145,60 @@ impl RegisteredGlobalDb {
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
-        crate::hotpath_observe::record_transaction_rows(1);
+        match self
+            .append_observability_events(std::slice::from_ref(event))
+            .await?
+            .as_slice()
+        {
+            [id] => Ok(*id),
+            _ => Err("observability append returned an invalid id count".to_owned()),
+        }
+    }
+
+    #[hotpath::measure(
+        future = true,
+        label = "global_db.registered.analytics.append_observability_batch"
+    )]
+    pub async fn append_observability_events(
+        &self,
+        events: &[AnalyticsEventInsert],
+    ) -> Result<Vec<i64>, String> {
+        self.append_events(events, AnalyticsAppendKind::Observability)
+            .await
+    }
+
+    async fn append_events(
+        &self,
+        events: &[AnalyticsEventInsert],
+        kind: AnalyticsAppendKind,
+    ) -> Result<Vec<i64>, String> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        crate::hotpath_observe::record_transaction_rows(
+            u64::try_from(events.len()).unwrap_or(u64::MAX),
+        );
         let transaction = self
             .begin_write_transaction()
             .await
-            .map_err(|error| format!("failed to begin observability transaction: {error}"))?;
-        let id = append_observability_event_in_existing_tx(&transaction, event).await?;
+            .map_err(|error| format!("failed to begin analytics append transaction: {error}"))?;
+        let ids = match kind {
+            AnalyticsAppendKind::General => {
+                append_analytics_events_in_existing_tx(&transaction, events).await?
+            }
+            AnalyticsAppendKind::Observability => {
+                let mut ids = Vec::with_capacity(events.len());
+                for event in events {
+                    ids.push(append_observability_event_in_existing_tx(&transaction, event).await?);
+                }
+                ids
+            }
+        };
         transaction
             .commit()
             .await
-            .map_err(|error| format!("failed to commit observability event: {error}"))?;
-        Ok(id)
+            .map_err(|error| format!("failed to commit analytics append transaction: {error}"))?;
+        Ok(ids)
     }
 
     #[hotpath::measure(
@@ -492,22 +541,8 @@ impl RegisteredGlobalDb {
         &self,
         events: &[AnalyticsEventInsert],
     ) -> Result<Vec<i64>, String> {
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-        crate::hotpath_observe::record_transaction_rows(
-            u64::try_from(events.len()).unwrap_or(u64::MAX),
-        );
-        let transaction = self
-            .begin_write_transaction()
+        self.append_events(events, AnalyticsAppendKind::General)
             .await
-            .map_err(|error| format!("failed to begin analytics event batch: {error}"))?;
-        let ids = append_analytics_events_in_existing_tx(&transaction, events).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit analytics event batch: {error}"))?;
-        Ok(ids)
     }
 
     /// Atomically appends one imported JSONL frontier and advances its cursor.
@@ -928,12 +963,7 @@ async fn append_observability_event_in_existing_tx(
     transaction: &RegisteredGlobalDbWriteTransaction<'_>,
     event: &AnalyticsEventInsert,
 ) -> Result<i64, String> {
-    if event.provider != "tracedecay-observability"
-        || event.hint_id.as_deref().is_none_or(str::is_empty)
-        || event.metadata_json.is_none()
-    {
-        return Err("invalid canonical observability event".to_string());
-    }
+    validate_observability_event(event)?;
     let mut rows = transaction
         .query(
             "SELECT id, provider, project_id, session_id, timestamp, event_kind,
@@ -964,6 +994,16 @@ async fn append_observability_event_in_existing_tx(
     }
     drop(rows);
     append_analytics_event_in_existing_tx(transaction, event).await
+}
+
+fn validate_observability_event(event: &AnalyticsEventInsert) -> Result<(), String> {
+    if event.hint_id.as_deref().is_none_or(str::is_empty) {
+        return Err("invalid canonical observability event".to_owned());
+    }
+    if event.provider != "tracedecay-observability" || event.metadata_json.is_none() {
+        return Err("invalid canonical observability event".to_owned());
+    }
+    Ok(())
 }
 
 fn analytics_record_matches_insert(
