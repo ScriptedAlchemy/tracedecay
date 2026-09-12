@@ -622,7 +622,7 @@ where
     // would stay unattributed until a transcript ingest happens to run. The
     // Graph publication is content-addressed and idempotent, so running it on
     // every pass (including passes with zero new session rows) is safe.
-    let later_failure = match super::attribution::run_commit_attribution_sweep_outcome(
+    let later_failure = match super::attribution::run_commit_attribution_sweep(
         session_store,
         opts.merge_gap_secs,
         |target| scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo),

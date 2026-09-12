@@ -431,13 +431,13 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     git_correlation::publish_graph_evidence(&store, "live-ingest", &[live_span], &[]).unwrap();
 
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
+    let attribution = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
         super::project::git_scan_commits(target, gap)
     })
     .await
     .unwrap();
     assert!(
-        inserted >= 1,
+        attribution.commits_attributed >= 1,
         "a commit made during a live session must be attributed"
     );
 
@@ -478,7 +478,8 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     })
     .await
     .unwrap();
-    assert_eq!(again, 0, "re-sweeping an attributed commit is a no-op");
+    assert_eq!(again.commits_attributed, 0, "re-sweeping an attributed commit is a no-op");
+    assert_eq!(again.unavailable_references, 0);
 }
 
 /// A fresh project has never published a Git evidence projection. The
@@ -497,12 +498,12 @@ async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() 
     };
 
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
+    let attribution = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
         panic!("a never-published projection has no span targets to scan")
     })
     .await
     .expect("the empty start is not an error");
-    assert_eq!(inserted, 0, "nothing to attribute on the empty start");
+    assert_eq!(attribution, git_correlation::CommitAttributionSweepOutcome::default());
 }
 
 #[tokio::test]
@@ -547,7 +548,7 @@ async fn archived_branch_keeps_observed_span_without_retrying_attribution() {
     };
     git_correlation::publish_graph_evidence(&store, "archived", &[archived], &[]).unwrap();
 
-    let attribution = git_correlation::run_commit_attribution_sweep_outcome(
+    let attribution = git_correlation::run_commit_attribution_sweep(
         &store,
         git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
         |target| {

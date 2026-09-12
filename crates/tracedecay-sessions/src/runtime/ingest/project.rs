@@ -524,7 +524,14 @@ async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
     commit_attribution_sweep(&db.git_correlation_store(), gap)
         .await
-        .map(|_| ())
+        .map(|outcome| {
+            if outcome.unavailable_references > 0 {
+                tracing::warn!(
+                    unavailable_references = outcome.unavailable_references,
+                    "historical Git attribution unavailable for archived session branches"
+                );
+            }
+        })
 }
 
 /// One bounded sweep over the verified span projection. Any changed attribution
@@ -532,7 +539,7 @@ async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(
 async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
     store: &S,
     gap_secs: i64,
-) -> Result<usize, git_correlation::GitCorrelationError> {
+) -> Result<git_correlation::CommitAttributionSweepOutcome, git_correlation::GitCorrelationError> {
     git_correlation::run_commit_attribution_sweep(store, gap_secs, |target| {
         git_scan_commits(target, gap_secs)
     })

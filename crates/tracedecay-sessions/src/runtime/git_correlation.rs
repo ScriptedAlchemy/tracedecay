@@ -1223,7 +1223,6 @@ pub use attribution::{
     CommitAttributionSweepOutcome, ScannedCommit, SpanScanTarget, SpanWindow, TargetScan,
     commit_overlap_kind, graph_evidence_publication_key, match_commit_to_spans,
     publish_graph_evidence, publish_transcript_graph_evidence, run_commit_attribution_sweep,
-    run_commit_attribution_sweep_outcome,
 };
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
