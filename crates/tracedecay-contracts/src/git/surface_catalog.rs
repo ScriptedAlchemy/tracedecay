@@ -8,17 +8,18 @@
 use schemars::JsonSchema;
 use tracedecay_domain::{GitIndexPreviewV1, GitIndexTransactionReceiptV1};
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
-    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
-    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
-    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
-    LifecycleClass, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
-    UseCaseId,
+    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    LifecycleClass, PrivacyClass, ProfileId, RevalidationContract, RevalidationPoint,
+    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
+    TerminalState, TerminalStateContract, UseCaseId,
 };
 
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::git::{
@@ -298,66 +299,46 @@ fn capability(
     capability_id: CapabilityId,
     binding_ids: Vec<BindingId>,
 ) -> Result<CapabilityManifestV1, ApplicationContractError> {
-    Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
-        capability_id,
-        use_case_id: UseCaseId::new(spec.use_case)?,
-        routing: RoutingContractV1::new(
-            1,
-            spec.summary,
-            spec.description,
-            vec![spec.example.to_owned()],
-        )?,
-        request_schema: schema(spec.request_schema)?,
-        result_schema: schema(spec.result_schema)?,
-        effect: spec.effect,
-        scope: ScopeRequirement::new(vec![
-            ScopeDimension::Project,
-            ScopeDimension::Repository,
-            ScopeDimension::Worktree,
-        ])?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
-        denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
-        privacy: PrivacyClass::ScopedMetadata,
-        lifecycle: LifecycleClass::Resumable,
-        streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(cancellation_points(spec.effect))?,
-        deadline: DeadlineContract::new(30_000, deadline_behavior(spec.effect))?,
-        pagination: None,
-        idempotency: if spec.effect.is_effect() {
-            IdempotencyContract::Required
-        } else {
-            IdempotencyContract::NotRequired
+    Ok(application_capability_manifest(
+        ApplicationCapabilityManifestInput {
+            capability_id,
+            use_case_id: UseCaseId::new(spec.use_case)?,
+            routing: RoutingContractV1::new(
+                1,
+                spec.summary,
+                spec.description,
+                vec![spec.example.to_owned()],
+            )?,
+            request_schema: schema(spec.request_schema)?,
+            result_schema: schema(spec.result_schema)?,
+            effect: spec.effect,
+            scope: ScopeRequirement::new(vec![
+                ScopeDimension::Project,
+                ScopeDimension::Repository,
+                ScopeDimension::Worktree,
+            ])?,
+            denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+            privacy: PrivacyClass::ScopedMetadata,
+            lifecycle: LifecycleClass::Resumable,
+            streaming: StreamingContract::Unsupported,
+            cancellation: CancellationContract::cooperative(cancellation_points(spec.effect))?,
+            deadline: DeadlineContract::new(30_000, deadline_behavior(spec.effect))?,
+            pagination: None,
+            inverse: None,
+            authority_revalidation: RevalidationContract::required(vec![
+                RevalidationPoint::Authority,
+                RevalidationPoint::Scope,
+                RevalidationPoint::Policy,
+                RevalidationPoint::Configuration,
+                RevalidationPoint::ExpectedState,
+            ])?,
+            terminal_states: TerminalStateContract::new(terminal_states(spec.effect))?,
+            availability: AvailabilityContract::Available,
+            binding_ids,
+            profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+            required_features: Vec::new(),
         },
-        inverse: if spec.effect.is_effect() {
-            tracedecay_tool_catalog::InverseContract::Unavailable {
-                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
-            }
-        } else {
-            tracedecay_tool_catalog::InverseContract::NotApplicable
-        },
-        authority_revalidation: RevalidationContract::required(vec![
-            RevalidationPoint::Authority,
-            RevalidationPoint::Scope,
-            RevalidationPoint::Policy,
-            RevalidationPoint::Configuration,
-            RevalidationPoint::ExpectedState,
-        ])?,
-        reconciliation: if spec.effect.is_effect() {
-            ReconciliationContract::Required
-        } else {
-            ReconciliationContract::NotRequired
-        },
-        receipt: if spec.effect.is_effect() {
-            ReceiptContract::DurableEffect
-        } else {
-            ReceiptContract::Operation
-        },
-        terminal_states: TerminalStateContract::new(terminal_states(spec.effect))?,
-        availability: AvailabilityContract::Available,
-        binding_ids,
-        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
-        required_features: Vec::new(),
-    })?)
+    )?)
 }
 
 fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
