@@ -160,6 +160,8 @@ pub enum StorageRuntimeErrorV1 {
         expected: Box<Option<ObservationSourceCursorV1>>,
         actual: Box<Option<ObservationSourceCursorV1>>,
     },
+    #[error("observation cursor advance receipt collided with different contents")]
+    ObservationCursorAdvanceCollision,
     #[error("observation cursor-advance ledger disagrees with immutable coverage")]
     ObservationCursorAdvanceLedgerDisagreement {
         disagreement: Box<CursorAdvanceLedgerDisagreementV1>,

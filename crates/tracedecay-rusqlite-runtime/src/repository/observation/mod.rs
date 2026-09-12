@@ -186,9 +186,7 @@ impl ObservationExecutor {
             if cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
                 return Ok(());
             }
-            return Err(
-                invalid("source cursor advance sanitization receipt identity collision").into(),
-            );
+            return Err(StorageOperationError::ObservationCursorAdvanceCollision);
         }
         if actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(observation_source_cursor_conflict(
@@ -218,9 +216,7 @@ impl ObservationExecutor {
             return Err(disagreement);
         }
         if !cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
-            return Err(
-                invalid("source cursor advance sanitization receipt identity collision").into(),
-            );
+            return Err(StorageOperationError::ObservationCursorAdvanceCollision);
         }
         savepoint.execute(
             COMMIT_SOURCE_CURSOR_SQL,
