@@ -30,7 +30,7 @@ use tracedecay_domain::{
     RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
     RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId,
     SensitivityLevelV1, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
-    sha256_hex_suffix,
+    encode_lowercase_hex, sha256_hex_suffix,
 };
 
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
@@ -110,6 +110,13 @@ mod semantic_schedule_order_tests;
 /// different scope than the one the scheduler writes and reads. Create the
 /// fixture inside the canonical temporary directory so every path taken from
 /// it is already canonical.
+fn decode_hex(encoded: &str) -> Vec<u8> {
+    (0..encoded.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).expect("hex byte"))
+        .collect()
+}
+
 fn canonical_temp_root() -> std::path::PathBuf {
     let base = std::env::temp_dir();
     base.canonicalize().unwrap_or(base)
@@ -1239,7 +1246,7 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     );
 
     let orphan_bytes = b"evidence pack committed before its manifest";
-    let orphan_digest = hex::encode(Sha256::digest(orphan_bytes));
+    let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
     let orphan_pack = segment_root.join(format!("segment-{orphan_digest}.json"));
     std::fs::write(&orphan_pack, orphan_bytes).expect("write committed orphan evidence pack");
     // A rollback reserve of one holds the single superseded generation; the
@@ -5166,7 +5173,7 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
         tracedecay_private_fs::create_private_file(&staging).expect("create private staging file");
     std::io::Write::write_all(&mut staging_file, artifact_bytes).expect("write staging artifact");
     drop(staging_file);
-    let artifact_hex = hex::encode(Sha256::digest(artifact_bytes));
+    let artifact_hex = encode_lowercase_hex(&Sha256::digest(artifact_bytes));
     let artifact_file = format!("text-artifact-{artifact_hex}.bin");
     let artifact_path = artifacts_root.join(&artifact_file);
     let mut artifact_file_handle = tracedecay_private_fs::create_private_file(&artifact_path)
@@ -5893,7 +5900,10 @@ fn invalid_partial_text_artifact_cursor_is_discarded_and_rebuilt() {
             );
             hasher.update(text(index));
         }
-        cursor[12] = serde_json::Value::from(format!("sha256:{}", hex::encode(hasher.finalize())));
+        cursor[12] = serde_json::Value::from(format!(
+            "sha256:{}",
+            encode_lowercase_hex(&hasher.finalize())
+        ));
         let cursor_bytes = serde_json::to_vec(&cursor).expect("encode invalid persisted cursor");
         connection
             .execute_batch("DROP TRIGGER immutable_source_pages_update")
@@ -6233,7 +6243,7 @@ fn text_artifact_hash_honors_cancellation_between_bounded_reads() {
     };
 
     assert_eq!(
-        super::sha256_private_file_hex_and_size(&staging, &control).map(|(digest, _)| digest),
+        super::sha256_private_file_and_size(&staging, &control).map(|(digest, _)| digest),
         Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
     );
     assert!(
@@ -6262,7 +6272,7 @@ fn text_artifact_hash_rejects_non_regular_staging_paths() {
 
     assert!(
         matches!(
-            super::sha256_private_file_hex_and_size(&staging_directory, &NeverCancelled),
+            super::sha256_private_file_and_size(&staging_directory, &NeverCancelled),
             Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
         ),
         "publication hashing must reject a non-regular staging path as unsafe input"
@@ -6294,7 +6304,7 @@ fn text_artifact_hash_rejects_symlink_staging_paths() {
 
     assert!(
         matches!(
-            super::sha256_private_file_hex_and_size(&staging, &NeverCancelled),
+            super::sha256_private_file_and_size(&staging, &NeverCancelled),
             Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
         ),
         "publication hashing must not follow a staging symlink"
@@ -6352,7 +6362,7 @@ fn text_artifact_hash_rejects_a_named_file_replaced_during_hashing() {
 
     assert!(
         matches!(
-            super::sha256_private_file_hex_and_size(&staging, &control),
+            super::sha256_private_file_and_size(&staging, &control),
             Err(tracedecay_query::retrieval::RetrievalPortError::Contract(_))
         ),
         "the hashed handle must still be the regular file named by the staging path"
@@ -14510,11 +14520,11 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         .split_once('.')
         .expect("callable cursor revision prefix");
     let mut tampered: serde_json::Value =
-        serde_json::from_slice(&hex::decode(encoded).expect("cursor hex")).expect("cursor JSON");
+        serde_json::from_slice(&decode_hex(encoded)).expect("cursor JSON");
     tampered["payload"]["expires_at"] = serde_json::json!(0);
     let tampered = OpaqueCursor::new(format!(
         "{prefix}.{}",
-        hex::encode(serde_json::to_vec(&tampered).expect("tampered cursor JSON"))
+        encode_lowercase_hex(&serde_json::to_vec(&tampered).expect("tampered cursor JSON"))
     ))
     .expect("tampered cursor");
     let tampered_request = ExactOccurrenceRequest::new(
