@@ -3,28 +3,28 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tracedecay_domain::canonical_text::sha256_hex;
 
+use crate::hook_events::HookEvent;
 use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
-use tracedecay_mcp::hook_events::HookEvent;
 
-pub(super) struct McpToolAnalyticsEvent<'a> {
-    pub(super) project_root: &'a std::path::Path,
-    pub(super) session_id: Option<String>,
-    pub(super) tool_name: &'a str,
-    pub(super) outcome: &'a str,
-    pub(super) raw_file_tokens: u64,
-    pub(super) response_tokens: u64,
-    pub(super) net_saved_tokens: u64,
-    pub(super) duration_us: Option<u64>,
-    pub(super) timestamp: i64,
-    pub(super) request_id: &'a Value,
-    pub(super) arguments: &'a Value,
-    pub(super) internal_analytics: Option<&'a Value>,
+pub struct McpToolAnalyticsEvent<'a> {
+    pub project_root: &'a std::path::Path,
+    pub session_id: Option<String>,
+    pub tool_name: &'a str,
+    pub outcome: &'a str,
+    pub raw_file_tokens: u64,
+    pub response_tokens: u64,
+    pub net_saved_tokens: u64,
+    pub duration_us: Option<u64>,
+    pub timestamp: i64,
+    pub request_id: &'a Value,
+    pub arguments: &'a Value,
+    pub internal_analytics: Option<&'a Value>,
     /// The negotiated MCP client name from the `initialize` handshake's
     /// `clientInfo.name` (e.g. `"claude-code"`, `"codex"`, `"cursor"`).
     /// `None` when the client omitted `clientInfo` or no `initialize` was
     /// observed yet (e.g. a daemon-proxied first call). Bounded to the
     /// negotiated name only — never the full `clientInfo` payload.
-    pub(super) client_name: Option<&'a str>,
+    pub client_name: Option<&'a str>,
     /// Stable per-process MCP server instance id (a random hex token minted
     /// once at server start). Recorded in `metadata.mcp_instance_id` on every
     /// event so calls from one server lifetime can be grouped even when
@@ -35,13 +35,13 @@ pub(super) struct McpToolAnalyticsEvent<'a> {
     /// historical events had a NULL `session_id`). This is an honest grouping
     /// key, NOT a real session id, so it stays in metadata rather than
     /// masquerading in the `session_id` column.
-    pub(super) mcp_instance_id: Option<&'a str>,
+    pub mcp_instance_id: Option<&'a str>,
     /// Bounded, sanitized (no argument bodies) reason for a `outcome ==
     /// "error"` call, e.g. a structural edit-tool failure message or a
     /// dispatch error's `Display` text. `None` falls back to a generic
     /// marker so pre-existing callers that have not been migrated to supply
     /// a real reason keep working.
-    pub(super) failure_reason: Option<&'a str>,
+    pub failure_reason: Option<&'a str>,
 }
 
 /// Failure reasons are capped well below the metadata column's practical
@@ -59,7 +59,7 @@ const LOOKUP_IDENTIFIER_MAX_BYTES: usize = 256;
 /// Collapse whitespace and cap a failure reason to
 /// [`FAILURE_REASON_MAX_CHARS`] characters (never argument bodies — callers
 /// must derive `reason` from response/error text only).
-pub(super) fn bounded_failure_reason(reason: &str) -> String {
+pub fn bounded_failure_reason(reason: &str) -> String {
     let collapsed: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= FAILURE_REASON_MAX_CHARS {
         collapsed
@@ -106,7 +106,7 @@ fn hook_route_idempotency_key(project_root: &Path, admission_seq: u64) -> String
     ))
 }
 
-pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
+pub fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> AnalyticsEventInsert {
     let category = tracedecay_agent_hosts::task_classifier::classify(&[input.tool_name], &[]);
     let mut metadata = json!({
         "request_id": input.request_id,
@@ -174,7 +174,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
 /// hook boundary and remain byte-identical for joins. Command bodies and
 /// receipt payloads are never included. `admission_seq` is the per-admission
 /// idempotency identity.
-pub(super) fn hook_route_analytics_event(
+pub fn hook_route_analytics_event(
     project_root: &std::path::Path,
     event: &HookEvent,
     current_branch: Option<&str>,
@@ -266,8 +266,8 @@ mod tests {
 
     use serde_json::json;
 
+    use crate::hook_events::{HookAgent, HookEvent, HookEventKind};
     use tracedecay_hooks::core_events::HookRouteMetadata;
-    use tracedecay_mcp::hook_events::{HookAgent, HookEvent, HookEventKind};
 
     use super::{
         FAILURE_REASON_MAX_CHARS, McpToolAnalyticsEvent, bounded_failure_reason,

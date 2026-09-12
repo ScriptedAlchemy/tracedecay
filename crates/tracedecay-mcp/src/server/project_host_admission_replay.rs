@@ -1,6 +1,6 @@
 //! Cancellable daemon-owned project host-admission replay worker.
 //!
-//! Continues bounded [`McpServer::replay_host_admission`] passes while the
+//! Continues bounded project host-admission replay passes while the
 //! spool makes progress, applies retryable backoff, and is cancelled + joined
 //! during project-server shutdown on every platform.
 
@@ -22,12 +22,12 @@ use tracedecay_sessions::admission::HostAdmissionOutcome;
 type PassFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = HostAdmissionOutcome> + Send>> + Send + Sync>;
 
-pub(super) struct ProjectHostAdmissionReplayTask {
+pub struct ProjectHostAdmissionReplayTask {
     worker: Arc<ProjectHostAdmissionReplayWorker>,
     task: Option<JoinHandle<()>>,
 }
 
-pub(super) struct ProjectHostAdmissionReplayWorker {
+pub struct ProjectHostAdmissionReplayWorker {
     broker: SharedHostAdmissionBroker,
     pass: PassFn,
     cancel: AtomicBool,
@@ -40,7 +40,7 @@ pub(super) struct ProjectHostAdmissionReplayWorker {
 }
 
 impl ProjectHostAdmissionReplayTask {
-    pub(super) fn start(broker: SharedHostAdmissionBroker, pass: PassFn) -> Self {
+    pub fn start(broker: SharedHostAdmissionBroker, pass: PassFn) -> Self {
         let worker = Arc::new(ProjectHostAdmissionReplayWorker {
             broker,
             pass,
@@ -61,26 +61,26 @@ impl ProjectHostAdmissionReplayTask {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn worker(&self) -> &Arc<ProjectHostAdmissionReplayWorker> {
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn worker(&self) -> &Arc<ProjectHostAdmissionReplayWorker> {
         &self.worker
     }
 
     #[hotpath::skip]
-    pub(super) async fn shutdown(mut self) {
+    pub async fn shutdown(mut self) {
         self.worker.cancel();
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn pass_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn pass_count(&self) -> usize {
         self.worker.pass_count()
     }
 
-    #[cfg(test)]
-    pub(super) fn backoff_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn backoff_count(&self) -> usize {
         self.worker.backoff_count()
     }
 }
@@ -107,9 +107,9 @@ impl ProjectHostAdmissionReplayWorker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     #[hotpath::skip]
-    pub(super) async fn wait_idle(&self, timeout: Duration) -> bool {
+    pub async fn wait_idle(&self, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if self.cancel.load(Ordering::Acquire) {
@@ -133,13 +133,13 @@ impl ProjectHostAdmissionReplayWorker {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn pass_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn pass_count(&self) -> usize {
         self.pass_count.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
-    pub(super) fn backoff_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn backoff_count(&self) -> usize {
         self.backoff_count.load(Ordering::Acquire)
     }
 
@@ -222,7 +222,7 @@ impl ProjectHostAdmissionReplayWorker {
     }
 }
 
-pub(super) fn project_replay_backoff(attempt: u32) -> Duration {
+pub fn project_replay_backoff(attempt: u32) -> Duration {
     replay_backoff(attempt, REPLAY_BACKOFF_SHIFT_CAP)
 }
 

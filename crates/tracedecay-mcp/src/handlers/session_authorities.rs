@@ -13,28 +13,28 @@ use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 pub struct SessionAuthorities<'a> {
     /// Registered project session store; ingestion, retrieval, and project
     /// host admission are all derived from this one lease.
-    pub(crate) project: Option<&'a RegisteredGlobalDbLeaseV1>,
+    pub project: Option<&'a RegisteredGlobalDbLeaseV1>,
     /// Registered profile (user-scope) session store.
-    pub(crate) user: Option<&'a RegisteredGlobalDbLeaseV1>,
-    pub(crate) profile_identity: Option<std::sync::Arc<dyn ProfileIdentityReadPort>>,
+    pub user: Option<&'a RegisteredGlobalDbLeaseV1>,
+    pub profile_identity: Option<std::sync::Arc<dyn ProfileIdentityReadPort>>,
     /// The process background CPU authority host observation capture prepares
     /// under; absent on direct servers, where capture fails closed.
-    pub(crate) background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
-    pub(crate) profile_retained_authority:
+    pub background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
+    pub profile_retained_authority:
         Option<&'a tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1>,
-    pub(crate) project_lcm:
+    pub project_lcm:
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
-    pub(crate) profile_lcm:
+    pub profile_lcm:
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
     /// Daemon-wide profile session refresh service serving profile-scoped
     /// `tracedecay_session_refresh_*` calls on this connection.
-    pub(crate) profile_session_refresh:
+    pub profile_session_refresh:
         Option<&'a dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
 }
 
 impl<'a> SessionAuthorities<'a> {
     #[hotpath::skip]
-    pub(crate) const fn new(
+    pub const fn new(
         project: Option<&'a RegisteredGlobalDbLeaseV1>,
         user: Option<&'a RegisteredGlobalDbLeaseV1>,
     ) -> Self {
@@ -50,7 +50,8 @@ impl<'a> SessionAuthorities<'a> {
         }
     }
 
-    pub(crate) fn with_profile_identity(
+    #[must_use]
+    pub fn with_profile_identity(
         mut self,
         profile_identity: Option<std::sync::Arc<dyn ProfileIdentityReadPort>>,
     ) -> Self {
@@ -58,7 +59,8 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
-    pub(crate) fn with_background_cpu(
+    #[must_use]
+    pub fn with_background_cpu(
         mut self,
         background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
     ) -> Self {
@@ -66,8 +68,9 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
+    #[must_use]
     #[hotpath::skip]
-    pub(crate) const fn with_profile_retained_authority(
+    pub const fn with_profile_retained_authority(
         mut self,
         authority: Option<
             &'a tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
@@ -77,8 +80,9 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
+    #[must_use]
     #[hotpath::skip]
-    pub(crate) const fn with_lcm_authorities(
+    pub const fn with_lcm_authorities(
         mut self,
         project: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
         profile: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
@@ -88,8 +92,9 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
+    #[must_use]
     #[hotpath::skip]
-    pub(crate) const fn with_profile_session_refresh(
+    pub const fn with_profile_session_refresh(
         mut self,
         refresh: Option<&'a dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
     ) -> Self {

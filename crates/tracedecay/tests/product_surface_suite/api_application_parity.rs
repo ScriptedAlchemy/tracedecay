@@ -4,7 +4,6 @@ use axum::body::Body;
 use axum::extract::Extension;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
-use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
     application_router,
@@ -31,6 +30,7 @@ use tracedecay_domain::{
     RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
+use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay_mcp::{get_tool_definitions, mcp_input_schema};
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, OperationId, ProfileId, SchemaId,

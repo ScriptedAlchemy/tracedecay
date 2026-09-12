@@ -142,11 +142,11 @@ struct ApplicationSurfaceDispatch<'a> {
 /// executor before the request is admitted to its typed owner.
 fn requires_application_invocation_executor(tool_name: &str) -> bool {
     ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
-        || crate::mcp::tools::binding::work_operation_for_tool(tool_name).is_some()
-        || crate::mcp::tools::binding::workflow_operation_for_tool(tool_name).is_some()
+        || tracedecay_mcp::tools::binding::work_operation_for_tool(tool_name).is_some()
+        || tracedecay_mcp::tools::binding::workflow_operation_for_tool(tool_name).is_some()
         || matches!(
-            crate::mcp::tools::binding::dispatch_group_for_tool(tool_name),
-            Some(crate::mcp::tools::binding::McpToolDispatchGroup::MultiRoot)
+            tracedecay_mcp::tools::binding::dispatch_group_for_tool(tool_name),
+            Some(tracedecay_mcp::tools::binding::McpToolDispatchGroup::MultiRoot)
         )
         || tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
         || is_source_edit_tool(tool_name)
@@ -159,7 +159,7 @@ pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
 }
 
 pub(super) fn is_source_edit_tool(tool_name: &str) -> bool {
-    crate::mcp::tools::tool_dispatches_source_edit_effect(tool_name)
+    tracedecay_mcp::tools::binding::tool_dispatches_source_edit_effect(tool_name)
 }
 
 /// Reads that walk a git tree or the whole code graph, and so must not run
@@ -184,7 +184,7 @@ pub(super) fn is_controlled_read_tool(tool_name: &str) -> bool {
 }
 
 pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
-    crate::mcp::tools::tool_supports_live_cancellation(tool_name)
+    tracedecay_mcp::tools::binding::tool_supports_live_cancellation(tool_name)
 }
 
 pub(super) fn dispatch_deadline_horizon_micros(bounded_operation: bool) -> Option<i64> {
@@ -195,7 +195,7 @@ pub(super) fn dispatch_deadline_horizon_micros(bounded_operation: bool) -> Optio
 }
 
 fn tool_carries_effect(tool_name: &str) -> bool {
-    crate::mcp::tools::binding::mcp_dispatch_contract(tool_name)
+    tracedecay_mcp::tools::binding::mcp_dispatch_contract(tool_name)
         .is_ok_and(|contract| !contract.read_only())
 }
 
@@ -208,7 +208,7 @@ impl McpServer {
         pre_cancelled: bool,
         caller_deadline: Option<tracedecay_contracts::Deadline>,
     ) -> Result<PreparedDispatchControl<'a>> {
-        let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)
+        let ceiling = tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)
             .map_err(|error| TraceDecayError::Config {
                 message: format!("could not resolve MCP dispatch deadline: {error}"),
             })?;
@@ -233,7 +233,7 @@ impl McpServer {
                     live_cancellable: tool_supports_live_cancellation(tool_name),
                     carries_effect: tool_carries_effect(tool_name),
                     canonical_effect_settlement:
-                        crate::mcp::tools::binding::tool_requires_canonical_effect_settlement(
+                        tracedecay_mcp::tools::binding::tool_requires_canonical_effect_settlement(
                             tool_name,
                         ),
                 },
@@ -751,7 +751,7 @@ impl McpServer {
         };
         match hotpath::measure_block!(
             "mcp.server.tools_list.compose",
-            crate::mcp::tools::catalog_discovery_tools_list_payload(
+            tracedecay_mcp::tools::catalog_discovery::catalog_discovery_tools_list_payload(
                 None,
                 budget,
                 &profile_id,
@@ -971,8 +971,9 @@ impl McpServer {
         // a full project walk; on very large indexes (especially when
         // node_modules was intentionally included) that turns diagnostics and
         // search into sync operations.
-        let skip_graph_freshness = crate::mcp::tools::binding::tool_branch_sensitivity(tool_name)
-            == crate::mcp::tools::binding::BranchSensitivity::Independent;
+        let skip_graph_freshness =
+            tracedecay_mcp::tools::binding::tool_branch_sensitivity(tool_name)
+                == tracedecay_mcp::tools::binding::BranchSensitivity::Independent;
         if !skip_graph_freshness
             && !project_reader_preselected
             && needs_lazy_sync_before_dispatch(tool_name)
@@ -1934,8 +1935,8 @@ mod git_read_control_tests {
     #[test]
     fn all_retained_tools_request_the_daemon_invocation_executor() {
         for definition in tracedecay_mcp::get_tool_definitions().expect("tool definitions") {
-            if crate::mcp::tools::binding::dispatch_group_for_tool(&definition.name)
-                == Some(crate::mcp::tools::binding::McpToolDispatchGroup::MultiRoot)
+            if tracedecay_mcp::tools::binding::dispatch_group_for_tool(&definition.name)
+                == Some(tracedecay_mcp::tools::binding::McpToolDispatchGroup::MultiRoot)
             {
                 assert!(
                     requires_application_invocation_executor(&definition.name),

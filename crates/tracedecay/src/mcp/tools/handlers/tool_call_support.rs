@@ -10,12 +10,12 @@ use tracedecay_mcp::response_handles::{
     ResponseHandleLookup, public_retrieve_error, retrieve_response_handle,
 };
 
-use super::super::binding::{
-    tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
-};
 use super::support;
 use super::support::registered_project_context;
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::tools::binding::{
+    tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
+};
 use tracedecay_mcp::tools::render;
 
 const RETRIEVE_PAGE_HEADER_ALLOWANCE: usize = 2_048;
@@ -37,14 +37,6 @@ where
 {
     Box::pin(future)
 }
-
-pub(crate) const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
-    "tracedecay_admin_branch_add",
-    "tracedecay_admin_cli",
-    "tracedecay_admin_project",
-    "tracedecay_admin_sync",
-    "tracedecay_hook_runtime",
-];
 
 pub(super) fn rejected_tool_project_selector_present(_tool_name: &str, args: &Value) -> bool {
     args.get("project_selector").is_some()

@@ -1,5 +1,9 @@
 //! Portable MCP tool call results, CLI help rendering, and response rendering.
 
+pub mod binding;
+pub mod catalog_discovery;
+pub mod dispatch;
+pub mod dispatch_ceiling;
 pub mod render;
 pub mod renderers;
 

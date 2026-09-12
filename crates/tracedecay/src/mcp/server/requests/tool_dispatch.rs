@@ -17,7 +17,7 @@ impl McpServer {
         memory_request_scope: &str,
     ) -> Result<RoutedToolCall> {
         let private_reader =
-            crate::mcp::tools::tool_dispatches_registered_project_reader(tool_name);
+            tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader(tool_name);
         let cached_private_route = private_reader
             .then(|| route_cache.workspace_route_for_arguments(&arguments))
             .flatten();
@@ -179,20 +179,20 @@ impl McpServer {
         // `routed.selected_server`; an unselected call is admitted on `self`.
         // Never resolve or fall back to another project inside the worker.
         let dispatch_server = self;
-        let (cg, live_branch) = match crate::mcp::tools::binding::tool_branch_sensitivity(tool_name)
-        {
-            crate::mcp::tools::binding::BranchSensitivity::Independent => {
-                let cg = dispatch_server.cg_snapshot().await;
-                let live_branch = tracedecay_runtime_core::branch::BranchMemo::resolved(
-                    cg.project_root(),
-                    cg.serving_branch().map(str::to_owned),
-                );
-                (cg, live_branch)
-            }
-            crate::mcp::tools::binding::BranchSensitivity::Sensitive => {
-                dispatch_server.reopen_if_branch_drifted_memoized().await
-            }
-        };
+        let (cg, live_branch) =
+            match tracedecay_mcp::tools::binding::tool_branch_sensitivity(tool_name) {
+                tracedecay_mcp::tools::binding::BranchSensitivity::Independent => {
+                    let cg = dispatch_server.cg_snapshot().await;
+                    let live_branch = tracedecay_runtime_core::branch::BranchMemo::resolved(
+                        cg.project_root(),
+                        cg.serving_branch().map(str::to_owned),
+                    );
+                    (cg, live_branch)
+                }
+                tracedecay_mcp::tools::binding::BranchSensitivity::Sensitive => {
+                    dispatch_server.reopen_if_branch_drifted_memoized().await
+                }
+            };
         let project_reader_preselected = routed.selected_project.is_some();
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
@@ -263,7 +263,7 @@ impl McpServer {
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
         let read_flight = tool_allows_identical_read_coalescing(tool_name, |tool_name| {
-            crate::mcp::tools::mcp_dispatch_contract(tool_name)
+            tracedecay_mcp::tools::binding::mcp_dispatch_contract(tool_name)
                 .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
         })
         .then(|| {
@@ -342,7 +342,7 @@ impl McpServer {
                 retained_project_server_resolver: self.retained_project_server_resolver.clone(),
                 session_sync_service: session_sync_service.as_deref(),
                 served_stale_graph_generation: std::sync::Arc::new(std::sync::OnceLock::new()),
-                session_authorities: crate::mcp::tools::SessionAuthorities::new(
+                session_authorities: tracedecay_mcp::handlers::SessionAuthorities::new(
                     self.project_session_db.as_ref(),
                     self.profile_session_db.as_ref(),
                 )

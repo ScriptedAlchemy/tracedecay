@@ -7,13 +7,13 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
 
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use tracedecay_mcp::{
+use crate::{
     ToolDefinition, ToolRegistryMode, ast_grep_available, context_description,
     context_warming_description, get_maximal_tool_definitions,
     retain_host_available_tool_definitions,
 };
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tracedecay_tool_catalog::{CapabilityId, FeatureId, ProfileId, ScopeDimension};
 
 use super::dispatch::McpDispatchMetadataError;
@@ -337,7 +337,7 @@ pub fn default_catalog_discovery_authority()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_mcp::{explore_call_budget, project_catalog_discovery_scope};
+    use crate::{explore_call_budget, project_catalog_discovery_scope};
 
     #[test]
     fn catalog_filtered_discovery_uses_the_deterministic_maximal_registry() {
@@ -483,7 +483,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_catalog_discovery_cache_for_test();
         reset_catalog_discovery_cache_hits_for_test();
-        crate::mcp::tools::dispatch::reset_attach_dispatch_metadata_calls_for_test();
+        crate::tools::dispatch::reset_attach_dispatch_metadata_calls_for_test();
         body()
     }
 
@@ -501,7 +501,7 @@ mod tests {
             )
             .expect("first discovery compose");
             let attaches_after_first =
-                crate::mcp::tools::dispatch::attach_dispatch_metadata_calls_for_test();
+                crate::tools::dispatch::attach_dispatch_metadata_calls_for_test();
             let hits_after_first = catalog_discovery_cache_hits_for_test();
 
             let second = catalog_discovery_tools_list_payload(
@@ -519,7 +519,7 @@ mod tests {
                 "equivalent discovery must stay byte-identical"
             );
             assert_eq!(
-                crate::mcp::tools::dispatch::attach_dispatch_metadata_calls_for_test(),
+                crate::tools::dispatch::attach_dispatch_metadata_calls_for_test(),
                 attaches_after_first,
                 "a cache hit must not serialize dispatch contracts again"
             );

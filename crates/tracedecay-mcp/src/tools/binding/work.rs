@@ -11,7 +11,7 @@ use super::{DispatchCatalogBinding, McpToolDispatchGroup};
 /// Work intentionally has no row in `MCP_TOOL_BINDINGS`: the executable
 /// registry already owns its complete operation set and lifecycle contracts.
 /// The `tracedecay_work_` name map lives once, in the MCP handler crate.
-pub(crate) use tracedecay_mcp::handlers::work::work_operation_for_tool;
+pub use crate::handlers::work::work_operation_for_tool;
 
 /// Resolve the executable Work binding that names an MCP tool.
 ///

@@ -58,14 +58,14 @@ struct SummaryHydrationRequest {
     content: String,
 }
 
-pub(crate) struct DashboardLcmReadAdapter {
+pub struct DashboardLcmReadAdapter {
     retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
     identity: ResolvedSessionIdentity,
     project_id: String,
 }
 
 impl DashboardLcmReadAdapter {
-    pub(crate) fn new(
+    pub fn new(
         retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
         identity: ResolvedSessionIdentity,
     ) -> Option<Self> {

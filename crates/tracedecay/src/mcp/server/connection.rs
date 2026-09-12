@@ -46,7 +46,7 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
     }
 
     fn tool_is_read_only(&self, tool_name: &str) -> bool {
-        crate::mcp::tools::mcp_dispatch_contract(tool_name)
+        tracedecay_mcp::tools::binding::mcp_dispatch_contract(tool_name)
             .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
     }
 
@@ -496,7 +496,7 @@ impl McpServer {
         let guard = self.project_host_admission_replay.lock().await;
         guard.as_ref().map_or(
             0,
-            project_host_admission_replay::ProjectHostAdmissionReplayTask::pass_count,
+            tracedecay_mcp::server::ProjectHostAdmissionReplayTask::pass_count,
         )
     }
 
@@ -506,7 +506,7 @@ impl McpServer {
         let guard = self.project_host_admission_replay.lock().await;
         guard.as_ref().map_or(
             0,
-            project_host_admission_replay::ProjectHostAdmissionReplayTask::backoff_count,
+            tracedecay_mcp::server::ProjectHostAdmissionReplayTask::backoff_count,
         )
     }
 }

@@ -78,7 +78,7 @@ async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
             .all(|definition| definition.name != retired)
     );
     assert!(
-        crate::mcp::tools::binding::mcp_dispatch_catalog()
+        tracedecay_mcp::tools::binding::mcp_dispatch_catalog()
             .expect("MCP dispatch catalog")
             .contract(retired)
             .is_none()
@@ -319,12 +319,13 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                 definition.name
             ),
             McpToolDispatchGroup::Work => assert!(
-                crate::mcp::tools::binding::work_operation_for_tool(&definition.name).is_some(),
+                tracedecay_mcp::tools::binding::work_operation_for_tool(&definition.name).is_some(),
                 "{} has no canonical Work operation entry",
                 definition.name
             ),
             McpToolDispatchGroup::Workflow => assert!(
-                crate::mcp::tools::binding::workflow_operation_for_tool(&definition.name).is_some(),
+                tracedecay_mcp::tools::binding::workflow_operation_for_tool(&definition.name)
+                    .is_some(),
                 "{} has no canonical Workflow operation entry",
                 definition.name
             ),
@@ -1669,7 +1670,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
 // Universal dispatch ceiling
 // ---------------------------------------------------------------------------
 
-use super::dispatch_groups::{
+use tracedecay_mcp::tools::dispatch_ceiling::{
     LONG_RUNNING_TOOL_DISPATCH_CEILING, TOOL_DISPATCH_CEILING, tool_dispatch_budget,
     tool_dispatch_ceiling, tool_dispatch_deadline_error,
 };
@@ -2060,7 +2061,7 @@ async fn profile_scoped_session_refresh_dispatches_to_the_profile_authority() {
             profile_database.clone(),
         )
         .await;
-    let refresh = crate::mcp::server::DaemonSessionRefreshService::new(
+    let refresh = tracedecay_mcp::server::DaemonSessionRefreshService::new(
         profile_database,
         std::sync::Arc::new(wake),
         None,

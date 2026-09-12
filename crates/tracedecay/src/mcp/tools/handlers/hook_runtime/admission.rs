@@ -9,7 +9,6 @@ use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
-use super::super::SessionAuthorities;
 use super::context_scout::{
     admit_native_context_scout_lifecycle, hook_v2_context_scout_lifecycle_for_session,
     hook_v2_native_context_scout_lifecycle, lookup_hook_v2_delivery_claim,
@@ -20,6 +19,7 @@ use super::envelope::{
     hook_v2_lifecycle_range, hook_v2_native_session_id, hook_v2_requires_producer_work,
 };
 use super::required_project_db;
+use tracedecay_mcp::handlers::SessionAuthorities;
 
 pub(super) enum HookV2BindingAdmission {
     Bound(tracedecay_hooks::HookConfigurationSnapshotV1),

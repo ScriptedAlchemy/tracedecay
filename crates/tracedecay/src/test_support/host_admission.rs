@@ -21,8 +21,8 @@ pub use tracedecay_project::test_support::host_admission::{
     ensure_process_background_cpu_authority,
 };
 
-use crate::mcp::tools::SessionAuthorities;
 use crate::project::TraceDecay;
+use tracedecay_mcp::handlers::SessionAuthorities;
 
 /// The session authorities an MCP server retains for this runtime's
 /// registered project and profile session stores.

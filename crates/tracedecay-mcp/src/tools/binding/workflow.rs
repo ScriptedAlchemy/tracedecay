@@ -13,7 +13,7 @@ use tracedecay_tool_catalog::ExecutableBindingV1;
 use super::{DispatchCatalogBinding, McpToolDispatchGroup};
 
 /// The `tracedecay_workflow_` name map lives once, in the MCP handler crate.
-pub(crate) use tracedecay_mcp::handlers::workflow_family::workflow_operation_for_tool;
+pub use crate::handlers::workflow_family::workflow_operation_for_tool;
 
 /// Resolve the executable Workflow binding that names an MCP tool.
 pub(super) fn workflow_executable_binding_for_tool(

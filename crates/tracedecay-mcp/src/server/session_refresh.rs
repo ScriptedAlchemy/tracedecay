@@ -55,7 +55,7 @@ impl SessionScopeAuthorizer for DaemonSessionRefreshAuthorizer<'_> {
     }
 }
 
-pub(crate) struct DaemonSessionRefreshService {
+pub struct DaemonSessionRefreshService {
     database: RegisteredGlobalDbLeaseV1,
     wake: std::sync::Arc<dyn SessionTemporalRefreshWakePort>,
     expected_project_id: Option<String>,
@@ -69,7 +69,7 @@ enum SessionRefreshHandleLookup {
 }
 
 impl DaemonSessionRefreshService {
-    pub(crate) fn new(
+    pub fn new(
         database: RegisteredGlobalDbLeaseV1,
         wake: std::sync::Arc<dyn SessionTemporalRefreshWakePort>,
         expected_project_id: Option<String>,

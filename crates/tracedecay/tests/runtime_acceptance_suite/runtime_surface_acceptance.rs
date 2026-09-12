@@ -14,7 +14,6 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use tracedecay::daemon::call_default_tool;
-use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_api::sse_response;
 use tracedecay_application::ProjectSourceAccessSnapshot;
 use tracedecay_application::feedback::concrete::open_feedback_runtime;
@@ -73,6 +72,7 @@ use tracedecay_mcp::application_output::json::json_line as canonical_json_line;
 use tracedecay_mcp::application_output::markdown::render as render_markdown;
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
 use tracedecay_mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
+use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 

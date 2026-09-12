@@ -28,13 +28,13 @@ use tracedecay_dashboard_api::{
     DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1, DashboardHttpRequestControlV1,
 };
 
-pub(crate) struct DashboardDeliveryReadAdapter {
+pub struct DashboardDeliveryReadAdapter {
     service: DaemonInvocationService,
     project_root: PathBuf,
 }
 
 impl DashboardDeliveryReadAdapter {
-    pub(crate) fn new(service: DaemonInvocationService, project_root: PathBuf) -> Self {
+    pub fn new(service: DaemonInvocationService, project_root: PathBuf) -> Self {
         Self {
             service,
             project_root,
@@ -206,7 +206,7 @@ fn request_context(
 ) -> Option<(RequestContext, GitHubReleaseReadControlV1)> {
     request_context_from_parts_with_deadline(
         control.request_id(),
-        control.cancellation().clone(),
+        control.cancellation(),
         issued_at,
         access,
         expires_at,
@@ -217,8 +217,8 @@ fn request_context(
 #[cfg(test)]
 fn request_context_from_parts(
     request_id: tracedecay_contracts::RequestId,
-    deadline: Deadline,
-    cancellation: tracedecay_contracts::CancellationSignal,
+    deadline: &Deadline,
+    cancellation: &tracedecay_contracts::CancellationSignal,
     observed_at: tracedecay_domain::UtcMicros,
     access: tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
 ) -> Option<(RequestContext, GitHubReleaseReadControlV1)> {
@@ -236,7 +236,7 @@ fn request_context_from_parts(
 
 fn request_context_from_parts_with_deadline(
     request_id: tracedecay_contracts::RequestId,
-    cancellation: tracedecay_contracts::CancellationSignal,
+    cancellation: &tracedecay_contracts::CancellationSignal,
     observed_at: tracedecay_domain::UtcMicros,
     access: tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
     expires_at: tracedecay_domain::UtcMicros,
@@ -399,8 +399,8 @@ mod tests {
                 .expect("cancellation");
         let (context, _release) = request_context_from_parts(
             request_id.clone(),
-            Deadline::new(UtcMicros(150)).expect("deadline"),
-            cancellation,
+            &Deadline::new(UtcMicros(150)).expect("deadline"),
+            &cancellation,
             UtcMicros(100),
             access,
         )
@@ -431,8 +431,8 @@ mod tests {
         let (context, _release) = request_context_from_parts(
             tracedecay_contracts::RequestId::new("request.dashboard-delivery.intersection")
                 .expect("request id"),
-            Deadline::new(UtcMicros(150)).expect("deadline"),
-            tracedecay_contracts::CancellationSignal::active(
+            &Deadline::new(UtcMicros(150)).expect("deadline"),
+            &tracedecay_contracts::CancellationSignal::active(
                 "cancel.dashboard-delivery.intersection",
             )
             .expect("cancellation"),
@@ -465,8 +465,8 @@ mod tests {
             request_context_from_parts(
                 tracedecay_contracts::RequestId::new("request.dashboard-delivery.cancelled",)
                     .expect("request id"),
-                Deadline::new(UtcMicros(150)).expect("deadline"),
-                cancelled,
+                &Deadline::new(UtcMicros(150)).expect("deadline"),
+                &cancelled,
                 UtcMicros(100),
                 access.clone(),
             )
@@ -476,8 +476,8 @@ mod tests {
             request_context_from_parts(
                 tracedecay_contracts::RequestId::new("request.dashboard-delivery.expired")
                     .expect("request id"),
-                Deadline::new(UtcMicros(100)).expect("deadline"),
-                tracedecay_contracts::CancellationSignal::active(
+                &Deadline::new(UtcMicros(100)).expect("deadline"),
+                &tracedecay_contracts::CancellationSignal::active(
                     "cancel.dashboard-delivery.expired",
                 )
                 .expect("cancellation"),
@@ -496,8 +496,8 @@ mod tests {
             request_context_from_parts(
                 tracedecay_contracts::RequestId::new("request.dashboard-delivery.denied")
                     .expect("request id"),
-                Deadline::new(UtcMicros(150)).expect("deadline"),
-                tracedecay_contracts::CancellationSignal::active(
+                &Deadline::new(UtcMicros(150)).expect("deadline"),
+                &tracedecay_contracts::CancellationSignal::active(
                     "cancel.dashboard-delivery.denied",
                 )
                 .expect("cancellation"),

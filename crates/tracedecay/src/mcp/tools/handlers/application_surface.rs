@@ -6,10 +6,6 @@ use tracedecay_contracts::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
-use crate::mcp::tools::dispatch::{
-    resolve_mcp_application_surface_for_target,
-    resolve_mcp_application_surface_with_controls_for_target,
-};
 use crate::project::TraceDecay;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
@@ -18,6 +14,10 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
+use tracedecay_mcp::tools::dispatch::{
+    resolve_mcp_application_surface_for_target,
+    resolve_mcp_application_surface_with_controls_for_target,
+};
 
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
@@ -56,11 +56,10 @@ fn complete_protocol_controls_for_tool(
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
-    let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name).map_err(
-        |error| TraceDecayError::Config {
+    let ceiling = tracedecay_mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name)
+        .map_err(|error| TraceDecayError::Config {
             message: format!("could not resolve application surface deadline: {error}"),
-        },
-    )?;
+        })?;
     complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
 }
 

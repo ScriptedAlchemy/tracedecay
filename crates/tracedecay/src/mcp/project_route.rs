@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_mcp::hook_events;
+pub(crate) use tracedecay_mcp::project_route::{ProjectRouteFailure, ProjectRouteFailureKind};
 
 const MAX_HOOK_ROUTE_CACHE_ENTRIES: usize = 256;
 
@@ -67,8 +68,9 @@ pub(crate) async fn resolve_registered_project_route(
             "registered project server resolver is unavailable",
         ));
     };
-    let (requested_path, scope) = crate::mcp::scope::resolve_query_scope(&context, requested_path)
-        .map_err(|error| error.into_route_failure().into_error())?;
+    let (requested_path, scope) =
+        tracedecay_mcp::scope::resolve_query_scope(&context, requested_path)
+            .map_err(|error| error.into_route_failure().into_error())?;
     let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
         context.clone(),
         requested_path.clone(),
@@ -91,79 +93,6 @@ pub(crate) async fn resolve_registered_project_route(
         requested_root: requested_path,
         scope,
     })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProjectRouteFailureKind {
-    NotFound,
-    NotAuthorized,
-    Ambiguous,
-    Unavailable,
-}
-
-impl ProjectRouteFailureKind {
-    #[hotpath::skip]
-    pub(crate) const fn reason_code(self) -> &'static str {
-        match self {
-            Self::NotFound => "project_route_not_found",
-            Self::NotAuthorized => "project_route_not_authorized",
-            Self::Ambiguous => "project_route_ambiguous",
-            Self::Unavailable => "project_route_unavailable",
-        }
-    }
-
-    #[hotpath::skip]
-    pub(crate) const fn retryable(self) -> bool {
-        matches!(self, Self::Unavailable)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectRouteFailure {
-    pub(crate) kind: ProjectRouteFailureKind,
-    pub(crate) detail: String,
-}
-
-impl ProjectRouteFailure {
-    pub(crate) fn into_error(self) -> tracedecay_domain::errors::TraceDecayError {
-        tracedecay_domain::errors::TraceDecayError::project_route(
-            self.kind.reason_code(),
-            self.kind.retryable(),
-            self.detail,
-        )
-    }
-
-    pub(crate) fn from_selection_error(error: &tracedecay_domain::errors::TraceDecayError) -> Self {
-        let detail = error.to_string();
-        let kind = match error {
-            tracedecay_domain::errors::TraceDecayError::ProjectRoute { reason_code, .. } => {
-                match reason_code.as_str() {
-                    "project_route_not_found" => ProjectRouteFailureKind::NotFound,
-                    "project_route_not_authorized" => ProjectRouteFailureKind::NotAuthorized,
-                    "project_route_ambiguous" => ProjectRouteFailureKind::Ambiguous,
-                    _ => ProjectRouteFailureKind::Unavailable,
-                }
-            }
-            tracedecay_domain::errors::TraceDecayError::Config { message }
-                if message.contains("not found for selector") =>
-            {
-                ProjectRouteFailureKind::NotFound
-            }
-            tracedecay_domain::errors::TraceDecayError::Config { message }
-                if message.contains("ambiguous") || message.contains("multiple stores") =>
-            {
-                ProjectRouteFailureKind::Ambiguous
-            }
-            tracedecay_domain::errors::TraceDecayError::Config { message }
-                if message.contains("registry is unavailable")
-                    || message.contains("profile identity") =>
-            {
-                ProjectRouteFailureKind::NotAuthorized
-            }
-            _ => ProjectRouteFailureKind::Unavailable,
-        };
-        Self { kind, detail }
-    }
 }
 
 #[derive(Clone)]

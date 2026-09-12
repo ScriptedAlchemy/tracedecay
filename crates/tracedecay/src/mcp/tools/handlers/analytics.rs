@@ -221,7 +221,7 @@ fn bound_but_unadvertised_tool_names(maximal_defined: &[String]) -> BTreeSet<&'s
         .iter()
         .map(|name| tracedecay_automation::analytics::normalize_tool_name(name))
         .collect();
-    crate::mcp::tools::binding::MCP_TOOL_BINDINGS
+    tracedecay_mcp::tools::binding::MCP_TOOL_BINDINGS
         .iter()
         .map(|binding| binding.name)
         .filter(|name| {
@@ -246,7 +246,7 @@ mod tests {
         let bound_unadvertised = bound_but_unadvertised_tool_names(&maximal_defined);
 
         assert!(
-            crate::mcp::tools::binding::MCP_TOOL_BINDINGS
+            tracedecay_mcp::tools::binding::MCP_TOOL_BINDINGS
                 .iter()
                 .any(|binding| binding.name == "tracedecay_admin_cli")
         );

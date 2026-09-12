@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::call_default_tool;
-use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
 use tracedecay_contracts::retained_surfaces::RetainedSurfaceResultV1;
 use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_contracts::{ApplicationEnvelope, RequestId};
 use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 use tracedecay_daemon_protocol::{DaemonHandshake, DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn initialize_project(home: &Path, project: &Path) {

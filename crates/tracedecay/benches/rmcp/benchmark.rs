@@ -244,7 +244,7 @@ pub fn run_rmcp_connection_pipeline<'a>(
         // the selected dispatch allocation reports steady-state connection
         // work. Cold catalog construction is intentionally outside this
         // scope and is measured separately with process profiling.
-        crate::mcp::tools::binding::mcp_dispatch_catalog()
+        tracedecay_mcp::tools::binding::mcp_dispatch_catalog()
             .map_err(|error| format!("warm benchmark dispatch catalog: {error}"))?;
 
         before_measurement();
