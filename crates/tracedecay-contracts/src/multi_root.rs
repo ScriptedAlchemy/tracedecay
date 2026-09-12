@@ -12,7 +12,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::{RequestAdmission, RequestContext};
+use crate::{OpaqueCursor, RequestAdmission, RequestContext};
 
 pub mod catalog;
 mod collection;
@@ -500,7 +500,9 @@ pub enum MultiRootQueryError {
 #[serde(deny_unknown_fields)]
 pub struct MultiRootContinuationV1 {
     scope_set_digest: ManifestDigest,
-    root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
+    root_generations: Vec<RootScopeOutcomeV1<Option<RootGenerationV1>>>,
+    #[schemars(with = "Vec<RootScopeOutcomeV1<Option<String>>>")]
+    root_cursors: Vec<RootScopeOutcomeV1<Option<OpaqueCursor>>>,
     query_digest: ManifestDigest,
     order_digest: ManifestDigest,
     #[schemars(range(min = 1))]
@@ -512,7 +514,8 @@ pub struct MultiRootContinuationV1 {
 #[serde(deny_unknown_fields)]
 struct MultiRootContinuationWireV1 {
     scope_set_digest: ManifestDigest,
-    root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
+    root_generations: Vec<RootScopeOutcomeV1<Option<RootGenerationV1>>>,
+    root_cursors: Vec<RootScopeOutcomeV1<Option<OpaqueCursor>>>,
     query_digest: ManifestDigest,
     order_digest: ManifestDigest,
     next_page: u64,
@@ -528,6 +531,7 @@ impl<'de> Deserialize<'de> for MultiRootContinuationV1 {
         let continuation = Self::new(
             wire.scope_set_digest,
             wire.root_generations,
+            wire.root_cursors,
             wire.query_digest,
             wire.order_digest,
             wire.next_page,
@@ -545,7 +549,8 @@ impl<'de> Deserialize<'de> for MultiRootContinuationV1 {
 impl MultiRootContinuationV1 {
     pub fn new(
         scope_set_digest: ManifestDigest,
-        mut root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
+        mut root_generations: Vec<RootScopeOutcomeV1<Option<RootGenerationV1>>>,
+        mut root_cursors: Vec<RootScopeOutcomeV1<Option<OpaqueCursor>>>,
         query_digest: ManifestDigest,
         order_digest: ManifestDigest,
         next_page: u64,
@@ -568,13 +573,39 @@ impl MultiRootContinuationV1 {
             ));
         }
         for root in &root_generations {
-            root.validate_generation()
+            root.scope_digest
+                .validate()
                 .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+            match &root.outcome {
+                ScopeOutcome::Exact(Some(generation))
+                | ScopeOutcome::Partial {
+                    value: Some(generation),
+                    ..
+                } => RootScopeOutcomeV1::new(
+                    root.scope_digest.clone(),
+                    ScopeOutcome::Exact(generation.clone()),
+                )
+                .and_then(|root| root.validate_generation())
+                .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?,
+                ScopeOutcome::Exact(None)
+                | ScopeOutcome::Partial { value: None, .. }
+                | ScopeOutcome::Denied
+                | ScopeOutcome::Unavailable { .. } => {}
+            }
         }
         root_generations.sort_by(|left, right| left.scope_digest.cmp(&right.scope_digest));
+        root_cursors.sort_by(|left, right| left.scope_digest.cmp(&right.scope_digest));
         if root_generations
             .windows(2)
             .any(|pair| pair[0].scope_digest == pair[1].scope_digest)
+        {
+            return Err(MultiRootQueryError::RootSetMismatch);
+        }
+        if root_cursors.len() != root_generations.len()
+            || root_cursors
+                .iter()
+                .zip(&root_generations)
+                .any(|(cursor, generation)| cursor.scope_digest != generation.scope_digest)
         {
             return Err(MultiRootQueryError::RootSetMismatch);
         }
@@ -582,6 +613,7 @@ impl MultiRootContinuationV1 {
             MULTI_ROOT_CONTINUATION_DIGEST_DOMAIN_V1,
             &scope_set_digest,
             &root_generations,
+            &root_cursors,
             &query_digest,
             &order_digest,
             next_page,
@@ -590,6 +622,7 @@ impl MultiRootContinuationV1 {
         Ok(Self {
             scope_set_digest,
             root_generations,
+            root_cursors,
             query_digest,
             order_digest,
             next_page,
@@ -601,8 +634,40 @@ impl MultiRootContinuationV1 {
         &self.scope_set_digest
     }
 
-    pub fn root_generations(&self) -> &[RootScopeOutcomeV1<RootGenerationV1>] {
+    pub fn query_digest(&self) -> &ManifestDigest {
+        &self.query_digest
+    }
+
+    pub fn order_digest(&self) -> &ManifestDigest {
+        &self.order_digest
+    }
+
+    pub fn root_generations(&self) -> &[RootScopeOutcomeV1<Option<RootGenerationV1>>] {
         &self.root_generations
+    }
+
+    pub fn root_generation(
+        &self,
+        scope_digest: &ManifestDigest,
+    ) -> Option<&ScopeOutcome<Option<RootGenerationV1>>> {
+        self.root_generations
+            .iter()
+            .find(|root| &root.scope_digest == scope_digest)
+            .map(|root| &root.outcome)
+    }
+
+    pub fn root_cursors(&self) -> &[RootScopeOutcomeV1<Option<OpaqueCursor>>] {
+        &self.root_cursors
+    }
+
+    pub fn root_cursor(
+        &self,
+        scope_digest: &ManifestDigest,
+    ) -> Option<&ScopeOutcome<Option<OpaqueCursor>>> {
+        self.root_cursors
+            .iter()
+            .find(|root| &root.scope_digest == scope_digest)
+            .map(|root| &root.outcome)
     }
 
     #[hotpath::skip]
@@ -618,6 +683,7 @@ impl MultiRootContinuationV1 {
         let canonical = Self::new(
             self.scope_set_digest.clone(),
             self.root_generations.clone(),
+            self.root_cursors.clone(),
             self.query_digest.clone(),
             self.order_digest.clone(),
             self.next_page,
@@ -635,7 +701,7 @@ impl MultiRootContinuationV1 {
 pub struct MultiRootQueryRequestV1<Q> {
     pub scope_set: AuthorizedScopeSet,
     pub contexts: Vec<RequestContext>,
-    pub root_generations: Vec<RootScopeOutcomeV1<RootGenerationV1>>,
+    pub root_generations: Vec<RootScopeOutcomeV1<Option<RootGenerationV1>>>,
     pub capability_id: CapabilityId,
     pub use_case_id: UseCaseId,
     pub observed_at: UtcMicros,
@@ -652,10 +718,17 @@ pub trait MultiRootQueryPort<Q, T> {
     fn query_root(
         &self,
         context: &RequestContext,
-        generation: &RootGenerationV1,
+        generation: Option<&RootGenerationV1>,
         query: &Q,
-        page: u64,
-    ) -> ScopeOutcome<Vec<T>>;
+        cursor: Option<&OpaqueCursor>,
+    ) -> ScopeOutcome<MultiRootRootPageV1<T>>;
+}
+
+/// One root's actual child page and its owner-minted continuation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultiRootRootPageV1<T> {
+    pub value: Vec<T>,
+    pub next_cursor: Option<OpaqueCursor>,
 }
 
 /// Federated page preserving each root outcome and aggregate partial truth.
@@ -668,7 +741,7 @@ pub struct MultiRootQueryPageV1<T> {
     pub scope_set_digest: ManifestDigest,
     pub roots: Vec<RootScopeOutcomeV1<Vec<T>>>,
     pub aggregate: ScopeOutcome<Vec<T>>,
-    pub continuation: MultiRootContinuationV1,
+    pub continuation: Option<MultiRootContinuationV1>,
 }
 
 pub struct AuthorizedMultiRootQueryService<P> {
@@ -697,63 +770,150 @@ impl<P> AuthorizedMultiRootQueryService<P> {
         validate_continuation(&request)?;
 
         let mut roots = Vec::with_capacity(request.scope_set.roots().len());
+        let mut root_cursors = Vec::with_capacity(request.scope_set.roots().len());
         for root in request.scope_set.roots() {
             let scope = root.scope();
+            let resume = request
+                .continuation
+                .as_ref()
+                .map(|continuation| {
+                    continuation
+                        .root_cursor(&scope.scope_digest)
+                        .ok_or(MultiRootQueryError::RootSetMismatch)
+                })
+                .transpose()?;
+            let child_cursor = match resume {
+                Some(ScopeOutcome::Exact(cursor))
+                | Some(ScopeOutcome::Partial { value: cursor, .. }) => cursor.as_ref(),
+                Some(ScopeOutcome::Denied | ScopeOutcome::Unavailable { .. }) | None => None,
+            };
             let snapshot = generations
                 .get(&scope.scope_digest)
                 .copied()
                 .ok_or(MultiRootQueryError::RootSetMismatch)?;
-            let outcome = match &snapshot.outcome {
-                ScopeOutcome::Exact(generation) => {
-                    let context = contexts
-                        .get(&scope.scope_digest)
-                        .copied()
-                        .ok_or(MultiRootQueryError::RootSetMismatch)?;
-                    self.port
-                        .query_root(context, generation, &request.query, request.page)
-                }
-                ScopeOutcome::Partial {
-                    value: generation,
+            let exhausted = match resume {
+                Some(ScopeOutcome::Exact(None)) => Some(ScopeOutcome::Exact(MultiRootRootPageV1 {
+                    value: Vec::new(),
+                    next_cursor: None,
+                })),
+                Some(ScopeOutcome::Partial {
+                    value: None,
                     reason,
-                } => {
-                    let context = contexts
-                        .get(&scope.scope_digest)
-                        .copied()
-                        .ok_or(MultiRootQueryError::RootSetMismatch)?;
-                    match self
-                        .port
-                        .query_root(context, generation, &request.query, request.page)
-                    {
-                        ScopeOutcome::Exact(value) => ScopeOutcome::Partial {
-                            value,
-                            reason: *reason,
-                        },
-                        outcome => outcome,
+                }) => Some(ScopeOutcome::Partial {
+                    value: MultiRootRootPageV1 {
+                        value: Vec::new(),
+                        next_cursor: None,
+                    },
+                    reason: *reason,
+                }),
+                Some(ScopeOutcome::Denied) => Some(ScopeOutcome::Denied),
+                Some(ScopeOutcome::Unavailable { reason }) => {
+                    Some(ScopeOutcome::Unavailable { reason: *reason })
+                }
+                Some(ScopeOutcome::Exact(Some(_)))
+                | Some(ScopeOutcome::Partial { value: Some(_), .. })
+                | None => None,
+            };
+            let page = if let Some(exhausted) = exhausted {
+                exhausted
+            } else {
+                match &snapshot.outcome {
+                    ScopeOutcome::Exact(generation) => {
+                        let context = contexts
+                            .get(&scope.scope_digest)
+                            .copied()
+                            .ok_or(MultiRootQueryError::RootSetMismatch)?;
+                        self.port.query_root(
+                            context,
+                            generation.as_ref(),
+                            &request.query,
+                            child_cursor,
+                        )
+                    }
+                    ScopeOutcome::Partial {
+                        value: generation,
+                        reason,
+                    } => {
+                        let context = contexts
+                            .get(&scope.scope_digest)
+                            .copied()
+                            .ok_or(MultiRootQueryError::RootSetMismatch)?;
+                        match self.port.query_root(
+                            context,
+                            generation.as_ref(),
+                            &request.query,
+                            child_cursor,
+                        ) {
+                            ScopeOutcome::Exact(value) => ScopeOutcome::Partial {
+                                value,
+                                reason: *reason,
+                            },
+                            outcome => outcome,
+                        }
+                    }
+                    ScopeOutcome::Denied => ScopeOutcome::Denied,
+                    ScopeOutcome::Unavailable { reason } => {
+                        ScopeOutcome::Unavailable { reason: *reason }
                     }
                 }
-                ScopeOutcome::Denied => ScopeOutcome::Denied,
-                ScopeOutcome::Unavailable { reason } => {
-                    ScopeOutcome::Unavailable { reason: *reason }
-                }
+            };
+            let (outcome, cursor_outcome) = match page {
+                ScopeOutcome::Exact(page) => (
+                    ScopeOutcome::Exact(page.value),
+                    ScopeOutcome::Exact(page.next_cursor),
+                ),
+                ScopeOutcome::Partial {
+                    value: page,
+                    reason,
+                } => (
+                    ScopeOutcome::Partial {
+                        value: page.value,
+                        reason,
+                    },
+                    ScopeOutcome::Partial {
+                        value: page.next_cursor,
+                        reason,
+                    },
+                ),
+                ScopeOutcome::Denied => (ScopeOutcome::Denied, ScopeOutcome::Denied),
+                ScopeOutcome::Unavailable { reason } => (
+                    ScopeOutcome::Unavailable { reason },
+                    ScopeOutcome::Unavailable { reason },
+                ),
             };
             roots.push(
                 RootScopeOutcomeV1::new(scope.scope_digest.clone(), outcome)
                     .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?,
             );
+            root_cursors.push(
+                RootScopeOutcomeV1::new(scope.scope_digest.clone(), cursor_outcome)
+                    .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?,
+            );
         }
 
         let aggregate = aggregate_outcomes(&roots);
-        let next_page = request
-            .page
-            .checked_add(1)
-            .ok_or_else(|| MultiRootQueryError::Invalid("page overflow".to_owned()))?;
-        let continuation = MultiRootContinuationV1::new(
-            request.scope_set.digest().clone(),
-            request.root_generations,
-            request.query_digest,
-            request.order_digest,
-            next_page,
-        )?;
+        let has_next = root_cursors.iter().any(|root| match &root.outcome {
+            ScopeOutcome::Exact(cursor) | ScopeOutcome::Partial { value: cursor, .. } => {
+                cursor.is_some()
+            }
+            ScopeOutcome::Denied | ScopeOutcome::Unavailable { .. } => false,
+        });
+        let continuation = if has_next {
+            let next_page = request
+                .page
+                .checked_add(1)
+                .ok_or_else(|| MultiRootQueryError::Invalid("page overflow".to_owned()))?;
+            Some(MultiRootContinuationV1::new(
+                request.scope_set.digest().clone(),
+                request.root_generations,
+                root_cursors,
+                request.query_digest,
+                request.order_digest,
+                next_page,
+            )?)
+        } else {
+            None
+        };
         Ok(MultiRootQueryPageV1 {
             scope_set_id: request.scope_set.scope_set_id().clone(),
             scope_set_revision: request.scope_set.revision(),
@@ -818,15 +978,34 @@ fn validate_contexts<Q>(
 
 fn validate_generations<Q>(
     request: &MultiRootQueryRequestV1<Q>,
-) -> Result<BTreeMap<ManifestDigest, &RootScopeOutcomeV1<RootGenerationV1>>, MultiRootQueryError> {
+) -> Result<
+    BTreeMap<ManifestDigest, &RootScopeOutcomeV1<Option<RootGenerationV1>>>,
+    MultiRootQueryError,
+> {
     if request.root_generations.len() != request.scope_set.roots().len() {
         return Err(MultiRootQueryError::RootSetMismatch);
     }
     let mut generations = BTreeMap::new();
     for generation in &request.root_generations {
         generation
-            .validate_generation()
+            .scope_digest
+            .validate()
             .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        match &generation.outcome {
+            ScopeOutcome::Exact(Some(value))
+            | ScopeOutcome::Partial {
+                value: Some(value), ..
+            } => RootScopeOutcomeV1::new(
+                generation.scope_digest.clone(),
+                ScopeOutcome::Exact(value.clone()),
+            )
+            .and_then(|root| root.validate_generation())
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?,
+            ScopeOutcome::Exact(None)
+            | ScopeOutcome::Partial { value: None, .. }
+            | ScopeOutcome::Denied
+            | ScopeOutcome::Unavailable { .. } => {}
+        }
         if generations
             .insert(generation.scope_digest.clone(), generation)
             .is_some()

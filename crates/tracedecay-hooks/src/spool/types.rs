@@ -377,8 +377,9 @@ impl PendingRecordV1 {
             && self.queued_at == record.queued_at
             && self.framed_len == record.framed_len
             && self.event_id == record.envelope.event_id
-            && self.envelope.as_ref() == Some(&record.envelope)
             && self.checksum == record.checksum
-            && self.native_lifecycle == record.native_lifecycle
+            && self.envelope.as_ref().is_none_or(|envelope| {
+                envelope == &record.envelope && self.native_lifecycle == record.native_lifecycle
+            })
     }
 }

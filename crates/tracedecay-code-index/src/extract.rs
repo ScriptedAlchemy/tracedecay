@@ -768,13 +768,28 @@ mod tests {
     fn canonical_rows_digest_matches_pinned_identity() {
         let extractor = TreeSitterExtractor::new();
         let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
+        let descriptor = rust_descriptor();
         let extraction = extractor
-            .extract(&file, &rust_descriptor(), &NeverCancelled)
+            .extract(&file, &descriptor, &NeverCancelled)
             .expect("extraction succeeds");
 
+        let mut prior_descriptor = descriptor.clone();
+        prior_descriptor.extractor_revision =
+            ExtractorRevision::new("extractor.rust.v4").expect("prior extractor revision");
+        assert_eq!(
+            rows_digest(
+                file.validated_file(),
+                &prior_descriptor,
+                extraction.parse_artifact()
+            )
+            .expect("prior canonical rows digest")
+            .as_str(),
+            "sha256:5143ed246c9900a5de85721fb98d0aeb93b8565bd8714f55341693889be0ab86",
+            "the prior identity remains reproducible from the superseded Rust v4 descriptor"
+        );
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:5143ed246c9900a5de85721fb98d0aeb93b8565bd8714f55341693889be0ab86"
+            "sha256:0360c533adb5dc9cfbeafa5e5d28c6fe0090439cf396971e09490afe6417ce58"
         );
     }
 

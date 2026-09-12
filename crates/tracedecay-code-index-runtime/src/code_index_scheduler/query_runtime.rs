@@ -177,7 +177,7 @@ pub enum DeferredMountAttemptV1 {
     AwaitNextPublication,
 }
 
-/// Waits for the first authenticated text generation of `project_root` and then
+/// Waits for the first retained generation of `project_root` and then
 /// retries the query-authority mount. Exits when the mount reaches any terminal
 /// outcome or the publication channel closes (daemon shutdown).
 ///
@@ -198,7 +198,7 @@ pub async fn retry_deferred_query_authority_until_serving<F, Fut>(
     ready_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if registry
-            .latest_text_serving_for_root(&project_root)
+            .retained_text_owner_for_root(&project_root)
             .await
             .is_some()
             && attempt().await != DeferredMountAttemptV1::AwaitNextPublication
@@ -257,23 +257,17 @@ async fn prepare_core_query_authority_on_project_open(
     scope: &ResolvedScope,
     cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
-    let root_text = registry.latest_text_serving_for_root(project_root).await;
-    let privacy_domain = if let Some(text) = registry
-        .latest_text_serving_for_scope(scope)
+    let root_text = registry.retained_text_owner_for_root(project_root).await;
+    let privacy_domain = registry
+        .retained_text_owner_freshness_for_scope(scope)
         .await
+        .map(|(text, _)| text)
         .or(root_text)
-    {
-        text.metadata().manifest().privacy_domain.clone()
-    } else {
-        registry
-            .latest_complete_fresh_for_scope(scope)
-            .await
-            .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?
-            .generation
-            .manifest()
-            .privacy_domain
-            .clone()
-    };
+        .ok_or(QueryRuntimeMountErrorV1::GenerationUnavailable)?
+        .metadata()
+        .manifest()
+        .privacy_domain
+        .clone();
     let (profile, diversity) = core_query_policy()?;
     let ranking_revision =
         ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)

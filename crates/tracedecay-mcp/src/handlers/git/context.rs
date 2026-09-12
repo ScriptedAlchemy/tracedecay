@@ -498,10 +498,19 @@ pub async fn handle_diff_context(
             )?
         )
     };
+    let impacted_paths = impacted
+        .impacted
+        .iter()
+        .map(|impacted| symbol_path(&impacted.summary).map(str::to_owned))
+        .collect::<Result<HashSet<_>>>()?;
+    let annotation_paths = requested_paths
+        .union(&impacted_paths)
+        .cloned()
+        .collect::<HashSet<_>>();
     let files_with_inline_tests = hotpath::measure_block!(
         "mcp.git.diff_context.test_annotations",
         graph.test_annotated_logical_files(
-            None,
+            Some(&annotation_paths),
             VERIFIED_GRAPH_MAX_SYMBOLS,
             VERIFIED_GRAPH_MAX_RELATIONS,
         )?
@@ -527,7 +536,7 @@ pub async fn handle_diff_context(
     }
 
     let traversal = hotpath::future!(
-        collect_verified_affected_test_files(graph, &files, depth, None, &files_with_inline_tests),
+        collect_verified_affected_test_files(graph, &files, depth, None),
         label = "mcp.git.diff_context.affected"
     )
     .await?;

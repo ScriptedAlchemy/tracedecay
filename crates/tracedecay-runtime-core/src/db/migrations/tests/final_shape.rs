@@ -117,6 +117,13 @@ async fn current_final_store_is_admitted_without_mutation() {
     // Diagnostics install this same DDL when publishing their first result.
     // That ordinary operation must not make the store fail its next open.
     tamper(&path, tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL);
+    // The runtime writer likewise re-ensures its ledger before its first
+    // idempotency lookup. A fresh store followed by an ordinary write must
+    // remain the exact shape accepted on restart.
+    tamper(
+        &path,
+        tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA,
+    );
     let before = store_snapshot(&path);
     assert_eq!(before.user_version, i64::from(SCHEMA_VERSION));
 

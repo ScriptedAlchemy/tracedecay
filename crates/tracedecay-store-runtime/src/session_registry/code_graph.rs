@@ -1495,6 +1495,25 @@ impl RetainedCodeGraphRuntimeV1 {
         &self,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.recover_verified_code_snapshot(request_cancelled, true)
+    }
+
+    /// Recover this runtime's exact retained generation without requiring it
+    /// to remain the relational head. The replay and sealed generation remain
+    /// generation-addressed; this read never installs or repoints the current
+    /// verified head.
+    pub fn recover_verified_generation(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        self.recover_verified_code_snapshot(request_cancelled, false)
+    }
+
+    fn recover_verified_code_snapshot(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+        require_current_head: bool,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         if request_cancelled.load(Ordering::Acquire)
             || self.lifecycle_cancelled.load(Ordering::Acquire)
         {
@@ -1573,11 +1592,11 @@ impl RetainedCodeGraphRuntimeV1 {
             .project_database
             .graph_publication_storage()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        let head = storage
+        let current_head = storage
             .verified_head(&relational_projection, &context)
             .map_err(GraphDbError::from)?
             .ok_or_else(|| GraphDbError::unavailable("code graph has no verified head"))?;
-        if head.key != expected_key {
+        if require_current_head && current_head.key != expected_key {
             return Err(GraphDbError::conflict(
                 "code_graph.recover_verified_snapshot_from_head.generation",
             ));
@@ -1601,7 +1620,7 @@ impl RetainedCodeGraphRuntimeV1 {
         .map_err(|error| GraphDbError::Corrupt {
             message: format!("verified code graph replay is invalid: {error}"),
         })?;
-        if replay_head != head {
+        if require_current_head && replay_head != current_head {
             return Err(GraphDbError::Corrupt {
                 message: "verified code graph head does not match its active replay".to_owned(),
             });
@@ -1627,13 +1646,22 @@ impl RetainedCodeGraphRuntimeV1 {
             lifecycle_cancellation: graph_lifecycle_cancellation(&self.lifecycle_cancelled, None),
             deadline: deadline_at,
         };
-        let snapshot = self.graph_registry.recover_verified_sealed_snapshot(
-            registration,
-            &mut storage,
-            &context,
-            &relational_projection,
-        )?;
-        if snapshot.verified_head() != &head || snapshot.generation() != &graph_generation {
+        let snapshot = if require_current_head {
+            self.graph_registry.recover_verified_sealed_snapshot(
+                registration,
+                &mut storage,
+                &context,
+                &relational_projection,
+            )?
+        } else {
+            self.graph_registry.verified_generation_snapshot(
+                registration,
+                &mut storage,
+                &context,
+                &expected_key,
+            )?
+        };
+        if snapshot.verified_head() != &replay_head || snapshot.generation() != &graph_generation {
             return Err(GraphDbError::conflict(
                 "code_graph.recover_verified_snapshot_from_head.changed",
             ));
@@ -3298,6 +3326,16 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
         tracedecay_graph_db::GraphDbError,
     > {
         Self::recover_verified_snapshot_from_head(self, request_cancelled)
+    }
+
+    fn recover_verified_generation(
+        &self,
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<
+        tracedecay_graph_db::VerifiedGraphSnapshot,
+        tracedecay_graph_db::GraphDbError,
+    > {
+        Self::recover_verified_generation(self, request_cancelled)
     }
 
     fn load_sealed_read_bundle_catalog(

@@ -17,10 +17,13 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
     scoped_code_index_store_root,
 };
 use tracedecay_contracts::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope, now_micros,
+    CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantId,
+    CapabilityGrantSnapshot, CodeQueryScope, CodeRelationRequest, Deadline, DisclosureClass,
+    PageRequest, RequestContext, RequestId, ResolvedScope, ResultProjection, RetrievalOrder,
+    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
+    now_micros,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
+use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_graph_query::{
     CodeGraphReadFreshnessV1, CodeGraphReadRequest, request_graph_cancellation,
 };
@@ -103,6 +106,44 @@ fn published(
             panic!("expected a published generation, got noop {evidence:?}")
         }
     }
+}
+
+fn callers_context(scope: ResolvedScope) -> RequestContext {
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.persistent-graph-cursor").expect("grant id"),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("grant digest"),
+        ActorId::new("actor.code-index.issuer").expect("issuer"),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        BTreeSet::from([operation.capability_id().clone()]),
+        BTreeSet::from([operation.use_case_id().clone()]),
+        DisclosureClass::Evidence,
+    )
+    .expect("grant");
+    RequestContext::new(
+        ActorId::new("actor.code-index.requester").expect("requester"),
+        scope,
+        grant,
+        RequestId::new("request.persistent-graph-cursor").expect("request id"),
+        Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+        CancellationContext::active("cancel.persistent-graph-cursor").expect("cancellation"),
+    )
+    .expect("request context")
+}
+
+fn callers_meta(
+    page_size: u32,
+    cursor: Option<tracedecay_contracts::OpaqueCursor>,
+) -> RetrievalRequestMeta {
+    RetrievalRequestMeta::current(
+        PageRequest::new(page_size, cursor).expect("callers page"),
+        ResultProjection::Evidence,
+        RetrievalOrder::Relevance,
+    )
 }
 
 /// A retained text generation reaches exact/lexical readiness when persistent
@@ -360,6 +401,282 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     drop(graph_activation);
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join graph reconciliation tasks");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generation_b() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let scoped_store = scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let (latest_a, replay_a, scope, hub) = {
+        let mut scheduler = scheduler(
+            &fixture,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("publish generation A"));
+        let latest = scheduler.latest_complete().expect("generation A");
+        let replay = scheduler
+            .code_graph_replay_binding(&latest.generation().manifest().generation_id)
+            .expect("generation A replay binding");
+        let snapshot = latest.generation().snapshot();
+        let scope = ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope");
+        let hub = latest
+            .generation()
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name.ends_with("hub"))
+            .expect("hub symbol")
+            .occurrence
+            .as_str()
+            .to_owned();
+        (latest, replay, scope, hub)
+    };
+    let generation_a = latest_a.generation().manifest().generation_id.clone();
+    let project_id = test_project_id();
+    let profile = TempDir::new().expect("profile root");
+    let profile_root = profile.path().join("profile");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        fixture.path(),
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        96,
+        "persistent historical graph cursor",
+    )
+    .expect("database scope");
+    let graph_runtime = Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("graph runtime registry"),
+    );
+    let project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("project database");
+    crate::test_support::host_admission::await_bound_graph_runtime(
+        &project_database,
+        "bind persistent historical cursor graph runtime",
+    )
+    .await
+    .expect("bound graph runtime");
+    let activation = CodeGraphActivationAuthorityV1::Persistent {
+        runtime: graph_runtime.code_graph_seat_port(),
+        project_database: Arc::clone(&project_database),
+        policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    };
+    activation
+        .activate(
+            &project_id,
+            &scope.repository_id,
+            &scope.worktree_id,
+            latest_a,
+            replay_a,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await
+        .expect("activate generation A");
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_runtime(
+            project_id,
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            graph_runtime.code_graph_seat_port(),
+            Arc::clone(&project_database),
+            CodeGraphActivationPolicyV1::Enabled,
+            None,
+        )
+        .await
+        .expect("mount persistent generation A");
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if registry
+            .retained_text_owner_freshness_for_scope(&scope)
+            .await
+            .is_some_and(|(latest, current)| current && latest.interactive_graph_store().is_ok())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= ready_deadline,
+            "generation A graph did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let sessions = graph_runtime
+        .profile_sessions()
+        .await
+        .expect("profile session database");
+    let cursor_keys = sessions
+        .load_session_cursor_key_provider_result()
+        .await
+        .expect("cursor keys");
+    tracedecay_code_index_runtime::code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
+        &registry,
+        fixture.path(),
+        &scope,
+        &cursor_keys,
+    )
+    .await
+    .expect("mount query authority");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::Callers).expect("callers operation");
+    let context = callers_context(scope.clone());
+    let query_scope = CodeQueryScope::new(
+        CodeGenerationId::new(tracedecay_contracts::UNPINNED_LATEST_GENERATION_SENTINEL)
+            .expect("unpinned generation"),
+        None,
+    )
+    .expect("query scope");
+    let first = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &CodeRelationRequest {
+                node_id: hub.clone(),
+                maximum_depth: 1,
+                resolve_trait_dispatch: false,
+                scope: query_scope.clone(),
+                meta: callers_meta(1, None),
+            },
+        )
+        .await;
+    let first = match first {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("generation A page"),
+        other => panic!("generation A callers unavailable: {other:?}"),
+    };
+    let first_caller = first
+        .items
+        .first()
+        .expect("generation A page 1 caller")
+        .symbol
+        .node_id
+        .clone();
+    let cursor_a = first.next_cursor.expect("generation A cursor");
+    assert_eq!(first.generation, generation_a);
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\npub fn caller_c() { hub(); }\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "publish generation B"]);
+    let (generation_b, hub_b) = loop {
+        if let Some((latest, true)) = registry
+            .retained_text_owner_freshness_for_scope(&scope)
+            .await
+            && latest.metadata().manifest().generation_id != generation_a
+            && let Ok(store) = latest.interactive_graph_store()
+            && let Ok(reader) = store.interactive_reader_with_cancellation(
+                &latest.metadata().manifest().generation_id,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
+            && let Ok(hubs) = reader.resolve_simple_name(
+                "hub",
+                None,
+                2,
+                Arc::new(tracedecay_graph_db::NeverCancelled),
+            )
+            && hubs.len() == 1
+        {
+            break (
+                latest.metadata().manifest().generation_id.clone(),
+                hubs[0].occurrence.as_str().to_owned(),
+            );
+        }
+        assert!(
+            std::time::Instant::now() <= ready_deadline + Duration::from_secs(20),
+            "generation B graph did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    let continuation = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &CodeRelationRequest {
+                node_id: hub.clone(),
+                maximum_depth: 1,
+                resolve_trait_dispatch: false,
+                scope: query_scope.clone(),
+                meta: callers_meta(1, Some(cursor_a)),
+            },
+        )
+        .await;
+    let continuation = match continuation {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("generation A page 2"),
+        other => panic!("generation A cursor did not continue: {other:?}"),
+    };
+    assert_eq!(continuation.generation, generation_a);
+    assert_eq!(continuation.total, Some(2));
+    assert_ne!(
+        continuation
+            .items
+            .first()
+            .expect("generation A page 2 caller")
+            .symbol
+            .node_id,
+        first_caller,
+    );
+
+    let current = registry
+        .callers(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &CodeRelationRequest {
+                node_id: hub_b,
+                maximum_depth: 1,
+                resolve_trait_dispatch: false,
+                scope: query_scope,
+                meta: callers_meta(4, None),
+            },
+        )
+        .await;
+    let current = match current {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("generation B page"),
+        other => panic!("generation B no longer served after A recovery: {other:?}"),
+    };
+    assert_eq!(current.generation, generation_b);
+    assert_eq!(current.total, Some(3));
+    assert!(current.items.iter().any(|item| {
+        item.symbol
+            .qualified_name
+            .rsplit("::")
+            .next()
+            .is_some_and(|name| name == "caller_c")
+    }));
+
+    registry.shutdown().await;
     graph_runtime
         .shutdown_memory_graph_reconciliation_tasks()
         .await

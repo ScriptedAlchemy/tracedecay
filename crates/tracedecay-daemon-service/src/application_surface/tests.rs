@@ -1238,7 +1238,6 @@ fn callable_code_operations_parse_distinct_application_requests() {
 
     for operation in [
         ApplicationSurfaceOperation::CodeDeclaration,
-        ApplicationSurfaceOperation::CodeDefinition,
         ApplicationSurfaceOperation::CodeTypeDefinition,
         ApplicationSurfaceOperation::CodeReferences,
     ] {
@@ -1491,10 +1490,6 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
         (
             ApplicationSurfaceOperation::CodeDeclaration,
             "code_declaration",
-        ),
-        (
-            ApplicationSurfaceOperation::CodeDefinition,
-            "code_definition",
         ),
         (
             ApplicationSurfaceOperation::CodeTypeDefinition,

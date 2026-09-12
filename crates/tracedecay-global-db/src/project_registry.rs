@@ -213,14 +213,11 @@ pub fn alias_key_path(alias: &str) -> Option<&Path> {
 
 /// Whether `path` lives under the OS temporary directory.
 ///
-/// Canonicalizes both sides where possible so a `/tmp` symlinked to
-/// `/private/tmp` (macOS) still matches.
+/// Resolves existing ancestors so symlinked temporary directories also match
+/// profile paths that have not been created yet.
 #[must_use]
 pub fn is_ephemeral_path(path: &Path) -> bool {
-    let temp_root = std::env::temp_dir();
-    let temp_root = temp_root.canonicalize().unwrap_or(temp_root);
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    path.starts_with(&temp_root)
+    canonical_project_path(path).starts_with(canonical_project_path(&std::env::temp_dir()))
 }
 
 /// Reason code carried by the [`TraceDecayError::ProjectRoute`] that

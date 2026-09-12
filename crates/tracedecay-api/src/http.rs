@@ -120,7 +120,6 @@ const fn is_callable_code_route(operation: ApplicationSurfaceOperation) -> bool 
             | ApplicationSurfaceOperation::CodeFacets
             | ApplicationSurfaceOperation::CodeTimeline
             | ApplicationSurfaceOperation::CodeDeclaration
-            | ApplicationSurfaceOperation::CodeDefinition
             | ApplicationSurfaceOperation::CodeTypeDefinition
             | ApplicationSurfaceOperation::CodeReferences
     )

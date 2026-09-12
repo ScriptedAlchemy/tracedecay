@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
@@ -7,7 +8,8 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 #[cfg(any(test, feature = "test-helpers"))]
 use tokio::sync::Notify;
 use tokio::sync::Semaphore;
-use tracedecay_store::StoreShardIdV1;
+use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
+use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
 use super::retained_hook_tasks::RetainedHookTaskJoin;
 
@@ -63,6 +65,49 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
     execution_count: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(any(test, feature = "test-helpers"))]
     gate: StdMutex<Option<Arc<RegisteredSchemaConvergenceTestGateState>>>,
+}
+
+enum SchemaConvergenceTarget {
+    Registered {
+        database: RegisteredGlobalDbLeaseV1,
+        convergence: RegisteredSchemaConvergence,
+    },
+    RuntimeLedger(Database),
+}
+
+impl SchemaConvergenceTarget {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        match self {
+            Self::Registered { database, .. } => database.binding(),
+            Self::RuntimeLedger(database) => database.registered_binding(),
+        }
+    }
+
+    fn db_path(&self) -> &Path {
+        match self {
+            Self::Registered { database, .. } => database.db_path(),
+            Self::RuntimeLedger(database) => database.canonical_database_path(),
+        }
+    }
+
+    async fn converge(&self) -> Result<()> {
+        match self {
+            Self::Registered {
+                database,
+                convergence,
+            } => database.converge_schema(*convergence).await,
+            Self::RuntimeLedger(database) => {
+                tracedecay_global_db::schema_stages::converge_runtime_writer_ledger(database).await
+            }
+        }
+    }
+
+    async fn release_connection_memory(&self) -> Result<()> {
+        match self {
+            Self::Registered { database, .. } => database.release_connection_memory().await,
+            Self::RuntimeLedger(database) => database.release_connection_memory().await,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -171,9 +216,23 @@ impl RegisteredSchemaConvergenceMaintenance {
     pub(super) fn schedule(
         &self,
         database: RegisteredGlobalDbLeaseV1,
-        convergence: Option<tracedecay_global_db::schema_stages::RegisteredSchemaConvergence>,
+        convergence: Option<RegisteredSchemaConvergence>,
     ) {
-        let shard_id = database.binding().shard_id.clone();
+        let Some(convergence) = convergence else {
+            return;
+        };
+        self.schedule_target(SchemaConvergenceTarget::Registered {
+            database,
+            convergence,
+        });
+    }
+
+    pub(super) fn schedule_runtime_ledger(&self, database: Database) {
+        self.schedule_target(SchemaConvergenceTarget::RuntimeLedger(database));
+    }
+
+    fn schedule_target(&self, target: SchemaConvergenceTarget) {
+        let shard_id = target.binding().shard_id.clone();
         let mut tasks = self
             .tasks
             .lock()
@@ -208,7 +267,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             let permit = match concurrency.acquire_owned().await {
                 Ok(permit) => permit,
                 Err(error) => {
-                    drop(database);
+                    drop(target);
                     lock_registered_schema_convergence_statuses(&statuses).insert(
                         task_shard_id,
                         RegisteredSchemaConvergenceStatus::Degraded {
@@ -230,20 +289,15 @@ impl RegisteredSchemaConvergenceMaintenance {
             if let Some(gate) = gate {
                 gate.block().await;
             }
-            let result = match convergence {
-                Some(convergence) => {
-                    let convergence: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
-                        Box::pin(database.converge_schema(convergence));
-                    convergence.await
-                }
-                None => Ok(()),
-            };
-            if let Err(error) = database.release_connection_memory().await {
+            let convergence: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+                Box::pin(target.converge());
+            let result = convergence.await;
+            if let Err(error) = target.release_connection_memory().await {
                 crate::session_registry::log_store_runtime_event(
                     "registered_schema_convergence_memory_release",
                     &[
                         ("outcome", "degraded".to_owned()),
-                        ("database", database.db_path().display().to_string()),
+                        ("database", target.db_path().display().to_string()),
                         ("shard", format!("{task_shard_id:?}")),
                         ("error", error.to_string()),
                     ],
@@ -257,7 +311,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                         "registered_schema_convergence",
                         &[
                             ("outcome", "complete".to_owned()),
-                            ("database", database.db_path().display().to_string()),
+                            ("database", target.db_path().display().to_string()),
                             ("shard", format!("{task_shard_id:?}")),
                         ],
                     );
@@ -269,7 +323,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                         "registered_schema_convergence",
                         &[
                             ("outcome", "degraded".to_owned()),
-                            ("database", database.db_path().display().to_string()),
+                            ("database", target.db_path().display().to_string()),
                             ("shard", format!("{task_shard_id:?}")),
                             ("error", message.clone()),
                         ],
@@ -277,7 +331,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                     RegisteredSchemaConvergenceStatus::Degraded { message }
                 }
             };
-            drop(database);
+            drop(target);
             lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
         });
         let task = tokio::spawn(hotpath::future!(
