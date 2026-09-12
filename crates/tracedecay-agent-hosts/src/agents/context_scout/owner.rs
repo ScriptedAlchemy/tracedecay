@@ -291,6 +291,60 @@ impl ProjectContextScoutOwnerV1 {
             .map(|mounted| mounted.pin.clone())
     }
 
+    /// Returns the pin for one unique mounted producer in the same routed
+    /// session. A later host event may have a different turn/message tuple;
+    /// the retained producer lifecycle remains the exact registry authority.
+    pub async fn unique_session_claim_pin(
+        &self,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+    ) -> Option<ContextScoutAuthorityPinV1> {
+        let authorities = self.claim_authorities.read().await;
+        let mut matches = authorities
+            .iter()
+            .filter(|mounted| same_routed_session(&mounted.lifecycle, lifecycle));
+        let mounted = matches.next()?;
+        matches.next().is_none().then(|| mounted.pin.clone())
+    }
+
+    pub async fn resolve_current_session_claim_authority(
+        &self,
+        hook: &AdmittedContextScoutHookV1,
+        lifecycle: &ContextScoutLifecycleAddressV1,
+        expected_pin: &ContextScoutAuthorityPinV1,
+        observed_at: UtcMicros,
+        configuration_is_current: bool,
+    ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
+        if !configuration_is_current {
+            return None;
+        }
+        let mounted = {
+            let authorities = self.claim_authorities.read().await;
+            let mut matches = authorities
+                .iter()
+                .filter(|mounted| same_routed_session(&mounted.lifecycle, lifecycle));
+            let mounted = matches.next()?.clone();
+            if matches.next().is_some() {
+                return None;
+            }
+            mounted
+        };
+        if mounted.pin != *expected_pin {
+            return None;
+        }
+        let resolved = mounted
+            .registry
+            .resolve_current_exact(
+                hook,
+                &mounted.pin,
+                &mounted.lifecycle,
+                &mounted.context,
+                observed_at,
+            )
+            .await;
+        (resolved == super::ports::ContextScoutAddressResolveOutcomeV1::Resolved(mounted.address))
+            .then_some((mounted.address, mounted.input_watermark))
+    }
+
     pub async fn resolve_admitted_claim(
         &self,
         lifecycle: &ContextScoutLifecycleAddressV1,
@@ -940,6 +994,17 @@ impl ProjectContextScoutOwnerV1 {
     }
 }
 
+fn same_routed_session(
+    left: &ContextScoutLifecycleAddressV1,
+    right: &ContextScoutLifecycleAddressV1,
+) -> bool {
+    left.profile_id == right.profile_id
+        && left.provider_id == right.provider_id
+        && left.project_id == right.project_id
+        && left.worktree_id == right.worktree_id
+        && left.session_id == right.session_id
+}
+
 fn context_scout_state_transition_is_exact(
     current: ContextScoutControlV1,
     next: ContextScoutControlV1,
@@ -1489,6 +1554,84 @@ mod tests {
             .expect("reused owner");
         assert!(Arc::ptr_eq(&first, &again));
         unregister(project_id, &again);
+    }
+
+    #[tokio::test]
+    async fn later_session_event_resolves_one_retained_exact_claim_and_refuses_ambiguity() {
+        let project_id = [40; 16];
+        let owner = test_owner(project_id).await;
+        let (_temporary, database) = test_database().await;
+        let (registry, hook, pin, context, observed_at) = claim_mount_authority(database);
+        let producer_lifecycle = claim_lifecycle(1);
+        let producer_address = match registry.bind(&hook, &pin, producer_lifecycle.clone()).await {
+            ContextScoutAddressBindOutcomeV1::Bound(address) => address,
+            other => panic!("expected producer address, got {other:?}"),
+        };
+        assert_eq!(
+            owner
+                .mount_current_claim_authority(
+                    Arc::clone(&registry),
+                    &hook,
+                    pin.clone(),
+                    context.clone(),
+                    producer_lifecycle,
+                    producer_address,
+                    [1; 32],
+                    observed_at,
+                    true,
+                )
+                .await,
+            ContextScoutClaimAdmissionV1::Mounted
+        );
+
+        let later_lifecycle = claim_lifecycle(2);
+        assert_eq!(
+            owner
+                .resolve_current_session_claim_authority(
+                    &hook,
+                    &later_lifecycle,
+                    &pin,
+                    observed_at,
+                    true,
+                )
+                .await,
+            Some((producer_address, [1; 32]))
+        );
+
+        let second_address = match registry.bind(&hook, &pin, later_lifecycle.clone()).await {
+            ContextScoutAddressBindOutcomeV1::Bound(address) => address,
+            other => panic!("expected second producer address, got {other:?}"),
+        };
+        assert_eq!(
+            owner
+                .mount_current_claim_authority(
+                    registry,
+                    &hook,
+                    pin.clone(),
+                    context,
+                    later_lifecycle.clone(),
+                    second_address,
+                    [2; 32],
+                    observed_at,
+                    true,
+                )
+                .await,
+            ContextScoutClaimAdmissionV1::Mounted
+        );
+        assert!(
+            owner
+                .resolve_current_session_claim_authority(
+                    &hook,
+                    &later_lifecycle,
+                    &pin,
+                    observed_at,
+                    true,
+                )
+                .await
+                .is_none(),
+            "more than one mounted producer in the session must remain ambiguous"
+        );
+        unregister(project_id, &owner);
     }
 
     #[tokio::test]

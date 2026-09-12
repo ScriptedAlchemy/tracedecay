@@ -430,8 +430,18 @@ async fn admit_hook_v2_envelope_with_lifecycle(
             lifecycle.as_ref(),
         ) {
             (Some(hook), Some(lifecycle)) => {
-                cg.resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
+                match cg
+                    .resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
                     .await
+                {
+                    Some(authority) => Some(authority),
+                    None => {
+                        cg.resolve_current_context_scout_session_claim_authority(
+                            &hook, lifecycle, now,
+                        )
+                        .await
+                    }
+                }
             }
             _ => None,
         }

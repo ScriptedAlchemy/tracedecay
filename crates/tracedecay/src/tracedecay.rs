@@ -210,6 +210,35 @@ impl TraceDecay {
         }
     }
 
+    /// Resolves a unique mounted producer from an earlier event in the same
+    /// routed session. The owner reuses and revalidates that producer's exact
+    /// lifecycle authority; the later event supplies no replacement identity.
+    #[hotpath::skip]
+    pub(crate) async fn resolve_current_context_scout_session_claim_authority(
+        &self,
+        hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
+        lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Option<(ContextScoutAddressV1, [u8; 32])> {
+        let owner = self.context_scout_owner()?;
+        let pin = owner.unique_session_claim_pin(lifecycle).await?;
+        let configuration_is_current = self.context_scout_configuration_is_current(&pin).await;
+        let resolved = owner
+            .resolve_current_session_claim_authority(
+                hook,
+                lifecycle,
+                &pin,
+                observed_at,
+                configuration_is_current,
+            )
+            .await;
+        if resolved.is_some() && self.context_scout_configuration_is_current(&pin).await {
+            resolved
+        } else {
+            None
+        }
+    }
+
     #[hotpath::skip]
     async fn context_scout_configuration_is_current(
         &self,
