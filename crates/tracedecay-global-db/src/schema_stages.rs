@@ -19,6 +19,11 @@ use tracedecay_runtime_core::{
     ports::registered_schema::RegisteredSchemaInstallationV1,
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
+use tracedecay_rusqlite_runtime::runtime_ledger::{
+    COPY_RETIRED_IDEMPOTENCY_LEDGER_PAGE_SQL, DELETE_CONVERGED_IDEMPOTENCY_LEDGER_PAGE_SQL,
+    DROP_RETIRED_IDEMPOTENCY_LEDGER_SQL, RETIRED_IDEMPOTENCY_LEDGER_PRESENT_SQL,
+    RUNTIME_LEDGER_SCHEMA,
+};
 use tracedecay_rusqlite_runtime::work::{
     RETIRE_WORK_EVENT_JOURNAL_V1, WORK_PRODUCT_SCHEMA_V1 as WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1,
     WORK_SCHEMA_V1,
@@ -770,6 +775,10 @@ async fn install_registered_schema_stage_sequence(
         "initialize registered external source state",
     )
     .await?;
+    transaction
+        .execute_batch(RUNTIME_LEDGER_SCHEMA)
+        .await
+        .map_err(|error| global_db_operation_error("initialize runtime writer ledger", error))?;
     // `force_exhaustive` means admission observed damaged or missing guard
     // triggers (for example a dropped guarded table takes its triggers with
     // it). Reinstall them here so the post-commit contract validation sees a
@@ -860,7 +869,101 @@ async fn converge_registered_schema_on(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
+    converge_runtime_writer_ledger(database).await?;
     ensure_authority_invariants(database, convergence.force_exhaustive, convergence.is_fresh).await
+}
+
+/// Copies the released WITHOUT ROWID ledger in bounded transactions after
+/// admission. Each committed page releases the canonical writer, and runtime
+/// submissions continue to consult V1 until the final exact-schema retirement.
+#[hotpath::measure(
+    future = true,
+    label = "global_db.schema.persist.converge_runtime_ledger"
+)]
+pub async fn converge_runtime_writer_ledger(
+    database: &Database,
+) -> tracedecay_domain::errors::Result<()> {
+    let installation = database
+        .begin_write_transaction("install current runtime writer ledger")
+        .await?;
+    installation
+        .execute_batch(RUNTIME_LEDGER_SCHEMA)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("install current runtime writer ledger", error)
+        })?;
+    installation.commit().await?;
+
+    loop {
+        let transaction = database
+            .begin_write_transaction("converge runtime writer ledger page")
+            .await?;
+        let mut presence = transaction
+            .query(RETIRED_IDEMPOTENCY_LEDGER_PRESENT_SQL, ())
+            .await
+            .map_err(|error| {
+                global_db_operation_error("inspect retired runtime writer ledger", error)
+            })?;
+        let present = presence
+            .next()
+            .await
+            .map_err(|error| {
+                global_db_operation_error("read retired runtime writer ledger state", error)
+            })?
+            .is_some();
+        drop(presence);
+        if !present {
+            transaction.commit().await?;
+            return Ok(());
+        }
+
+        let copied = transaction
+            .execute(COPY_RETIRED_IDEMPOTENCY_LEDGER_PAGE_SQL, ())
+            .await
+            .map_err(|error| {
+                global_db_operation_error("copy retired runtime writer ledger page", error)
+            })?;
+        let retired = transaction
+            .execute(DELETE_CONVERGED_IDEMPOTENCY_LEDGER_PAGE_SQL, ())
+            .await
+            .map_err(|error| {
+                global_db_operation_error("retire converged runtime writer ledger page", error)
+            })?;
+        let mut remaining = transaction
+            .query("SELECT 1 FROM td_runtime_writer_idempotency_v1 LIMIT 1", ())
+            .await
+            .map_err(|error| {
+                global_db_operation_error("inspect runtime writer ledger convergence", error)
+            })?;
+        let has_remaining = remaining
+            .next()
+            .await
+            .map_err(|error| {
+                global_db_operation_error("read runtime writer ledger convergence", error)
+            })?
+            .is_some();
+        drop(remaining);
+        transaction.commit().await?;
+
+        if !has_remaining {
+            // Current binaries never append V1. Once the last bounded page is
+            // committed, no producer can repopulate the retired table before
+            // this separately authorized exact-schema statement removes it.
+            database
+                .execute_authority_revalidated_batch(
+                    "retire converged runtime writer ledger",
+                    DROP_RETIRED_IDEMPOTENCY_LEDGER_SQL,
+                )
+                .await?;
+            return Ok(());
+        }
+        if copied == 0 && retired == 0 {
+            return Err(global_db_operation_message(
+                "converge runtime writer ledger",
+                "retired and current idempotency authorities disagree",
+            ));
+        }
+    }
 }
 
 /// Synchronously converges an attached existing store's historical schema.

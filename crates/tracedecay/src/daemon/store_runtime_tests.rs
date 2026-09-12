@@ -6,12 +6,12 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
-
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
-    FactOwnerV1, FactRelationKindV1,
+    FactOwnerV1, FactRelationKindV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, ProviderId, SessionId,
 };
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
@@ -29,10 +29,11 @@ use tracedecay_session_memory::memory::{
     ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
 };
 use tracedecay_store::{
-    FactReadControl, FactWriteControl, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
+    CursorAdvanceOutcome, FactReadControl, FactWriteControl, ObservationCoverageReason,
+    ObservationCursorAdvance, ObservationStore, ObservationStoreError, ProjectId,
+    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
+    RetainedGraphStoreLeaseV1, StoreShardIdV1,
 };
-use tracedecay_store::{ProjectId, StoreShardIdV1};
 use tracedecay_store_runtime::{
     DaemonSessionRuntimeRegistryV1, RegisteredSchemaConvergenceStatus, process_runtime_generation,
     registry_open_error,
@@ -255,6 +256,29 @@ async fn lcm_migration_applied_at(connection: &(impl QueryExecutor + ?Sized)) ->
         .expect("LCM migration row")
         .get::<i64>(0)
         .expect("decode LCM migration applied_at")
+}
+
+fn runtime_cursor_advance(
+    project_id: &ProjectId,
+    marker: &str,
+    reason: ObservationCoverageReason,
+) -> ObservationCursorAdvance {
+    ObservationCursorAdvance::new(
+        ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("runtime-ledger-convergence").expect("cursor provider identity"),
+            SessionId::new(format!("session.runtime-ledger.{marker}"))
+                .expect("cursor session identity"),
+        )
+        .expect("cursor source identity"),
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+        ObservationSourceGenerationV1::new(1).expect("cursor source generation"),
+        None,
+        ObservationSourceRangeV1::new(0, 1).expect("cursor source range"),
+        reason,
+    )
+    .expect("runtime cursor advance")
 }
 
 fn accepting_memory_write_control() -> FactWriteControl {
@@ -879,6 +903,234 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
         lcm_migration_applied_at(&snapshot).await,
         123,
         "background convergence must not rewrite the current LCM migration marker"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_runtime_ledger_replays_during_bounded_background_convergence() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_current_convergence("project.runtime-ledger-convergence").await;
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+
+    let seed_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("seed session runtime registry");
+    let seed_database = seed_registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("seed registered project sessions");
+    let retired_advance = runtime_cursor_advance(
+        &project_id,
+        "retired",
+        ObservationCoverageReason::OutOfScope,
+    );
+    assert_eq!(
+        seed_database
+            .observation_store()
+            .advance_source_cursor(retired_advance.clone())
+            .await
+            .expect("commit cursor before ledger migration"),
+        CursorAdvanceOutcome::Committed
+    );
+    drop(seed_database);
+    drop(seed_registry);
+
+    let seed = TestConnection::open(&sessions_path);
+    seed.execute_batch(
+        "CREATE TABLE td_runtime_writer_idempotency_v1 (
+             shard_json TEXT NOT NULL,
+             incarnation INTEGER NOT NULL,
+             authority_epoch INTEGER NOT NULL,
+             idempotency_key TEXT NOT NULL,
+             request_digest TEXT NOT NULL,
+             original_receipt_json TEXT NOT NULL,
+             transaction_scope_json TEXT NOT NULL,
+             operation_id TEXT NOT NULL,
+             durability_json TEXT NOT NULL,
+             committed_at_micros INTEGER NOT NULL,
+             PRIMARY KEY (shard_json, incarnation, authority_epoch, idempotency_key)
+         ) WITHOUT ROWID;
+         INSERT INTO td_runtime_writer_idempotency_v1
+             SELECT * FROM td_runtime_writer_idempotency_v2;
+         DROP TABLE td_runtime_writer_idempotency_v2",
+    )
+    .await
+    .expect("restore released WITHOUT ROWID ledger name");
+    let mut retired_rows = seed
+        .query(
+            "SELECT idempotency_key, authority_epoch, original_receipt_json
+             FROM td_runtime_writer_idempotency_v1
+             WHERE idempotency_key LIKE 'cursor.%'",
+            (),
+        )
+        .await
+        .expect("read retained cursor receipt identity");
+    let retired_row = retired_rows
+        .next()
+        .await
+        .expect("read retained cursor receipt")
+        .expect("retained cursor receipt row");
+    let retired_key = retired_row
+        .get::<String>(0)
+        .expect("decode retained cursor key");
+    let retired_epoch = retired_row
+        .get::<i64>(1)
+        .expect("decode retained cursor authority epoch");
+    let retired_receipt_json = retired_row
+        .get::<String>(2)
+        .expect("decode retained cursor receipt");
+    assert!(
+        retired_rows
+            .next()
+            .await
+            .expect("check retained cursor receipt cardinality")
+            .is_none(),
+        "the released fixture carries one cursor receipt"
+    );
+    drop(retired_rows);
+    drop(seed);
+
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+    let database = registry
+        .project_sessions(project_id.clone(), [project_root])
+        .await
+        .expect("admit retained runtime ledger");
+    convergence_gate.wait_until_blocked().await;
+
+    assert_eq!(
+        database
+            .observation_store()
+            .advance_source_cursor(retired_advance)
+            .await
+            .expect("replay retained cursor while convergence is pending"),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
+    let conflicting_advance = runtime_cursor_advance(
+        &project_id,
+        "retired",
+        ObservationCoverageReason::BlankFrame,
+    );
+    assert!(matches!(
+        database
+            .observation_store()
+            .advance_source_cursor(conflicting_advance)
+            .await
+            .expect_err("classify retained cursor collision while convergence is pending"),
+        ObservationStoreError::CursorAdvanceCollision
+    ));
+
+    let fresh_advance =
+        runtime_cursor_advance(&project_id, "fresh", ObservationCoverageReason::OutOfScope);
+    assert_eq!(
+        database
+            .observation_store()
+            .advance_source_cursor(fresh_advance)
+            .await
+            .expect("ordinary cursor write while convergence is pending"),
+        CursorAdvanceOutcome::Committed
+    );
+
+    convergence_gate.release();
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .expect("runtime ledger convergence snapshot");
+    let mut tables = snapshot
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'",
+            (),
+        )
+        .await
+        .expect("inspect retired runtime ledger table");
+    assert_eq!(
+        tables
+            .next()
+            .await
+            .expect("read retired runtime ledger state")
+            .expect("retired runtime ledger state row")
+            .get::<i64>(0)
+            .expect("decode retired runtime ledger state"),
+        0
+    );
+    let mut cursor_effects = snapshot
+        .query("SELECT COUNT(*) FROM source_cursors", ())
+        .await
+        .expect("inspect committed cursor effects");
+    assert_eq!(
+        cursor_effects
+            .next()
+            .await
+            .expect("read committed cursor effects")
+            .expect("committed cursor effect count row")
+            .get::<i64>(0)
+            .expect("decode committed cursor effect count"),
+        2,
+        "the retained replay and collision must not create another cursor effect"
+    );
+    let mut receipts = snapshot
+        .query(
+            "SELECT idempotency_key, authority_epoch, original_receipt_json
+             FROM td_runtime_writer_idempotency_v2
+             WHERE idempotency_key LIKE 'cursor.%'",
+            (),
+        )
+        .await
+        .expect("inspect converged runtime ledger receipts");
+    let mut receipt_rows = Vec::new();
+    while let Some(row) = receipts
+        .next()
+        .await
+        .expect("read converged runtime ledger receipt")
+    {
+        receipt_rows.push((
+            row.get::<String>(0).expect("decode converged cursor key"),
+            row.get::<i64>(1)
+                .expect("decode converged cursor authority epoch"),
+            row.get::<String>(2)
+                .expect("decode converged cursor receipt"),
+        ));
+    }
+    let retired_identity_rows = receipt_rows
+        .iter()
+        .filter(|(key, _, _)| key == &retired_key)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retired_identity_rows.len(),
+        2,
+        "the same logical cursor is receipted once per admitted authority epoch"
+    );
+    assert!(
+        retired_identity_rows
+            .iter()
+            .any(|(_, epoch, receipt)| *epoch == retired_epoch
+                && receipt.as_str() == retired_receipt_json),
+        "bounded convergence must preserve the released receipt bytes"
+    );
+    assert!(
+        retired_identity_rows
+            .iter()
+            .any(|(_, epoch, _)| *epoch != retired_epoch),
+        "the reopened authority records its own exact cursor acknowledgement"
+    );
+    assert_eq!(
+        receipt_rows
+            .iter()
+            .filter(|(key, _, _)| key != &retired_key)
+            .count(),
+        1,
+        "the fresh cursor has one runtime receipt"
     );
 }
 
