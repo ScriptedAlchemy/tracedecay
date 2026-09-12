@@ -5622,6 +5622,7 @@ export type WorkExperienceApplicabilityV1 = z.infer<typeof WorkExperienceApplica
 
 export const WorkExperienceCandidateV1Schema = z.object({
   applicability: z.array(z.lazy(() => WorkExperienceApplicabilityV1Schema)),
+  attempt_receipts: z.array(z.lazy(() => WorkAttemptReceiptV1Schema)),
   evidence: z.array(z.lazy(() => TaskEvidenceLinkV1Schema)),
   item: z.lazy(() => WorkItemV1Schema),
 }).strict();
