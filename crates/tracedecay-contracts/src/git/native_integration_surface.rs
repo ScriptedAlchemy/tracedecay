@@ -303,6 +303,8 @@ impl NativeIntegrationPreviewProjectionV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeIntegrationApprovalProjectionV1 {
+    /// Daemon-minted identity consumed verbatim by apply, status, and cancel.
+    pub transaction_id: NativeIntegrationTransactionId,
     pub approval_id: NativeIntegrationApprovalId,
     pub preview_id: NativeIntegrationPreviewId,
     pub preview_digest: ManifestDigest,
@@ -314,8 +316,12 @@ pub struct NativeIntegrationApprovalProjectionV1 {
 }
 
 impl NativeIntegrationApprovalProjectionV1 {
-    pub fn project(approval: &NativeIntegrationApprovalV1) -> Self {
+    pub fn project(
+        approval: &NativeIntegrationApprovalV1,
+        transaction_id: NativeIntegrationTransactionId,
+    ) -> Self {
         Self {
+            transaction_id,
             approval_id: approval.approval_id.clone(),
             preview_id: approval.preview_id.clone(),
             preview_digest: approval.preview_digest.clone(),
