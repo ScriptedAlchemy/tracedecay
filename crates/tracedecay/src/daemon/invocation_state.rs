@@ -995,20 +995,23 @@ impl DaemonInvocationState {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                     if query_operation && served_revision.is_none() {
-                        return DaemonInvocationResponse::problem(
-                            request_id,
-                            DaemonInvocationProblem::Unavailable,
-                        );
-                    }
-                    (
-                        tracedecay_domain::ScopeOutcome::Exact(
-                            tracedecay_contracts::MultiRootRootPageV1 {
-                                value: vec![value],
-                                next_cursor,
+                        (
+                            tracedecay_domain::ScopeOutcome::Unavailable {
+                                reason: tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
                             },
-                        ),
-                        served_revision,
-                    )
+                            None,
+                        )
+                    } else {
+                        (
+                            tracedecay_domain::ScopeOutcome::Exact(
+                                tracedecay_contracts::MultiRootRootPageV1 {
+                                    value: vec![value],
+                                    next_cursor,
+                                },
+                            ),
+                            served_revision,
+                        )
+                    }
                 }
                 Err(DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
                     (tracedecay_domain::ScopeOutcome::Denied, None)
