@@ -46,6 +46,7 @@ use super::schema::{
 };
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1, CodeLexicalArtifactBatchLimitV1,
@@ -2020,10 +2021,10 @@ fn validated_fixed_ledger_charge(
     memory_budget_bytes: usize,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     if memory_budget_bytes == 0
-        || memory_budget_bytes > CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+        || memory_budget_bytes > CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1
     {
         return Err(CodeLexicalArtifactErrorV1::Contract(format!(
-            "lexical artifact build memory budget must be within 1..={CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1} bytes"
+            "lexical artifact build memory budget must be within 1..={CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1} bytes"
         )));
     }
     let serialized_bytes = metadata_serialized_upper_bound(metadata);
