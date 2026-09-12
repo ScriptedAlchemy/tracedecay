@@ -16,6 +16,18 @@ export function assertNever(value: never): never {
 
 export const WIRE_SCHEMA_REVISION = 1 as const;
 
+/** The accept-proposal operation can commit acceptance only. */
+export const AcceptWorkProposalDispositionV1Schema = z.literal("accepted");
+export type AcceptWorkProposalDispositionV1 = z.infer<typeof AcceptWorkProposalDispositionV1Schema>;
+
+export const AcceptWorkProposalRequestV1Schema = z.object({
+  disposition: z.lazy(() => AcceptWorkProposalDispositionV1Schema),
+  mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
+  proposal: z.lazy(() => WorkProposalV1Schema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+}).strict();
+export type AcceptWorkProposalRequestV1 = z.infer<typeof AcceptWorkProposalRequestV1Schema>;
+
 export const AcceptWorkTaskRequestV1Schema = z.object({
   evidence_by_criterion: z.record(z.string()),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
@@ -4126,6 +4138,20 @@ export const ReviewTopologyPolicyV1Schema = z.object({
   github_stacked_prs: z.lazy(() => GitHubStackedPullRequestPolicyV1Schema),
 }).strict();
 export type ReviewTopologyPolicyV1 = z.infer<typeof ReviewTopologyPolicyV1Schema>;
+
+/** The only non-accepting dispositions the proposal-review operation can
+commit. The broader decision request remains available to the graph
+mutation operation, which owns all decision forms. */
+export const ReviewWorkProposalDispositionV1Schema = z.enum(["rejected", "superseded"]);
+export type ReviewWorkProposalDispositionV1 = z.infer<typeof ReviewWorkProposalDispositionV1Schema>;
+
+export const ReviewWorkProposalRequestV1Schema = z.object({
+  disposition: z.lazy(() => ReviewWorkProposalDispositionV1Schema),
+  mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
+  proposal: z.lazy(() => WorkProposalV1Schema),
+  selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
+}).strict();
+export type ReviewWorkProposalRequestV1 = z.infer<typeof ReviewWorkProposalRequestV1Schema>;
 
 /** Immutable collection and stack revisions for one exact resolved root. */
 export const RootGenerationV1Schema = z.object({
