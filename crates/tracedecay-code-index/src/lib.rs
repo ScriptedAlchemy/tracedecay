@@ -42,6 +42,18 @@ pub mod test_attribution;
 
 pub use self::intake::CodeIndexIntake;
 
+/// Whether an extracted symbol is a parser-attested test annotation.
+///
+/// Callers combine this marker with the canonical `Annotates` edge instead of
+/// inferring runnable tests from names or enclosing modules.
+pub fn is_test_marker(record: &lineage::LineageSymbolRecordV1) -> bool {
+    record.kind == "annotation_usage"
+        && matches!(
+            record.simple_name.as_str(),
+            "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
+        )
+}
+
 /// Directory components (ASCII case-insensitive) that mark every file below
 /// them as test code.
 const TEST_DIRECTORY_COMPONENTS: [&str; 5] = ["test", "tests", "__tests__", "spec", "e2e"];
