@@ -19,15 +19,17 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use crate::authority;
 
 /// A discovered daemon endpoint plus its credential and private authority
-/// provenance.
+/// provenance. Distinct from the protocol crate's transport
+/// [`tracedecay_daemon_protocol::DaemonConnection`]; convert with
+/// [`Self::into_protocol`].
 #[derive(Clone)]
-pub struct DaemonConnection {
+pub struct ResolvedDaemonConnection {
     pub endpoint: DaemonEndpoint,
     pub auth_token: Option<String>,
     authority_record: Option<authority::DaemonAuthorityRecord>,
 }
 
-impl DaemonConnection {
+impl ResolvedDaemonConnection {
     /// The loopback HTTP application endpoint published by this connection's
     /// authority, when one is available.
     pub fn http_application_endpoint(&self) -> Option<SocketAddr> {
@@ -101,7 +103,7 @@ pub fn invocation_client_for_current(
     ))
 }
 
-pub fn current_daemon_connection() -> Result<DaemonConnection> {
+pub fn current_daemon_connection() -> Result<ResolvedDaemonConnection> {
     let profile_root = tracedecay_runtime_core::config::user_data_dir().ok_or_else(|| {
         TraceDecayError::Config {
             message: "could not determine TraceDecay user data directory".to_string(),
@@ -113,7 +115,7 @@ pub fn current_daemon_connection() -> Result<DaemonConnection> {
                 "TraceDecay daemon authority record is not available. Start or restart the daemon."
                     .to_string(),
         })?;
-    Ok(DaemonConnection {
+    Ok(ResolvedDaemonConnection {
         endpoint: record.endpoint.clone(),
         auth_token: Some(record.auth_token.clone()),
         authority_record: Some(record),
@@ -121,7 +123,7 @@ pub fn current_daemon_connection() -> Result<DaemonConnection> {
 }
 
 #[cfg(unix)]
-pub fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
+pub fn connection_for_socket_path(socket_path: &Path) -> ResolvedDaemonConnection {
     if let Ok(connection) = current_daemon_connection()
         && let DaemonEndpoint::Unix(authority_path) = &connection.endpoint
         && authority::canonical_identity_path(authority_path).ok()
@@ -135,7 +137,7 @@ pub fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
         && authority::canonical_identity_path(authority_path).ok()
             == authority::canonical_identity_path(socket_path).ok()
     {
-        return DaemonConnection {
+        return ResolvedDaemonConnection {
             endpoint: record.endpoint.clone(),
             auth_token: Some(record.auth_token.clone()),
             authority_record: Some(record),
@@ -144,7 +146,7 @@ pub fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
     // Explicit paths are retained for test harnesses and legacy one-shot
     // callers without a discoverable authority record. Default production
     // routing always uses the authority record.
-    DaemonConnection {
+    ResolvedDaemonConnection {
         endpoint: DaemonEndpoint::Unix(socket_path.to_path_buf()),
         auth_token: None,
         authority_record: None,
@@ -154,7 +156,7 @@ pub fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
 // Windows discovers the current daemon through a fallible endpoint lookup;
 // Unix keeps the same cross-platform contract even though its path is infallible.
 #[allow(clippy::unnecessary_wraps)]
-pub fn client_connection(socket_path: &Path) -> Result<DaemonConnection> {
+pub fn client_connection(socket_path: &Path) -> Result<ResolvedDaemonConnection> {
     #[cfg(unix)]
     {
         Ok(connection_for_socket_path(socket_path))
@@ -174,7 +176,7 @@ mod tests {
     fn connection_exposes_only_the_published_http_application_endpoint() {
         let http_application_endpoint = "127.0.0.1:43124".parse().unwrap();
         let endpoint = DaemonEndpoint::loopback("127.0.0.1:43123".parse().unwrap()).unwrap();
-        let connection = DaemonConnection {
+        let connection = ResolvedDaemonConnection {
             endpoint: endpoint.clone(),
             auth_token: Some("11".repeat(32)),
             authority_record: Some(authority::DaemonAuthorityRecord {
