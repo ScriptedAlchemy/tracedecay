@@ -105,7 +105,8 @@ impl ProviderRunFailure for TranscriptCatchUpFailure {
     }
 }
 
-pub(super) type ProviderRunOutcome = GenericProviderRunOutcome<TranscriptCatchUpFailure>;
+pub(in crate::runtime) type ProviderRunOutcome =
+    GenericProviderRunOutcome<TranscriptCatchUpFailure>;
 pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailure>;
 
 /// Converts operation cancellation into provider-loop control termination.

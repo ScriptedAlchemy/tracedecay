@@ -1255,6 +1255,7 @@ type ReadyProbeServingPartsV1 = (
     Arc<AtomicBool>,
     Arc<tokio::sync::Notify>,
     Arc<PendingWakeV1>,
+    Arc<AtomicUsize>,
 );
 
 #[derive(Clone)]
@@ -1287,6 +1288,7 @@ pub struct CodeIndexSchedulerRegistryV1 {
     /// block on a transition instead of polling the slot.
     serving_seats: Arc<tokio::sync::watch::Sender<u64>>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
+    pub(super) relation_symbol_hydrations: Arc<AtomicU64>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
     test_attribution_authorities: Arc<
         RwLock<
@@ -4699,13 +4701,17 @@ impl CodeIndexSchedulerRegistryV1 {
                                     *serving_source_witness
                                         .write()
                                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                        pass_proves_latest.then(|| super::ServingSourceWitnessV1 {
-                                            generation_id: latest
-                                                .generation()
-                                                .manifest()
-                                                .generation_id
-                                                .clone(),
-                                        });
+                                        pass_proves_latest
+                                            .then(|| {
+                                                source_freshness.source_currency_witness_for(
+                                                    &latest.generation().manifest().generation_id,
+                                                    &latest
+                                                        .generation()
+                                                        .snapshot()
+                                                        .content_identity,
+                                                )
+                                            })
+                                            .flatten();
                                 }
                                 // The durable pointer names a successor, so no
                                 // proof of this seat's currency exists to bind.
@@ -6581,6 +6587,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::clone(&worktree.shutting_down),
             Arc::clone(&worktree.wake),
             Arc::clone(&worktree.pending_wake),
+            Arc::clone(&worktree.reconcile_in_progress),
         ))
     }
 
@@ -6593,6 +6600,7 @@ impl CodeIndexSchedulerRegistryV1 {
             shutting_down,
             wake,
             pending_wake,
+            reconcile_in_progress,
         ): ReadyProbeServingPartsV1,
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -6614,20 +6622,17 @@ impl CodeIndexSchedulerRegistryV1 {
             .is_some_and(|witness| {
                 witness.generation_id == serving.generation().manifest().generation_id
             });
+        let wake_trigger = if reconcile_in_progress.load(Ordering::Acquire) == 0 {
+            CodeIndexCadenceTriggerV1::QueryAdmission
+        } else {
+            CodeIndexCadenceTriggerV1::BusyFollowUp
+        };
         if !witness_matches_seat {
-            Self::note_wake_if_idle(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
+            Self::note_wake_if_idle(&pending_wake, &wake, wake_trigger);
             return None;
         }
         if !source_freshness.ready_without_stat(project_root, &shutting_down) {
-            Self::note_wake_if_idle(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
+            Self::note_wake_if_idle(&pending_wake, &wake, wake_trigger);
             return None;
         }
         if !historical_generation_owner
