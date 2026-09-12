@@ -178,7 +178,7 @@ fn observation_matches_filter(
 }
 
 /// Borrowed read-only adapter over one authoritative database snapshot.
-pub struct GlobalDbTemporalReadPort<'a> {
+pub struct SessionTemporalReadPort<'a> {
     read: TemporalSqlRead<'a>,
     relation_authority: Option<SessionReadRelationAuthority<'a>>,
     git_scope_session_ids: Option<&'a BTreeSet<(String, String)>>,
@@ -189,7 +189,7 @@ struct SessionReadRelationAuthority<'a> {
     store: SessionRelationGraphStore,
 }
 
-impl<'a> GlobalDbTemporalReadPort<'a> {
+impl<'a> SessionTemporalReadPort<'a> {
     #[cfg(test)]
     #[hotpath::skip]
     pub const fn new(read: &'a engine::Connection) -> Self {
@@ -1315,7 +1315,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     }
 }
 
-impl TemporalReadPort for GlobalDbTemporalReadPort<'_> {
+impl TemporalReadPort for SessionTemporalReadPort<'_> {
     fn produce_candidate_page<'a>(
         &'a self,
         snapshot: &'a TemporalExecutionSnapshot,

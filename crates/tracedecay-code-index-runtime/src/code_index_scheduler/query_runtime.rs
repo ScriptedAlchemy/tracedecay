@@ -117,7 +117,7 @@ pub async fn mount_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
     let authority =
         prepare_core_query_authority_on_project_open(registry, project_root, scope, cursor_keys)
@@ -136,7 +136,7 @@ pub async fn mount_core_query_authority_for_committed_fallback_on_project_open(
     project_root: &Path,
     scope: &ResolvedScope,
     expected_revision: &ConfigurationRevisionId,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
     let authority =
         prepare_core_query_authority_on_project_open(registry, project_root, scope, cursor_keys)
@@ -255,7 +255,7 @@ async fn prepare_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
     let root_text = registry.latest_text_serving_for_root(project_root).await;
     let privacy_domain = if let Some(text) = registry

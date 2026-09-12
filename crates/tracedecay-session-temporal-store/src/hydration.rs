@@ -24,11 +24,11 @@ use tracedecay_lcm::payload::{
     PayloadStreamError, VerifiedPayloadStream, open_verified_payload_stream,
 };
 use tracedecay_lcm::{LcmStorageKind, raw};
-use tracedecay_query::temporal::hydration::{
+use tracedecay_temporal_query::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
     HydrationSink, TemporalHydrationPort,
 };
-use tracedecay_query::temporal::ports::{
+use tracedecay_temporal_query::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalPortError, TemporalRetrievalScope,
     TemporalSourceAccess,
 };
@@ -401,7 +401,7 @@ impl<B: TemporalHydrationBackend> TemporalHydrationPort for SessionTemporalHydra
     }
 }
 
-pub struct GlobalDbHydrationBackend<'snapshot> {
+pub struct SessionTemporalHydrationBackend<'snapshot> {
     read: TemporalSqlRead<'snapshot>,
     storage_root: &'snapshot Path,
     relation_authority: Option<SessionHydrationRelationAuthority<'snapshot>>,
@@ -412,7 +412,7 @@ struct SessionHydrationRelationAuthority<'snapshot> {
     store: SessionRelationGraphStore,
 }
 
-impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
+impl<'snapshot> SessionTemporalHydrationBackend<'snapshot> {
     #[hotpath::skip]
     pub const fn new_registered(
         read: &'snapshot DatabaseEngineReadSnapshot,
@@ -441,15 +441,18 @@ impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
 }
 
 pub type GlobalDbTemporalHydrationPort<'snapshot> =
-    SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
+    SessionTemporalHydrationAdapter<SessionTemporalHydrationBackend<'snapshot>>;
 
-impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
+impl<'snapshot> SessionTemporalHydrationAdapter<SessionTemporalHydrationBackend<'snapshot>> {
     #[hotpath::skip]
     pub const fn for_registered_snapshot(
         read: &'snapshot DatabaseEngineReadSnapshot,
         storage_root: &'snapshot Path,
     ) -> Self {
-        Self::new(GlobalDbHydrationBackend::new_registered(read, storage_root))
+        Self::new(SessionTemporalHydrationBackend::new_registered(
+            read,
+            storage_root,
+        ))
     }
 
     #[hotpath::skip]
@@ -459,12 +462,14 @@ impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapsh
         scope: &'snapshot SessionRelationScope,
         store: SessionRelationGraphStore,
     ) -> Self {
-        Self::new(GlobalDbHydrationBackend::new_registered_with_relations(
-            read,
-            storage_root,
-            scope,
-            store,
-        ))
+        Self::new(
+            SessionTemporalHydrationBackend::new_registered_with_relations(
+                read,
+                storage_root,
+                scope,
+                store,
+            ),
+        )
     }
 }
 
@@ -622,7 +627,7 @@ fn canonical_projected_message(
         .map(|output| output.message().clone())
 }
 
-impl GlobalDbHydrationBackend<'_> {
+impl SessionTemporalHydrationBackend<'_> {
     #[hotpath::measure(future = true, label = "session_temporal.hydrate.resolve")]
     async fn resolve_current(
         &self,
@@ -716,7 +721,7 @@ impl GlobalDbHydrationBackend<'_> {
     }
 }
 
-impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {
+impl TemporalHydrationBackend for SessionTemporalHydrationBackend<'_> {
     fn snapshot_is_stable(&self) -> bool {
         true
     }
@@ -1462,11 +1467,11 @@ mod tests {
 
     use super::*;
     use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-    use tracedecay_query::temporal::ports::{
+    use tracedecay_temporal_query::ports::{
         BindingDigest, ExecutionLimits, KernelVersions, TemporalAuthorizedRoot, TemporalPortError,
         TemporalSnapshotRequest, TemporalWatermarks,
     };
-    use tracedecay_query::temporal::resolution::ValidatedAuthorization;
+    use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
     struct RegisteredHydrationRead {
         read: DatabaseEngineReadSnapshot,
@@ -2487,7 +2492,7 @@ mod tests {
     fn authorized_snapshot(anchor: &RetrievalAnchorRecord) -> TemporalExecutionSnapshot {
         authorized_snapshot_for_scope(
             anchor,
-            tracedecay_query::temporal::ports::TemporalRetrievalScope::Session(
+            tracedecay_temporal_query::ports::TemporalRetrievalScope::Session(
                 SessionId::new("session-1").expect("session"),
             ),
         )
@@ -2496,13 +2501,13 @@ mod tests {
     fn authorized_root_snapshot(anchor: &RetrievalAnchorRecord) -> TemporalExecutionSnapshot {
         authorized_snapshot_for_scope(
             anchor,
-            tracedecay_query::temporal::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+            tracedecay_temporal_query::ports::TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
         )
     }
 
     fn authorized_snapshot_for_scope(
         anchor: &RetrievalAnchorRecord,
-        scope: tracedecay_query::temporal::ports::TemporalRetrievalScope,
+        scope: tracedecay_temporal_query::ports::TemporalRetrievalScope,
     ) -> TemporalExecutionSnapshot {
         TemporalExecutionSnapshot::new_authorized(
             TemporalSnapshotRequest::new(

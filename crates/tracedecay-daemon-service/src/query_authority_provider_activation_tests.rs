@@ -1205,7 +1205,7 @@ async fn install_committed_semantic_route(
     provider: &DaemonQueryAuthorityProviderV1,
     project_root: &Path,
     profile_id: &UserProfileId,
-    cursor_keys: &Arc<tracedecay_session_temporal_store::GlobalDbCursorKeyProvider>,
+    cursor_keys: &Arc<tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider>,
     privacy_domain: &PrivacyDomainId,
     query_profile_id: &tracedecay_domain::FusionProfileId,
     committed: &CommittedRetrievalProfileStateV1,

@@ -85,7 +85,7 @@ use tracedecay_graph_query::{
     request_graph_cancellation,
 };
 use tracedecay_runtime_core::db::Database;
-use tracedecay_session_temporal_store::GlobalDbCursorKeyProvider;
+use tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider;
 use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
 };
@@ -2771,7 +2771,7 @@ pub async fn open_production_primitive_runtime(
         }
     })?;
     let authenticator = Arc::new(
-        GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key.clone())
+        SessionTemporalCursorKeyProvider::from_registered_key_ref(&read, key.clone())
             .await
             .map_err(|_| ApplicationContractError::Inconsistent {
                 field: "application primitive session cursor authenticator",
