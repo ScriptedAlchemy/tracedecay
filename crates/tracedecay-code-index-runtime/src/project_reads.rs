@@ -94,9 +94,14 @@ impl ProjectCodeGraphServingAuthorityV1 {
                 tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
             );
         }
+        // The owner's native graph store is the only thing this route reads
+        // from it, and the guard below proves that store is ready. Requiring
+        // exact/lexical readiness as well made a restart that resumed an
+        // unfinished ngram index refuse every graph read for the duration of
+        // that build, with a recovered verified head already seated.
         if let Some((text, current)) = self
             .schedulers
-            .latest_text_serving_freshness_for_scope(&self.scope)
+            .retained_text_owner_freshness_for_scope(&self.scope)
             .await
             && text.interactive_graph_store().is_ok()
         {
