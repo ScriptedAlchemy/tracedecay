@@ -1288,6 +1288,7 @@ pub struct CodeIndexSchedulerRegistryV1 {
     /// block on a transition instead of polling the slot.
     serving_seats: Arc<tokio::sync::watch::Sender<u64>>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
+    pub(super) relation_symbol_hydrations: Arc<AtomicU64>,
     activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
     test_attribution_authorities: Arc<
         RwLock<
