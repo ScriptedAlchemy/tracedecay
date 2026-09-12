@@ -23,7 +23,6 @@ pub mod branch_snapshots;
 pub mod catalog_composition;
 pub mod clock;
 pub mod configuration;
-mod configuration_wire;
 pub mod context;
 pub mod context_scout;
 pub mod diagnostics;
@@ -137,7 +136,6 @@ pub use configuration::{
     configuration_surface_operation, configuration_surface_request_schema,
     configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
 };
-pub use configuration_wire::{ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1};
 pub use context::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationRequestControlV1, CancellationContext,
     CancellationSignal, CancellationState, CancellationTokenId, CapabilityGrantId,
@@ -533,9 +531,10 @@ pub use work_placement::{
     WorkPlacementStorageError, WorkPlacementStoragePort,
 };
 pub use work_product::{
-    AcceptWorkTaskRequestV1, AdmitWorkExecutionRequestV1, AuthorizedWorkProductScopeV1,
-    CreateWorkProductRequestV1, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
-    MAX_WORK_EVIDENCE_SELECTION_V1, MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, MAX_WORK_HISTORY_EVENTS_V1,
+    AcceptWorkTaskRequestV1, AddWorkTaskRequestV1, AdmitWorkExecutionRequestV1,
+    AuthorizedWorkProductScopeV1, CreateWorkProductRequestV1, CreateWorkTaskRequestV1,
+    DecideWorkProposalRequestV1, MAX_WORK_EVIDENCE_SELECTION_V1,
+    MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, MAX_WORK_HISTORY_EVENTS_V1,
     PrepareWorkProductMutationRequestV1, SelectedWorkEvidenceV1, VerifiedWorkEvidenceExpansionV1,
     VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1, WorkEvidenceExpansionV1,
     WorkEvidenceReadPortErrorV1, WorkEvidenceReadPortV1, WorkEvidenceSelectRequestV1,
