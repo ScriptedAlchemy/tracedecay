@@ -18816,13 +18816,24 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
         reason.contains("injected terminal graph activation failure"),
         "typed failure must retain its terminal cause: {reason}"
     );
-    assert!(
-        registry
+    // The owner's projection runs on its own task now, so the terminal graph
+    // failure above can be observed before it finishes. Withdrawal is still
+    // falsified: a withdrawn owner never becomes warm and this deadline fires.
+    let serving_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
             .latest_text_serving_for_scope(&scope)
             .await
-            .is_some_and(|text| text.query_owners_are_warm()),
-        "terminal native graph failure must not withdraw exact/lexical serving"
-    );
+            .is_some_and(|text| text.query_owners_are_warm())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= serving_deadline,
+            "terminal native graph failure must not withdraw exact/lexical serving"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
     registry.shutdown().await;
 }
 
@@ -19422,43 +19433,45 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
     use super::registry::GraphSeatGateV1;
 
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, true, true, false, true),
+        GraphSeatGateV1::decide(true, false, true, true, true),
         GraphSeatGateV1::Prepare,
         "a publication prepares once its own text owner has reopened, however busy the \
          checkout is; the owner's projection runs alongside and the seat joins it"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, true, true, false, false),
+        GraphSeatGateV1::decide(true, false, true, true, false),
         GraphSeatGateV1::PublishedTextOwnerUnavailable,
         "a publication whose replacement text owner did not reopen must not start graph work"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, true, false, true, false),
+        GraphSeatGateV1::decide(true, false, true, false, true),
         GraphSeatGateV1::Prepare,
-        "an unchanged pass seats the retained ready text owner's generation"
+        "an unchanged pass prepares as soon as a retained owner exists to recover a head \
+         from: the seat reads that owner's sealed manifest, never its lexical artifact, so a \
+         restart resuming an unfinished ngram index serves the graph while text still warms"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, true, false, false, false),
-        GraphSeatGateV1::RetainedTextOwnerWarming,
-        "an unchanged pass waits for exact and lexical serving to finish first"
+        GraphSeatGateV1::decide(true, false, true, false, false),
+        GraphSeatGateV1::RetainedGenerationUnavailable,
+        "an unchanged pass with no retained owner has no head to recover"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, true, true, true, true, true),
+        GraphSeatGateV1::decide(true, true, true, true, true),
         GraphSeatGateV1::ActivationDeferred,
         "a scheduled activation retry owns the next seat attempt"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(true, false, false, true, true, true),
+        GraphSeatGateV1::decide(true, false, false, true, true),
         GraphSeatGateV1::ReconcileUnfinished,
         "a pass with no terminal outcome has nothing to seat"
     );
     assert_eq!(
-        GraphSeatGateV1::decide(false, false, true, true, true, true),
+        GraphSeatGateV1::decide(false, false, true, true, true),
         GraphSeatGateV1::Disabled,
         "graph activation off means no seat and no skip to report"
     );
     assert!(
-        GraphSeatGateV1::decide(false, false, true, true, true, true)
+        GraphSeatGateV1::decide(false, false, true, true, true)
             .skip_reason()
             .is_none(),
         "a worktree with graph activation off is not waiting for a seat"
@@ -19468,7 +19481,7 @@ fn a_publication_seats_its_own_generation_without_waiting_for_a_quiet_tree() {
             GraphSeatGateV1::ReconcileUnfinished,
             GraphSeatGateV1::ActivationDeferred,
             GraphSeatGateV1::PublishedTextOwnerUnavailable,
-            GraphSeatGateV1::RetainedTextOwnerWarming,
+            GraphSeatGateV1::RetainedGenerationUnavailable,
         ]
         .into_iter()
         .all(|gate| gate.skip_reason().is_some()),
