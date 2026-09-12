@@ -127,7 +127,7 @@ pub(super) fn def_retrieve() -> ToolDefinition {
                 "max_chars": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": crate::tools::MAX_RESPONSE_CHARS,
+                    "maximum": crate::MAX_RESPONSE_CHARS,
                     "description": "Maximum characters requested for this page. Values above the safe response-frame budget are clamped."
                 }
             })),
