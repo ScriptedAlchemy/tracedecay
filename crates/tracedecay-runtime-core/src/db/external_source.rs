@@ -101,6 +101,42 @@ pub async fn migrate_retired_mutation_copy_tables(conn: &crate::db::Database) ->
     Ok(())
 }
 
+/// Retires the payload-copying predecessors inside a caller's transaction.
+///
+/// The released project store carries them and the shape this binary admits
+/// does not, so the one-time convergence of such a store has to finish the
+/// move before admission rather than after it. Each chunk is still bounded by
+/// the same statements [`migrate_retired_mutation_copy_tables`] uses; what a
+/// caller gives up is resumability, which a one-shot upgrade transaction does
+/// not have anyway.
+pub(super) async fn retire_mutation_copies_in_transaction(
+    conn: &(impl Executor + Sync),
+) -> Result<()> {
+    for (retired_table, chunk_statements) in RETIRED_MUTATION_COPY_TABLES {
+        if !table_exists(conn, retired_table).await? {
+            continue;
+        }
+        while let Some(ceiling) = retired_chunk_ceiling(conn, retired_table).await? {
+            for statement in *chunk_statements {
+                conn.execute(statement, params![ceiling])
+                    .await
+                    .map_err(|error| {
+                        migration_failure(
+                            format!("failed to move {retired_table} rows through rowid {ceiling}"),
+                            error,
+                        )
+                    })?;
+            }
+        }
+        conn.execute_batch(&format!("DROP TABLE {retired_table}"))
+            .await
+            .map_err(|error| {
+                migration_failure(format!("failed to drop {retired_table}"), error)
+            })?;
+    }
+    Ok(())
+}
+
 fn migration_failure(message: String, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!("{message}: {error}"),
