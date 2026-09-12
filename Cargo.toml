@@ -34,6 +34,7 @@ members = [
     "crates/tracedecay-policy",
     "crates/tracedecay-privacy",
     "crates/tracedecay-private-fs",
+    "crates/tracedecay-project",
     "crates/tracedecay-query",
     "crates/tracedecay-runtime-core",
     "crates/tracedecay-sdk",

@@ -425,7 +425,7 @@ async fn retained_recovery_project(
     std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
     std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
         .expect("project source");
-    crate::project::TraceDecay::init_with_options(
+    crate::project::TraceDecay::init_with_options_for_test(
         &project_root,
         crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
@@ -894,7 +894,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
         &serde_json::to_vec_pretty(&mismatched_transition).expect("mismatched transition bytes"),
     );
     cg.close();
-    let reopened = crate::project::TraceDecay::init_with_options(
+    let reopened = crate::project::TraceDecay::init_with_options_for_test(
         &project_root,
         crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
@@ -1342,7 +1342,7 @@ async fn recovery_defers_unavailable_memory_without_blocking_external_or_termina
     write_private_test_file(&intent_path, corrupt);
     cg.close();
 
-    let read_only = crate::project::TraceDecay::open_read_only_with_options(
+    let read_only = crate::project::TraceDecay::open_read_only_with_options_for_test(
         &project_root,
         crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
@@ -1399,7 +1399,7 @@ async fn empty_pending_index_does_not_open_project_memory() {
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     cg.close();
 
-    let read_only = crate::project::TraceDecay::open_read_only_with_options(
+    let read_only = crate::project::TraceDecay::open_read_only_with_options_for_test(
         &project_root,
         crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
@@ -1512,7 +1512,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
     std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
         .expect("project source");
-    let cg = crate::project::TraceDecay::init_with_options(
+    let cg = crate::project::TraceDecay::init_with_options_for_test(
         &project_root,
         crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),

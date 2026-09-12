@@ -71,6 +71,7 @@
         "tracedecay-host-admission",
         "tracedecay-maintenance",
         "tracedecay-mcp",
+        "tracedecay-project",
         "tracedecay-session-memory",
         "tracedecay-session-runtime",
         "tracedecay-source-edit",
@@ -89,6 +90,7 @@
         "tracedecay-host-admission/test-helpers",
         "tracedecay-maintenance/test-helpers",
         "tracedecay-mcp/test-transport",
+        "tracedecay-project/test-helpers",
         "tracedecay-session-runtime/test-helpers",
         "tracedecay-store-runtime/test-helpers"
       ]

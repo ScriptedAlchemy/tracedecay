@@ -20,9 +20,9 @@ mod automation_context;
 #[cfg(test)]
 mod concrete_runtime_tests;
 mod diagnostics;
-pub(crate) mod facts;
+pub mod facts;
 mod lifecycle;
-pub(crate) mod queries;
+pub mod queries;
 mod source_edit_runtime;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
@@ -30,7 +30,7 @@ pub use lifecycle::MovedStoreAdoption;
 
 /// Why a `TraceDecay` instance has no Context Scout owner.
 #[derive(Clone)]
-pub(crate) enum ContextScoutOwnerLookupV1 {
+pub enum ContextScoutOwnerLookupV1 {
     Ready(Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>),
     ReadOnly,
     Unregistered,
@@ -43,7 +43,7 @@ pub(crate) enum ContextScoutOwnerLookupV1 {
 pub struct TraceDecay {
     db: Database,
     profile_database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    pub(crate) store_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    pub store_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: TraceDecayConfig,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
@@ -62,7 +62,9 @@ pub struct TraceDecay {
     /// new `TraceDecay` rather than mutating an existing one, so the resolved
     /// path is safe to cache for the instance's lifetime.
     db_path_cache: OnceLock<PathBuf>,
-    #[cfg(any(test, feature = "test-transport"))]
+    /// The registered test runtime a fixture open went through, kept alive
+    /// for as long as the graph is; `None` for every production open.
+    #[cfg(any(test, feature = "test-helpers"))]
     test_runtime_guard:
         Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
     _standalone_maintenance_scope:
@@ -70,42 +72,42 @@ pub struct TraceDecay {
 }
 
 impl TraceDecay {
-    pub(crate) fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
+    pub fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
         self.db.storage_telemetry_handle()
     }
 
     #[hotpath::skip]
-    pub(crate) async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
+    pub async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
         self.db.storage_page_counts().await
     }
 
-    pub(crate) fn configuration_runtime(
+    pub fn configuration_runtime(
         &self,
     ) -> &Arc<tracedecay_configuration::ProjectConfigurationRuntime> {
         &self.configuration_runtime
     }
 
-    pub(crate) fn project_store_runtime(&self) -> &DaemonSessionRuntimeRegistryV1 {
+    pub fn project_store_runtime(&self) -> &DaemonSessionRuntimeRegistryV1 {
         self.store_runtime_registry.as_ref()
     }
 
-    pub(crate) fn profile_database(&self) -> &tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
+    pub fn profile_database(&self) -> &tracedecay_global_db::RegisteredGlobalDbLeaseV1 {
         &self.profile_database
     }
 
     #[doc(hidden)]
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn test_runtime_for_test(
         &self,
     ) -> Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>> {
         self.test_runtime_guard.clone()
     }
 
-    pub(crate) fn hook_store_layout(&self) -> &StoreLayout {
+    pub fn hook_store_layout(&self) -> &StoreLayout {
         &self.store_layout
     }
 
-    pub(crate) fn source_read_context(&self) -> Option<SourceReadContext> {
+    pub fn source_read_context(&self) -> Option<SourceReadContext> {
         Some(SourceReadContext::new(
             self.project_root.clone(),
             self.db.clone(),
@@ -114,7 +116,7 @@ impl TraceDecay {
         ))
     }
 
-    pub(crate) fn context_scout_owner(
+    pub fn context_scout_owner(
         &self,
     ) -> Option<Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>>
     {
@@ -124,7 +126,7 @@ impl TraceDecay {
         }
     }
 
-    pub(crate) fn context_scout_owner_lookup(&self) -> ContextScoutOwnerLookupV1 {
+    pub fn context_scout_owner_lookup(&self) -> ContextScoutOwnerLookupV1 {
         if self.read_only {
             return ContextScoutOwnerLookupV1::ReadOnly;
         }
@@ -150,7 +152,7 @@ impl TraceDecay {
     /// mounts.
     #[allow(clippy::too_many_arguments)]
     #[hotpath::skip]
-    pub(crate) async fn mount_current_context_scout_claim_authority(
+    pub async fn mount_current_context_scout_claim_authority(
         &self,
         registry: Arc<tracedecay_agent_hosts::agents::context_scout::ports::ProjectContextScoutAddressRegistryV1>,
         hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
@@ -189,7 +191,7 @@ impl TraceDecay {
     /// the mounted pin, or the durable address registry no longer resolves
     /// the mounted address for this hook.
     #[hotpath::skip]
-    pub(crate) async fn resolve_current_context_scout_claim_authority(
+    pub async fn resolve_current_context_scout_claim_authority(
         &self,
         hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
         lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
@@ -214,7 +216,7 @@ impl TraceDecay {
     /// routed session. The owner reuses and revalidates that producer's exact
     /// lifecycle authority; the later event supplies no replacement identity.
     #[hotpath::skip]
-    pub(crate) async fn resolve_current_context_scout_session_claim_authority(
+    pub async fn resolve_current_context_scout_session_claim_authority(
         &self,
         hook: &tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1,
         lifecycle: &tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
