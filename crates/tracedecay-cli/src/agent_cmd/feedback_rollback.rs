@@ -1,3 +1,5 @@
+//! Feedback-path rollback command and durable recovery state.
+
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
