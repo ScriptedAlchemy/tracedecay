@@ -167,11 +167,19 @@ pub(crate) fn record_model_state(name: &'static str) {
     let _ = name;
 }
 
+/// The execution provider this process *offers* ONNX Runtime, recorded once
+/// the build, platform, and environment have resolved it.
+///
+/// Deliberately not "the provider that executed": ORT registers execution
+/// providers with `error_on_failure: false`, so a provider that fails to
+/// register is silently replaced by the next one — or by CPU — inside the
+/// session constructor, with no signal this crate can observe. Reading this
+/// value as proof that CoreML or CUDA ran would therefore be wrong.
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]
 #[inline(always)]
-pub(crate) fn record_embed_execution_provider(name: &'static str) {
+pub(crate) fn record_offered_embed_execution_provider(name: &'static str) {
     #[cfg(feature = "hotpath")]
-    hotpath::val!("semantic_embed_execution_provider").set(&name);
+    hotpath::val!("semantic_embed_execution_provider_offered").set(&name);
     #[cfg(not(feature = "hotpath"))]
     let _ = name;
 }

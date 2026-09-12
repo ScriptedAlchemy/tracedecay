@@ -73,7 +73,9 @@ pub(crate) fn resolved_execution_provider() -> EmbeddingExecutionProviderV1 {
             webgpu_provider(true).unwrap_or(EmbeddingExecutionProviderV1::Cpu)
         }
     };
-    crate::hotpath_observe::record_embed_execution_provider(match provider {
+    // Every provider reports on the same condition — resolution, not
+    // registration — so the four are comparable with each other.
+    crate::hotpath_observe::record_offered_embed_execution_provider(match provider {
         EmbeddingExecutionProviderV1::Cpu => "cpu",
         EmbeddingExecutionProviderV1::CoreMl => "coreml",
         EmbeddingExecutionProviderV1::Cuda => "cuda",
