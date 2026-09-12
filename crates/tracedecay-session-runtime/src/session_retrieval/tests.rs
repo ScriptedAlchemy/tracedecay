@@ -1108,9 +1108,16 @@ async fn advertised_minimum_session_lookup_request_passes_budget_admission() {
     );
 }
 
+/// A session browse reads a bounded cohort window of storage, so a session far
+/// larger than that window must still answer a small page and its cursor must
+/// advance the storage keyset rather than re-reading the same window: every
+/// page returns a full `LIMIT`, no message is served twice, and the walk keeps
+/// yielding a continuation while records remain.
 #[tokio::test]
-async fn one_item_lookup_reads_a_session_larger_than_the_response_budget() {
-    const RECORDS: usize = 182;
+async fn small_lookup_reads_a_session_larger_than_the_response_budget() {
+    const RECORDS: usize = 1500;
+    const LIMIT: usize = 3;
+    const PAGES: usize = 3;
     let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
         "session-lookup-large-candidate-workspace",
     )
@@ -1138,23 +1145,26 @@ async fn one_item_lookup_reads_a_session_larger_than_the_response_budget() {
     let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
         .expect("registered retrieval service");
     let context = admitted_lookup_context(scope);
-    let query = SessionTemporalQuery::new(
-        SessionId::new(session_id).expect("large session identity"),
-        None,
-        "",
-        None,
-        TemporalModeV1::Current,
-        tracedecay_domain::RetrievalGrainV1::Occurrence,
-        1,
-        DiversityLimits::unbounded(),
-        ContextBudget {
-            max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
-            max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
-            estimator_version: "words-v1".to_owned(),
-        },
-    )
-    .expect("large-session temporal query")
-    .with_execution_limits(admitted_execution_limits(1));
+    let session = SessionId::new(session_id).expect("large session identity");
+    let page_query = |limit: usize, cursor: Option<String>| {
+        SessionTemporalQuery::new(
+            session.clone(),
+            None,
+            "",
+            cursor,
+            TemporalModeV1::Current,
+            tracedecay_domain::RetrievalGrainV1::Occurrence,
+            limit,
+            DiversityLimits::unbounded(),
+            ContextBudget {
+                max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+                estimator_version: "words-v1".to_owned(),
+            },
+        )
+        .expect("large-session temporal query")
+        .with_execution_limits(admitted_execution_limits(limit))
+    };
 
     let mut candidate_limits = admitted_execution_limits(1);
     candidate_limits.candidate_total_bytes = ExecutionLimits::default().candidate_total_bytes + 1;
@@ -1172,7 +1182,7 @@ async fn one_item_lookup_reads_a_session_larger_than_the_response_budget() {
     ] {
         assert_eq!(
             service
-                .retrieve_admitted(&context, query.clone().with_execution_limits(limits))
+                .retrieve_admitted(&context, page_query(1, None).with_execution_limits(limits))
                 .await,
             SessionRetrievalServiceOutcome::BudgetExhausted {
                 stage: expected_stage,
@@ -1180,15 +1190,27 @@ async fn one_item_lookup_reads_a_session_larger_than_the_response_budget() {
         );
     }
 
-    let outcome = service.retrieve_admitted(&context, query).await;
+    // The cohort is a bounded window over storage order, so a page accounts for
+    // the window it examined, not the whole session: every candidate the page
+    // did not hydrate is reported unhydrated, and the rest of the session is
+    // owed by the continuation instead.
+    let cohort_window = u64::try_from(ExecutionLimits::default().candidate_limit).expect("window");
+    assert!(
+        RECORDS as u64 > cohort_window,
+        "the session must be larger than one cohort window",
+    );
+    let outcome = service
+        .retrieve_admitted(&context, page_query(1, None))
+        .await;
     let page = match outcome {
         SessionRetrievalServiceOutcome::Partial {
             page,
             freshness: SessionDataFreshness::Fresh,
             omitted,
-        } if omitted == RECORDS as u64 => page,
+        } if omitted == cohort_window => page,
         other => panic!("large session must return a bounded hydrated page: {other:?}"),
     };
+    assert_eq!(page.temporal.coverage.unknown, cohort_window);
     assert_eq!(page.temporal.anchors.len(), 1);
     assert_eq!(page.results.len(), 1);
     let message = &page.results[0].message;
@@ -1204,6 +1226,149 @@ async fn one_item_lookup_reads_a_session_larger_than_the_response_budget() {
     );
     assert!(page.temporal.omissions.is_empty());
     assert_eq!(page.temporal.watermarks.source, RECORDS as u64);
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut cursor = None;
+    for page_index in 0..PAGES {
+        let page = match service
+            .retrieve_admitted(&context, page_query(LIMIT, cursor.take()))
+            .await
+        {
+            SessionRetrievalServiceOutcome::Partial { page, .. }
+            | SessionRetrievalServiceOutcome::Complete { page, .. } => page,
+            other => panic!("page {page_index} of a large session must hydrate: {other:?}"),
+        };
+        assert_eq!(
+            page.results.len(),
+            LIMIT,
+            "page {page_index} must fill the requested limit",
+        );
+        for result in &page.results {
+            let message = &result.message;
+            assert_eq!(
+                expected_messages.get(&message.message_id),
+                Some(&message.text),
+                "page {page_index} must hydrate the exact retained bytes",
+            );
+            assert!(
+                seen.insert(message.message_id.clone()),
+                "page {page_index} re-served {}",
+                message.message_id,
+            );
+        }
+        cursor = page.temporal.cursor.clone();
+        assert!(
+            cursor.is_some(),
+            "page {page_index} left {} of {RECORDS} records unread and must continue",
+            RECORDS - seen.len(),
+        );
+    }
+    assert_eq!(seen.len(), PAGES * LIMIT);
+}
+
+/// A cursor walk must be exact at both ends: every record is served once, the
+/// page that finishes the session carries no continuation, and every page
+/// before it does. The limits bracket the record count so the final page is
+/// full, one short of full, and a single record.
+#[tokio::test]
+async fn session_lookup_cursor_walk_is_exact_at_the_page_boundaries() {
+    const RECORDS: usize = 40;
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "session-lookup-cursor-walk-workspace",
+    )
+    .await;
+    let root = real_page_root("root.walk");
+    let session_id = "session.page.walk".to_owned();
+    let mut expected_messages = BTreeMap::new();
+    for rank in 0..RECORDS {
+        let fixture = seed_real_page_fixture_in_session(
+            harness.registered.as_ref(),
+            &root,
+            rank,
+            "codex".to_owned(),
+            session_id.clone(),
+            rank + 1 == RECORDS,
+        )
+        .await;
+        expected_messages.insert(fixture.projected_message_id, fixture.text);
+    }
+    let root = registered_profile_retrieval_root(&harness.registered);
+    let scope = root
+        .identity()
+        .session_request_scope()
+        .expect("profile session scope");
+    let service = DaemonSessionRetrievalService::new(harness.registered.clone(), root, None)
+        .expect("registered retrieval service");
+    let context = admitted_lookup_context(scope);
+    let session = SessionId::new(session_id).expect("walked session identity");
+
+    for limit in [RECORDS, RECORDS - 1, 1] {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut cursor = None;
+        let mut pages = 0usize;
+        loop {
+            let query = SessionTemporalQuery::new(
+                session.clone(),
+                None,
+                "",
+                cursor.take(),
+                TemporalModeV1::Current,
+                tracedecay_domain::RetrievalGrainV1::Occurrence,
+                limit,
+                DiversityLimits::unbounded(),
+                ContextBudget {
+                    max_bytes: APPLICATION_RETRIEVAL_MAX_BYTES,
+                    max_tokens: APPLICATION_RETRIEVAL_MAX_BYTES / 4,
+                    estimator_version: "words-v1".to_owned(),
+                },
+            )
+            .expect("walked temporal query")
+            .with_execution_limits(admitted_execution_limits(limit));
+            let page = match service.retrieve_admitted(&context, query).await {
+                SessionRetrievalServiceOutcome::Partial { page, .. }
+                | SessionRetrievalServiceOutcome::Complete { page, .. } => page,
+                other => panic!("limit {limit} page {pages} must hydrate: {other:?}"),
+            };
+            pages += 1;
+            assert!(
+                !page.results.is_empty(),
+                "limit {limit} page {pages} produced a continuation with no records",
+            );
+            for result in &page.results {
+                let message = &result.message;
+                assert_eq!(
+                    expected_messages.get(&message.message_id),
+                    Some(&message.text),
+                    "limit {limit} page {pages} must hydrate the exact retained bytes",
+                );
+                assert!(
+                    seen.insert(message.message_id.clone()),
+                    "limit {limit} page {pages} re-served {}",
+                    message.message_id,
+                );
+            }
+            cursor = page.temporal.cursor.clone();
+            match cursor {
+                Some(_) => assert!(
+                    seen.len() < RECORDS,
+                    "limit {limit} continued past the last record",
+                ),
+                None => {
+                    assert_eq!(
+                        seen.len(),
+                        RECORDS,
+                        "limit {limit} stopped continuing with records unread",
+                    );
+                    break;
+                }
+            }
+            assert!(
+                pages <= RECORDS,
+                "limit {limit} failed to reach the end of the session",
+            );
+        }
+        assert_eq!(pages, RECORDS.div_ceil(limit));
+    }
 }
 
 /// Sizing the limits for the admitted budget must not admit a page the

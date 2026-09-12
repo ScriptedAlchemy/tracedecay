@@ -620,6 +620,15 @@ fn retrieval_query(
     include_summaries: bool,
     git_filter: GitScopeFilter,
 ) -> Result<SessionTemporalQuery, RetainedSurfaceExecutionErrorV1> {
+    // Diversity spreads a *relevance* page across competing sessions, turns and
+    // messages. A browse has no query to be relevant to: it lists the scope in
+    // temporal order, so per-session/turn/message quotas would silently drop
+    // most of a session and make paging to the end impossible.
+    let diversity = if query_text.is_empty() {
+        DiversityLimits::unbounded()
+    } else {
+        DiversityLimits::default()
+    };
     let query = SessionTemporalQuery::new(
         session_id.clone(),
         provider.map(str::to_owned),
@@ -628,7 +637,7 @@ fn retrieval_query(
         temporal_mode,
         RetrievalGrainV1::Occurrence,
         limit,
-        DiversityLimits::default(),
+        diversity,
         context_budget,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?

@@ -11,10 +11,11 @@ use super::ports::{
     TemporalRetrievalScope,
 };
 
-const CURSOR_FORMAT_VERSION: &str = "2";
+const CURSOR_FORMAT_VERSION: &str = "3";
 const MAX_CURSOR_PAYLOAD_HEX_BYTES: usize = 2 * 65_536;
 const MAX_CURSOR_KEY_ID_HEX_BYTES: usize = 2 * 1024;
 const MAX_SORT_KEY_STABLE_ID_BYTES: usize = 4 * 1024;
+const MAX_CANDIDATE_KEYSET_BYTES: usize = 4 * 1024;
 pub const CURSOR_LIFETIME_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 pub const CURSOR_CLOCK_SKEW_MICROS: i64 = 5 * 60 * 1_000_000;
 
@@ -24,6 +25,22 @@ pub struct StableSortKey {
     pub normalized_score_micros: u64,
     pub knowledge_at_micros: i64,
     pub stable_id: String,
+}
+
+/// Where a continuation resumes reading.
+///
+/// A candidate cohort is a bounded window over storage order, so a position
+/// has two independent halves: `candidate_keyset` names the storage key the
+/// window starts after, and `last_sort_key` names how far the ranked page has
+/// walked inside that window. Advancing to the next window resets the ranked
+/// half; walking inside one window keeps the same keyset.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CursorPosition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_keyset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sort_key: Option<StableSortKey>,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -110,7 +127,7 @@ struct CursorPayload {
     schema_version: u32,
     ranking_version: u32,
     configuration_digest: String,
-    last_sort_key: StableSortKey,
+    position: CursorPosition,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,10 +136,10 @@ struct CursorScopeKind(String);
 impl CursorPayload {
     fn from_snapshot(
         snapshot: &TemporalExecutionSnapshot,
-        last_sort_key: StableSortKey,
+        position: CursorPosition,
         issued_at_micros: i64,
     ) -> Result<Self, CursorError> {
-        validate_sort_key(&last_sort_key)?;
+        validate_position(&position)?;
         snapshot.cursor_key().ok_or(CursorError::KeyUnavailable)?;
         let expires_at_micros = issued_at_micros
             .checked_add(CURSOR_LIFETIME_MICROS)
@@ -158,26 +175,43 @@ impl CursorPayload {
                 .configuration_digest
                 .as_str()
                 .to_string(),
-            last_sort_key,
+            position,
         })
     }
 }
 
+/// Mint a continuation for a page that ended on a ranked key inside the
+/// candidate cohort it already read.
 pub fn encode_cursor(
     snapshot: &TemporalExecutionSnapshot,
     last_sort_key: &StableSortKey,
     authenticator: &(impl SessionCursorAuthenticator + ?Sized),
 ) -> Result<String, CursorError> {
-    encode_cursor_at(snapshot, last_sort_key, authenticator, now_micros()?)
+    encode_cursor_position(
+        snapshot,
+        &CursorPosition {
+            candidate_keyset: None,
+            last_sort_key: Some(last_sort_key.clone()),
+        },
+        authenticator,
+    )
+}
+
+pub fn encode_cursor_position(
+    snapshot: &TemporalExecutionSnapshot,
+    position: &CursorPosition,
+    authenticator: &(impl SessionCursorAuthenticator + ?Sized),
+) -> Result<String, CursorError> {
+    encode_cursor_at(snapshot, position, authenticator, now_micros()?)
 }
 
 fn encode_cursor_at(
     snapshot: &TemporalExecutionSnapshot,
-    last_sort_key: &StableSortKey,
+    position: &CursorPosition,
     authenticator: &(impl SessionCursorAuthenticator + ?Sized),
     issued_at_micros: i64,
 ) -> Result<String, CursorError> {
-    let payload = CursorPayload::from_snapshot(snapshot, last_sort_key.clone(), issued_at_micros)?;
+    let payload = CursorPayload::from_snapshot(snapshot, position.clone(), issued_at_micros)?;
     let payload_bytes = serde_json::to_vec(&payload).map_err(|_| CursorError::Malformed)?;
     let payload_hex = hex::encode(payload_bytes);
     let key_ref = snapshot.cursor_key().ok_or(CursorError::KeyUnavailable)?;
@@ -198,11 +232,24 @@ fn encode_cursor_at(
     Ok(format!("{authenticated}.{signature}"))
 }
 
+/// Verify a continuation minted by [`encode_cursor`]: a position whose ranked
+/// half is the whole cursor. A keyset-only position has no sort key to return
+/// and is rejected rather than silently read as "start over".
 pub fn verify_cursor(
     encoded: &str,
     expected: &TemporalExecutionSnapshot,
     authenticator: &(impl SessionCursorAuthenticator + ?Sized),
 ) -> Result<StableSortKey, CursorError> {
+    verify_cursor_position(encoded, expected, authenticator)?
+        .last_sort_key
+        .ok_or(CursorError::SortKeyMismatch)
+}
+
+pub fn verify_cursor_position(
+    encoded: &str,
+    expected: &TemporalExecutionSnapshot,
+    authenticator: &(impl SessionCursorAuthenticator + ?Sized),
+) -> Result<CursorPosition, CursorError> {
     verify_cursor_at(encoded, expected, authenticator, now_micros()?)
 }
 
@@ -211,7 +258,7 @@ fn verify_cursor_at(
     expected: &TemporalExecutionSnapshot,
     authenticator: &(impl SessionCursorAuthenticator + ?Sized),
     now_micros: i64,
-) -> Result<StableSortKey, CursorError> {
+) -> Result<CursorPosition, CursorError> {
     let mut parts = encoded.split('.');
     let version = parts.next().ok_or(CursorError::Malformed)?;
     let key_id_hex = parts.next().ok_or(CursorError::Malformed)?;
@@ -271,21 +318,8 @@ fn verify_cursor_at(
         return Err(CursorError::KeyVersionMismatch);
     }
     verify_bindings(&payload, expected)?;
-    validate_sort_key(&payload.last_sort_key)?;
-    Ok(payload.last_sort_key)
-}
-
-pub fn verify_cursor_for_sort_key(
-    encoded: &str,
-    expected: &TemporalExecutionSnapshot,
-    expected_sort_key: &StableSortKey,
-    authenticator: &(impl SessionCursorAuthenticator + ?Sized),
-) -> Result<(), CursorError> {
-    let actual = verify_cursor(encoded, expected, authenticator)?;
-    if &actual != expected_sort_key {
-        return Err(CursorError::SortKeyMismatch);
-    }
-    Ok(())
+    validate_position(&payload.position)?;
+    Ok(payload.position)
 }
 
 fn verify_bindings(
@@ -365,10 +399,21 @@ fn cursor_scope_kind(scope: &TemporalRetrievalScope) -> CursorScopeKind {
     }
 }
 
-fn validate_sort_key(sort_key: &StableSortKey) -> Result<(), CursorError> {
-    if sort_key.stable_id.is_empty()
-        || sort_key.stable_id.len() > MAX_SORT_KEY_STABLE_ID_BYTES
-        || sort_key.stable_id.chars().any(char::is_control)
+fn validate_position(position: &CursorPosition) -> Result<(), CursorError> {
+    if position.candidate_keyset.is_none() && position.last_sort_key.is_none() {
+        return Err(CursorError::SortKeyMismatch);
+    }
+    if let Some(sort_key) = position.last_sort_key.as_ref()
+        && (sort_key.stable_id.is_empty()
+            || sort_key.stable_id.len() > MAX_SORT_KEY_STABLE_ID_BYTES
+            || sort_key.stable_id.chars().any(char::is_control))
+    {
+        return Err(CursorError::SortKeyMismatch);
+    }
+    if let Some(keyset) = position.candidate_keyset.as_ref()
+        && (keyset.is_empty()
+            || keyset.len() > MAX_CANDIDATE_KEYSET_BYTES
+            || keyset.chars().any(char::is_control))
     {
         return Err(CursorError::SortKeyMismatch);
     }
@@ -428,8 +473,9 @@ mod tests {
     use crate::ports::{
         BindingDigest, CursorKeyError, CursorSignature, KernelVersions, MAX_TEMPORAL_PARTICIPANTS,
         SessionCursorAuthenticator, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
-        TemporalParticipantGeneration, TemporalParticipantManifest, TemporalSnapshotRequest,
-        TemporalSourceAccess, TemporalWatermarks,
+        TemporalParticipantGeneration, TemporalParticipantManifest,
+        TemporalPreparedCandidateCohort, TemporalSnapshotRequest, TemporalSourceAccess,
+        TemporalWatermarks,
     };
     use crate::ranking::RankingCandidate;
 
@@ -534,6 +580,23 @@ mod tests {
         snapshot_for("session-1", access, projection)
     }
 
+    /// A root-wide snapshot, the only scope that carries a prepared cohort.
+    fn root_snapshot() -> TemporalExecutionSnapshot {
+        let session = snapshot('2', 13);
+        TemporalExecutionSnapshot::new(
+            session
+                .request()
+                .clone()
+                .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot),
+            session.watermarks(),
+            session.versions().clone(),
+            session.cursor_key().cloned(),
+        )
+        .expect("root snapshot")
+        .with_participant_manifest(participant_manifest(7))
+        .expect("participant manifest")
+    }
+
     fn auth(secret: u8) -> KeyAuth {
         KeyAuth::new(
             snapshot('2', 13)
@@ -550,6 +613,36 @@ mod tests {
             knowledge_at_micros: 42,
             stable_id: "anchor-9".to_string(),
         }
+    }
+
+    fn position() -> CursorPosition {
+        CursorPosition {
+            candidate_keyset: None,
+            last_sort_key: Some(sort_key()),
+        }
+    }
+
+    fn participant_manifest(generation: u64) -> TemporalParticipantManifest {
+        TemporalParticipantManifest::new(vec![
+            TemporalParticipantGeneration::new(
+                SessionId::new("session-1").expect("session"),
+                "source-1",
+                TemporalWatermarks {
+                    generation,
+                    source: 11,
+                    projection: 13,
+                    index: 17,
+                    summary: 19,
+                },
+                23,
+                &BindingDigest::new("configuration", digest('3')).expect("configuration"),
+                &BindingDigest::new("authorization", digest('2')).expect("authorization"),
+                TemporalParticipantAuthorization::Authorized,
+                TemporalSourceAccess::Available,
+            )
+            .expect("participant"),
+        ])
+        .expect("manifest")
     }
 
     fn participant_manifest_with_count(count: usize) -> TemporalParticipantManifest {
@@ -636,7 +729,7 @@ mod tests {
     #[test]
     fn cursor_round_trip_is_restart_stable_and_canonical() {
         let provider = auth(7);
-        let encoded = encode_cursor_at(&snapshot('2', 13), &sort_key(), &provider, TEST_NOW_MICROS)
+        let encoded = encode_cursor_at(&snapshot('2', 13), &position(), &provider, TEST_NOW_MICROS)
             .expect("encode");
         assert_eq!(encoded.split('.').count(), 5);
 
@@ -648,7 +741,7 @@ mod tests {
             TEST_NOW_MICROS,
         )
         .expect("same persisted key verifies after restart");
-        assert_eq!(decoded, sort_key());
+        assert_eq!(decoded, position());
     }
 
     #[test]
@@ -656,7 +749,7 @@ mod tests {
         let provider = auth(8);
         let expected = snapshot('2', 13);
         let encoded =
-            encode_cursor_at(&expected, &sort_key(), &provider, TEST_NOW_MICROS).expect("encode");
+            encode_cursor_at(&expected, &position(), &provider, TEST_NOW_MICROS).expect("encode");
         let payload_hex = encoded.split('.').nth(3).expect("payload");
         let payload: CursorPayload =
             serde_json::from_slice(&hex::decode(payload_hex).expect("payload hex"))
@@ -673,7 +766,7 @@ mod tests {
                 &provider,
                 payload.expires_at_micros - 1,
             ),
-            Ok(sort_key())
+            Ok(position())
         );
         assert_eq!(
             verify_cursor_at(&encoded, &expected, &provider, payload.expires_at_micros,),
@@ -686,7 +779,7 @@ mod tests {
                 &provider,
                 TEST_NOW_MICROS - CURSOR_CLOCK_SKEW_MICROS,
             ),
-            Ok(sort_key())
+            Ok(position())
         );
         assert_eq!(
             verify_cursor_at(
@@ -800,26 +893,31 @@ mod tests {
         assert_eq!(maximum.len(), one.len());
     }
 
+    /// A prepared cohort is frozen into the snapshot, so a cursor binds its
+    /// exact contents: replaying against the same cohort succeeds and any
+    /// change refuses. Ordinary session reads bind position by keyset instead
+    /// — their cohort is a window that is only materialized by the read.
     #[test]
     fn cursor_ignores_unrelated_no_match_state_but_rejects_candidate_change() {
         let provider = auth(7);
         let first_candidate = cohort_candidate("candidate-1");
-        let expected = snapshot('2', 13)
-            .with_observed_candidate_cohort(std::slice::from_ref(&first_candidate))
-            .expect("candidate cohort");
+        let prepared = |candidates: Vec<RankingCandidate>| {
+            root_snapshot()
+                .with_prepared_candidate_cohort(
+                    TemporalPreparedCandidateCohort::new(candidates).expect("prepared cohort"),
+                )
+                .expect("prepared candidate cohort")
+        };
+        let expected = prepared(vec![first_candidate.clone()]);
         let encoded = encode_cursor(&expected, &sort_key(), &provider).expect("cursor");
 
-        let unrelated_no_match = snapshot('2', 13)
-            .with_observed_candidate_cohort(std::slice::from_ref(&first_candidate))
-            .expect("unchanged matching cohort");
+        let unrelated_no_match = prepared(vec![first_candidate.clone()]);
         assert_eq!(
             verify_cursor(&encoded, &unrelated_no_match, &provider),
             Ok(sort_key())
         );
 
-        let matching_change = snapshot('2', 13)
-            .with_observed_candidate_cohort(&[first_candidate, cohort_candidate("candidate-2")])
-            .expect("changed matching cohort");
+        let matching_change = prepared(vec![first_candidate, cohort_candidate("candidate-2")]);
         assert_eq!(
             verify_cursor(&encoded, &matching_change, &provider),
             Err(CursorError::CandidateCohortMismatch)
@@ -914,7 +1012,7 @@ mod tests {
         };
         let encoded = encode_cursor_at(
             &snapshot('2', 13),
-            &sort_key(),
+            &position(),
             &auth.inner,
             TEST_NOW_MICROS,
         )
@@ -1037,7 +1135,11 @@ mod tests {
             CursorError::CandidateCohortMismatch
         );
         mismatch!(
-            |payload: &mut CursorPayload| payload.last_sort_key.stable_id.clear(),
+            |payload: &mut CursorPayload| {
+                if let Some(sort_key) = payload.position.last_sort_key.as_mut() {
+                    sort_key.stable_id.clear();
+                }
+            },
             CursorError::SortKeyMismatch
         );
         mismatch!(
@@ -1045,13 +1147,6 @@ mod tests {
                 payload.provider_scope = Some("other-provider".to_string());
             },
             CursorError::WrongRequest
-        );
-
-        let mut different_sort_key = sort_key();
-        different_sort_key.stable_id = "anchor-10".to_string();
-        assert_eq!(
-            verify_cursor_for_sort_key(&encoded, &expected, &different_sort_key, &auth),
-            Err(CursorError::SortKeyMismatch)
         );
     }
 
@@ -1139,7 +1234,9 @@ mod tests {
         let encoded = encode_cursor(&expected, &sort_key(), &auth).expect("encode");
         let key_ref = expected.cursor_key().expect("snapshot key");
         let mutated = mutate_and_resign(&encoded, key_ref, &auth, |payload| {
-            payload.last_sort_key.stable_id = "x".repeat(MAX_SORT_KEY_STABLE_ID_BYTES + 1);
+            if let Some(sort_key) = payload.position.last_sort_key.as_mut() {
+                sort_key.stable_id = "x".repeat(MAX_SORT_KEY_STABLE_ID_BYTES + 1);
+            }
         });
         assert_eq!(
             verify_cursor(&mutated, &expected, &auth),
@@ -1276,7 +1373,7 @@ mod tests {
         };
         let encoded = encode_cursor_at(
             &snapshot('2', 13),
-            &sort_key(),
+            &position(),
             &auth.inner,
             TEST_NOW_MICROS,
         )
