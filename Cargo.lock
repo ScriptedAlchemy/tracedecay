@@ -6584,7 +6584,6 @@ dependencies = [
  "hex",
  "hotpath",
  "parking_lot",
- "rayon",
  "rusqlite",
  "serde",
  "serde_json",
