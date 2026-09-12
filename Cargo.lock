@@ -6872,6 +6872,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-graph-db",
  "tracedecay-private-fs",
+ "tracedecay-query",
  "tracedecay-temporal-query",
  "tracing",
  "zeroize",
