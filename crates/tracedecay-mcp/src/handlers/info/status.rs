@@ -619,6 +619,7 @@ fn active_project_context(
     let layout = ctx.store_layout();
     let graph_db_path = ctx.graph_db_path();
     let mut output = json!({
+        "project_id": layout.identity.project_id.as_deref(),
         "project_root": display_path(project_root),
         "resolution_source": "active_project",
         "storage": {
