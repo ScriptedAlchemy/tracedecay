@@ -829,23 +829,53 @@ pub fn canonical_observation_git_evidence(
         })
         .unwrap_or_default();
 
-    let Ok(repo) = gix::discover(admitted_project_root) else {
-        return Ok((Vec::new(), spans));
-    };
+    let repo = gix::discover(admitted_project_root).map_err(|error| {
+        GitCorrelationError::Unavailable(format!(
+            "admitted repository could not be opened for canonical commit evidence: {error}"
+        ))
+    })?;
     let mut commits = Vec::new();
     for reference in commit_references {
-        let Ok(spec) = repo.rev_parse_single(reference.as_str()) else {
+        let Ok(prefix) = gix::hash::Prefix::from_hex(reference.as_str()) else {
+            // A non-hex historical value is not independently verifiable
+            // commit evidence.
             continue;
         };
-        let Ok(object) = spec.object() else {
-            continue;
+        let object_id = match repo.objects.lookup_prefix(prefix, None) {
+            Ok(Some(Ok(object_id))) => object_id,
+            // Missing and ambiguous historical prefixes are unresolved, so
+            // neither is evidence for a particular commit.
+            Ok(None | Some(Err(()))) => continue,
+            Err(error) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit prefix `{reference}` could not be read: {error}"
+                )));
+            }
         };
-        let Ok(commit) = object.try_into_commit() else {
-            continue;
+        let object = match repo.try_find_object(object_id) {
+            Ok(Some(object)) => object,
+            Ok(None) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit `{reference}` disappeared after prefix resolution"
+                )));
+            }
+            Err(error) => {
+                return Err(GitCorrelationError::Unavailable(format!(
+                    "canonical commit object `{reference}` could not be read: {error}"
+                )));
+            }
         };
-        let Ok(commit_time) = commit.time() else {
-            continue;
+        let commit = match object.try_into_commit() {
+            Ok(commit) => commit,
+            // A provider may retain another Git object identifier. It is not
+            // independently verified commit evidence.
+            Err(_) => continue,
         };
+        let commit_time = commit.time().map_err(|error| {
+            GitCorrelationError::Corrupt(format!(
+                "canonical commit `{reference}` timestamp could not be decoded: {error}"
+            ))
+        })?;
         let commit_sha = commit.id.to_string();
         commits.push(CommitSessionRecord {
             commit_sha,

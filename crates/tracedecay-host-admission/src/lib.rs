@@ -1190,12 +1190,6 @@ async fn project_captured_outcome(
     else {
         return Ok(outcome);
     };
-    publish_canonical_git_evidence(
-        database,
-        repository_provenance,
-        std::slice::from_ref(&outcome),
-    )
-    .await?;
     let projection =
         tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
             database.runtime_client(),
@@ -1203,11 +1197,17 @@ async fn project_captured_outcome(
         .capture_host_observation(persisted.receipt())
         .await
         .map_err(classify_external_source_error)?;
-    if let tracedecay_session_memory::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) =
-        projection
-    {
-        return accepted_for_external_source_replay(outcome, receipt);
-    }
+    publish_canonical_git_evidence(
+        database,
+        repository_provenance,
+        std::slice::from_ref(&outcome),
+    )
+    .await?;
+    let outcome = if let tracedecay_session_memory::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) = projection {
+        accepted_for_external_source_replay(outcome, receipt)?
+    } else {
+        outcome
+    };
     Ok(outcome)
 }
 
@@ -1230,7 +1230,6 @@ async fn project_captured_outcomes(
     if receipts.is_empty() {
         return Ok(outcomes);
     }
-    publish_canonical_git_evidence(database, repository_provenance, &outcomes).await?;
     let projections =
         tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
             database.runtime_client(),
@@ -1243,6 +1242,7 @@ async fn project_captured_outcomes(
             "external_source_commit_failed",
         ));
     }
+    publish_canonical_git_evidence(database, repository_provenance, &outcomes).await?;
     let mut next = persisted_slots.into_iter().zip(projections);
     let mut pending = next.next();
     let mut projected = Vec::with_capacity(outcomes.len());
@@ -1318,10 +1318,6 @@ async fn publish_canonical_git_evidence(
         tracing::warn!(%error, "canonical Git evidence outbox commit failed");
         HostAdmissionOutcome::retained_unavailable("git_evidence_outbox_unavailable")
     })?;
-    database
-        .replay_pending_git_evidence_publications()
-        .await
-        .map_err(classify_git_evidence_error)?;
     Ok(())
 }
 

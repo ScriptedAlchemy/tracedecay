@@ -1,17 +1,19 @@
 use std::num::NonZeroUsize;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::{
-    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
-    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, UtcMicros,
 };
 use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
 use tracedecay_privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
@@ -199,6 +201,170 @@ async fn mounted_capture_batch_reduces_writer_transactions() {
     assert_eq!(
         committed, 2,
         "one observation batch plus one external-source batch must commit"
+    );
+}
+
+fn run_git(project: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(project)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn canonical_message_projection_succeeds_while_git_graph_is_unavailable() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("source-graph-unavailable");
+    std::fs::create_dir_all(&project).unwrap();
+    run_git(&project, &["init", "-b", "capture-branch"]);
+    let project_id = ProjectId::new("project.graph-unavailable-capture").unwrap();
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            &project,
+            project_id.as_str(),
+        )
+        .unwrap()
+    );
+    let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(&project)
+        .unwrap()
+        .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        tmp.path().join("profile"),
+        &project,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let database = runtime
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    assert!(database.project_graph_runtime().is_none());
+    let provenance = RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+        &project,
+        &project_id,
+        &marker,
+    )
+    .unwrap();
+    let shard = &database.binding().shard_id;
+    let facade = HostAdmissionFacade::new(
+        HostAdmissionAuthorities::for_project(
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+            project_id.clone(),
+            database,
+        )
+        .with_repository_provenance(provenance)
+        .with_background_cpu(background_cpu_for_host_admission_test()),
+    );
+
+    let session_id = SessionId::new("session.graph-unavailable-capture").unwrap();
+    let message_id = ObservationId::new("message.graph-unavailable-capture").unwrap();
+    let payload = json!({"text": "ordinary canonical message remains available"});
+    let encoded = serde_json::to_vec(&payload).unwrap();
+    let range = ObservationSourceRangeV1::new(0, encoded.len() as u64).unwrap();
+    let parsed = parse_normalized_observation_record_v1(
+        &encoded,
+        range,
+        ObservationOrderingDomainV1::FileBytes,
+        {
+            let session_id = session_id.clone();
+            let message_id = message_id.clone();
+            let project_path = project.to_string_lossy().into_owned();
+            move |native| {
+                CanonicalObservationEnvelopeV1::new(
+                    ProviderId::new("codex").unwrap(),
+                    "message",
+                    message_id.clone(),
+                    CanonicalObservationRelationsV1::new(session_id.clone())
+                        .with_message_id(message_id.clone()),
+                    vec![
+                        CanonicalObservationFactV1::Session {
+                            project_path: Some(project_path.clone()),
+                            location_path: Some(project_path.clone()),
+                            transcript_path: None,
+                            title: None,
+                            started_at: None,
+                            ended_at: None,
+                            source: Some("codex_rollout".to_owned()),
+                            native_source: Some("codex".to_owned()),
+                            profile: None,
+                            location_provenance: Some("rollout_context".to_owned()),
+                        },
+                        CanonicalObservationFactV1::Git {
+                            evidence_kind: CanonicalGitEvidenceKindV1::Branch,
+                            reference: Some("capture-branch".to_owned()),
+                            content: None,
+                        },
+                        CanonicalObservationFactV1::Message {
+                            role: CanonicalMessageRoleV1::Assistant,
+                            content: native,
+                            model: None,
+                            timestamp: Some(1_785_000_000),
+                        },
+                    ],
+                    CanonicalObservationEvidenceV1::new(
+                        ObservationOrderingDomainV1::FileBytes,
+                        range,
+                    )
+                    .with_native_timestamp(1_785_000_000),
+                )
+                .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            }
+        },
+    )
+    .unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let source =
+        ObservationSourceIdentityV1::for_provider(ProviderId::new("codex").unwrap(), session_id)
+            .unwrap();
+    let request = CaptureObservationRequest::new(
+        parsed,
+        ObservationIdentityMaterialV1::for_native_record(
+            source,
+            scope.clone(),
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            message_id.clone(),
+        )
+        .unwrap(),
+        None,
+        RetentionClass::new("retention.graph-unavailable-capture").unwrap(),
+        ObservationCancellation::default(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        facade.capture_observation(request).await.unwrap(),
+        CaptureObservationOutcome::Persisted { .. }
+            | CaptureObservationOutcome::AcceptedForReplay { .. }
+    ));
+    let drained = facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 1)
+        .await
+        .unwrap();
+    assert!(drained.deferred);
+    assert!(
+        facade
+            .has_session_message(&scope, "codex", message_id.as_str())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        tracedecay_sessions::runtime::git_correlation::pending_git_evidence_publication_count(
+            database
+        )
+        .await
+        .unwrap(),
+        1
     );
 }
 
