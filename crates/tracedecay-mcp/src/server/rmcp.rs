@@ -281,6 +281,10 @@ impl<C> RmcpConnectionAdapter<C>
 where
     C: McpConnectionContext,
 {
+    fn timings_enabled(&self) -> bool {
+        self.timings_enabled || self.context.timings_enabled()
+    }
+
     pub fn new(
         context: Arc<C>,
         timings_enabled: bool,
@@ -402,7 +406,7 @@ where
         // catalog-dispatch future inline in rmcp's generated request future.
         let handling =
             self.context
-                .dispatch(request, self.timings_enabled, connection, pre_cancelled);
+                .dispatch(request, self.timings_enabled(), connection, pre_cancelled);
         let response = if pre_cancelled {
             Some(handling.await)
         } else {
@@ -457,7 +461,7 @@ where
             .context
             .dispatch(
                 McpDispatchRequest::from_legacy(&request),
-                self.timings_enabled,
+                self.timings_enabled(),
                 &mut connection,
                 false,
             )
@@ -523,6 +527,9 @@ fn attach_missing_tool_timing(response: &mut JsonRpcResponse, elapsed_us: Option
         return;
     };
     let meta = result.entry("_meta").or_insert_with(|| json!({}));
+    if meta.is_null() {
+        *meta = json!({});
+    }
     let Some(meta) = meta.as_object_mut() else {
         return;
     };
@@ -540,8 +547,12 @@ mod tool_timing_tests {
         attach_missing_tool_timing(&mut missing, Some(17));
         assert_eq!(missing.result.unwrap()["_meta"]["duration_us"], 17);
 
+        let mut null = JsonRpcResponse::success(json!(2), json!({"_meta": null, "content": []}));
+        attach_missing_tool_timing(&mut null, Some(23));
+        assert_eq!(null.result.unwrap()["_meta"]["duration_us"], 23);
+
         let mut existing = JsonRpcResponse::success(
-            json!(2),
+            json!(3),
             json!({"_meta": {"duration_us": 11}, "content": []}),
         );
         attach_missing_tool_timing(&mut existing, Some(29));
@@ -681,7 +692,7 @@ where
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let started = self.timings_enabled.then(std::time::Instant::now);
+        let started = self.timings_enabled().then(std::time::Instant::now);
         let mut response = self
             .dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
             .await?;
