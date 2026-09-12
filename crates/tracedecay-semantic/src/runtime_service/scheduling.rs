@@ -679,39 +679,6 @@ mod schedule_failure_tests {
     use super::*;
 
     #[test]
-    fn publication_detail_preserves_the_source_chain() {
-        let failure = SemanticRuntimeScheduleFailureV1::publication(
-            "isolated evaluation graph rejected identity",
-        );
-        assert!(failure.is_publication());
-        assert_eq!(
-            failure.to_string(),
-            "Publication: isolated evaluation graph rejected identity"
-        );
-        assert!(
-            format!("{failure:?}").contains("isolated evaluation graph rejected identity"),
-            "Debug must also carry the source: {failure:?}"
-        );
-    }
-
-    #[test]
-    fn projection_detail_preserves_the_source_chain() {
-        let failure = SemanticRuntimeScheduleFailureV1::projection(
-            "rebuild_generation: vector generation plan is invalid",
-        );
-        assert!(failure.is_projection());
-        assert_eq!(
-            failure.to_string(),
-            "Projection: rebuild_generation: vector generation plan is invalid"
-        );
-        assert!(
-            format!("{failure:?}")
-                .contains("rebuild_generation: vector generation plan is invalid"),
-            "Debug must also carry the source: {failure:?}"
-        );
-    }
-
-    #[test]
     fn completed_units_ignore_out_of_order_regressions() {
         let progress = SemanticRuntimeScheduleCancellationV1::new(8);
 

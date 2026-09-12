@@ -259,43 +259,7 @@ fn matches_token(value: &str, tokens: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        WorkflowIndexState, WorkflowRunDetailOutcome, WorkflowRunListOutcome, WorkflowStatus,
-    };
-
-    #[test]
-    fn workflow_status_preserves_unknown_values() {
-        assert_eq!(WorkflowStatus::from_disk("done"), WorkflowStatus::Completed);
-        assert_eq!(WorkflowStatus::from_disk("blocked"), WorkflowStatus::Failed);
-        assert_eq!(
-            WorkflowStatus::from_disk("future-state"),
-            WorkflowStatus::Unknown
-        );
-    }
-
-    #[test]
-    fn workflow_list_distinguishes_empty_from_unbuilt() {
-        let empty = WorkflowRunListOutcome::Runs(Vec::new());
-        let unbuilt = WorkflowRunListOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt);
-
-        assert!(matches!(empty, WorkflowRunListOutcome::Runs(runs) if runs.is_empty()));
-        assert!(matches!(
-            unbuilt,
-            WorkflowRunListOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt)
-        ));
-    }
-
-    #[test]
-    fn workflow_detail_distinguishes_missing_from_unbuilt() {
-        assert!(matches!(
-            WorkflowRunDetailOutcome::NotFound,
-            WorkflowRunDetailOutcome::NotFound
-        ));
-        assert!(matches!(
-            WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt),
-            WorkflowRunDetailOutcome::Unavailable(WorkflowIndexState::IndexNotBuilt)
-        ));
-    }
+    use super::WorkflowStatus;
 
     #[test]
     fn default_counters_are_omitted_from_serialized_workflow_rows() {

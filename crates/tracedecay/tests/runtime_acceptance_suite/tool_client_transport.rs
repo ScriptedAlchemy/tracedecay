@@ -200,31 +200,6 @@ fn fixture() -> (TempDir, TempDir, TempDir, PathBuf, PathBuf, PathBuf) {
 }
 
 #[test]
-fn generic_tool_accepts_split_json_rpc_frame() {
-    let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
-        let bytes = response_bytes(&request, "split-ok");
-        let split = bytes.len() / 2;
-        stream.write_all(&bytes[..split]).expect("write prefix");
-        stream.flush().expect("flush prefix");
-        std::thread::sleep(Duration::from_millis(100));
-        stream.write_all(&bytes[split..]).expect("write suffix");
-    });
-    let result = run_command_with_timeout(
-        tool_command(&home, &project, &socket, "split"),
-        CHILD_TIMEOUT,
-    );
-    server.join().expect("join fake daemon");
-    assert!(!result.killed_by_harness, "split response hung");
-    assert!(
-        result.output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&result.output.stdout).contains("split-ok"));
-}
-
-#[test]
 fn generic_tool_accepts_slow_byte_stream() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {

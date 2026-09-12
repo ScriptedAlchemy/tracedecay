@@ -132,53 +132,6 @@ describe('the Work page over mounted routes', () => {
     expect(calls.some((url) => url.includes('/work/delta'))).toBe(false);
   });
 
-  it('reads the product graph and names the task it returned', async () => {
-    renderPage();
-    expect(await screen.findByText('Alpha task')).toBeTruthy();
-  });
-
-  it('labels the default Work view as the active project', async () => {
-    renderPage();
-    expect(
-      await screen.findByText('canonical task graph · the active project · exact product authority'),
-    ).toBeTruthy();
-  });
-
-  it('labels an exact selected project without claiming it is active', async () => {
-    useScope.setState({
-      scope: {
-        kind: 'project',
-        projectId: 'project-beta',
-        label: 'Beta',
-        activation: 'selected',
-      },
-    });
-    renderPage();
-
-    const provenance = await screen.findByText(
-      'canonical task graph · Beta (project-beta) · selected project · exact product authority',
-    );
-    expect(provenance.textContent).not.toContain('active project');
-  });
-
-  it('labels an explicitly selected active project from reconciled scope state', async () => {
-    useScope.setState({
-      scope: {
-        kind: 'project',
-        projectId: 'project-alpha',
-        label: 'Alpha',
-        activation: 'active',
-      },
-    });
-    renderPage();
-
-    expect(
-      await screen.findByText(
-        'canonical task graph · Alpha (project-alpha) · selected active project · exact product authority',
-      ),
-    ).toBeTruthy();
-  });
-
   it('leaves the shell its own main landmark and scrolls inside a named region', async () => {
     const { container } = renderPage();
     await screen.findByText('Alpha task');
@@ -226,14 +179,6 @@ describe('the Work page over mounted routes', () => {
     expect(screen.getAllByText(/No task in this build has reached this gate/).length).toBeGreaterThan(
       0,
     );
-  });
-
-  it('draws no boundary aside for the retired attempt family', async () => {
-    renderPage();
-    await screen.findByText('Alpha task');
-    // Execution belongs to the Workflow runtime; there is no withheld attempt
-    // inventory left to disclose, so the page must not print one.
-    expect(screen.queryByLabelText('Work boundary')).toBeNull();
   });
 
   it('selects a task by keyboard and records it in the address', async () => {

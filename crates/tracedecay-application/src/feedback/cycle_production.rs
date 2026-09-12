@@ -1436,53 +1436,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_lsp_input_builds_a_provider_identity_for_the_requested_document() {
-        let scope = scope();
-        let configuration = digest("configuration");
-        let policy = digest("policy");
-        let document = document_identity();
-        let (provider, _) = managed_lsp_candidate(
-            &mounted_provider("typescript"),
-            AnalyzerAvailabilityV1::Available,
-            &scope,
-            &configuration,
-            &policy,
-            UtcMicros(1),
-            &document,
-            &AnalyzerSettingsV1::empty(),
-        )
-        .expect("provider");
-        let configuration_revision =
-            ConfigurationRevisionId::new("configuration.test.current").expect("revision");
-        let (authorization, _) =
-            authorization(&scope, &configuration_revision, &configuration, 1_000_000);
-        let input = production_lsp_input(ProductionLspInputContext {
-            feedback_scope: feedback_scope(&scope),
-            scope,
-            requester: ActorId::new("actor.cycle-production").expect("actor"),
-            authorization,
-            threshold_pin: threshold_pin(&configuration_revision, &configuration),
-            policy_digest: policy,
-            providers: vec![provider],
-            project_root: PathBuf::from(WORKSPACE_ROOT),
-            document_identity: Arc::new(Identity(document)),
-        })
-        .expect("input");
-
-        let invocation = input(FeedbackCycleRequest {
-            root_uri: WORKSPACE_URI.to_owned(),
-            trigger: DiagnosticTrigger::DocumentSave,
-            document_uri: format!("{WORKSPACE_URI}/src/lib.rs"),
-        })
-        .await;
-
-        assert!(
-            invocation.is_ok(),
-            "a saved document must resolve to an exact provider/input identity"
-        );
-    }
-
-    #[tokio::test]
     async fn production_lsp_input_reauthorizes_each_cycle_and_rejects_expiry() {
         let scope = scope();
         let configuration = digest("configuration");

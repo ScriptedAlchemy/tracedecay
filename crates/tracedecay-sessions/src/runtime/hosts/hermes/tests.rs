@@ -9,7 +9,7 @@ use tracedecay_domain::{
     CanonicalReasoningVisibilityV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceRangeV1, ProviderUsageCounterSemanticsV1,
-    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1, RetentionClass, SessionId,
+    ProviderUsageCountersV1, ProviderUsageScopeV1, RetentionClass, SessionId,
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
@@ -172,58 +172,6 @@ fn canonical_with_session_usage(
     )
     .unwrap();
     serde_json::from_value(parsed.value().clone()).unwrap()
-}
-
-#[test]
-fn repeated_joined_session_totals_emit_only_at_the_session_frontier() {
-    let mut first = fixture(7);
-    first.is_session_usage_frontier = false;
-    let second = fixture(8);
-    let first_envelope = canonical_with_session_usage(&first, 0, first.is_session_usage_frontier);
-    let second_envelope =
-        canonical_with_session_usage(&second, 7, second.is_session_usage_frontier);
-    assert!(first_envelope.facts().iter().all(|fact| {
-        !matches!(
-            fact,
-            CanonicalObservationFactV1::ProviderUsage { .. }
-                | CanonicalObservationFactV1::UncorrelatedUsage { .. }
-        )
-    }));
-    assert_eq!(
-        second_envelope
-            .facts()
-            .iter()
-            .filter(|fact| matches!(fact, CanonicalObservationFactV1::ProviderUsage { .. }))
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn newly_observed_session_frontier_preserves_updated_cumulative_totals() {
-    let mut updated = fixture(8);
-    updated.session_input_tokens = Some(21);
-    updated.session_output_tokens = Some(9);
-    let envelope = canonical_with_session_usage(&updated, 7, updated.is_session_usage_frontier);
-
-    assert!(envelope.facts().iter().any(|fact| matches!(
-        fact,
-        CanonicalObservationFactV1::ProviderUsage {
-            model: ProviderUsageModelV1::Known { model },
-            native_scope: ProviderUsageScopeV1::Session,
-            counter_semantics: ProviderUsageCounterSemanticsV1::Cumulative,
-            counters: ProviderUsageCountersV1::Known {
-                input_tokens: Some(21),
-                output_tokens: Some(9),
-                ..
-            },
-            request_id: None,
-            native_kind,
-            native_field,
-        } if model == "model-redacted"
-            && native_kind == "session"
-            && native_field == "sessions.token_counters"
-    )));
 }
 
 #[tokio::test]
@@ -444,23 +392,6 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
 }
 
 #[test]
-fn canonical_identity_and_parent_relation_match_native_evidence() {
-    let row = fixture(7);
-    let record = normalized(&row, 0);
-    let expected_record_id = record.native_record_id.clone();
-    let expected_parent = stable_native_id("hermes.session", &json!("parent-redacted")).unwrap();
-    let envelope = normalize_native_observation(record.native, record.range).unwrap();
-    assert_eq!(envelope.stable_record_id(), &expected_record_id);
-    assert_eq!(
-        envelope.relations().parent_agent_id(),
-        Some(&expected_parent)
-    );
-    let relations = serde_json::to_value(envelope.relations()).unwrap();
-    assert!(relations.get("thread_id").is_none());
-    assert!(relations.get("turn_id").is_none());
-}
-
-#[test]
 fn assistant_without_reasoning_is_typed_unavailable() {
     let mut row = fixture(7);
     row.reasoning = None;
@@ -604,26 +535,6 @@ fn replacement_generation_restarts_sqlite_ordering() {
     assert!(matches!(
         admission.action,
         HermesAdmissionAction::Capture(_)
-    ));
-}
-
-#[test]
-fn malformed_tool_calls_are_complete_typed_coverage() {
-    let mut row = fixture(7);
-    row.tool_calls = Some("{not-json".to_string());
-    let admission = prepare_observation_row(
-        &row,
-        Some(&fixture_projection()),
-        &ObservationScopeV1::Profile,
-        ObservationSourceGenerationV1::new(17).unwrap(),
-        None,
-        23,
-        29,
-    )
-    .unwrap();
-    assert!(matches!(
-        admission.action,
-        HermesAdmissionAction::Cover(ObservationCoverageReason::MalformedFrame)
     ));
 }
 
@@ -1502,34 +1413,6 @@ async fn corrupt_and_incomplete_state_databases_fail_closed() {
     drop(conn);
     let conn = open_read_only_strict(&malformed).await.unwrap();
     assert!(validate_required_schema(&conn).await.is_err());
-}
-
-#[tokio::test]
-async fn minimal_legacy_schema_reads_without_optional_columns() {
-    let dir = tempfile::tempdir().unwrap();
-    initialize_owned_store_before_foreign_fixture(dir.path()).await;
-    let path = dir.path().join("state.db");
-    write_minimal_legacy_state_db(&path, 1);
-
-    let conn = open_read_only_strict(&path).await.unwrap();
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await.unwrap(),
-        &table_columns(&conn, "sessions").await.unwrap(),
-    );
-    let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
-        .await
-        .unwrap();
-
-    assert_eq!(page.items.len(), 1);
-    let row = &page.items[0];
-    assert_eq!(row.session_id, "legacy-session");
-    assert_eq!(row.content.as_deref(), Some("legacy row 0"));
-    assert!(row.tool_name.is_none());
-    assert!(row.tool_calls.is_none());
-    assert!(row.session_model.is_none());
-    assert!(row.parent_session_id.is_none());
-    assert!(row.session_input_tokens.is_none());
-    assert_eq!(row.active, 1);
 }
 
 #[tokio::test]

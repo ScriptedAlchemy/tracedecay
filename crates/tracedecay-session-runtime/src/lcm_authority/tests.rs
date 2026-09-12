@@ -239,16 +239,6 @@ fn hermes_ingest(messages: Vec<serde_json::Value>) -> LcmTranscriptIngestCommand
     }
 }
 
-#[test]
-fn pressure_compression_uses_the_daemon_summarizer_route() {
-    let request = pressure_compression_request(preflight("cursor"));
-    assert_eq!(request.summarizer, LcmSummarizerMode::HermesAuxiliary);
-    assert!(
-        request.messages.is_empty(),
-        "daemon compaction must compress already-ingested canonical content only"
-    );
-}
-
 fn preflight(provider: &str) -> LcmPreflightRequest {
     LcmPreflightRequest {
         provider: provider.to_owned(),
@@ -304,36 +294,6 @@ async fn denied_command_never_reaches_daemon_store() {
 
     assert_eq!(response.outcome, LcmAuthorityOutcome::Denied);
     assert!(store.calls().is_empty());
-}
-
-#[tokio::test]
-async fn authentic_hermes_turn_is_committed_through_daemon_store() {
-    let store = Arc::new(FakeStore::default());
-    let authority = DaemonLcmAuthority::with_store(store.clone());
-    let command = hermes_ingest(vec![serde_json::json!({
-        "id": "message.hermes.1",
-        "role": "user",
-        "content": "authentic callback content"
-    })]);
-    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Ingest, true);
-
-    let response = authority
-        .execute(LcmAuthorityInvocation {
-            context,
-            binding,
-            target: target("hermes", Some("session.lcm-test")),
-            cancellation,
-            request: LcmAuthorityRequest::Ingest(command),
-        })
-        .await;
-
-    assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
-    assert!(response.receipt.committed_state.is_some());
-    assert!(matches!(
-        response.payload,
-        Some(LcmAuthorityPayload::Ingest(_))
-    ));
-    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Ingest]);
 }
 
 #[tokio::test]

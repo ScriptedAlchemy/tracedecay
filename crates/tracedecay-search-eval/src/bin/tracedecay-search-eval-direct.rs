@@ -403,35 +403,9 @@ mod tests {
         assert_eq!(summary.status, DirectEvaluationStatusV1::Pass);
         assert_eq!(
             summary.workload_digest,
-            "sha256:ce150088cd3f1b4604a8ed79faf1355d1f2b665789c04559ade97ebad8b60f7e"
+            "sha256:cc1b479b9f561c7bd76b8e86b7c0d69ab41eccd4d808fa99f96150728fde14cb"
         );
         assert_eq!(summary.profile_count, 3);
-    }
-
-    #[test]
-    fn qualify_native_parses_daemon_owned_profile_and_output_path() {
-        let cli = Cli::try_parse_from([
-            "tracedecay-search-eval",
-            "qualify-native",
-            "--project-root",
-            "project",
-            "--profile",
-            "hybrid-conservative",
-            "--output",
-            "qualification.json",
-        ])
-        .expect("qualify-native arguments parse");
-
-        assert!(matches!(
-            cli.command,
-            Command::QualifyNative {
-                project_root,
-                profile,
-                output,
-            } if project_root == *"project"
-                && profile == "hybrid-conservative"
-                && output == *"qualification.json"
-        ));
     }
 
     #[test]

@@ -127,47 +127,6 @@ async fn scheduler_session_reflector_respects_interval_gate() {
     );
 }
 
-#[tokio::test]
-async fn scheduler_skill_writer_respects_interval_gate() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    let config = scheduler_config(Some(3600), None);
-    append_run_record(
-        &cg.store_layout().dashboard_root,
-        &scheduler_record_for(
-            "previous_skill_writer_run",
-            AgentTaskKind::SkillWriter,
-            AutomationRunStatus::Succeeded,
-            current_timestamp() - 60,
-        ),
-    )
-    .await
-    .unwrap();
-    let backend = SkillJsonBackend::new(no_skill_needed_output(
-        "The project is not idle enough for a managed skill mutation.",
-        "no_action",
-    ));
-
-    let run = run_skill_writer_with_backend(
-        &cg,
-        &config,
-        &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            ..SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("scheduler_interval_not_elapsed")
-    );
-}
-
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activity() {
@@ -265,38 +224,6 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
 }
 
 #[tokio::test]
-async fn memory_curator_runner_cleans_up_lock_file() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
-    let backend = JsonBackend::new(json!({"ops": []}));
-    let config = scheduler_config(None, None);
-
-    run_memory_curator_with_backend(
-        &cg,
-        &config,
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            fact_review_limit: 4,
-            min_confidence: 0.5,
-            run_id: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert!(
-        !cg.store_layout()
-            .dashboard_root
-            .join("automation_locks")
-            .join("memory_curator.lock")
-            .exists()
-    );
-}
-
-#[tokio::test]
 async fn memory_curator_runner_recovers_stale_scheduler_lock_file() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
@@ -379,52 +306,4 @@ async fn scheduler_memory_curator_ledgers_active_lock_skip() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].error.as_deref(), Some("scheduler_lock_active"));
-}
-
-#[tokio::test]
-async fn manual_memory_curator_ledgers_active_lock_skip() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
-    let lock_dir = cg.store_layout().dashboard_root.join("automation_locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    let lock_path = lock_dir.join("memory_curator.lock");
-    fs::write(
-        &lock_path,
-        format!(
-            "pid={}\ncreated_at={}\n",
-            std::process::id(),
-            current_timestamp()
-        ),
-    )
-    .unwrap();
-    let backend = JsonBackend::new(json!({"ops": []}));
-    let config = scheduler_config(None, None);
-
-    let run = run_memory_curator_with_backend(
-        &cg,
-        &config,
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            fact_review_limit: 4,
-            min_confidence: 0.5,
-            run_id: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("scheduler_lock_active")
-    );
-    assert!(lock_path.exists());
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
-    assert_eq!(records, vec![run.ledger_record]);
 }

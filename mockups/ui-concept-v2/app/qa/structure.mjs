@@ -23,6 +23,11 @@ try {
   const url = new URL(process.env.BASE_URL ?? 'http://127.0.0.1:5195');
   url.searchParams.set('surface', 'brain'); url.searchParams.set('data', 'snapshot');
   await page.goto(url.href, { waitUntil: 'networkidle' });
+  // Accepted Brain composition is registry-first. The measured atlas remains a
+  // separately labelled repository-structure option, rather than the default
+  // knowledge geometry for every recorded snapshot.
+  assert.match(await page.getByLabel('Recorded Brain snapshot').innerText(), /REGISTRY · READY[\s\S]*ACTIVITY · EMPTY/);
+  await page.getByRole('button', { name: 'Atlas / repository structure', exact: true }).click();
   const state = () => page.evaluate(() => JSON.parse(sessionStorage.getItem('td:view:snapshot:repository-atlas')));
   assert.equal((await state()).camera, null);
   assert.equal((await state()).layer, 'structure');
@@ -171,7 +176,7 @@ try {
   for (const viewport of [{width:1263,height:931},{width:793,height:700},{width:1586,height:992}]) {
     await page.setViewportSize(viewport);
     const url=new URL(process.env.BASE_URL ?? 'http://127.0.0.1:5195');
-    url.searchParams.set('surface','brain');url.searchParams.set('data','snapshot');
+    url.searchParams.set('surface','brain');url.searchParams.set('data','snapshot');url.searchParams.set('atlas','1');
     await page.goto(url.href,{waitUntil:'networkidle'});
     const atlas=page.getByRole('region',{name:'Measured repository atlas'});
     await atlas.getByRole('button',{name:'Dependencies',exact:true}).click();

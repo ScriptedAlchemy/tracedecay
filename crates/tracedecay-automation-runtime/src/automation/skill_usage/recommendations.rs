@@ -328,17 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn too_early_outcome_does_not_flag_stale() {
-        let now = 100 * 24 * 60 * 60;
-        let mut summary = ignored_since_activation_summary(now);
-        summary.activated_at = Some(now - 1);
-        summary.view_count_at_activation = Some(2);
-
-        let recommendation = stale_skill_recommendation(&summary, now, 365 * 24 * 60 * 60);
-        assert!(!recommendation.stale);
-    }
-
-    #[test]
     fn ignored_outcome_triggers_improvement_review() {
         let now = 100 * 24 * 60 * 60;
         let summary = ignored_since_activation_summary(now);

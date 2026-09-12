@@ -162,6 +162,9 @@ impl GraphDb {
         let validated = options.validate(persistent_store_state)?;
         let markers = GenerationMarkers::new(validated.config.path.as_deref());
         let opened = open_validated_graph(&validated, GraphEngineOpenSite::Eager)?;
+        if let Some(path) = validated.config.path.as_deref() {
+            crate::sealed_store::sweep_abandoned_sealed_staging(path);
+        }
         markers.bind(opened.identity);
         let graph = Arc::new(Self {
             inner: Arc::new(Inner {
@@ -1736,6 +1739,9 @@ impl GraphDb {
             }
             Err(error) => return Err(error),
         };
+        if let Some(path) = validated.config.path.as_deref() {
+            crate::sealed_store::sweep_abandoned_sealed_staging(path);
+        }
         *self
             .inner
             .state

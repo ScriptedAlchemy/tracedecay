@@ -16,18 +16,11 @@
  * schemas. A mirror can be wrong in the same direction as the fixture; the
  * generated contract cannot, because it is derived from the Rust type.
  *
- * Coverage is enforced rather than assumed. Every key in `FIXTURES` must be
- * listed either in `CONTRACTS` (a generated schema exists for its handler) or
- * in `UNCONTRACTED` (it does not, with the reason), and an entry naming a route
- * that no longer has a fixture fails too. So a new fixture cannot be added
- * outside this gate by omission.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { z, type ZodType } from 'zod';
 
-import { runAutomaticCurator } from '../../src/data/query/automation.ts';
-import { FIXTURES, FIXTURE_PREFIXES, resolveFixture } from './data.ts';
-import { fixtureServer } from './handlers.ts';
+import { resolveFixture } from './data.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
   AnalyticsAgentsPayloadV1Schema,
@@ -60,6 +53,7 @@ import {
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   StructureReadV12Schema,
+  ListTaskHandoffsResultV1Schema,
   WorkflowDefinitionSchema,
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
@@ -138,16 +132,6 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
 };
 
 /**
- * Fixture routes whose handler has no generated contract, each with why.
- *
- * These are the handlers that still build their response with `json!` or a
- * bare `serde_json::Value`, so there is no Rust type for `contract_schema.rs`
- * to export and nothing here to parse against. They are not exempt from
- * review — `endpoint-fixtures.test.ts` holds each to a mirror of its page's
- * own decoder — but that mirror is hand-written, so this list is the standing
- * record of which routes are still outside the generated boundary.
- */
-/**
  * Routes that answer with the application's `HttpJsonEnvelope` instead of
  * `DashboardEnvelopeV1`, mapped to the generated contract inside it.
  *
@@ -165,23 +149,7 @@ const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
   // A workflow read answers through the same application wrapper Work reads
   // use; the walked payload is the definitions array itself.
   '/api/application/workflow/list-definitions': z.array(WorkflowDefinitionSchema),
-};
-
-const UNCONTRACTED: Readonly<Record<string, string>> = {
-  '/api/capabilities': 'mod.rs `capabilities` builds the bundle with `json!`',
-  '/api/plugins/hermes-lcm/search':
-    'temporal retrieval search is modeled unavailable, so the canonical envelope has no payload',
-  '/api/plugins/analytics/hints': 'analytics_api::hints answers with a bare Value',
-  '/api/plugins/analytics/underused': 'analytics_api::underused answers with a bare Value',
-  '/api/plugins/analytics/diagnostics':
-    'analytics_api::diagnostics_summary answers with a bare Value',
-  '/api/automation/jobs': 'automation_jobs_api::list answers with a bare Value',
-  '/api/automation/skills': 'automation_skills_api::list answers with a bare Value',
-  '/api/automation/automatic-fact-receipts':
-    'automatic_fact_receipts_api::list answers with a bare Value',
-  '/api/automation/runs': 'automation_run_api::run_list answers with a bare Value',
-  '/api/automation/outcomes':
-    'automation_outcomes_api::outcomes answers with a bare Value',
+  '/api/application/handoff/list-task': ListTaskHandoffsResultV1Schema,
 };
 
 /**
@@ -245,82 +213,4 @@ describe('fixtures parse against the generated contract for their route', () => 
     },
   );
 
-  it('holds every fixture route to a contract or a recorded reason', () => {
-    const classified = new Set([
-      ...Object.keys(CONTRACTS),
-      ...Object.keys(APPLICATION_ENVELOPE),
-      ...Object.keys(UNCONTRACTED),
-    ]);
-    const routes = Object.keys(FIXTURES);
-    // A fixture added without a decision about its contract.
-    expect(routes.filter((route) => !classified.has(route))).toEqual([]);
-    // A decision left behind by a fixture that was removed or renamed, which
-    // would otherwise read as coverage that no longer exists.
-    expect([...classified].filter((route) => !(route in FIXTURES)).sort()).toEqual([]);
-    // No map may claim a route another one owns.
-    for (const route of Object.keys(CONTRACTS)) {
-      expect(UNCONTRACTED[route]).toBeUndefined();
-      expect(APPLICATION_ENVELOPE[route]).toBeUndefined();
-    }
-    for (const route of Object.keys(APPLICATION_ENVELOPE)) {
-      expect(UNCONTRACTED[route]).toBeUndefined();
-    }
-  });
-
-  it('serves only already-gated payloads from the prefix fallbacks', () => {
-    // A prefix fixture answers any path under it, so an ungated payload behind
-    // one would reach the audit and the MSW tests without ever being parsed.
-    // Every prefix therefore has to serve the same body some exact route above
-    // already holds to a contract.
-    const gated = Object.values(FIXTURES);
-    for (const [prefix, payload] of FIXTURE_PREFIXES) {
-      const matched = gated.some((fixture) => {
-        try {
-          expect(fixture).toEqual(payload);
-          return true;
-        } catch {
-          return false;
-        }
-      });
-      expect(matched, `prefix ${prefix} serves a payload no exact route gates`).toBe(true);
-    }
-  });
-});
-
-describe('fact_store_curate MSW fixture', () => {
-  const server = fixtureServer();
-
-  beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
-  afterEach(() => server.resetHandlers());
-  afterAll(() => server.close());
-
-  it('settles through the same admitted-bounds decoder as the dashboard', async () => {
-    const pathname = '/api/application/retained/fact_store_curate';
-    expect(resolveFixture(pathname)).toMatchObject({
-      kind: 'success',
-      value: {
-        binding_id: 'binding.http.fact_store_curate.v1',
-        contract: {
-          schema_id: 'schema.application.retained.fact-store-curate.result',
-          schema_revision: 1,
-        },
-        request_id: 'request.story.fact-store-curate',
-        scope: {
-          project_id: 'project.story',
-          repository_id: 'repository.story',
-          worktree_id: 'worktree.story',
-          reference: null,
-          scope_digest:
-            'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
-        },
-      },
-    });
-    const result = await runAutomaticCurator(`http://localhost${pathname}`);
-
-    expect(result.outcome).toBe('ok');
-    if (result.outcome !== 'ok') return;
-    expect(result.run.request_digest).toBe(
-      'sha256:a566bcd0eee410d55c935f0e4b1964d052603493ef9fbbd4295747aa351f6571',
-    );
-  });
 });

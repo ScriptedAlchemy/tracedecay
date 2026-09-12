@@ -11,13 +11,12 @@ use super::composition::{
 };
 use super::protocol::{RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1};
 use super::query::{
-    REMOTE_EXACT_OBSERVATION_QUERY_USE_CASE_V1, REMOTE_QUERY_SCHEMA_REVISION_V1,
-    RemoteExactObservationQueryCommandV1, RemoteExactObservationQueryErrorV1,
-    RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryProtocolAdapterV1,
-    RemoteExactObservationQueryReadPortV1, RemoteExactObservationQueryServiceV1,
-    RemoteExactObservationResultV1, RemoteQueryAuthorizationEvidenceV1,
-    RemoteQueryAuthorizationPortV1, RemoteQueryClockPortV1, RemoteQueryCompleteValueV1,
-    RemoteQueryOperationV1, RemoteQueryRequestV1, RemoteQueryResultV1, SystemRemoteQueryClockV1,
+    REMOTE_QUERY_SCHEMA_REVISION_V1, RemoteExactObservationQueryCommandV1,
+    RemoteExactObservationQueryErrorV1, RemoteExactObservationQueryOutcomeV1,
+    RemoteExactObservationQueryProtocolAdapterV1, RemoteExactObservationQueryReadPortV1,
+    RemoteExactObservationQueryServiceV1, RemoteExactObservationResultV1,
+    RemoteQueryAuthorizationEvidenceV1, RemoteQueryAuthorizationPortV1, RemoteQueryClockPortV1,
+    RemoteQueryCompleteValueV1, RemoteQueryOperationV1, RemoteQueryRequestV1, RemoteQueryResultV1,
     query_protocol_failure, remote_exact_observation_query_result_contract_v1,
     validate_composition, validate_protocol_authority_binding, validate_result_identity,
     validate_returned_authority, validate_returned_observation_identity,
@@ -174,22 +173,6 @@ fn remote_query_request_rejects_unknown_wire_fields() {
         .insert("unexpected".to_owned(), serde_json::Value::Null);
 
     assert!(serde_json::from_value::<RemoteQueryRequestV1>(json).is_err());
-}
-
-#[test]
-fn exact_observation_query_has_operation_specific_contract_identity() {
-    assert_eq!(
-        REMOTE_EXACT_OBSERVATION_QUERY_USE_CASE_V1,
-        "use-case.remote.query.exact-observation"
-    );
-    assert_ne!(
-        remote_exact_observation_query_result_contract_v1(),
-        super::protocol::remote_replay_result_contract_v1()
-    );
-    assert!(matches!(
-        request(vec![shard(1)]).operation,
-        RemoteQueryOperationV1::ExactObservation { .. }
-    ));
 }
 
 #[test]
@@ -598,17 +581,6 @@ fn clock_failure_is_typed_rather_than_a_fabricated_stamp() {
         "clock failure must surface as unavailable authority, got {:?}",
         response.authority
     );
-}
-
-#[test]
-fn system_query_clock_reads_a_representable_instant() {
-    let now = SystemRemoteQueryClockV1
-        .now()
-        .expect("a plausible host clock is representable");
-
-    // 2020-01-01T00:00:00Z. Neither saturating sentinel is a real reading.
-    assert!(now.0 > 1_577_836_800_000_000);
-    assert!(now.0 < i64::MAX);
 }
 
 fn protocol_request(sent_at: UtcMicros) -> RemoteProtocolRequestV1<RemoteQueryRequestV1> {

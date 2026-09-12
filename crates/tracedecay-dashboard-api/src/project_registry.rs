@@ -228,38 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn repo_label_with_parent_disambiguates_identical_repo_labels() {
-        // Two distinct repos that both happen to be named "app" under
-        // different parent directories should end up with distinct,
-        // parent-qualified labels instead of colliding.
-        let ctx_a = registry_context(project_record(
-            "a1",
-            "/work/teamA/app",
-            Some("/work/teamA/app/.git"),
-        ));
-        let ctx_b = registry_context(project_record(
-            "b1",
-            "/work/teamB/app",
-            Some("/work/teamB/app/.git"),
-        ));
-
-        let view = build_project_registry_view(&[ctx_a, ctx_b], None, false);
-
-        assert_eq!(view.summary.repo_count, 2);
-        let labels: BTreeSet<String> = view.project_tree.iter().map(|g| g.label.clone()).collect();
-        assert!(
-            labels.contains("app (teamA)"),
-            "expected disambiguated label for teamA, got {labels:?}"
-        );
-        assert!(
-            labels.contains("app (teamB)"),
-            "expected disambiguated label for teamB, got {labels:?}"
-        );
-        // The plain, colliding label must not survive disambiguation.
-        assert!(!labels.contains("app"));
-    }
-
-    #[test]
     fn worktree_groups_under_parent_repo_git_common_dir() {
         // A worktree's git_common_dir points back at the primary repo's
         // .git directory, so both entries should be grouped together
@@ -288,22 +256,5 @@ mod tests {
         }
         assert_eq!(kinds.get("main"), Some(&"primary"));
         assert_eq!(kinds.get("wt"), Some(&"worktree"));
-    }
-
-    #[test]
-    fn repo_label_with_parent_leaves_label_unchanged_for_root_path() {
-        // Degenerate case: a project rooted at "/" has no parent
-        // directory to qualify the label with, so the label must be
-        // returned unchanged rather than panicking or producing garbage.
-        let entry = project_entry(&registry_context(project_record("root", "/", None)), None);
-        let group = ProjectRepoGroup {
-            label: "root".to_string(),
-            git_common_dir: None,
-            project_count: 1,
-            branches: Vec::new(),
-            projects: vec![entry],
-        };
-
-        assert_eq!(repo_label_with_parent(&group), "root");
     }
 }

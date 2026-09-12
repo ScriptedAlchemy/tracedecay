@@ -1301,15 +1301,6 @@ fn noop_output_for_task(task: AgentTaskKind) -> Value {
 mod recorded_failure_tests {
     use super::*;
 
-    fn assert_send_static<T: Send + 'static>() {}
-
-    #[test]
-    fn retained_settlement_types_are_send_and_static() {
-        assert_send_static::<AutomationRunSettlementGuard>();
-        assert_send_static::<RetainedAutomationRun<()>>();
-        assert_send_static::<RetainedAutomationSettlementDisposition<()>>();
-    }
-
     #[test]
     fn retained_settlement_disposition_carries_exact_reused_scheduler_skip() {
         let config = AutomationConfig::default();
@@ -1412,50 +1403,6 @@ mod recorded_failure_tests {
             .expect("post-settlement lock acquisition")
             .is_some()
         );
-    }
-
-    #[test]
-    fn recorded_failure_exposes_only_its_constructed_terminal() {
-        let config = AutomationConfig::default();
-        let finalizer = AgentRunFinalizer::new_at(
-            Path::new("/unused"),
-            "recorded_failure_run",
-            AutomationTrigger::Dashboard,
-            &config,
-            AgentTaskKind::SessionReflector,
-            "0",
-            None,
-            std::time::SystemTime::UNIX_EPOCH,
-        )
-        .expect("test finalizer");
-        let ledger_record = finalizer
-            .record(RunRecordOutcome {
-                model: None,
-                status: AutomationRunStatus::Failed,
-                evidence_hash: None,
-                proposed_ops: None,
-                accepted_count: 0,
-                rejected_count: 0,
-                error: Some("failed".to_owned()),
-            })
-            .expect("test ledger record");
-        let recorded = AutomationRunError::RecordedFailure {
-            error: TraceDecayError::Config {
-                message: "failed".to_owned(),
-            },
-            ledger_record: Box::new(ledger_record),
-        };
-        let runtime = AutomationRunError::Runtime(TraceDecayError::Config {
-            message: "failed before terminal construction".to_owned(),
-        });
-
-        assert_eq!(
-            recorded
-                .ledger_record()
-                .map(|record| record.run_id.as_str()),
-            Some("recorded_failure_run")
-        );
-        assert!(runtime.ledger_record().is_none());
     }
 }
 

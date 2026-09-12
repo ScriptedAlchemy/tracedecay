@@ -1056,5 +1056,3 @@ mod scheduler_config_tests;
 #[path = "jobs/scheduler_gate.rs"]
 mod scheduler_gate;
 pub use scheduler_gate::evaluate_and_record_scheduler_skip;
-#[cfg(test)]
-use scheduler_gate::latest_effectful_scheduler_job_record;

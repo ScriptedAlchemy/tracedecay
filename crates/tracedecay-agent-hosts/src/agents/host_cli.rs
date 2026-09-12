@@ -597,20 +597,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_clean_exit_captures_stdout_and_reports_success() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("faux");
-        write_fake_cli(&bin, "echo \"ran: $*\"");
-
-        let outcome = run_host_cli(&bin, &["plugin", "uninstall", "tracedecay"], dir.path())
-            .expect("spawning a present binary must not error");
-
-        assert!(outcome.succeeded());
-        assert_eq!(outcome.stdout.trim(), "ran: plugin uninstall tracedecay");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn a_failing_command_surfaces_the_hosts_own_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("faux");

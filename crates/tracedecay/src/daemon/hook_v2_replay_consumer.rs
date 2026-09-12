@@ -168,6 +168,14 @@ async fn drain_admitted_host_spool(
     if !root.is_dir() {
         return None;
     }
+    // An absent/empty records file needs neither recovery nor replay, so do
+    // not acquire the cross-process writer lease merely to prove it again.
+    // A hook that appends after this observation publishes a durable record
+    // and is picked up by the next bounded sweep; non-empty spools still take
+    // the lease before interpreting acknowledgement or recovery state.
+    if !HookSpoolV1::has_durable_records(&root).ok()? {
+        return None;
+    }
     let (spool, _report) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now).ok()?;
     let binding = published_hook_scope_binding(data_root, host, now);
     Some(

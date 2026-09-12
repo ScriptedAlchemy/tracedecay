@@ -55,10 +55,30 @@ mod edge_cases;
 
 const NOW: UtcMicros = UtcMicros(1_000);
 
+#[tokio::test]
+async fn page_uses_the_verified_projection_freshness() {
+    let freshness = tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+        sealed_at: UtcMicros(900),
+        rebuild_in_flight: true,
+    };
+    let fixture = fixture_with_freshness(freshness);
+    let outcome = adapter(&fixture, None)
+        .symbol_search(
+            port_context(&fixture),
+            &search_request("Widget", false, None),
+        )
+        .await;
+    let SymbolGraphPortOutcome::Completed { page, .. } = outcome else {
+        panic!("fixture projection must return a complete symbol page");
+    };
+    assert_eq!(page.freshness, freshness);
+}
+
 #[derive(Clone)]
 struct FixtureCodeGraphProjection {
     scope: ResolvedScope,
     store: Arc<CodeGraphProjectionStore>,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
 impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
@@ -75,11 +95,7 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
                 RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
             }
-            VerifiedCodeGraphRead::new(
-                self.scope.clone(),
-                Arc::clone(&self.store),
-                tracedecay_graph_query::CodeGraphReadFreshnessV1::Current,
-            )
+            VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store), self.freshness)
         })
     }
 }
@@ -255,86 +271,6 @@ async fn exact_symbol_never_schedules_without_opt_in_or_after_a_positive_exact_m
     assert!(scheduler.calls().is_empty());
 }
 
-#[tokio::test]
-async fn symbol_search_opt_in_reuses_the_exact_symbol_scheduler_boundary() {
-    let fixture = fixture();
-    let scheduler = Arc::new(RecordingIgnoredDependencyAdmission::new(Ok(
-        next_generation(),
-    )));
-    let adapter = adapter(&fixture, Some(scheduler.clone()));
-    let request = search_request("ExternalWidget", true, Some("src/client"));
-
-    let outcome = adapter
-        .symbol_search(port_context(&fixture), &request)
-        .await;
-
-    assert_failure(
-        outcome,
-        PrimitiveFailureKind::Stale,
-        "application.symbol-graph.ignored-dependency-generation-advanced",
-    );
-    let calls = scheduler.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].context, fixture.context);
-    assert_eq!(calls[0].source_generation, fixture.generation);
-    assert_eq!(calls[0].imports, vec![fixture.expected_import.clone()]);
-}
-
-#[tokio::test]
-async fn symbol_search_absent_scheduler_fails_closed_without_legacy_support_gap() {
-    let fixture = fixture();
-    let adapter = adapter(&fixture, None);
-    let request = search_request("ExternalWidget", true, Some("src/client"));
-
-    let outcome = adapter
-        .symbol_search(port_context(&fixture), &request)
-        .await;
-
-    assert_failure(
-        outcome,
-        PrimitiveFailureKind::Unavailable,
-        "application.symbol-graph.ignored-dependency-scheduler-unavailable",
-    );
-}
-
-#[tokio::test]
-async fn symbol_search_scheduler_failures_remain_typed_and_never_become_support_gaps() {
-    for (error, expected_kind, expected_code) in scheduler_error_cases() {
-        let fixture = fixture();
-        let scheduler = Arc::new(RecordingIgnoredDependencyAdmission::new(Err(error)));
-        let request = search_request("ExternalWidget", true, Some("src/client"));
-
-        let outcome = adapter(&fixture, Some(scheduler.clone()))
-            .symbol_search(port_context(&fixture), &request)
-            .await;
-
-        assert_failure(outcome, expected_kind, expected_code);
-        assert_eq!(scheduler.calls().len(), 1);
-    }
-}
-
-#[tokio::test]
-async fn symbol_search_never_schedules_without_opt_in_or_after_a_positive_match() {
-    let fixture = fixture();
-    let scheduler = Arc::new(RecordingIgnoredDependencyAdmission::new(Ok(
-        next_generation(),
-    )));
-    let adapter = adapter(&fixture, Some(scheduler.clone()));
-    let no_opt_in = search_request("ExternalWidget", false, Some("src/client"));
-    let positive = search_request("Widget", true, Some("src/client"));
-
-    let empty = adapter
-        .symbol_search(port_context(&fixture), &no_opt_in)
-        .await;
-    assert_completed_names(empty, &[]);
-
-    let matched = adapter
-        .symbol_search(port_context(&fixture), &positive)
-        .await;
-    assert_completed_names(matched, &["Widget"]);
-    assert!(scheduler.calls().is_empty());
-}
-
 struct Fixture {
     scope: ResolvedScope,
     context: RequestContext,
@@ -346,12 +282,17 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_freshness(tracedecay_graph_query::CodeGraphReadFreshnessV1::Current)
+}
+
+fn fixture_with_freshness(freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1) -> Fixture {
     let (scope, context, operation) = application_context();
     let generation = current_generation();
     let (store, expected_import) = projection_fixture(&generation);
     let graph: Arc<dyn CodeGraphProjectionReadPort> = Arc::new(FixtureCodeGraphProjection {
         scope: scope.clone(),
         store,
+        freshness,
     });
     let cursor = FixtureCursor {
         snapshot: cursor_snapshot(&scope, &context),
@@ -666,7 +607,24 @@ fn projection_manifest(
             .relations
             .push(file_import_relation(&projection, row));
     }
-    manifest.entities.push(symbol_entity(&client_file));
+    manifest.entities.push(symbol_entity(
+        &client_file,
+        "symbol.fixture.Widget",
+        "client::Widget",
+        "Widget",
+        'e',
+        '1',
+        0,
+    ));
+    manifest.entities.push(symbol_entity(
+        &client_file,
+        "symbol.fixture.WidgetFactory",
+        "client::WidgetFactory",
+        "WidgetFactory",
+        'a',
+        '2',
+        8,
+    ));
     let projection_node_count = manifest.entities.len();
     let current = manifest
         .entities
@@ -802,16 +760,25 @@ struct SymbolRecordFixture {
     metadata: Option<LineageSymbolRecordV1>,
 }
 
-fn symbol_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
-    let occurrence = SymbolOccurrenceId::new("symbol.fixture.Widget").expect("symbol");
+#[allow(clippy::too_many_arguments)]
+fn symbol_entity(
+    file: &SanitizedCodeFileV1,
+    occurrence: &str,
+    qualified_name: &str,
+    simple_name: &str,
+    identity_byte: char,
+    content_byte: char,
+    start_byte: u64,
+) -> GraphEntity {
+    let occurrence = SymbolOccurrenceId::new(occurrence).expect("symbol");
     let record = SymbolRecordFixture {
         occurrence: occurrence.clone(),
         binding: Some(CodeGraphSymbolBindingV1 {
             file: file.file_occurrence_id.clone(),
             logical_path: Some(file.logical_path.clone()),
             source_span: Some(SourceSpan {
-                start_byte: 0,
-                end_byte: 6,
+                start_byte,
+                end_byte: start_byte + simple_name.len() as u64,
             }),
             chunk: None,
             language_descriptor_revision: LanguageDescriptorRevision::new("language.typescript.v1")
@@ -819,9 +786,9 @@ fn symbol_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
         }),
         metadata: Some(LineageSymbolRecordV1 {
             occurrence: occurrence.clone(),
-            identity: digest::<SymbolIdentityDigest>('e'),
-            qualified_name: "client::Widget".to_owned(),
-            simple_name: "Widget".to_owned(),
+            identity: digest::<SymbolIdentityDigest>(identity_byte),
+            qualified_name: qualified_name.to_owned(),
+            simple_name: simple_name.to_owned(),
             kind: "struct".to_owned(),
             visibility: "public".to_owned(),
             branches: 0,
@@ -836,7 +803,7 @@ fn symbol_entity(file: &SanitizedCodeFileV1) -> GraphEntity {
             derives: Vec::new(),
             skip_test_coverage: false,
             file_identity: digest::<FileIdentityDigest>('f'),
-            content_digest: digest::<ContentDigest>('1'),
+            content_digest: digest::<ContentDigest>(content_byte),
         }),
     };
     GraphEntity::new(

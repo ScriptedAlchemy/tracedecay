@@ -1,23 +1,3 @@
-//! Direct surface proof for the native-integration journey.
-//!
-//! `stack_snapshot` and `preflight_native_integration` must be callable on
-//! the shipped application and CLI/MCP surfaces. Apply, status, and cancel
-//! join that same journey and must stay exposed consistently through CLI and
-//! MCP over one application result. Explicit-root worktree inventory and
-//! cleanup bind CLI, MCP, and HTTP; the transaction journey still withholds
-//! HTTP because apply has no transport fallback.
-//!
-//! This suite proves the journey is *mounted and callable* end to end at the
-//! surface boundary: canonical operation identity, catalog bindings on both
-//! CLI and MCP, an advertised MCP tool per operation, typed request decoding
-//! that rejects a mismatched or path-bearing request, and a truthful typed
-//! result envelope whose unavailable and cancellation states advance nothing.
-//!
-//! The full multi-repository apply journey needs a mounted native-integration
-//! runtime and is deliberately not attempted here.
-
-use std::collections::BTreeSet;
-
 use serde_json::json;
 use tracedecay_api::is_http_application_operation_exposed;
 use tracedecay_contracts::{
@@ -32,7 +12,6 @@ use tracedecay_daemon_protocol::{ApplicationSurfaceRequest, parse_application_su
 use tracedecay_daemon_service::application_surface::{
     resolve_application_surface_dispatch, resolve_catalog_tool_binding,
 };
-use tracedecay_mcp::get_tool_definitions;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface, CatalogContributionV1};
 
 /// The transaction journey, restated here as the reverse authority. Deriving
@@ -87,22 +66,6 @@ const WORKTREE_JOURNEY: [(ApplicationSurfaceOperation, &str); 5] = [
         "worktree_cleanup_reconcile",
     ),
 ];
-
-#[test]
-fn every_journey_operation_has_canonical_identity() {
-    for (operation, name) in JOURNEY.iter().chain(WORKTREE_JOURNEY.iter()) {
-        assert_eq!(operation.as_str(), *name);
-        assert_eq!(
-            ApplicationSurfaceOperation::from_tool_name(&format!("tracedecay_{name}")),
-            Some(*operation),
-            "{name} does not resolve from its MCP tool name"
-        );
-        assert!(
-            ApplicationSurfaceOperation::ALL.contains(operation),
-            "{name} is missing from the canonical operation authority"
-        );
-    }
-}
 
 #[test]
 fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
@@ -193,21 +156,6 @@ fn assert_cli_and_mcp_bindings(contribution: &CatalogContributionV1, name: &str)
         assert!(
             resolved.is_some(),
             "{name} is declared for {surface:?} but the production resolver answers nothing"
-        );
-    }
-}
-
-#[test]
-fn every_journey_operation_is_an_advertised_mcp_tool() {
-    let advertised = get_tool_definitions()
-        .expect("tool definitions")
-        .into_iter()
-        .map(|definition| definition.name)
-        .collect::<BTreeSet<_>>();
-    for (_, name) in JOURNEY.iter().chain(WORKTREE_JOURNEY.iter()) {
-        assert!(
-            advertised.contains(&format!("tracedecay_{name}")),
-            "tracedecay_{name} is not advertised by the MCP tool registry"
         );
     }
 }

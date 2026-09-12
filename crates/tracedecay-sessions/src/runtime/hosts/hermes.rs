@@ -45,7 +45,7 @@ use coverage::sqlite_incarnation;
 use observation::{
     HermesAdmissionAction, HermesObservationRecord, HermesProjectionMetadata,
     native_observation_record, normalize_native_observation, observation_source,
-    prepare_observation_row, stable_native_id,
+    prepare_observation_row,
 };
 #[cfg(test)]
 use rows::HermesRow;

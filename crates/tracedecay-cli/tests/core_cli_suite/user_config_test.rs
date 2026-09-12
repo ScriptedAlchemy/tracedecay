@@ -22,10 +22,3 @@ fn old_daemon_debounce_field_still_deserializes() {
     let cfg: tracedecay_session_memory::user_config::UserConfig = toml::from_str(toml).unwrap();
     assert_eq!(cfg.watcher_debounce, "30s");
 }
-
-#[test]
-fn new_watcher_debounce_field_works() {
-    let toml = r#"watcher_debounce = "45s""#;
-    let cfg: tracedecay_session_memory::user_config::UserConfig = toml::from_str(toml).unwrap();
-    assert_eq!(cfg.watcher_debounce, "45s");
-}

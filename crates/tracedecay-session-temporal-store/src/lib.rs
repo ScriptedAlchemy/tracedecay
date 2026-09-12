@@ -117,6 +117,22 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         &self,
         filter: &GitScopeFilter,
     ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
+        self.git_scope_session_ids_with_bound(filter, None)
+    }
+
+    pub fn git_scope_session_ids_bounded(
+        &self,
+        filter: &GitScopeFilter,
+        maximum: usize,
+    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
+        self.git_scope_session_ids_with_bound(filter, Some(maximum))
+    }
+
+    fn git_scope_session_ids_with_bound(
+        &self,
+        filter: &GitScopeFilter,
+        maximum: Option<usize>,
+    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
         if filter.is_empty() {
             return Ok(None);
         }
@@ -145,7 +161,11 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 )));
             }
         };
-        let session_ids = view.session_ids_for_scope(filter)?.ok_or_else(|| {
+        let session_ids = match maximum {
+            Some(maximum) => view.session_ids_for_scope_bounded(filter, maximum),
+            None => view.session_ids_for_scope(filter),
+        }?
+        .ok_or_else(|| {
             GitCorrelationError::Contract(
                 "Git scope resolution requires a non-empty filter".to_owned(),
             )

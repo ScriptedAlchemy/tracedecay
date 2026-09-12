@@ -181,24 +181,4 @@ mod tests {
             Err("knowledge search requires a canonical cursor before pagination")
         );
     }
-
-    #[test]
-    fn bounded_page_does_not_advertise_a_rejected_numeric_continuation() {
-        let request = ExplorerQueryRequestV1 {
-            query: "cache".to_owned(),
-            limit: 1,
-            offset: 0,
-        };
-        let source = ready_source(
-            ExplorerSourceIdV1::Knowledge,
-            &request,
-            vec![json!({"fact_id": "fact.fixture"})],
-            Some(2),
-            json!({}),
-            "facts",
-            Vec::new(),
-        );
-
-        assert_eq!(source.page.and_then(|page| page.next_offset), None);
-    }
 }

@@ -442,7 +442,11 @@ fn default_profile_capacity_tracks_composed_runtime() {
         })
         .count();
     assert!(default_binding_count > 0);
-    assert!(default_binding_count <= default_profile.budget().maximum_bindings() as usize);
+    assert_eq!(
+        default_binding_count,
+        default_profile.budget().maximum_bindings() as usize,
+        "the default profile budget must exactly track composition"
+    );
 
     let definitions = get_catalog_filtered_tool_definitions_with_budget(
         0,

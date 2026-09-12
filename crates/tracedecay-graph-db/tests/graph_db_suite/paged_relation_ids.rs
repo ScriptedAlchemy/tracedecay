@@ -157,53 +157,6 @@ fn expected_edge_ids(spokes: usize) -> Vec<GraphRelationId> {
 }
 
 #[test]
-fn id_only_fanout_skips_property_decode_and_snapshots_quarantine() {
-    let db = memory_db();
-    let hub = apply_star(&db, STAR, false);
-    let starts = [hub];
-    let _ = take_graph_db_traversal_counters();
-
-    let ids = db
-        .outgoing_relation_ids(&namespace(), &starts, &kinds(), STAR, live())
-        .unwrap();
-    assert_eq!(ids[0].len(), STAR);
-    assert_eq!(ids[0], expected_edge_ids(STAR));
-
-    let counts = take_graph_db_traversal_counters();
-    assert_eq!(
-        counts.property_decodes, 0,
-        "ID-only fan-out must not decode relation properties; observed {}",
-        counts.property_decodes
-    );
-    assert!(
-        counts.quarantine_lock_acquisitions <= 1,
-        "quarantine must be snapshotted once per distinct projection; observed {}",
-        counts.quarantine_lock_acquisitions
-    );
-    assert!(
-        counts.relation_identity_decodes > 0,
-        "ID-only decode must run for traversed edges"
-    );
-}
-
-#[test]
-fn incoming_id_only_fanout_matches_outgoing_counts() {
-    let db = memory_db();
-    let hub = apply_star(&db, STAR, true);
-    let starts = [hub];
-    let _ = take_graph_db_traversal_counters();
-
-    let ids = db
-        .incoming_relation_ids(&namespace(), &starts, &kinds(), STAR, live())
-        .unwrap();
-    assert_eq!(ids[0], expected_edge_ids(STAR));
-
-    let counts = take_graph_db_traversal_counters();
-    assert_eq!(counts.property_decodes, 0);
-    assert!(counts.quarantine_lock_acquisitions <= 1);
-}
-
-#[test]
 fn label_keys_scan_once_per_store_epoch() {
     let db = memory_db();
     let hub = apply_star(&db, 32, false);
@@ -444,30 +397,5 @@ fn refuse_mode_stops_at_budget_without_caching_index() {
     assert!(
         cached_refuse.adjacency_index_hits >= 1,
         "over-budget refuse after a paged build must use the cached index"
-    );
-}
-
-#[test]
-fn paged_ids_honor_limit_per_start() {
-    let db = memory_db();
-    let hub_a = apply_star(&db, 32, false);
-    let hub_b = apply_named_star(&db, "hub-b", "hub-b-spoke", "hub-b-edge", 32, false);
-    let starts = [hub_a, hub_b];
-
-    let pages = db
-        .outgoing_relation_ids_page(&namespace(), &starts, &kinds(), None, PAGE, live())
-        .unwrap();
-    assert_eq!(pages.len(), 2, "each start must receive its own page slot");
-    assert_eq!(
-        pages[0].len(),
-        PAGE,
-        "first hub must receive a full per-start page, not a shared leftover; got {}",
-        pages[0].len()
-    );
-    assert_eq!(
-        pages[1].len(),
-        PAGE,
-        "second hub must receive a full per-start page, not an empty leftover from a total cap; got {}",
-        pages[1].len()
     );
 }

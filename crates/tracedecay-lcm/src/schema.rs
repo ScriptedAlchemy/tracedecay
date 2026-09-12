@@ -443,6 +443,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     ensure_raw_identity_schema(conn).await?;
     conn.execute_batch(RAW_FTS_DDL).await?;
     super::summary_convergence::ensure_schema(conn).await?;
+    super::summary_convergence::retire_predecessor_range_rewrite(conn).await?;
     for sql in LCM_STATUS_PERFORMANCE_INDEX_SQL {
         conn.execute_batch(sql).await?;
     }

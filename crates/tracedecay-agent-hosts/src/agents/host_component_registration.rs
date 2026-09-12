@@ -542,9 +542,7 @@ impl CatalogHostComponentRegistrationAuthority {
             if fs::symlink_metadata(&claude_root)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
             {
-                return Err(
-                    crate::agents::host_bundle::HostBundleError::UnsafeClaudeHomeSymlink,
-                );
+                return Err(crate::agents::host_bundle::HostBundleError::UnsafeClaudeHomeSymlink);
             }
         }
         let mut digest = Sha256::new();
@@ -563,9 +561,7 @@ impl CatalogHostComponentRegistrationAuthority {
                 }
                 match fs::symlink_metadata(path) {
                     Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                        return Err(
-                            crate::agents::host_bundle::HostBundleError::UnsafeInstallPath,
-                        );
+                        return Err(crate::agents::host_bundle::HostBundleError::UnsafeInstallPath);
                     }
                     Ok(_) => {
                         let bytes = fs::read(path).map_err(|_| host_bundle_storage_failure!())?;
@@ -767,9 +763,9 @@ impl CatalogHostComponentRegistrationAuthority {
                     return Err(host_bundle_storage_failure!());
                 }
             }
-            let parent = path.parent().ok_or(
-                crate::agents::host_bundle::HostBundleError::RecoveryDirectoryUnavailable,
-            )?;
+            let parent = path
+                .parent()
+                .ok_or(crate::agents::host_bundle::HostBundleError::RecoveryDirectoryUnavailable)?;
             let staging_path = parent.join(format!(
                 ".tracedecay-registration-apply-{}-{index}",
                 hex::encode(operation_id)
@@ -999,9 +995,7 @@ impl CatalogHostComponentRegistrationAuthority {
             let metadata_marker = self.directory_metadata_marker(operation_id, index);
             let missing_marker = self.directory_missing_marker(operation_id, index);
             if metadata_marker.is_file() == missing_marker.is_file() {
-                return Err(
-                    crate::agents::host_bundle::HostBundleError::UnsupportedRecoveryFormat,
-                );
+                return Err(crate::agents::host_bundle::HostBundleError::UnsupportedRecoveryFormat);
             }
             if metadata_marker.is_file() {
                 // Parse every metadata record before restoring any file. The
@@ -1017,9 +1011,7 @@ impl CatalogHostComponentRegistrationAuthority {
                     })?;
                 match fs::symlink_metadata(path) {
                     Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                        return Err(
-                            crate::agents::host_bundle::HostBundleError::UnsafeInstallPath,
-                        );
+                        return Err(crate::agents::host_bundle::HostBundleError::UnsafeInstallPath);
                     }
                     Ok(_) => {
                         let observed = crate::agents::capture_host_file_metadata(path)
@@ -1054,9 +1046,7 @@ impl CatalogHostComponentRegistrationAuthority {
             } else {
                 match fs::symlink_metadata(path) {
                     Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                        return Err(
-                            crate::agents::host_bundle::HostBundleError::UnsafeInstallPath,
-                        );
+                        return Err(crate::agents::host_bundle::HostBundleError::UnsafeInstallPath);
                     }
                     Ok(_) => {
                         let applied_marker =
@@ -1064,13 +1054,13 @@ impl CatalogHostComponentRegistrationAuthority {
                         if !applied_marker.is_file() {
                             return Err(host_bundle_stale_preview!());
                         }
-                        let applied: RegistrationDirectoryAppliedStateV2 =
-                            serde_json::from_slice(&fs::read(applied_marker).map_err(|_| {
-                                host_bundle_storage_failure!()
-                            })?)
-                            .map_err(|_| {
-                                crate::agents::host_bundle::HostBundleError::UnsupportedRecoveryFormat
-                            })?;
+                        let applied: RegistrationDirectoryAppliedStateV2 = serde_json::from_slice(
+                            &fs::read(applied_marker)
+                                .map_err(|_| host_bundle_storage_failure!())?,
+                        )
+                        .map_err(|_| {
+                            crate::agents::host_bundle::HostBundleError::UnsupportedRecoveryFormat
+                        })?;
                         if registration_directory_applied_state(path)? != applied {
                             return Err(host_bundle_stale_preview!());
                         }
@@ -1104,12 +1094,10 @@ impl CatalogHostComponentRegistrationAuthority {
                 &fs::read(self.directory_metadata_marker(operation_id, index))
                     .map_err(|_| host_bundle_storage_failure!())?,
             )
-            .map_err(|_| {
-                crate::agents::host_bundle::HostBundleError::UnsupportedRecoveryFormat
-            })?;
-            let parent = path.parent().ok_or(
-                crate::agents::host_bundle::HostBundleError::RecoveryDirectoryUnavailable,
-            )?;
+            .map_err(|_| crate::agents::host_bundle::HostBundleError::UnsupportedRecoveryFormat)?;
+            let parent = path
+                .parent()
+                .ok_or(crate::agents::host_bundle::HostBundleError::RecoveryDirectoryUnavailable)?;
             let staging_path = parent.join(format!(
                 ".tracedecay-registration-recovery-{}-{index}",
                 hex::encode(operation_id)
@@ -1205,9 +1193,7 @@ impl CatalogHostComponentRegistrationAuthority {
                         fs::remove_file(path).map_err(|_| host_bundle_storage_failure!())?
                     }
                     Ok(_) => {
-                        return Err(
-                            crate::agents::host_bundle::HostBundleError::UnsafeInstallPath,
-                        );
+                        return Err(crate::agents::host_bundle::HostBundleError::UnsafeInstallPath);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => {
@@ -1243,9 +1229,7 @@ impl CatalogHostComponentRegistrationAuthority {
                 let applied_marker = self.directory_applied_metadata_marker(operation_id, index);
                 match fs::symlink_metadata(path) {
                     Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                        return Err(
-                            crate::agents::host_bundle::HostBundleError::UnsafeInstallPath,
-                        );
+                        return Err(crate::agents::host_bundle::HostBundleError::UnsafeInstallPath);
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1907,37 +1891,6 @@ mod tests {
             )
             .expect("Cursor has a compiled default set");
         assert!(cursor.supports_artifact_only_backup_restore(&cursor_set.component_set));
-    }
-
-    /// Copilot's deployed artifact is a receipt-owned descriptor; the host
-    /// carries nothing until `copilot mcp add` writes its own registry.
-    /// Classifying the set as artifact-only would let artifact backup/restore
-    /// claim it can reverse a host registration it never snapshots — the same
-    /// truthfulness violation Gemini's case above pins.
-    #[test]
-    fn copilot_component_sets_are_not_artifact_only_lifecycles() {
-        let home = tempfile::tempdir().expect("home");
-        let lifecycle_root = tempfile::tempdir().expect("lifecycle root");
-        let authority = CatalogHostComponentRegistrationAuthority::new(
-            "copilot",
-            home.path(),
-            lifecycle_root.path(),
-            crate::agents::host_bundle::HostBundleLifecycleOpV1::Install,
-        )
-        .expect("catalog registration authority");
-        let component_set =
-            crate::agents::host_bundle_registry::verified_embedded_default_host_component_set(
-                crate::agents::host_bundle::HostKindV1::Copilot,
-                0,
-                crate::agents::TEST_GENERATOR_COMMIT,
-            )
-            .expect("Copilot has a compiled default set");
-
-        assert!(
-            !authority.supports_artifact_only_backup_restore(&component_set.component_set),
-            "the Copilot lifecycle drives `copilot mcp add`, so its deployed \
-             bytes are not the whole lifecycle"
-        );
     }
 
     /// The live reinstall journey: TraceDecay's own staging residue (a

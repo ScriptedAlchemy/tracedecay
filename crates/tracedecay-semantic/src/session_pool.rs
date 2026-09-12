@@ -1263,7 +1263,7 @@ pub mod test_support {
                 pooling: ManifestPoolingV1::Mean,
                 truncation: TruncationPolicyV1 {
                     side: TruncationSideV1::Right,
-                    max_length: 512,
+                    max_length: 4096,
                 },
                 precision: ManifestPrecisionV1::Fp32,
                 runtime: RuntimeCompatibilityV1 {
@@ -1281,7 +1281,7 @@ pub mod test_support {
                     max_resident_bytes,
                     max_threads: 4,
                     max_batch_size: 8,
-                    max_sequence_length: 512,
+                    max_sequence_length: 4096,
                     load_deadline_ms,
                 },
                 upstream: UpstreamSourceV1 {
@@ -1311,7 +1311,7 @@ pub mod test_support {
             document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
             pooling: EmbeddingPoolingV1::Mean,
             truncation_side: EmbeddingTruncationSideV1::Right,
-            truncation_length: 512,
+            truncation_length: 4096,
             inference_batch_size: payload.resource_ceiling.max_batch_size,
             inference_batch_bytes: payload
                 .resource_ceiling
@@ -1321,6 +1321,7 @@ pub mod test_support {
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "ort-test-rev-1".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
             dimensions: 8,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,

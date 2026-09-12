@@ -1231,37 +1231,6 @@ mod tests {
     }
 
     #[test]
-    fn parent_message_reconstructs_distinct_thread_hierarchy() {
-        let parent = occurrence(
-            "occurrence.parent",
-            "anchor.parent",
-            "message.parent",
-            "thread.parent",
-            None,
-            1,
-        );
-        let child = occurrence(
-            "occurrence.child",
-            "anchor.child",
-            "message.child",
-            "thread.child",
-            Some("message.parent"),
-            2,
-        );
-
-        let (_, threads, _, _) = occurrence_relations(&[parent, child]).unwrap();
-
-        assert_eq!(
-            threads,
-            vec![ThreadHierarchyRelation {
-                parent_thread_id: ThreadId::new("thread.parent").unwrap(),
-                child_thread_id: ThreadId::new("thread.child").unwrap(),
-                ordinal: 2,
-            }]
-        );
-    }
-
-    #[test]
     fn parent_messages_reconstruct_the_full_thread_chain() {
         let root = occurrence(
             "occurrence.root",

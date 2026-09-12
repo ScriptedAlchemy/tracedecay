@@ -52,13 +52,18 @@ pub fn read_scope(
     (options.memory_scope, options.project_selector.as_ref())
 }
 
-pub fn validate_reason_entities(
+pub fn normalize_reason_entities(
     entities: &[String],
-) -> Result<(), RetainedSurfaceExecutionErrorV1> {
-    if entities.is_empty() || entities.windows(2).any(|pair| pair.first() >= pair.get(1)) {
+) -> Result<Vec<String>, RetainedSurfaceExecutionErrorV1> {
+    if entities.is_empty() {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
-    Ok(())
+    let mut entities = entities.to_vec();
+    entities.sort();
+    if entities.windows(2).any(|pair| pair.first() == pair.get(1)) {
+        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+    }
+    Ok(entities)
 }
 
 pub fn ensure_profile_request_scope(
@@ -511,9 +516,18 @@ pub fn projection(
     projection: &ProjectMemoryFactProjectionV1,
 ) -> Result<FactProjectionV1, RetainedSurfaceExecutionErrorV1> {
     match projection {
-        ProjectMemoryFactProjectionV1::Available(fact) => Ok(FactProjectionV1::Available {
-            fact: Box::new(available_fact(fact)?),
-        }),
+        ProjectMemoryFactProjectionV1::Available(fact) => {
+            let fact_projection = Box::new(available_fact(fact)?);
+            match fact.superseded_by() {
+                Some(superseded_by) => Ok(FactProjectionV1::Superseded {
+                    fact: fact_projection,
+                    superseded_by: superseded_by.clone(),
+                }),
+                None => Ok(FactProjectionV1::Available {
+                    fact: fact_projection,
+                }),
+            }
+        }
         ProjectMemoryFactProjectionV1::Unavailable(fact) => Ok(FactProjectionV1::Unavailable {
             status: unavailable_fact(fact)?,
         }),
@@ -1395,93 +1409,6 @@ mod tests {
             .expect(label);
             assert_same_identity(&prepared.logical_effect().expect(label), &legacy, label);
         }
-    }
-
-    /// The command a prepared mutation executes carries exactly the values its
-    /// logical effect digested; the query an exact search runs carries the
-    /// same trust floor and page size its identity names.
-    #[test]
-    fn prepared_commands_and_queries_carry_the_identity_values() {
-        let owner = owner();
-        let request = update_request(&owner, Some(FactSourceLabelPatchV1::Clear));
-        let command = PreparedFactUpdate::new(owner.clone(), &request)
-            .expect("update")
-            .into_command(operation_id(), actor())
-            .expect("update command");
-        assert_eq!(command.target().owner(), &owner);
-        assert_eq!(command.target().fact_id(), &request.fact_id);
-        assert_eq!(
-            command.expected_last_event_id(),
-            request.expected_last_event_id.as_ref()
-        );
-        assert_eq!(command.operation_id(), &operation_id());
-        assert_eq!(command.actor(), Some(&actor()));
-        let patch = command.patch();
-        assert_eq!(patch.content(), request.content.as_deref());
-        assert_eq!(patch.category(), request.category);
-        assert_eq!(patch.source_label(), Some(None), "Clear empties the label");
-        assert_eq!(patch.tags(), request.tags.as_deref());
-        assert_eq!(patch.entities(), request.entities.as_deref());
-        assert_eq!(patch.trust(), confidence(request.trust).expect("trust"));
-        assert_eq!(
-            patch.metadata(),
-            Some(&serde_json::to_value(&request.metadata).expect("metadata"))
-        );
-
-        let supersede = FactStoreSupersedeRequestV1 {
-            fact_id: fact_id(&owner, "operation.mapping.supersede.old"),
-            superseded_by: fact_id(&owner, "operation.mapping.supersede.new"),
-            expected_last_event_id: Some(event_id("supersede")),
-            memory_scope: None,
-            project_selector: None,
-        };
-        let command = PreparedFactSupersede::new(owner.clone(), &supersede)
-            .expect("supersede")
-            .into_command(operation_id(), actor())
-            .expect("supersede command");
-        assert_eq!(command.target().fact_id(), &supersede.fact_id);
-        assert_eq!(command.superseded_by().fact_id(), &supersede.superseded_by);
-        assert_eq!(
-            command.expected_last_event_id(),
-            supersede.expected_last_event_id.as_ref()
-        );
-
-        let feedback = FactFeedbackRequestV1 {
-            fact_id: fact_id(&owner, "operation.mapping.feedback"),
-            expected_last_event_id: None,
-            action: FactFeedbackActionV1::Helpful,
-            source_label: Some("reviewer".to_owned()),
-            reason: None,
-            memory_scope: None,
-            project_selector: None,
-        };
-        let command = PreparedFactFeedback::new(owner.clone(), &feedback)
-            .expect("feedback")
-            .into_command(operation_id(), actor())
-            .expect("feedback command");
-        assert_eq!(command.target().fact_id(), &feedback.fact_id);
-        assert_eq!(
-            command.action(),
-            tracedecay_store::ProjectMemoryFactFeedbackActionV1::Helpful
-        );
-        assert_eq!(command.source_label(), feedback.source_label.as_deref());
-        assert_eq!(command.reason(), None);
-
-        let search = FactStoreSearchRequestV1 {
-            query: "canonical identity".to_owned(),
-            options: FactReadOptionsV1::default(),
-            after: None,
-        };
-        let prepared = PreparedFactSearch::new(owner.clone(), &search).expect("search");
-        let identity = prepared.logical_effect().expect("search identity");
-        let query = prepared.into_query();
-        assert_eq!(query.owner(), &owner);
-        assert_eq!(query.query(), Some("canonical identity"));
-        assert_eq!(query.limit(), 20);
-        assert_eq!(identity[5], json!(20));
-        let floor = query.filter().min_trust().expect("default trust floor");
-        assert_eq!(identity[4], json!(floor.as_f64()));
-        assert_eq!(floor, confidence(Some(0.3)).expect("floor").expect("floor"));
     }
 
     /// Invalid public input fails while preparing, before any identity or

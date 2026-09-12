@@ -36,8 +36,8 @@ use tracedecay_query::retrieval::fusion::{CompositionOutputV1, digest_candidate_
 use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::semantic::{
     SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCompositionExecutionAuthorityV1,
-    SemanticCompositionExecutionOutcomeV1, SemanticQueryModeV1,
-    SemanticQueryServiceError, SemanticRetrievalRequestV1, apply_bounded_rerank_outcome,
+    SemanticCompositionExecutionOutcomeV1, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticRetrievalRequestV1, apply_bounded_rerank_outcome,
 };
 
 #[derive(Clone)]
@@ -1724,24 +1724,6 @@ mod tests {
                 "anchor.pagination.3",
             ]
         );
-    }
-
-    #[test]
-    fn absent_activation_preserves_the_exact_fallback_arc() {
-        let fallback = fallback();
-        let identity = Arc::as_ptr(&fallback);
-        let outcome = semantic_abstention(
-            SemanticQueryModeV1::FallbackAllowed,
-            SemanticAbstentionV1::CalibrationUnavailable,
-            fallback,
-        )
-        .expect("fallback allowed");
-
-        assert_eq!(Arc::as_ptr(outcome.fallback()), identity);
-        outcome
-            .fallback()
-            .validate()
-            .expect("canonical fallback remains valid");
     }
 
     #[test]

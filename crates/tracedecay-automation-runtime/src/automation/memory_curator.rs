@@ -39,8 +39,6 @@ const CURATION_MAX_OPERATIONS: usize = 256;
 
 mod review;
 mod wire;
-#[cfg(test)]
-use review::memory_curator_review_value;
 use review::{attach_pagination_summary, memory_curator_resume_cursor, memory_curator_review};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

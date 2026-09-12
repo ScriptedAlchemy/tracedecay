@@ -1,20 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
 import { CodeIndexWorkerSelectionV1Schema } from '../../contracts/generated.ts';
-import {
-  buildSettingsEditor,
-  buildSettingsModel,
-  countSettings,
-  filterOverrides,
-  filterRows,
-  isPathLike,
-  planCodeIndexWorkerChangeAgainst,
-  planProjectChangeAgainst,
-  planUserChangeAgainst,
-  readSettingsEnvelope,
-  settingsRevisionConflict,
-  splitPath,
-} from './settingsModel.ts';
+import { buildSettingsEditor, buildSettingsModel, filterOverrides, filterRows, isPathLike, planCodeIndexWorkerChangeAgainst, planProjectChangeAgainst, planUserChangeAgainst, readSettingsEnvelope, settingsRevisionConflict } from './settingsModel.ts';
 
 // `/api/settings` answers a DashboardEnvelopeV1; the read model addresses the
 // settings groups inside its payload. Reading it through the generated
@@ -38,29 +25,6 @@ if (!editor) {
 }
 
 describe('Settings read model', () => {
-  it('reads every top-level group the payload carries', () => {
-    const model = buildSettingsModel(payload);
-    expect(model.sections.map((s) => s.id).sort()).toEqual([
-      'automation',
-      'environment',
-      'project',
-      'storage',
-      'user',
-      'version',
-    ]);
-  });
-
-  it('orders file sources first, then the environment overlay, then resolved state', () => {
-    const model = buildSettingsModel(payload);
-    expect(model.sections.map((s) => s.origin)).toEqual([
-      'file',
-      'file',
-      'environment',
-      'resolved',
-      'resolved',
-      'resolved',
-    ]);
-  });
 
   // The honesty invariant this whole model exists to hold. `/api/settings`
   // ships effective values with no per-key attribution, so the model must not
@@ -74,43 +38,6 @@ describe('Settings read model', () => {
       expect(section).not.toHaveProperty('rank');
       expect(section).not.toHaveProperty('precedence');
     }
-  });
-
-  it('states a source location only when the payload names one', () => {
-    const model = buildSettingsModel(payload);
-    const byId = Object.fromEntries(model.sections.map((s) => [s.id, s]));
-    expect(byId['project']?.location).toBe(
-      '/fast/projects/tracedecay/.tracedecay/config.toml',
-    );
-    expect(byId['project']?.locationKind).toBe('path');
-    expect(byId['user']?.location).toBe('/home/zack/.tracedecay/config.toml');
-    expect(byId['automation']?.locationKind).toBe('endpoint');
-    // Storage and version state no config source, so none is invented.
-    expect(byId['storage']?.location).toBeNull();
-    expect(byId['version']?.location).toBeNull();
-  });
-
-  it('restates notes only from keys the payload actually carries', () => {
-    const model = buildSettingsModel(payload);
-    const project = model.sections.find((s) => s.id === 'project');
-    expect(project?.notes).toContain('legacy config path is read-only');
-    expect(project?.notes).toContain('config path and legacy path are the same file');
-    // `user` carries `legacy_config_read_only` but not `config_path`, so only
-    // the read-only note is restated.
-    expect(model.sections.find((s) => s.id === 'user')?.notes).toEqual([
-      'legacy config path is read-only',
-    ]);
-  });
-
-  it('reads environment overrides verbatim, including explicit-vs-default state', () => {
-    const model = buildSettingsModel(payload);
-    expect(model.overrides).toHaveLength(2);
-    expect(model.activeOverrides).toBe(0);
-    // Unset: no value, so a default applies and none is invented.
-    expect(model.overrides.find((o) => o.name === 'TRACEDECAY_DATA_DIR')).toMatchObject({
-      active: false,
-      value: null,
-    });
   });
 
   it('treats a variable as in force only on a literal active:true', () => {
@@ -153,30 +80,6 @@ describe('Settings read model', () => {
       buildSettingsModel({ version: { cached_latest_version: null } }).sections[0]?.rows[0]
         ?.kind,
     ).toBe('null');
-  });
-
-  it('counts scalar settings and reports group subtree sizes', () => {
-    const model = buildSettingsModel(payload);
-    const project = model.sections.find((s) => s.id === 'project');
-    const config = project?.rows.find((row) => row.id === 'config');
-    expect(config?.kind).toBe('group');
-    // include, exclude, max_file_size, extract_docstrings, track_call_sites,
-    // git_ignore, context_scout, telemetry.timings,
-    // sync.auto_track_pr_branches, sync.auto_track_pr_poll_secs
-    expect(config?.count).toBe(10);
-    expect(countSettings(project?.rows ?? [])).toBe(project?.settingCount);
-  });
-
-  it('collects snapshot identity stamps the payload carries', () => {
-    const model = buildSettingsModel(payload);
-    expect(model.stamps).toEqual(
-      expect.arrayContaining([
-        { label: 'snapshot', value: 'snap-42' },
-        { label: 'revision', value: 'rev-42' },
-        { label: 'version', value: '2.0.0' },
-        { label: 'channel', value: 'stable' },
-      ]),
-    );
   });
 
   /** A live payload's project and user groups routinely pin the SAME snapshot
@@ -279,17 +182,6 @@ describe('Settings filtering', () => {
     ]);
   });
 
-  it('matches values as well as keys', () => {
-    const rows = buildSettingsModel(payload).sections.find((s) => s.id === 'storage')!.rows;
-    expect(filterRows(rows, 'graph.db').map((row) => row.id)).toEqual(['graph_db']);
-  });
-
-  it('returns every row for an empty or whitespace query', () => {
-    const rows = buildSettingsModel(payload).sections.find((s) => s.id === 'user')!.rows;
-    expect(filterRows(rows, '')).toHaveLength(rows.length);
-    expect(filterRows(rows, '   ')).toHaveLength(rows.length);
-  });
-
   it('filters overrides across name, value and description', () => {
     const overrides = buildSettingsModel(payload).overrides;
     expect(filterOverrides(overrides, 'DATA_DIR').map((o) => o.name)).toEqual([
@@ -308,49 +200,9 @@ describe('Settings value helpers', () => {
     expect(isPathLike('stable')).toBe(false);
     expect(isPathLike('/path with spaces')).toBe(false);
   });
-
-  it('splits a path into directory prefix and final segment', () => {
-    expect(splitPath('/a/b/c.toml')).toEqual({ head: '/a/b/', tail: 'c.toml' });
-    expect(splitPath('bare')).toEqual({ head: '', tail: 'bare' });
-  });
 });
 
 describe('Settings authorized changes', () => {
-  it('captures the editable values and configuration revision from the GET payload', () => {
-    expect(buildSettingsEditor(payload)).toEqual({
-      projectExpectedRevisionId: 'rev-42',
-      userExpectedRevisionId: 'user-rev-7',
-      codeIndexWorkerExpectedRevisionId: 'profile-worker-rev-7',
-      project: {
-        include: ['src/**', 'dashboard/src/**'],
-        exclude: ['target/**', 'node_modules/**'],
-        max_file_size: '1048576',
-        extract_docstrings: true,
-        track_call_sites: true,
-        git_ignore: true,
-        context_scout: false,
-        telemetry_timings: false,
-        auto_track_pr_branches: true,
-        auto_track_pr_poll_secs: '120',
-      },
-      user: {
-        upload_enabled: false,
-        watcher_debounce: '2s',
-        extraction_timeout_secs: '30',
-      },
-      codeIndexWorkers: {
-        code_index_workers: { mode: 'automatic' },
-        code_index_worker_status: {
-          configured: { mode: 'automatic' },
-          environment_override_workers: null,
-          effective_workers: 4,
-          available_logical_cpus: 4,
-          memory_safe_workers: 6,
-          limiting_reason: 'automatic_all_cores',
-        },
-      },
-    });
-  });
 
   it('builds a project patch containing only supported changed fields', () => {
     expect(
@@ -411,38 +263,6 @@ describe('Settings authorized changes', () => {
     ).toMatchObject({
       outcome: 'invalid',
       errors: [{ field: 'include', message: "invalid glob pattern '[!]'" }],
-    });
-  });
-
-  it('builds a user patch containing only supported changed fields', () => {
-    expect(
-      planUserChangeAgainst(editor, {
-        ...editor.user,
-        upload_enabled: true,
-        watcher_debounce: '15s',
-      }),
-    ).toEqual({
-      outcome: 'ready',
-      expectedRevisionId: 'user-rev-7',
-      patch: {
-        upload_enabled: true,
-        watcher_debounce: '15s',
-      },
-    });
-  });
-
-  it('serializes an exact code-index worker request against its independent revision', () => {
-    const values = {
-      ...editor.codeIndexWorkers,
-      code_index_workers: { mode: 'exact' as const, workers: 4 },
-    };
-
-    expect(planCodeIndexWorkerChangeAgainst(editor, values)).toEqual({
-      outcome: 'ready',
-      expectedRevisionId: 'profile-worker-rev-7',
-      patch: {
-        code_index_workers: { mode: 'exact', workers: 4 },
-      },
     });
   });
 

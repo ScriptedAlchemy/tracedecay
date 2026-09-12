@@ -16,7 +16,7 @@ use tracedecay_domain::configuration::{
     BranchTopologyPolicyV1, CrossMergePolicyV1, ProtectedRefRuleV1, ReviewTopologyPolicyV1,
     TopologyGatePolicyV1, WorkTopologyPolicyV1, WorktreePlacementModeV1,
 };
-use tracedecay_domain::{RunId, TaskId, WorkAuthority};
+use tracedecay_domain::{RunId, TaskId};
 
 use crate::work_attempt::{
     WorkAttemptListCoverageV1, WorkAttemptListCursorV1, WorkAttemptListRequestV1,
@@ -110,7 +110,7 @@ pub fn execution_topology_view<S, PS>(
     policy: &WorkTopologyPolicyV1,
     context: &RequestContext,
     request: &WorkTopologyViewRequestV1,
-    topology: impl FnOnce(&WorkAuthority) -> Result<WorkAttemptTopologyStateV1, ApplicationProblem>,
+    topology: impl FnOnce() -> Result<WorkAttemptTopologyStateV1, ApplicationProblem>,
 ) -> Result<ExecutionTopologyViewV1, ApplicationProblem>
 where
     S: WorkAttemptStoragePort,

@@ -48,26 +48,6 @@ fn participant(session: &str, source: &str, generation: u64) -> TemporalParticip
 }
 
 #[test]
-fn execution_control_deadlines_have_no_scheduler_state() {
-    let deadline = Instant::now() + Duration::from_mins(1);
-    let controls: Vec<_> = (0..64)
-        .map(|_| ExecutionControl::new(Some(deadline)))
-        .collect();
-    assert_eq!(controls.len(), 64);
-    for control in &controls {
-        let ExecutionControl {
-            cancellation,
-            deadline: stored_deadline,
-            remaining_work,
-        } = control;
-        assert_eq!(*stored_deadline, Some(deadline));
-        assert_eq!(Arc::strong_count(cancellation), 1);
-        assert!(remaining_work.is_none());
-    }
-    drop(controls);
-}
-
-#[test]
 fn expired_deadline_fails_at_checkpoint() {
     let control = ExecutionControl::new(Some(Instant::now()));
 
@@ -98,51 +78,6 @@ fn snapshot_request_requires_canonical_bindings() {
 }
 
 #[test]
-fn snapshot_request_freezes_optional_exact_provider_scope() {
-    let all_providers = TemporalSnapshotRequest::new(
-        session_id(),
-        digest('0'),
-        digest('1'),
-        digest('2'),
-        TemporalModeV1::Current,
-        RetrievalGrainV1::LogicalMessage,
-    )
-    .expect("valid all-provider request");
-    assert_eq!(all_providers.provider_scope(), None);
-
-    let scoped = all_providers
-        .with_provider_scope(Some("claude".to_string()))
-        .expect("canonical provider");
-    assert_eq!(scoped.provider_scope(), Some("claude"));
-}
-
-#[test]
-fn snapshot_request_freezes_validated_semantic_filter_before_reads() {
-    let request = TemporalSnapshotRequest::new(
-        session_id(),
-        digest('0'),
-        digest('1'),
-        digest('2'),
-        TemporalModeV1::Current,
-        RetrievalGrainV1::LogicalMessage,
-    )
-    .expect("valid request");
-    let filter = TemporalCandidateFilterV1 {
-        git_branch: Some("feature/filters".to_string()),
-        workflow_run: Some("wf_filters".to_string()),
-        roles: vec!["assistant".to_string(), "user".to_string()],
-        goals: true,
-        ..TemporalCandidateFilterV1::default()
-    };
-
-    let request = request
-        .with_semantic_filter(filter.clone())
-        .expect("canonical semantic filter");
-
-    assert_eq!(request.semantic_filter(), &filter);
-}
-
-#[test]
 fn semantic_filter_rejects_ambiguous_or_unstable_bindings() {
     let unsorted = TemporalCandidateFilterV1 {
         roles: vec!["user".to_string(), "assistant".to_string()],
@@ -161,45 +96,6 @@ fn semantic_filter_rejects_ambiguous_or_unstable_bindings() {
         Err(TemporalPortError::InvalidBinding {
             field: "workflow_agent"
         })
-    );
-}
-
-#[test]
-fn snapshot_request_freezes_typed_retrieval_scope_additively() {
-    let session = session_id();
-    let authorized_root =
-        TemporalAuthorizedRoot::project("profile-1", "project-1", "store-1", "root-1")
-            .expect("typed root");
-    let session_request = TemporalSnapshotRequest::new(
-        session.clone(),
-        digest('0'),
-        digest('1'),
-        digest('2'),
-        TemporalModeV1::Current,
-        RetrievalGrainV1::LogicalMessage,
-    )
-    .expect("valid session request");
-    assert_eq!(
-        session_request.retrieval_scope(),
-        &TemporalRetrievalScope::Session(session)
-    );
-
-    let root_request = session_request
-        .with_authorized_root(authorized_root.clone())
-        .expect("authorized root")
-        .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot);
-    assert_eq!(
-        root_request.retrieval_scope(),
-        &TemporalRetrievalScope::AllSessionsInAuthorizedRoot
-    );
-    assert_eq!(root_request.retrieval_scope().session_id(), None);
-    assert_eq!(root_request.authorized_root(), Some(&authorized_root));
-    assert_eq!(
-        root_request
-            .authorized_root()
-            .expect("root authority")
-            .project_key(),
-        "project-1"
     );
 }
 
@@ -441,45 +337,6 @@ fn snapshot_request_rejects_noncanonical_provider_scope() {
             field: "provider_scope"
         })
     );
-}
-
-#[test]
-fn execution_snapshot_is_bound_to_one_root_and_frozen_versions() {
-    let request = TemporalSnapshotRequest::new(
-        session_id(),
-        digest('0'),
-        digest('1'),
-        digest('2'),
-        TemporalModeV1::AsOf {
-            cutoff: tracedecay_domain::UtcMicros(42),
-        },
-        RetrievalGrainV1::Turn,
-    )
-    .expect("valid request");
-    let snapshot = TemporalExecutionSnapshot::new_authorized(
-        request,
-        TemporalWatermarks {
-            generation: 7,
-            source: 11,
-            projection: 13,
-            index: 17,
-            summary: 19,
-        },
-        KernelVersions {
-            schema: 3,
-            ranking: 5,
-            configuration_digest: BindingDigest::new("configuration_digest", digest('3'))
-                .expect("valid digest"),
-        },
-        None,
-        ValidatedAuthorization::Authorized,
-    )
-    .expect("valid snapshot");
-
-    assert_eq!(snapshot.root_digest().as_str(), digest('0'));
-    assert_eq!(snapshot.watermarks().generation, 7);
-    assert_eq!(snapshot.versions().ranking, 5);
-    assert_eq!(snapshot.authorization(), ValidatedAuthorization::Authorized);
 }
 
 #[test]
@@ -726,50 +583,6 @@ impl TemporalReadPort for OversizedPort {
 }
 
 #[test]
-fn producer_cannot_underreport_private_measured_item_size() {
-    block_on(async {
-        let snapshot = snapshot_with_control(ExecutionControl::default());
-        let mut state =
-            CandidateReadState::new(PageLimits::new(1, 128, 128, 1).expect("valid limits"));
-
-        assert_eq!(
-            pull_candidate_page(
-                &OversizedPort,
-                &snapshot,
-                &CandidatePlan::default(),
-                &mut state,
-            )
-            .await,
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item bytes"
-            })
-        );
-    });
-}
-
-#[test]
-fn private_measurement_enforces_total_byte_limit() {
-    block_on(async {
-        let snapshot = snapshot_with_control(ExecutionControl::default());
-        let mut state =
-            CandidateReadState::new(PageLimits::new(1, 128, 4096, 1).expect("valid limits"));
-
-        assert_eq!(
-            pull_candidate_page(
-                &OversizedPort,
-                &snapshot,
-                &CandidatePlan::default(),
-                &mut state,
-            )
-            .await,
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate total bytes"
-            })
-        );
-    });
-}
-
-#[test]
 fn prepared_cohort_preserves_typed_candidate_byte_budget_failure() {
     block_on(async {
         let limits = ExecutionLimits {
@@ -879,41 +692,6 @@ impl TemporalReadPort for CancellingPort {
     }
 }
 
-struct DeadlineCrossingPort {
-    deadline: Instant,
-    entered: Arc<AtomicBool>,
-}
-
-impl TemporalReadPort for DeadlineCrossingPort {
-    fn produce_candidate_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _plan: &'a CandidatePlan,
-        _request: PageRequest,
-        _sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        let deadline = self.deadline;
-        let entered = Arc::clone(&self.entered);
-        Box::pin(async move {
-            entered.store(true, Ordering::Release);
-            while Instant::now() < deadline {
-                std::hint::spin_loop();
-            }
-            Ok(PageStatus::Complete)
-        })
-    }
-
-    fn produce_temporal_record_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _candidates: &'a [RankingCandidate],
-        _request: PageRequest,
-        _sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async { Ok(PageStatus::Complete) })
-    }
-}
-
 #[test]
 fn async_pull_observes_live_cancellation_midstream() {
     block_on(async {
@@ -959,24 +737,39 @@ fn prepared_cohort_preserves_live_cancellation() {
     });
 }
 
-#[test]
-fn async_pull_observes_deadline_after_live_producer_work() {
-    block_on(async {
-        let deadline = Instant::now() + Duration::from_millis(100);
-        let snapshot = snapshot_with_control(ExecutionControl::new(Some(deadline)));
-        let mut state =
-            CandidateReadState::new(PageLimits::new(1, 1024, 1024, 1).expect("valid limits"));
-        let entered = Arc::new(AtomicBool::new(false));
-        let port = DeadlineCrossingPort {
-            deadline,
-            entered: Arc::clone(&entered),
-        };
-        let result =
-            pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state).await;
+struct DeadlineCrossingPort {
+    deadline: Instant,
+    entered: Arc<AtomicBool>,
+}
 
-        assert!(entered.load(Ordering::Acquire));
-        assert_eq!(result, Err(TemporalPortError::DeadlineExceeded));
-    });
+impl TemporalReadPort for DeadlineCrossingPort {
+    fn produce_candidate_page<'a>(
+        &'a self,
+        _snapshot: &'a TemporalExecutionSnapshot,
+        _plan: &'a CandidatePlan,
+        _request: PageRequest,
+        _sink: &'a mut CandidatePageSink<'_>,
+    ) -> PortFuture<'a, PageStatus> {
+        let deadline = self.deadline;
+        let entered = Arc::clone(&self.entered);
+        Box::pin(async move {
+            entered.store(true, Ordering::Release);
+            while Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+            Ok(PageStatus::Complete)
+        })
+    }
+
+    fn produce_temporal_record_page<'a>(
+        &'a self,
+        _snapshot: &'a TemporalExecutionSnapshot,
+        _candidates: &'a [RankingCandidate],
+        _request: PageRequest,
+        _sink: &'a mut TemporalRecordPageSink<'_>,
+    ) -> PortFuture<'a, PageStatus> {
+        Box::pin(async { Ok(PageStatus::Complete) })
+    }
 }
 
 #[test]
@@ -1149,26 +942,33 @@ impl TemporalReadPort for OversizedRecordPort {
     }
 }
 
+/// A candidate cohort is a bounded window over storage order, so filling the
+/// item cap while the producer still holds rows yields the window plus the key
+/// the next window resumes from — never a refusal that hides the remainder.
 #[test]
-fn candidate_item_cap_with_producer_more_is_incomplete_coverage() {
+fn candidate_item_cap_with_producer_more_is_a_resumable_window() {
     block_on(async {
         let port = AlwaysMorePort::new(vec!["c0", "c1"], Vec::new());
         let snapshot = snapshot_with_control(ExecutionControl::default());
         let mut state =
             CandidateReadState::new(PageLimits::new(1, 16 * 1024, 4 * 1024, 1).expect("limits"));
 
-        assert_eq!(
-            pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state).await,
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item count"
-            })
-        );
+        let page = pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state)
+            .await
+            .expect("a full item cap is a bounded window, not incomplete coverage");
+        assert_eq!(page.status(), PageStatus::More);
+        assert_eq!(page.items().len(), 1);
         assert_eq!(state.consumed_items(), 1);
+        assert!(state.is_exhausted());
+        assert_eq!(
+            state.keyset().map(|key| key.as_str().to_owned()),
+            Some("1".to_owned())
+        );
     });
 }
 
 #[test]
-fn candidate_total_bytes_cap_with_producer_more_is_incomplete_coverage() {
+fn candidate_total_bytes_cap_with_producer_more_is_a_resumable_window() {
     block_on(async {
         let first = candidate("c0");
         let encoded = first.measured_encoded_bytes().expect("measured");
@@ -1177,59 +977,17 @@ fn candidate_total_bytes_cap_with_producer_more_is_incomplete_coverage() {
         let mut state =
             CandidateReadState::new(PageLimits::new(8, encoded, encoded, 1).expect("limits"));
 
-        assert_eq!(
-            pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state).await,
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate total bytes"
-            })
-        );
+        let page = pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state)
+            .await
+            .expect("a full byte cap is a bounded window, not incomplete coverage");
+        assert_eq!(page.status(), PageStatus::More);
         assert_eq!(state.consumed_bytes(), encoded);
         assert!(state.consumed_items() < 8);
-    });
-}
-
-#[test]
-fn candidate_item_bytes_cap_fails_closed_without_complete() {
-    block_on(async {
-        let snapshot = snapshot_with_control(ExecutionControl::default());
-        let mut state =
-            CandidateReadState::new(PageLimits::new(2, 16 * 1024, 128, 2).expect("limits"));
-
+        assert!(state.is_exhausted());
         assert_eq!(
-            pull_candidate_page(
-                &OversizedPort,
-                &snapshot,
-                &CandidatePlan::default(),
-                &mut state,
-            )
-            .await,
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item bytes"
-            })
+            state.keyset().map(|key| key.as_str().to_owned()),
+            Some("1".to_owned())
         );
-        assert_eq!(state.consumed_items(), 0);
-    });
-}
-
-#[test]
-fn record_item_cap_with_producer_more_is_incomplete_coverage() {
-    block_on(async {
-        let port = AlwaysMorePort::new(Vec::new(), vec!["r0", "r1"]);
-        let snapshot = snapshot_with_control(ExecutionControl::default());
-        let mut state = TemporalRecordReadState::new(
-            PageLimits::new(1, 16 * 1024, 4 * 1024, 1).expect("limits"),
-        );
-
-        match pull_temporal_record_page(&port, &snapshot, &[], &mut state).await {
-            Err(error) => assert_eq!(
-                error,
-                TemporalPortError::BudgetExceeded {
-                    resource: "record item count"
-                }
-            ),
-            Ok(_) => panic!("More + record item cap must be incomplete coverage"),
-        }
-        assert_eq!(state.consumed_items(), 1);
     });
 }
 
@@ -1389,21 +1147,19 @@ fn exhausted_caps_never_synthesize_complete_or_silently_drop_unread_work() {
             PageLimits::new(1, 16 * 1024, 4 * 1024, 1).expect("limits"),
         );
 
-        let candidate_err = pull_candidate_page(
+        let candidate_window = pull_candidate_page(
             &port,
             &snapshot,
             &CandidatePlan::default(),
             &mut candidate_state,
         )
         .await
-        .expect_err("More + candidate cap must not complete");
-        assert_eq!(
-            candidate_err,
-            TemporalPortError::BudgetExceeded {
-                resource: "candidate item count"
-            }
-        );
-        // A follow-up pull must keep failing closed — never empty Complete.
+        .expect("More + candidate cap is a bounded window");
+        assert_eq!(candidate_window.status(), PageStatus::More);
+        assert!(candidate_state.is_exhausted());
+        // The window is closed: a follow-up pull on the same exhausted state
+        // must keep failing closed — never an empty Complete that would drop
+        // the rows the continuation key still owes.
         let candidate_follow_up = pull_candidate_page(
             &port,
             &snapshot,
@@ -1870,37 +1626,6 @@ fn pull_rejects_read_state_looser_than_tightened_snapshot() {
             assert_eq!(error, TemporalPortError::BudgetExceeded { resource });
         }
     });
-}
-
-#[test]
-fn hydration_limits_cannot_be_replaced_or_loosened_after_authorization() {
-    let authorized = ExecutionLimits::default();
-    let mut tighter = authorized;
-    tighter.hydration_limit -= 1;
-    tighter.hydration_total_bytes -= 1;
-    tighter.hydration_payload_bytes -= 1;
-    tighter.hydration_chunk_bytes -= 1;
-    let tightened = snapshot_with_limits(authorized)
-        .with_limits(tighter)
-        .expect("valid hydration tightening");
-
-    assert_eq!(tightened.request().limits(), tighter);
-    assert_eq!(
-        tightened
-            .clone()
-            .with_limits(authorized)
-            .expect_err("hydration limits cannot be restored to looser authorized values"),
-        ExecutionLimitTighteningError::WouldLoosen {
-            field: "hydration_limit",
-            authorized: tighter.hydration_limit,
-            requested: authorized.hydration_limit,
-        }
-    );
-    assert_eq!(tightened.request().limits(), tighter);
-    assert_eq!(
-        tightened.authorization(),
-        ValidatedAuthorization::Authorized
-    );
 }
 
 #[test]

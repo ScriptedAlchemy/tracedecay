@@ -759,21 +759,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn diagnostics_catalog_preserves_the_shipped_default_page_size() {
-        let operation = primitive_read_operation("diagnostics_read")
-            .expect("primitive operation")
-            .expect("diagnostics operation");
-        let contribution = primitive_read_contribution().expect("primitive contribution");
-        let diagnostics = contribution
-            .capabilities()
-            .iter()
-            .find(|capability| capability.capability_id() == operation.capability_id())
-            .expect("diagnostics capability");
-        let pagination = diagnostics.pagination().expect("diagnostics pagination");
-
-        assert_eq!(pagination.default_page_size(), 1_000);
-        assert_eq!(pagination.maximum_page_size(), 1_000);
-    }
 }

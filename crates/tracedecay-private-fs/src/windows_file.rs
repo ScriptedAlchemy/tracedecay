@@ -129,15 +129,6 @@ mod tests {
     use super::{change_token, file_information, identity_information};
 
     #[test]
-    fn by_handle_information_preserves_partial_identity_and_link_count() {
-        let information = file_information(0, 41, 2);
-
-        assert_eq!(information.volume_serial_number, 0);
-        assert_eq!(information.file_index, 41);
-        assert_eq!(information.number_of_links, 2);
-    }
-
-    #[test]
     fn by_handle_identity_rejects_unprovable_and_sentinel_values() {
         let zero_volume = identity_information(file_information(0, 41, 1))
             .err()

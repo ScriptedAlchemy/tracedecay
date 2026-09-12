@@ -66,13 +66,13 @@ use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
     ExactLaneRetriever,
 };
-use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
     CodeLexicalArtifactWriterRevisionV1, CodeLexicalProjectionMetadataV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
 };
+use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::{
     QUERY_EXACT_RULE_REVISION_V1, QUERY_LEXICAL_PROFILE_REVISION_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
     QUERY_NORMALIZATION_REVISION_V1, QUERY_SANITIZER_REVISION_V1, RawRetrievalRequestV1,

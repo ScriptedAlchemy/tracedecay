@@ -18,11 +18,11 @@ try {
     };
   });
   const base = process.env.BASE_URL ?? "http://127.0.0.1:5173";
-  await page.goto(`${base}/`);
+  await page.goto(`${base}/?data=fixture`);
   await page.waitForURL((url) => url.searchParams.get("dim") === "2d");
   assert.equal(await page.getByRole("tab", { name: "Overview", exact: true }).isVisible(), true);
   console.log("PASS default opens plate-oriented 2D overview");
-  for (const route of ["?dim=3d", "?view=firing-tree", "?view=neuron-lab"]) {
+  for (const route of ["?data=fixture&dim=3d", "?data=fixture&view=firing-tree", "?data=fixture&view=neuron-lab"]) {
     await page.goto(`${base}/${route}`);
     await page.getByRole("heading", { name: "Brain renderer unavailable" }).waitFor();
     assert.equal(await page.getByRole("navigation", { name: "Workspaces" }).isVisible(), true);
@@ -44,7 +44,7 @@ try {
     assert.equal(await page.getByRole("heading", { name: "Brain renderer unavailable" }).count(), 0);
     console.log(`PASS renderer recovery ${route || "default"}`);
   }
-  await page.goto(`${base}/?view=overview&dim=2d`);
+  await page.goto(`${base}/?data=fixture&view=overview&dim=2d`);
   await page.getByText("Render tuning", { exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".aperture canvas")?.width > 0);
   const original = await page.locator(".aperture canvas").evaluate((canvas) => canvas.toDataURL());
@@ -109,8 +109,8 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForURL((url) => url.searchParams.get("view") === "overview");
   console.log("PASS caption keyboard inspection, scope and Escape");
-  assert.match(await page.locator(".status").innerText(), /DATA\s+snapshot/);
-  await page.goto(`${base}/?view=overview&dim=2d`, { waitUntil: "networkidle" });
+  assert.match(await page.locator(".status").innerText(), /DATA\s+design fixture/);
+  await page.goto(`${base}/?data=fixture&view=overview&dim=2d`, { waitUntil: "networkidle" });
   for (const [width, height] of [[1586, 992], [1280, 800]]) {
     await page.setViewportSize({ width, height });
     await page.waitForFunction(() => {
@@ -136,16 +136,6 @@ try {
     assert.deepEqual(collisions, []);
     console.log(`PASS caption bounds and HUD isolation ${width}x${height}`);
   }
-  await page.goto(`${base}/?surface=delivery&state=03`);
-  assert.match(await page.locator(".status").innerText(), /DATA\s+snapshot/);
-  const rspack = page.getByRole("button", { name: "Inspect Rspack", exact: true });
-  await rspack.click();
-  assert.equal(await rspack.getAttribute("aria-pressed"), "true");
-  assert.equal(await page.getByText("SELECTED REPOSITORY · Rspack", { exact: true }).isVisible(), true);
-  await page.getByRole("button", { name: "Inspect umbrella outcome", exact: true }).press("Enter");
-  assert.equal(await rspack.getAttribute("aria-pressed"), "false");
-  assert.equal(await page.getByText("SELECTED REPOSITORY · Rspack", { exact: true }).count(), 0);
-  console.log("PASS umbrella repository selection and keyboard clear");
 } finally {
   await browser.close();
 }

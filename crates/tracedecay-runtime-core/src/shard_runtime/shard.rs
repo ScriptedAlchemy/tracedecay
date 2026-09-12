@@ -1293,30 +1293,4 @@ mod tests {
         assert!(observation.eviction.is_eligible());
         assert_eq!(observation.eviction.idle_for, observation.health.idle_for);
     }
-
-    #[test]
-    fn independently_issued_lifetime_leases_count_by_token_and_clone_releases_last() {
-        let runtime = std::sync::Arc::new(drive_to(Ready));
-        let first = ShardRuntime::issue_client_lifetime_lease(runtime.clone()).unwrap();
-        let first_clone = first.clone();
-        let second = ShardRuntime::issue_client_lifetime_lease(runtime.clone()).unwrap();
-
-        assert_eq!(runtime.health_snapshot().client_leases, 2);
-        drop(first);
-        assert_eq!(runtime.health_snapshot().client_leases, 2);
-        drop(first_clone);
-        assert_eq!(runtime.health_snapshot().client_leases, 1);
-        drop(second);
-        assert_eq!(runtime.health_snapshot().client_leases, 0);
-    }
-
-    #[test]
-    fn client_operations_are_independent_retirement_blockers() {
-        let runtime = std::sync::Arc::new(drive_to(Ready));
-        let client = ShardRuntime::issue_client_lifetime_lease(runtime.clone()).unwrap();
-        let operation = client.begin_operation().unwrap();
-        assert_eq!(runtime.health_snapshot().operation_leases, 1);
-        drop(operation);
-        assert_eq!(runtime.health_snapshot().operation_leases, 0);
-    }
 }

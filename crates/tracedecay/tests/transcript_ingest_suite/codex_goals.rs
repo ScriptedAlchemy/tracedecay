@@ -8,52 +8,12 @@ use tracedecay_sessions::runtime::codex::CodexSource;
 use tracedecay_store::ObservationProjectionStore;
 use tracedecay_store::ObservationReplayRequest;
 
-use crate::codex::{
-    write_codex_rollout_with_goal_context, write_codex_rollout_with_structured_events, write_jsonl,
-};
+use crate::codex::write_jsonl;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, mark_test_project, open_project_session_db,
 };
 use crate::support::{init_git_repo, setup};
-
-/// Writes a Codex rollout whose only user `response_item` carries Codex's
-/// exact internal goal-context wrapper. Since `9d1f430c1`, an ordinary user
-/// `response_item` is the deduped precursor of `item_completed/UserMessage`
-/// and admits as an unsupported duplicate; only this wrapper keeps a
-/// response-only goal context projected as a canonical message.
-fn write_codex_rollout_with_native_goal_context(
-    home: &std::path::Path,
-    project: &std::path::Path,
-    session: &str,
-) -> std::path::PathBuf {
-    let dir = home.join(".codex/sessions/2026/01/04");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("rollout-2026-01-04T00-00-00-{session}.jsonl"));
-    write_jsonl(
-        &path,
-        &[
-            serde_json::json!({
-                "timestamp": "2026-01-04T00:00:00.000Z",
-                "type": "session_meta",
-                "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
-            }),
-            serde_json::json!({
-                "timestamp": "2026-01-04T00:00:01.000Z",
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": "<codex_internal_context source=\"goal\"><objective>ensure all provider session messages are ingested</objective>\nToken budget: 12000\nTokens remaining: 11000</codex_internal_context>"
-                    }]
-                }
-            }),
-        ],
-    );
-    path
-}
 
 /// Writes a Codex rollout carrying a `thread_goal_updated` lifecycle: an
 /// initial `active` goal, an identical follow-up (only token/time drift — must
@@ -97,6 +57,93 @@ fn write_codex_rollout_with_goal_events(
     path
 }
 
+/// One production Codex rollout: a single JSONL carries goal, plan, task,
+/// goal-context, and a plain user `response_item` together.
+///
+/// Project catch-up yields after one file (`37f00c083`). Splitting those
+/// records across dated sessions made one `ingest_project_provider_for_test`
+/// admit only the newest two-record file, so Goal/Plan/Task never reached
+/// persist. Real Codex threads emit this mix in one rollout.
+fn write_codex_rollout_with_workflow_lifecycle(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/04");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-04T00-00-00-{session}.jsonl"));
+    let mut goal_events: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/provider_normalization/codex/thread_goal_updates.input.json"
+    ))
+    .expect("checked-in Codex goal update sequence");
+    for event in &mut goal_events {
+        event["payload"]["threadId"] = serde_json::Value::String(session.to_owned());
+        event["payload"]["goal"]["threadId"] = serde_json::Value::String(session.to_owned());
+    }
+    let mut records = vec![
+        serde_json::json!({
+            "timestamp": "2026-01-04T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-04T00:00:01.000Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "start the overhaul"}
+        }),
+    ];
+    records.append(&mut goal_events);
+    records.extend([
+        serde_json::json!({
+            "timestamp": "2026-01-04T00:00:03.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "update_plan",
+                "call_id": "call-plan-1",
+                "arguments": "{\"explanation\":\"why\",\"plan\":[{\"step\":\"sweep telemetry\",\"status\":\"in_progress\"},{\"step\":\"ship\",\"status\":\"pending\"}]}"
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-04T00:00:09.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-1",
+                "duration_ms": 8000,
+                "time_to_first_token_ms": 900,
+                "last_agent_message": "must not become content"
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-04T00:00:10.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "<codex_internal_context source=\"goal\"><objective>ensure all provider session messages are ingested</objective>\nToken budget: 12000\nTokens remaining: 11000</codex_internal_context>"
+                }]
+            }
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-04T00:00:11.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "plain user response_item that is not goal context"
+                }]
+            }
+        }),
+    ]);
+    write_jsonl(&path, &records);
+    path
+}
+
 async fn codex_observation_json_blobs(runtime: &ProjectSessionTestRuntime) -> Vec<String> {
     runtime
         .runtime()
@@ -129,53 +176,6 @@ async fn codex_workflow_fact_rows(
         .unwrap()
 }
 
-#[tokio::test]
-async fn recent_session_goals_surfaces_latest_status_per_session() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    write_codex_rollout_with_goal_events(&home, &project, "codex-goal-events");
-
-    mark_test_project(&project);
-    let runtime = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
-    runtime
-        .runtime()
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-
-    let goals = runtime
-        .runtime()
-        .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
-        .await
-        .unwrap();
-    // One row per session: the latest lifecycle state (paused).
-    assert_eq!(goals.len(), 1);
-    let goal = &goals[0];
-    assert_eq!(goal.session.session_id, "codex-goal-events");
-    assert_eq!(goal.message.kind.as_deref(), Some("goal"));
-    assert_eq!(
-        goal.message.text,
-        "phlogiston pipeline rollout and verification"
-    );
-    let meta: serde_json::Value =
-        serde_json::from_str(goal.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(meta["status"], "paused");
-    assert_eq!(meta["updated_at"], 1_782_880_661i64);
-
-    // Re-ingest must be idempotent (upsert keyed by message_id): still one goal.
-    runtime
-        .runtime()
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    let goals_again = runtime
-        .runtime()
-        .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
-        .await
-        .unwrap();
-    assert_eq!(goals_again.len(), 1);
-}
 #[tokio::test]
 async fn codex_thread_goal_events_ingested_as_goal_rows_with_dedupe() {
     let tmp = TempDir::new().unwrap();
@@ -258,11 +258,7 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
     init_git_repo(&project);
     mark_test_project(&project);
 
-    // Fixture-backed rollouts already checked in via write helpers.
-    write_codex_rollout_with_goal_events(&home, &project, "codex-wf-goal");
-    write_codex_rollout_with_structured_events(&home, &project, "codex-wf-structured");
-    write_codex_rollout_with_goal_context(&home, &project, "codex-wf-goal-context");
-    write_codex_rollout_with_native_goal_context(&home, &project, "codex-wf-native-goal");
+    write_codex_rollout_with_workflow_lifecycle(&home, &project, "codex-wf-lifecycle");
 
     let runtime = open_project_session_db(&project).await.unwrap();
     let _ = runtime

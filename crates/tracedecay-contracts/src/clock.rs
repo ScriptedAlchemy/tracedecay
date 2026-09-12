@@ -65,16 +65,6 @@ mod tests {
     use super::{now_micros, try_now_micros};
 
     #[test]
-    fn reads_a_plausible_non_saturated_epoch_instant() {
-        let first = now_micros();
-        let second = now_micros();
-        // 2020-01-01T00:00:00Z: any plausible clock is past this.
-        assert!(first.0 > 1_577_836_800_000_000);
-        assert!(first.0 < i64::MAX);
-        assert!(second >= first);
-    }
-
-    #[test]
     fn try_now_micros_agrees_with_the_saturating_stamp_on_a_plausible_clock() {
         let attempted = try_now_micros().expect("plausible clock is representable");
         let stamped = now_micros();

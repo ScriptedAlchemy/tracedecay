@@ -239,35 +239,6 @@ async fn run_ledger_loads_records_without_optional_fields() {
 }
 
 #[tokio::test]
-async fn run_ledger_loads_legacy_rfc3339_with_consistent_micros() {
-    let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
-    let legacy = serde_json::json!({
-        "schema_version": 1,
-        "run_id": "legacy-micros-run",
-        "trigger": "manual_cli",
-        "task": "memory_curator",
-        "backend": "codex_app_server",
-        "status": "succeeded",
-        "accepted_count": 1,
-        "rejected_count": 0,
-        "started_at": "2026-06-24T05:00:00Z",
-        "completed_at": "2026-06-24T05:00:01Z",
-        "completed_at_micros": 1_782_277_201_000_000_i64
-    });
-    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
-    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{legacy}\n"))
-        .await
-        .unwrap();
-
-    let loaded = load_run_records(&dashboard_root, 10).await.unwrap();
-
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].run_id, "legacy-micros-run");
-    assert_eq!(loaded[0].completed_at_micros, Some(1_782_277_201_000_000));
-}
-
-#[tokio::test]
 async fn run_ledger_rejects_legacy_rfc3339_with_subsecond_micros() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");

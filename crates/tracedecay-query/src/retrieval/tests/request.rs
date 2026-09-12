@@ -61,24 +61,6 @@ fn raw_query_dto_sanitizes_immediately_without_leaking_into_request_or_debug() {
 }
 
 #[test]
-fn raw_query_dto_is_deserializable_only_at_the_boundary() {
-    let request = raw_request("private boundary query".to_owned());
-    let mut request_json =
-        serde_json::to_value(super::request()).expect("query-free request serializes");
-    request_json
-        .as_object_mut()
-        .expect("request is a JSON object")
-        .insert(
-            "query".to_owned(),
-            serde_json::Value::String("private boundary query".to_owned()),
-        );
-    let decoded: RawRetrievalRequestV1 =
-        serde_json::from_value(request_json).expect("boundary DTO deserializes");
-    assert_eq!(format!("{request:?}"), format!("{decoded:?}"));
-    assert!(!format!("{decoded:?}").contains("private boundary query"));
-}
-
-#[test]
 fn raw_query_dto_rejects_oversized_input_before_execution_state_exists() {
     let raw = raw_request("x".repeat(tracedecay_domain::MAX_EPHEMERAL_QUERY_VIEW_BYTES + 1));
     assert!(

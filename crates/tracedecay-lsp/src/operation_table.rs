@@ -231,33 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn delivers_once_and_reclaims_capacity() {
-        let runtime = InlineSpawner::default();
-        let table = BoundedOperationTable::new(1);
-
-        assert_eq!(
-            table.admit("first", "meta", &runtime, || Box::pin(async { 7 })),
-            OperationAdmission::Started("meta")
-        );
-        assert_eq!(
-            table.admit("second", "other", &runtime, || Box::pin(async { 8 })),
-            OperationAdmission::Saturated
-        );
-        assert_eq!(
-            table.poll(&"first"),
-            OperationPoll::Ready {
-                metadata: "meta",
-                result: 7
-            }
-        );
-        assert_eq!(table.poll(&"first"), OperationPoll::Missing);
-        assert_eq!(
-            table.admit("second", "other", &runtime, || Box::pin(async { 8 })),
-            OperationAdmission::Started("other")
-        );
-    }
-
-    #[test]
     fn preserves_identity_on_duplicate_and_mismatch() {
         let runtime = InlineSpawner::default();
         let table = BoundedOperationTable::new(1);

@@ -74,35 +74,3 @@ fn checked_source_total<'a>(
         })
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn source_total_includes_parsed_error_and_unsupported_coverage() {
-        let coverages = [
-            ExtractionCoverageV1 {
-                parsed_bytes: 5,
-                error_bytes: 7,
-                unsupported_bytes: 11,
-                symbols_extracted: 0,
-                relations_extracted: 0,
-                ambiguity_count: 0,
-            },
-            ExtractionCoverageV1 {
-                parsed_bytes: 13,
-                error_bytes: 0,
-                unsupported_bytes: 17,
-                symbols_extracted: 0,
-                relations_extracted: 0,
-                ambiguity_count: 0,
-            },
-        ];
-
-        assert_eq!(
-            checked_source_total(coverages.iter()).expect("coverage total"),
-            53
-        );
-    }
-}

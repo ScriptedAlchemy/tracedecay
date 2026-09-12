@@ -15,7 +15,7 @@ try {
   await page.locator('.journey-nav-entry').first().waitFor();
   const rows = await page.locator('.journey-nav-entry').count();
   assert.ok(rows < 30 && rows > 0, '808 identities must not become 808 DOM navigation rows');
-  assert.match(await page.locator('.loom-head').innerText(), /693 CAPTURED AGENT IDS.*808 SESSIONS/s);
+  assert.match(await page.locator('.loom-head').innerText(), /693 UNIQUE CAPTURED AGENT IDS.*808 SESSIONS/s);
   assert.ok(await page.locator('.journey-group').count() < 30, 'Agent zoom must preserve aggregation until a neighborhood is selected');
   await page.locator('.journey-nav-entry .loom-nav-row').first().focus();
   await page.keyboard.press('End');

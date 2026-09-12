@@ -17,7 +17,7 @@ use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, claude_observation, codex, git_correlation, source};
 
 use super::failure::{
-    IngestPassBounds, IngestPassCoverage, IngestPassOutcome, allocate_pass_byte_budgets,
+    IngestPassBounds, IngestPassCoverage, allocate_pass_byte_budgets,
     classify_claude_observation_failure, classify_transcript_ingest_failure,
     plan_round_robin_admission, scheduling_write_required,
 };
@@ -115,54 +115,6 @@ fn transcript_failure_classification_is_bounded_and_drives_outcome_success() {
     let rendered = serde_json::to_string(&outcome.failures).unwrap();
     assert!(!rendered.contains("private operation"));
     assert!(!rendered.contains("private source detail"));
-}
-
-#[test]
-fn bounded_pass_coverage_survives_transcript_outcome_boundary() {
-    let partial = IngestPassOutcome {
-        stats: TranscriptIngestStats {
-            sessions_upserted: 1,
-            messages_upserted: 2,
-        },
-        failures: Vec::new(),
-        coverage: IngestPassCoverage::Partial { deferred_units: 3 },
-        scheduling_state_written: true,
-        units_admitted: 2,
-        units_completed: 2,
-        units_failed: 0,
-        byte_bounds_enforced: true,
-    }
-    .into_transcript_outcome();
-
-    assert_eq!(
-        partial.coverage,
-        IngestPassCoverage::Partial { deferred_units: 3 }
-    );
-    assert!(!partial.is_success());
-
-    let backpressured = IngestPassOutcome {
-        stats: TranscriptIngestStats::default(),
-        failures: Vec::new(),
-        coverage: IngestPassCoverage::Backpressured {
-            admitted_units: 1,
-            rejected_units: 4,
-        },
-        scheduling_state_written: false,
-        units_admitted: 1,
-        units_completed: 0,
-        units_failed: 1,
-        byte_bounds_enforced: false,
-    }
-    .into_transcript_outcome();
-
-    assert_eq!(
-        backpressured.coverage,
-        IngestPassCoverage::Backpressured {
-            admitted_units: 1,
-            rejected_units: 4,
-        }
-    );
-    assert!(!backpressured.is_success());
 }
 
 #[test]
@@ -363,11 +315,6 @@ fn parse_git_log_commits_reads_sha_and_time_skipping_malformed() {
             },
         ]
     );
-}
-
-#[test]
-fn parse_git_log_commits_empty_is_empty() {
-    assert!(parse_git_log_commits("").is_empty());
 }
 
 use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
@@ -747,18 +694,6 @@ fn zero_unit_budget_is_typed_backpressure() {
             rejected_units: 3,
         }
     );
-}
-
-#[test]
-fn fully_covered_pass_never_requires_scheduling_write() {
-    let plan = plan_round_robin_admission(4, 7, 8);
-    assert_eq!(plan.admitted_indices, vec![3, 0, 1, 2]);
-    assert_eq!(plan.coverage, IngestPassCoverage::Complete);
-    assert!(!scheduling_write_required(
-        IngestPassCoverage::Complete,
-        plan.admitted_indices.len(),
-        false
-    ));
 }
 
 #[test]

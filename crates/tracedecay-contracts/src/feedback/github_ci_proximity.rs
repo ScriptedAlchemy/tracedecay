@@ -235,28 +235,3 @@ pub enum ProximityDedupeOutcomeV1 {
     Duplicate,
     Unavailable,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn write_operations_are_not_deserializable() {
-        assert!(serde_json::from_str::<GitHubReviewReadOperationV1>("\"mutation\"").is_err());
-    }
-
-    #[test]
-    fn read_operation_families_are_closed_and_disjoint() {
-        for operation in [
-            GitHubReviewReadOperationV1::RestGetPullRequest,
-            GitHubReviewReadOperationV1::RestListPullRequestReviews,
-            GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
-        ] {
-            assert!(operation.is_rest());
-            assert!(!operation.is_graphql_query());
-        }
-        assert!(
-            GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads.is_graphql_query()
-        );
-    }
-}

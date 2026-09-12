@@ -12,7 +12,6 @@ where
 {
     T::try_from(value.to_owned()).expect("valid fixture identity")
 }
-
 fn digest(byte: char) -> String {
     format!("sha256:{}", byte.to_string().repeat(64))
 }

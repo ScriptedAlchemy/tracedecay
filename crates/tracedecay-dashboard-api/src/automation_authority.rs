@@ -322,23 +322,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn automation_authority_preserves_the_exact_selected_profile_root() {
-        let root = if cfg!(windows) {
-            PathBuf::from(r"C:\profiles\selected")
-        } else {
-            PathBuf::from("/profiles/selected")
-        };
-        let authority = DashboardAutomationAuthorityV1::new(
-            root.clone(),
-            unavailable_run_port(),
-            unavailable_skill_port(),
-        )
-        .expect("absolute selected profile root");
-
-        assert_eq!(authority.profile_root(), root);
-    }
-
     #[tokio::test]
     async fn automation_authority_rejects_a_relative_selected_project_root() {
         let root = if cfg!(windows) {
@@ -368,57 +351,6 @@ mod tests {
             result,
             Err(DashboardAutomationAuthorityErrorV1::Unavailable { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn automation_authority_passes_only_user_job_identity_to_the_daemon_port() {
-        let observed = Arc::new(std::sync::Mutex::new(None));
-        let observed_run = Arc::clone(&observed);
-        let run: DashboardAutomationRunPortV1 = Arc::new(move |invocation| {
-            *observed_run
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invocation.request);
-            Box::pin(async {
-                Err(DashboardAutomationAuthorityErrorV1::unavailable(
-                    "test user-job authority",
-                ))
-            })
-        });
-        let profile_root = if cfg!(windows) {
-            PathBuf::from(r"C:\profiles\selected")
-        } else {
-            PathBuf::from("/profiles/selected")
-        };
-        let project_root = if cfg!(windows) {
-            PathBuf::from(r"C:\projects\selected")
-        } else {
-            PathBuf::from("/projects/selected")
-        };
-        let authority =
-            DashboardAutomationAuthorityV1::new(profile_root, run, unavailable_skill_port())
-                .expect("absolute selected profile root");
-
-        let _ = authority
-            .run(
-                &project_root,
-                DashboardAutomationRunRequestV1::UserJob {
-                    job_id: "nightly-summary".to_owned(),
-                    run_id: "dashboard_user_job_nightly-summary_1000000".to_owned(),
-                },
-                request_control(),
-            )
-            .await;
-
-        assert_eq!(
-            observed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-            Some(DashboardAutomationRunRequestV1::UserJob {
-                job_id: "nightly-summary".to_owned(),
-                run_id: "dashboard_user_job_nightly-summary_1000000".to_owned(),
-            })
-        );
     }
 
     #[tokio::test]

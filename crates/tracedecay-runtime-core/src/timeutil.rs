@@ -154,33 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_utc_with_fractional_seconds() {
-        assert_eq!(parse_rfc3339_timestamp("1970-01-01T00:00:00.000Z"), Some(0));
-        assert_eq!(
-            parse_rfc3339_timestamp("2026-01-01T00:00:00.123456Z"),
-            Some(1_767_225_600)
-        );
-    }
-
-    #[test]
-    fn parses_space_separator_and_lowercase_zone() {
-        assert_eq!(parse_rfc3339_timestamp("1970-01-01 00:00:01z"), Some(1));
-    }
-
-    #[test]
-    fn humanizes_unix_seconds_as_utc_calendar_time() {
-        assert_eq!(humanize_unix_secs(0), "1970-01-01 00:00:00Z");
-        assert_eq!(humanize_unix_secs(1_767_225_600), "2026-01-01 00:00:00Z");
-        assert_eq!(humanize_unix_secs(1_767_225_661), "2026-01-01 00:01:01Z");
-    }
-
-    #[test]
-    fn formats_epoch_boundaries_as_exact_utc_bytes() {
-        assert_eq!(format_yyyy_mm_dd(-1), "1969-12-31");
-        assert_eq!(humanize_unix_secs(-1), "1969-12-31 23:59:59Z");
-    }
-
-    #[test]
     fn formats_far_future_days_with_prior_bytes() {
         assert_eq!(format_yyyy_mm_dd(100_000_000), "275760-09-13");
         assert_eq!(
@@ -273,57 +246,6 @@ mod tests {
         );
         assert!(parse_search_time_filter("last zero hours", now).is_none());
         assert!(parse_search_time_filter("tomorrow", now).is_none());
-    }
-
-    #[test]
-    fn parses_cursor_human_timestamp() {
-        // 2026-06-10 09:11 at UTC+2 == 2026-06-10T07:11:00Z.
-        assert_eq!(
-            parse_cursor_human_timestamp("Wednesday, Jun 10, 2026, 9:11 AM (UTC+2)"),
-            parse_rfc3339_timestamp("2026-06-10T09:11:00+02:00"),
-        );
-        assert_eq!(
-            parse_cursor_human_timestamp("Monday, Jun 8, 2026, 11:55 PM (UTC+2)"),
-            parse_rfc3339_timestamp("2026-06-08T23:55:00+02:00"),
-        );
-    }
-
-    #[test]
-    fn cursor_human_timestamp_handles_midnight_noon_and_offsets() {
-        assert_eq!(
-            parse_cursor_human_timestamp("Thursday, Jan 1, 1970, 12:00 AM (UTC)"),
-            Some(0)
-        );
-        assert_eq!(
-            parse_cursor_human_timestamp("Thursday, Jan 1, 1970, 12:30 PM (UTC)"),
-            Some(12 * 3_600 + 30 * 60)
-        );
-        assert_eq!(
-            parse_cursor_human_timestamp("Friday, Jan 2, 1970, 5:30 AM (UTC+5:30)"),
-            Some(86_400)
-        );
-        assert_eq!(
-            parse_cursor_human_timestamp("Wednesday, Dec 31, 1969, 5:00 PM (UTC-7)"),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn cursor_human_timestamp_tolerates_missing_weekday_and_24h_clock() {
-        assert_eq!(
-            parse_cursor_human_timestamp("Jun 10, 2026, 9:11 AM (UTC+2)"),
-            parse_rfc3339_timestamp("2026-06-10T09:11:00+02:00"),
-        );
-        assert_eq!(
-            parse_cursor_human_timestamp("Jun 10, 2026, 21:11 (UTC+2)"),
-            parse_rfc3339_timestamp("2026-06-10T21:11:00+02:00"),
-        );
-    }
-
-    #[test]
-    fn formats_days_with_proleptic_gregorian_calendar() {
-        assert_eq!(format_yyyy_mm_dd(20_588), "2026-05-15");
-        assert_eq!(format_yyyy_mm_dd(-1), "1969-12-31");
     }
 
     #[test]

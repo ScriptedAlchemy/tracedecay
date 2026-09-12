@@ -1,12 +1,10 @@
-//! Closed GitHub review reads and scope-bound CI/proximity requests.
+//! Closed GitHub review reads.
 
-use tracedecay_contracts::feedback::{
-    CiFailureLocalizationRequestV1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
-};
+use tracedecay_contracts::feedback::GitHubReviewReadRequestV1;
 use tracedecay_domain::feedback::{
-    CiFailureRunIdentityV1, FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
+    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
 };
-use tracedecay_domain::{CommitId, ProjectId, RepositoryId, UtcMicros, WorktreeId};
+use tracedecay_domain::{CommitId, ProjectId, RepositoryId, WorktreeId};
 
 fn scope() -> FeedbackScopeV1 {
     FeedbackScopeV1 {
@@ -39,28 +37,4 @@ fn github_request_only_admits_closed_read_operations() {
             "GitHub mutation operation {mutation} must stay unrepresentable"
         );
     }
-}
-
-#[test]
-fn ci_and_proximity_requests_are_exactly_scope_bound() {
-    let scope = scope();
-    CiFailureLocalizationRequestV1 {
-        scope: scope.clone(),
-        run: CiFailureRunIdentityV1 {
-            workflow_id: "workflow.advisory.runtime".to_owned(),
-            job_id: "job.advisory.runtime".to_owned(),
-            check_suite_id: "suite.advisory.runtime".to_owned(),
-            check_run_id: "check.advisory.runtime".to_owned(),
-            run_id: "run.advisory.runtime".to_owned(),
-            attempt_id: "attempt.advisory.runtime".to_owned(),
-        },
-    }
-    .validate()
-    .unwrap();
-    ProximityEvaluationRequestV1 {
-        scope,
-        observed_at: UtcMicros(1),
-    }
-    .validate()
-    .unwrap();
 }

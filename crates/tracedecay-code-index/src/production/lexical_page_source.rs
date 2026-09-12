@@ -974,6 +974,16 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         &self.manifest
     }
 
+    /// Compare every owner-controlled input represented by the bounded
+    /// manifest and snapshot. Chunk policy census still requires the full
+    /// generation's chunk corpus.
+    pub fn manifest_compatibility_with(
+        &self,
+        config: &CodeIndexProductionConfigV1,
+    ) -> CodeIndexGenerationCompatibilityV1 {
+        CodeIndexGenerationCompatibilityV1::for_metadata(&self.manifest, &self.snapshot, config)
+    }
+
     pub fn source_commitments(
         &self,
     ) -> Result<&CodeGenerationSourceCommitmentsV1, CodeIndexProductionErrorV1> {
@@ -2184,10 +2194,6 @@ pub(super) struct SealedLexicalLayoutV1 {
     maximum_file_bytes: u64,
     manifest_range: Option<(u64, u64)>,
     snapshot_range: Option<(u64, u64)>,
-    #[cfg(test)]
-    structural_byte_visits: u64,
-    #[cfg(test)]
-    temporary_string_allocations: u64,
 }
 
 #[hotpath::measure(label = "code_index.restore.scan")]
@@ -2346,10 +2352,6 @@ struct LayoutScanner {
     captured_metadata_object: Option<(LayoutKey, u64, usize)>,
     manifest_range: Option<(u64, u64)>,
     snapshot_range: Option<(u64, u64)>,
-    #[cfg(test)]
-    structural_byte_visits: u64,
-    #[cfg(test)]
-    temporary_string_allocations: u64,
 }
 
 impl Default for LayoutScanner {
@@ -2380,10 +2382,6 @@ impl Default for LayoutScanner {
             captured_metadata_object: None,
             manifest_range: None,
             snapshot_range: None,
-            #[cfg(test)]
-            structural_byte_visits: 0,
-            #[cfg(test)]
-            temporary_string_allocations: 0,
         }
     }
 }
@@ -2464,10 +2462,6 @@ impl LayoutScanner {
     /// Only a key or the envelope state digest is retained, and both are
     /// capped at the scanner's existing 128-byte contract.
     fn observe_string_run(&mut self, bytes: &[u8]) {
-        #[cfg(test)]
-        {
-            self.structural_byte_visits = self.structural_byte_visits.saturating_add(1);
-        }
         let remaining = self.string.len().saturating_sub(self.string_len);
         let retained = remaining.min(bytes.len());
         let retained_end = self.string_len + retained;
@@ -2492,10 +2486,6 @@ impl LayoutScanner {
         byte: u8,
         offset: u64,
     ) -> Result<GenerationSpanEvent, CodeIndexProductionErrorV1> {
-        #[cfg(test)]
-        {
-            self.structural_byte_visits = self.structural_byte_visits.saturating_add(1);
-        }
         if self.in_string {
             if self.escaped {
                 self.escaped = false;
@@ -2507,11 +2497,6 @@ impl LayoutScanner {
                 b'"' => {
                     self.in_string = false;
                     if self.capture_state_digest {
-                        #[cfg(test)]
-                        {
-                            self.temporary_string_allocations =
-                                self.temporary_string_allocations.saturating_add(1);
-                        }
                         let value = String::from_utf8(self.string[..self.string_len].to_vec())
                             .map_err(|_| {
                                 CodeIndexProductionErrorV1::Contract(
@@ -2737,10 +2722,6 @@ impl LayoutScanner {
             maximum_file_bytes: self.maximum_file_bytes,
             manifest_range: self.manifest_range,
             snapshot_range: self.snapshot_range,
-            #[cfg(test)]
-            structural_byte_visits: self.structural_byte_visits,
-            #[cfg(test)]
-            temporary_string_allocations: self.temporary_string_allocations,
         })
     }
 }
@@ -2957,6 +2938,24 @@ fn admit_file_generation_artifacts(
     )
 }
 
+/// Serialize one retained page row through a reused staging buffer.
+///
+/// Every chunk, symbol display, and import row is kept for the page it lands
+/// in, and `serde_json::to_vec` reaches that length by doubling a fresh
+/// buffer: it churned one growing allocation per row and then retained up to
+/// the row's length again as unused capacity. Staging the bytes once and
+/// copying the exact slice keeps one allocation per row, sized to the row.
+fn serialize_page_row<T: serde::Serialize>(
+    value: &T,
+    staging: &mut Vec<u8>,
+    message: &'static str,
+) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+    staging.clear();
+    serde_json::to_writer(&mut *staging, value)
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(format!("{message}: {error}")))?;
+    Ok(staging.as_slice().to_vec())
+}
+
 fn admit_validated_file_parts(
     authority: &ReceiptBoundCodeFileAuthorityV1,
     extraction: &ExtractionBatchV1,
@@ -3016,29 +3015,25 @@ fn admit_validated_file_parts(
             {
                 let mut serialized_chunks = Vec::with_capacity(chunks.len());
                 let mut serialized_displays = Vec::with_capacity(chunks.len());
+                let mut staging = Vec::new();
                 for chunk in &chunks {
-                    serialized_chunks.push(serde_json::to_vec(chunk.chunk()).map_err(|error| {
-                        CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed lexical chunk serialization failed: {error}"
-                        ))
-                    })?);
+                    serialized_chunks.push(serialize_page_row(
+                        chunk.chunk(),
+                        &mut staging,
+                        "sealed lexical chunk serialization failed",
+                    )?);
                     let serialized_display =
                         match chunk.chunk().anchor.symbol_occurrence_id.as_ref() {
-                            Some(occurrence) => Some(
-                                serde_json::to_vec(symbol_displays.get(occurrence).ok_or_else(
-                                    || {
-                                        CodeIndexProductionErrorV1::Contract(
-                                            "sealed lexical symbol chunk has no parser-attested display identity"
-                                                .to_owned(),
-                                        )
-                                    },
-                                )?)
-                                .map_err(|error| {
-                                    CodeIndexProductionErrorV1::Contract(format!(
-                                        "sealed lexical symbol display serialization failed: {error}"
-                                    ))
+                            Some(occurrence) => Some(serialize_page_row(
+                                symbol_displays.get(occurrence).ok_or_else(|| {
+                                    CodeIndexProductionErrorV1::Contract(
+                                        "sealed lexical symbol chunk has no parser-attested display identity"
+                                            .to_owned(),
+                                    )
                                 })?,
-                            ),
+                                &mut staging,
+                                "sealed lexical symbol display serialization failed",
+                            )?),
                             None => None,
                         };
                     serialized_displays.push(serialized_display);
@@ -3046,11 +3041,11 @@ fn admit_validated_file_parts(
                 let serialized_imports = imports
                     .iter()
                     .map(|evidence| {
-                        serde_json::to_vec(evidence).map_err(|error| {
-                            CodeIndexProductionErrorV1::Contract(format!(
-                                "sealed lexical import serialization failed: {error}"
-                            ))
-                        })
+                        serialize_page_row(
+                            evidence,
+                            &mut staging,
+                            "sealed lexical import serialization failed",
+                        )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok::<_, CodeIndexProductionErrorV1>((

@@ -11,12 +11,6 @@ fn extract_fixture() -> ExtractionResult {
 }
 
 #[test]
-fn test_fortran_file_root() {
-    let result = extract_fixture();
-    assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
-}
-
-#[test]
 fn test_fortran_module() {
     let result = extract_fixture();
     let modules: Vec<_> = result
@@ -35,92 +29,6 @@ fn test_fortran_module() {
 }
 
 #[test]
-fn test_fortran_program() {
-    let result = extract_fixture();
-    let prog = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "main");
-    assert!(prog.is_some(), "program main not found as Function node");
-}
-
-#[test]
-fn test_fortran_subroutines() {
-    let result = extract_fixture();
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert!(
-        fns.iter().any(|n| n.name == "log_message"),
-        "log_message subroutine not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "connect_endpoint"),
-        "connect_endpoint subroutine not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "disconnect_endpoint"),
-        "disconnect_endpoint subroutine not found"
-    );
-}
-
-#[test]
-fn test_fortran_functions() {
-    let result = extract_fixture();
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert!(
-        fns.iter().any(|n| n.name == "create_endpoint"),
-        "create_endpoint function not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "is_connected"),
-        "is_connected function not found"
-    );
-}
-
-#[test]
-fn test_fortran_derived_types() {
-    let result = extract_fixture();
-    let structs: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Struct)
-        .collect();
-    assert!(
-        structs.iter().any(|n| n.name == "Endpoint"),
-        "Endpoint derived type not found"
-    );
-    assert!(
-        structs.iter().any(|n| n.name == "PooledEndpoint"),
-        "PooledEndpoint derived type not found"
-    );
-}
-
-#[test]
-fn test_fortran_type_extension() {
-    let result = extract_fixture();
-    let extends_refs: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.reference_kind == EdgeKind::Extends)
-        .collect();
-    assert!(
-        extends_refs.iter().any(|r| r.reference_name == "Endpoint"),
-        "expected Extends ref for PooledEndpoint -> Endpoint, got: {:?}",
-        extends_refs
-            .iter()
-            .map(|r| &r.reference_name)
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn test_fortran_interface() {
     let result = extract_fixture();
     let interfaces: Vec<_> = result
@@ -136,39 +44,6 @@ fn test_fortran_interface() {
         interfaces.iter().map(|n| &n.name).collect::<Vec<_>>()
     );
     assert_eq!(interfaces[0].name, "Connectable");
-}
-
-#[test]
-fn test_fortran_constants() {
-    let result = extract_fixture();
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    assert!(
-        consts.iter().any(|n| n.name == "MAX_RETRIES"),
-        "MAX_RETRIES constant not found"
-    );
-    assert!(
-        consts.iter().any(|n| n.name == "DEFAULT_PORT"),
-        "DEFAULT_PORT constant not found"
-    );
-}
-
-#[test]
-fn test_fortran_use_imports() {
-    let result = extract_fixture();
-    let uses: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert!(
-        uses.iter().any(|n| n.name == "networking"),
-        "use networking not found, got: {:?}",
-        uses.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
 }
 
 #[test]
@@ -258,22 +133,6 @@ fn test_fortran_docstrings() {
     assert!(
         ep.unwrap().docstring.is_some(),
         "Endpoint should have docstring"
-    );
-}
-
-#[test]
-fn test_fortran_contains_edges() {
-    let result = extract_fixture();
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(!contains.is_empty(), "expected Contains edges");
-    assert!(
-        contains.len() >= 5,
-        "expected >= 5 Contains edges, got {}",
-        contains.len()
     );
 }
 

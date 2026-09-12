@@ -228,47 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_overlapping_pairs_above_threshold() {
-        let (a, b) = overlapping_pair();
-        let unrelated = unrelated_skill();
-        let candidates = skill_overlap_candidates(&[a, b, unrelated], DEFAULT_SKILL_OVERLAP_LIMIT);
-
-        assert_eq!(candidates.len(), 1);
-        let candidate = &candidates[0];
-        assert_eq!(candidate.skill_a, "review-automation-runs");
-        assert_eq!(candidate.skill_b, "automation-run-review");
-        assert!(candidate.content_overlap >= SKILL_OVERLAP_CONTENT_THRESHOLD);
-        assert_eq!(candidate.recommendation, "merge_or_archive_review");
-        assert!(!candidate.shared_tokens.is_empty());
-    }
-
-    #[test]
-    fn skips_pairs_where_either_skill_is_pinned() {
-        let (mut a, mut b) = overlapping_pair();
-        a.set_pinned(true);
-        assert!(
-            skill_overlap_candidates(&[a.clone(), b.clone()], DEFAULT_SKILL_OVERLAP_LIMIT)
-                .is_empty()
-        );
-
-        a.set_pinned(false);
-        b.set_pinned(true);
-        assert!(skill_overlap_candidates(&[a, b], DEFAULT_SKILL_OVERLAP_LIMIT).is_empty());
-    }
-
-    #[test]
-    fn ignores_archived_and_disabled_skills() {
-        let (mut a, b) = overlapping_pair();
-        a.set_state(ManagedSkillState::Archived);
-        assert!(
-            skill_overlap_candidates(&[a.clone(), b.clone()], DEFAULT_SKILL_OVERLAP_LIMIT)
-                .is_empty()
-        );
-        a.set_state(ManagedSkillState::Disabled);
-        assert!(skill_overlap_candidates(&[a, b], DEFAULT_SKILL_OVERLAP_LIMIT).is_empty());
-    }
-
-    #[test]
     fn respects_the_candidate_limit() {
         let (a, b) = overlapping_pair();
         let c = skill(

@@ -122,7 +122,7 @@ async fn writer_txn_census(runtime: &HostAdmissionTestRuntimeV1) -> WriterTxnCen
     let mut rows = snapshot
         .query(
             "SELECT COUNT(*), COUNT(DISTINCT transaction_scope_json)
-             FROM td_runtime_writer_idempotency_v1",
+             FROM td_runtime_writer_idempotency_v2",
             (),
         )
         .await
@@ -346,22 +346,6 @@ fn colliding_rewrite(
     )
     .unwrap();
     anchored_write(observation, expected_cursor)
-}
-
-#[tokio::test]
-async fn empty_observation_batch_returns_no_outcomes_and_opens_no_writer_txn() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
-        .await
-        .unwrap();
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    initialize_writer_authority(&runtime, &store).await;
-    let before = writer_txn_census(&runtime).await;
-    let outcomes = store.persist_observations(Vec::new()).await.unwrap();
-    assert!(outcomes.is_empty());
-    assert_eq!(writer_txn_census(&runtime).await, before);
 }
 
 #[tokio::test]

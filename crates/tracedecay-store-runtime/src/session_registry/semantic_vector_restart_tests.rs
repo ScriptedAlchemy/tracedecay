@@ -287,6 +287,7 @@ fn admitted_embedding() -> tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
         runtime_backend: "semantic-vector-restart-runtime".to_owned(),
         runtime_build_revision: "semantic-vector-restart-runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions: 1,
         normalization: EmbeddingNormalizationV1::L2,
         metric: EmbeddingMetricV1::Cosine,

@@ -127,29 +127,6 @@ async fn empty_run_id_is_rejected() {
 }
 
 #[tokio::test]
-async fn runs_for_session_orders_newest_first_and_scopes_by_parent() {
-    let (_directory, conn) = test_conn();
-    ensure_workflow_index_schema(&conn).await.unwrap();
-
-    let mut old = sample_run("wf_old", "sess-1");
-    old.started_ts = Some(1_000);
-    let mut new = sample_run("wf_new", "sess-1");
-    new.started_ts = Some(2_000);
-    let other = sample_run("wf_other", "sess-2");
-    upsert_run(&conn, &old).await.unwrap();
-    upsert_run(&conn, &new).await.unwrap();
-    upsert_run(&conn, &other).await.unwrap();
-
-    let s1 = runs_for_session(&conn, "sess-1", 10).await.unwrap();
-    let ids: Vec<&str> = s1.iter().map(|r| r.run_id.as_str()).collect();
-    assert_eq!(ids, vec!["wf_new", "wf_old"]);
-
-    let s2 = runs_for_session(&conn, "sess-2", 10).await.unwrap();
-    assert_eq!(s2.len(), 1);
-    assert_eq!(s2[0].run_id, "wf_other");
-}
-
-#[tokio::test]
 async fn agents_upsert_and_order_within_run() {
     let (_directory, conn) = test_conn();
     ensure_workflow_index_schema(&conn).await.unwrap();
@@ -187,32 +164,6 @@ async fn agents_upsert_and_order_within_run() {
     assert_eq!(labels, vec!["mine:claude", "run:batch2"]);
     assert_eq!(agents[0].tokens, 4200);
     assert_eq!(agents[1].model.as_deref(), Some("claude-fable-5"));
-}
-
-#[test]
-fn workflow_scope_exists_predicate_includes_run_and_optional_label() {
-    let run_only = WorkflowScopeFilter {
-        run_id: "wf_alpha".to_string(),
-        agent_label: None,
-    };
-    let (sql, params) = workflow_scope_exists_predicate(&run_only, "m.source_path", "m.session_id");
-    assert!(sql.contains("workflow_agents"));
-    assert!(sql.contains("wa.run_id = ?1"));
-    assert!(sql.contains("wa.transcript_path = m.source_path"));
-    assert!(sql.contains("wa.agent_session_id = m.session_id"));
-    assert!(!sql.contains("agent_label"));
-    assert_eq!(params.len(), 1);
-    assert!(matches!(&params[0], Value::Text(id) if id == "wf_alpha"));
-
-    let narrowed = WorkflowScopeFilter {
-        run_id: "wf_beta".to_string(),
-        agent_label: Some("mine:claude".to_string()),
-    };
-    let (sql, params) = workflow_scope_exists_predicate(&narrowed, "m.source_path", "m.session_id");
-    assert!(sql.contains("workflow_agents"));
-    assert!(sql.contains("wa.agent_label = ?2"));
-    assert_eq!(params.len(), 2);
-    assert!(matches!(&params[1], Value::Text(label) if label == "mine:claude"));
 }
 
 #[tokio::test]

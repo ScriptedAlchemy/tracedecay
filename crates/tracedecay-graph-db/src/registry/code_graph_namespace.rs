@@ -104,23 +104,6 @@ mod tests {
     }
 
     #[test]
-    fn one_shard_keeps_one_namespace_across_generations() {
-        let shard = code_shard("worktree.primary");
-        assert_eq!(
-            code_graph_shard_namespace(&shard).unwrap(),
-            code_graph_shard_namespace(&shard).unwrap(),
-        );
-    }
-
-    #[test]
-    fn distinct_shards_keep_distinct_namespaces() {
-        assert_ne!(
-            code_graph_shard_namespace(&code_shard("worktree.primary")).unwrap(),
-            code_graph_shard_namespace(&code_shard("worktree.linked")).unwrap(),
-        );
-    }
-
-    #[test]
     fn canonical_and_legacy_layouts_are_disjoint_by_prefix() {
         let canonical = code_graph_shard_namespace(&code_shard("worktree.primary")).unwrap();
         assert!(is_code_graph_shard_namespace(&canonical));

@@ -5,10 +5,7 @@ use std::time::{Duration, Instant};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_memory::provider_usage::ProviderUsageCoverageV1;
 
-use crate::{
-    commands::daemon_tool_json,
-    cost_summary::{CostAdminPayload, CostSummaryPayload, TodayCostPayload},
-};
+use crate::{commands::daemon_tool_json, cost_summary::CostAdminPayload};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);

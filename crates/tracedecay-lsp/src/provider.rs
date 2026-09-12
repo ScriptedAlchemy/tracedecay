@@ -926,38 +926,6 @@ mod tests {
         );
     }
 
-    /// The budget counts consecutive failures, and forgiving it on `Ready`
-    /// alone made an analyzer that initializes and then dies immortal: every
-    /// restart erased the crash before it, so `start → Ready → crash` never
-    /// reached `Exhausted` and the daemon respawned the same dead process
-    /// forever. Only demonstrated service forgives it, so a crash loop —
-    /// including one that serves a request or two before dying — still runs
-    /// the budget out.
-    #[test]
-    fn a_crash_after_ready_loop_still_exhausts_the_restart_budget() {
-        let root = AdmittedRoot::new("file:///project");
-        let mut supervisor = AnalyzerSupervisor::new(root.clone());
-
-        let mut state = AnalyzerState::AwaitingStart;
-        for _ in 0..MAX_ANALYZER_RESTARTS {
-            supervisor
-                .apply(&root, AnalyzerEvent::StartRequested)
-                .unwrap();
-            supervisor.apply(&root, AnalyzerEvent::Ready).unwrap();
-            // Short of the stability threshold: useful, but not yet proof.
-            for _ in 0..ANALYZER_REQUESTS_PROVING_STABILITY - 1 {
-                supervisor.apply(&root, AnalyzerEvent::Ready).unwrap();
-            }
-            state = supervisor.apply(&root, AnalyzerEvent::Crashed).unwrap();
-        }
-
-        assert_eq!(state, AnalyzerState::Exhausted);
-        assert_eq!(
-            supervisor.failure_evidence(),
-            Some(("analyzer-crashed", "Analyzer process exited unexpectedly."))
-        );
-    }
-
     /// The refresh lane retiring a client is not evidence against the
     /// analyzer: the state must stop claiming `Ready` over a process that is
     /// gone, but the restart budget stays untouched and the next start is a

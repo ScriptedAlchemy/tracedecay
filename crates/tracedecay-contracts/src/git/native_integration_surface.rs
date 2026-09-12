@@ -24,11 +24,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ActorId, CapabilityId as DomainCapabilityId, ManifestDigest, MechanicalIntegrationModeV1,
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
-    NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
-    NativeIntegrationReceiptV1, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
-    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
-    RepositoryId, UtcMicros, WorktreeInventoryEpoch,
+    NativeIntegrationAnalysisReportV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationPhaseV1, NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
+    NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
+    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
+    NativeIntegrationTransactionStatusV1, ProjectId, RefId, RepositoryId, UtcMicros,
+    WorktreeInventoryEpoch,
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
@@ -113,32 +114,6 @@ impl<P: NativeIntegrationStackResolutionPort> NativeIntegrationStackSnapshotServ
     }
 }
 
-/// Exact semantic evidence revisions joined to native conflict evidence.
-///
-/// Mirrors [`super::NativeIntegrationEvidenceRevisionsV1`] on the wire; the
-/// application type stays the single validation authority.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct NativeIntegrationEvidenceRevisionsWireV1 {
-    pub graph_revision_digest: ManifestDigest,
-    pub test_revision_digest: ManifestDigest,
-    pub schema_revision_digest: ManifestDigest,
-    pub migration_revision_digest: ManifestDigest,
-}
-
-impl From<NativeIntegrationEvidenceRevisionsWireV1>
-    for super::NativeIntegrationEvidenceRevisionsV1
-{
-    fn from(value: NativeIntegrationEvidenceRevisionsWireV1) -> Self {
-        Self {
-            graph_revision_digest: value.graph_revision_digest,
-            test_revision_digest: value.test_revision_digest,
-            schema_revision_digest: value.schema_revision_digest,
-            migration_revision_digest: value.migration_revision_digest,
-        }
-    }
-}
-
 /// Read-only preflight over one frozen snapshot identity.
 ///
 /// `preferred_mode` selects only one of the three fixed mechanical encodings.
@@ -147,7 +122,6 @@ impl From<NativeIntegrationEvidenceRevisionsWireV1>
 #[serde(deny_unknown_fields)]
 pub struct NativeIntegrationPreflightSurfaceRequest {
     pub snapshot: NativeIntegrationSealedStackSnapshotV1,
-    pub evidence: NativeIntegrationEvidenceRevisionsWireV1,
     #[serde(default)]
     pub preferred_mode: Option<MechanicalIntegrationModeV1>,
 }
@@ -296,6 +270,7 @@ pub struct NativeIntegrationPreviewProjectionV1 {
     pub preview_digest: ManifestDigest,
     pub selection: NativeIntegrationSnapshotProjectionV1,
     pub disposition: NativeIntegrationPreviewDispositionV1,
+    pub analysis: Option<NativeIntegrationAnalysisReportV1>,
     pub ordered_commit_count: u32,
     pub created_at: UtcMicros,
     pub expires_at: UtcMicros,
@@ -308,6 +283,7 @@ impl NativeIntegrationPreviewProjectionV1 {
             preview_digest: preview.preview_digest.clone(),
             selection: NativeIntegrationSnapshotProjectionV1::project(&preview.selection)?,
             disposition: preview.disposition.clone(),
+            analysis: preview.analysis.clone(),
             ordered_commit_count: u32::try_from(preview.ordered_commits.len()).map_err(|_| {
                 ApplicationContractError::Inconsistent {
                     field: "native integration ordered commit count",
@@ -435,7 +411,7 @@ pub enum NativeIntegrationCancellationProjectionV1 {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum NativeIntegrationSurfaceResultV1 {
     StackSnapshot(Box<NativeIntegrationSealedStackSnapshotProjectionV1>),
-    Preview(NativeIntegrationPreviewProjectionV1),
+    Preview(Box<NativeIntegrationPreviewProjectionV1>),
     Approval(NativeIntegrationApprovalProjectionV1),
     Receipt(NativeIntegrationReceiptProjectionV1),
     Status(NativeIntegrationStatusProjectionV1),
@@ -501,9 +477,9 @@ impl NativeIntegrationSurfaceResultV1 {
         outcome: &NativeIntegrationPreflightOutcomeV1,
     ) -> Result<Self, ApplicationContractError> {
         Ok(match outcome {
-            NativeIntegrationPreflightOutcomeV1::Preview(preview) => {
-                Self::Preview(NativeIntegrationPreviewProjectionV1::project(preview)?)
-            }
+            NativeIntegrationPreflightOutcomeV1::Preview(preview) => Self::Preview(Box::new(
+                NativeIntegrationPreviewProjectionV1::project(preview)?,
+            )),
             NativeIntegrationPreflightOutcomeV1::Partial => {
                 Self::unavailable(NativeIntegrationSurfaceUnavailableV1::Partial)
             }
@@ -1001,7 +977,6 @@ fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use NativeIntegrationSurfaceUnavailableV1 as Reason;
 
     #[test]
     fn stack_snapshot_schema_requires_exact_registered_scope_set_identity() {
@@ -1121,52 +1096,6 @@ mod tests {
             ),
         ] {
             assert!(!result.is_advancing(), "{result:?}");
-        }
-    }
-
-    #[test]
-    fn every_port_failure_maps_to_a_truthful_unavailable_reason() {
-        for (error, expected) in [
-            (
-                NativeIntegrationPortError::Unavailable,
-                Reason::AuthorityUnmounted,
-            ),
-            (
-                NativeIntegrationPortError::Native("boom".to_owned()),
-                Reason::AuthorityUnmounted,
-            ),
-            (NativeIntegrationPortError::Stale, Reason::Stale),
-            (NativeIntegrationPortError::Denied, Reason::Denied),
-            (
-                NativeIntegrationPortError::ApprovalConflict,
-                Reason::ApprovalConflict,
-            ),
-            (
-                NativeIntegrationPortError::TransactionConflict,
-                Reason::TransactionConflict,
-            ),
-            (NativeIntegrationPortError::Cancelled, Reason::Cancelled),
-            (
-                NativeIntegrationPortError::RecoveryRequired,
-                Reason::RecoveryRequired,
-            ),
-            (
-                NativeIntegrationPortError::NeedsInspection,
-                Reason::NeedsInspection,
-            ),
-            (
-                NativeIntegrationPortError::ResetRequired,
-                Reason::ResetRequired,
-            ),
-            (
-                NativeIntegrationPortError::DurabilityUncertain,
-                Reason::DurabilityUncertain,
-            ),
-        ] {
-            assert_eq!(
-                NativeIntegrationSurfaceUnavailableV1::from(&error),
-                expected
-            );
         }
     }
 

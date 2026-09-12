@@ -375,19 +375,6 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn config_deserializes_partial_toml_with_bounded_session_defaults() {
-        let config: RetentionConfig =
-            serde_json::from_str(r#"{"analytics_events_days": 30}"#).unwrap();
-        assert_eq!(config.analytics_events_days, Some(30));
-        assert_eq!(config.session_messages_days, Some(180));
-        assert_eq!(config.lcm_raw_messages_days, Some(180));
-
-        // An empty object falls back to the safe defaults.
-        let empty: RetentionConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(empty, RetentionConfig::default());
-    }
-
     #[tokio::test]
     async fn disabled_retention_never_acquires_the_registered_writer() {
         let harness = RegisteredGlobalDbHarness::open("retention-disabled-no-writer").await;

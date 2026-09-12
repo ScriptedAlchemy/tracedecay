@@ -43,6 +43,7 @@ pub use generation::{
     GraphGenerationReplayMetadata, GraphGenerationReplaySource, GraphProjectionIdentity,
     GraphProjectorRevision, GraphRelationRef, GraphReplayCollectionOutcome,
     SealedCodeGenerationReplay, SealedGraphStateDigest, SemanticVectorGenerationReplay,
+    SupersededReplayRetirement,
 };
 pub use generation_runtime::{SealedStagingRelease, SealedStagingRetentionReason};
 pub use lease::{VerifiedGraphSnapshot, VerifiedTraversalResult, VerifiedTraversalVisit};
@@ -103,6 +104,7 @@ pub use registry::{
     VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
+pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
 /// What hydration decoded on **this thread** since the last take.
 ///

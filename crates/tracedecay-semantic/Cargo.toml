@@ -80,17 +80,17 @@ semantic-fastembed = [
     "fastembed/ort-download-binaries-rustls-tls",
     "fastembed/hf-hub-rustls-tls",
 ]
-# Opt-in GPU execution providers for the FastEmbed/ORT runtime (owner request:
-# CoreML on macOS, CUDA on Linux). Neither feature is in `default`, and
-# compiling one in changes nothing by itself: the adapter only registers the
-# execution provider when `TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml|cuda`
-# also selects it at runtime (default `cpu`), so a default build — and a
-# GPU-featured build left at the default env — stays byte-identical to the
-# CPU-only adapter. A missing platform/driver/library falls back to the CPU
-# execution provider with a WARN log; it never fails the session (see
-# `execution_provider.rs`).
+# GPU execution providers for the FastEmbed/ORT runtime. CoreML needs no
+# companion library and auto-selects on Apple builds (MLProgram + Metal GPU +
+# persistent compiled-model cache, see `execution_provider::coreml_dispatch`).
+# Linux WebGPU dynamically
+# loads `libwebgpu_dawn.so`, which ORT's wgpu distribution does not bundle, so
+# it is not in any release feature set. CUDA remains an explicit build choice.
+# Compiled providers auto-select when available; everything else falls back
+# to CPU.
 semantic-gpu-coreml = ["semantic-fastembed", "dep:ort", "ort/coreml", "ort/tracing"]
 semantic-gpu-cuda = ["semantic-fastembed", "dep:ort", "ort/cuda", "ort/tracing"]
+semantic-gpu-webgpu = ["semantic-fastembed", "dep:ort", "ort/webgpu", "ort/tracing"]
 # SEMANTIC Model2Vec static-embedding runtime. Independent of
 # `semantic-fastembed`: a build may ship either backend or both, and the
 # catalog entry's declared backend selects which runtime serves a model. The

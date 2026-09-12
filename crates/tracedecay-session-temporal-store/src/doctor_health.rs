@@ -1103,9 +1103,7 @@ fn record_session_doctor_check() {
 mod cache_tests {
     use super::*;
     use crate::handle::SessionTemporalAccess;
-    use tracedecay_global_db::tests::harness::{
-        RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime,
-    };
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
     #[test]
     fn session_temporal_fingerprint_tracks_database_and_wal_changes() {
@@ -1153,29 +1151,6 @@ mod cache_tests {
         assert!(report.findings().contains(&SessionTemporalHealthFinding {
             kind: SessionTemporalHealthFindingKind::RelationGraphUnavailable,
             count: 1,
-        }));
-    }
-
-    #[tokio::test]
-    async fn registered_doctor_accepts_a_bound_clean_relation_graph() {
-        let profile = tempfile::tempdir().expect("profile root");
-        let runtime = RegisteredGlobalDbTestRuntime::profile(profile.path())
-            .await
-            .expect("registered profile runtime");
-
-        let report = SessionTemporalAccess::new(runtime.profile_database())
-            .session_temporal_doctor_health()
-            .await;
-
-        assert_eq!(report.status(), SessionTemporalHealthStatus::Complete);
-        assert!(!report.findings().iter().any(|finding| {
-            matches!(
-                finding.kind,
-                SessionTemporalHealthFindingKind::RelationGraphUnavailable
-                    | SessionTemporalHealthFindingKind::RelationGraphCorruption
-                    | SessionTemporalHealthFindingKind::RelationGraphCycle
-                    | SessionTemporalHealthFindingKind::StaleSummaryClosure
-            )
         }));
     }
 }

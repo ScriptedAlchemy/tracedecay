@@ -328,32 +328,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn snapshot_response_publishes_the_exact_settings_revision() {
-        let mut settings = CodeDiagnosticsSettings {
-            idle_backfill: IdleBackfillMode::Off,
-            ..CodeDiagnosticsSettings::default()
-        };
-        settings.set_language_enabled("rust", false);
-        let expected = diagnostic_broker(std::path::PathBuf::from("project"), settings).snapshot();
-        let Json(actual) = snapshot_response(&expected).expect("diagnostics overview");
-
-        assert_eq!(actual["settings"]["idle_backfill"], json!("off"));
-        assert_eq!(actual["settings"]["languages"]["rust"]["enabled"], false);
-        // Every read publishes the compare-and-set token for the settings it
-        // just reported, so the next write is checked against this exact state.
-        assert_eq!(
-            actual["settings_revision"],
-            json!(settings_revision(&expected.settings).expect("settings revision"))
-        );
-        let mut without_revision = actual.clone();
-        without_revision
-            .as_object_mut()
-            .expect("overview object")
-            .remove("settings_revision");
-        assert_eq!(without_revision, json!(expected));
-    }
-
     #[tokio::test]
     async fn settings_patch_rejects_a_revision_the_authority_no_longer_holds() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();

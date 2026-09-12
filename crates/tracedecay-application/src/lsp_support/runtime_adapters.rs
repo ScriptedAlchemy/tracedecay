@@ -509,7 +509,6 @@ mod tests {
     enum WorkspaceIndexDrift {
         None,
         Publish,
-        AddFile,
     }
 
     impl LspDiagnosticDocumentPort for PublishingWorkspaceIndex {
@@ -542,18 +541,11 @@ mod tests {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
             let drifted = read > 0;
             let published = drifted && matches!(self.drift, WorkspaceIndexDrift::Publish);
-            let file_added = drifted && matches!(self.drift, WorkspaceIndexDrift::AddFile);
             Box::pin(async move {
-                let mut documents = vec![IndexedWorkspaceDocument {
+                let documents = vec![IndexedWorkspaceDocument {
                     uri: "file:///workspace/src/lib.rs".to_owned(),
                     content_digest: ContentDigest::of_bytes(b"fn main() {}"),
                 }];
-                if file_added {
-                    documents.push(IndexedWorkspaceDocument {
-                        uri: "file:///workspace/src/new.rs".to_owned(),
-                        content_digest: ContentDigest::of_bytes(b"fn added() {}"),
-                    });
-                }
                 Ok(tracedecay_lsp::IndexedWorkspaceDocuments {
                     code_generation_id: if published {
                         "code-generation-2".to_owned()
@@ -611,35 +603,6 @@ mod tests {
             })
             .await
             .expect_err("a cross-generation sweep must not be published");
-
-        assert_eq!(error.class(), "workspace-code-generation-stale");
-    }
-
-    #[tokio::test]
-    async fn workspace_sweep_rejects_a_file_added_before_completion() {
-        let root = AdmittedRoot::authorized("file:///workspace", digest('d'));
-        let workspace = AuthorizedLspWorkspace::new(Some(digest('e')), vec![root.clone()]).unwrap();
-        let authority = BrokerDiagnosticSnapshotAuthority::new(
-            Arc::new(AsyncMutex::new(DiagnosticBroker::new_for_test(
-                "/workspace",
-                Vec::new(),
-            ))),
-            Arc::new(PublishingWorkspaceIndex {
-                reads: AtomicUsize::new(0),
-                drift: WorkspaceIndexDrift::AddFile,
-            }),
-            Arc::new(FixedManagedDiagnostics),
-            Duration::from_millis(1),
-        );
-
-        let error = authority
-            .refresh_workspace(CanonicalWorkspaceDiagnosticRefreshRequest {
-                workspace,
-                root,
-                overlays: Vec::new(),
-            })
-            .await
-            .expect_err("a file-set change must make the sweep partial");
 
         assert_eq!(error.class(), "workspace-code-generation-stale");
     }

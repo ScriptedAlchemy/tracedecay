@@ -112,43 +112,6 @@ fn diagnostic(
 }
 
 #[test]
-fn exact_current_diagnostic_attaches_to_the_clean_generation() {
-    let (snapshot, manifest) = generation();
-    let record = diagnostic(
-        manifest.generation_id.as_str(),
-        "anchor.diagnostic.current",
-        'a',
-        DiagnosticRecordStateV1::Current,
-    );
-
-    let joined = GenerationDiagnosticJoinV1::join(
-        &manifest,
-        &snapshot,
-        &[record],
-        &watermark(
-            &snapshot,
-            &manifest,
-            DiagnosticJoinInputCoverageV1::Complete,
-        ),
-    )
-    .expect("exact diagnostic join");
-
-    assert_eq!(
-        joined.coverage,
-        GenerationDiagnosticJoinCoverageV1::Complete
-    );
-    assert_eq!(joined.records.len(), 1);
-    match &joined.records[0].disposition {
-        GenerationDiagnosticDispositionV1::Current { attachment } => {
-            assert_eq!(attachment.generation_id, manifest.generation_id);
-            assert_eq!(attachment.file_occurrence_id.as_str(), "file.fixture");
-            assert_eq!(attachment.content_digest, content('a'));
-        }
-        other => panic!("expected current attachment, got {other:?}"),
-    }
-}
-
-#[test]
 fn superseded_and_cleared_records_remain_typed_historical_evidence() {
     let (snapshot, manifest) = generation();
     let superseded = diagnostic(

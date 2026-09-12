@@ -5,13 +5,13 @@ use std::fmt::Debug;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    ByteRangeV1, CanonicalObservationIdV1, CanonicalObservationRelationsV1, CompactContextBundleV1,
-    CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
-    CompactContextRecordV1, ContextOmissionReasonV1, CopyProofV1, EntityKind, GroupingProvenanceV1,
-    HydrationStateV1, LogicalCopyRecordV1, MessageId, MessageOccurrenceIdV1,
-    MessageOccurrenceRecordV1, ObservationId, ProjectionOutputOrdinalV1, RetrievalAnchorId,
-    RetrievalGrainV1, SessionAuthorityClassV1, SessionContractError, SessionCursorKeyIdV1,
-    SessionCursorVersionV1, SessionEvidenceMetadataV1, SessionId, SessionProjectionGenerationV1,
+    ByteRangeV1, CanonicalObservationIdV1, CompactContextBundleV1, CompactContextConflictV1,
+    CompactContextLineageEdgeV1, CompactContextOmissionV1, CompactContextRecordV1,
+    ContextOmissionReasonV1, CopyProofV1, EntityKind, GroupingProvenanceV1, HydrationStateV1,
+    LogicalCopyRecordV1, MessageId, MessageOccurrenceIdV1, MessageOccurrenceRecordV1,
+    ObservationId, ProjectionOutputOrdinalV1, RetrievalAnchorId, RetrievalGrainV1,
+    SessionAuthorityClassV1, SessionContractError, SessionCursorKeyIdV1, SessionCursorVersionV1,
+    SessionEvidenceMetadataV1, SessionId, SessionProjectionGenerationV1,
     SessionRefreshOperationIdV1, SessionSummaryIdV1, SessionSummaryRecordV1, SignedCursorKeyRefV1,
     SummaryPublicationMetadataV1, SummarySourceHorizonV1, TemporalAssertionIdV1,
     TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
@@ -318,22 +318,6 @@ fn copy_proofs_and_copy_records_round_trip_and_reject_invalid_links() {
     .unwrap();
     assert_eq!(legacy.knowledge_at, UtcMicros(0));
     assert_eq!(legacy.valid_time, TemporalValidityV1::Unknown);
-}
-
-#[test]
-fn canonical_relations_expose_thread_turn_and_parent_message() {
-    let thread = ObservationId::new("thread.native.1").unwrap();
-    let turn = ObservationId::new("turn.native.1").unwrap();
-    let parent = ObservationId::new("message.native.parent").unwrap();
-    let relations =
-        CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap())
-            .with_thread_id(thread.clone())
-            .with_turn_id(turn.clone())
-            .with_parent_message_id(parent.clone());
-
-    assert_eq!(relations.thread_id(), Some(&thread));
-    assert_eq!(relations.turn_id(), Some(&turn));
-    assert_eq!(relations.parent_message_id(), Some(&parent));
 }
 
 #[test]

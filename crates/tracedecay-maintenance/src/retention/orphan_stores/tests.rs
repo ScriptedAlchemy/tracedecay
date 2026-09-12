@@ -2,15 +2,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use super::fence::{capture_store_content_fence, capture_store_directory_fence};
+use super::pages::walk_store_stats;
 #[cfg(windows)]
 use super::quarantine::classify_recovery_journal_probe;
-use super::pages::walk_store_stats;
 use super::quarantine::{
     DurableDatabaseInventoryV1, DurableMemoryCheck, PendingQuarantineReceiptV1,
-    QuarantineRecoveryOutcome, RegisteredQuarantineDecisionV1, RegisteredQuarantineInventoryV1,
-    RegisteredQuarantineRegistryStateV1, check_store_durable_memory, committed_journal_cleanup_names,
-    durable_check_scratch_root, durable_database_inventory, quarantine_candidate_namespace_available,
-    read_registered_quarantine_intents_controlled,
+    QuarantineFinalizeOutcome, QuarantineKindV1, QuarantineRecoveryOutcome,
+    QuarantineRegistryFenceV1, QuarantineStoreOutcome, RegisteredQuarantineDecisionV1,
+    RegisteredQuarantineInventoryV1, RegisteredQuarantineRegistryStateV1,
+    check_store_durable_memory, durable_check_scratch_root, durable_database_inventory,
+    quarantine_candidate_namespace_available, quarantine_store_for_verified_collection,
+    quarantine_store_for_verified_collection_controlled,
+    read_registered_quarantine_intents_controlled, reconcile_existing_quarantine,
     reconcile_registered_quarantine_inventory_with_classified_hook,
     recover_existing_store_quarantine, recover_named_store_quarantine,
     recover_named_store_quarantine_controlled, recover_registered_quarantine_intent_controlled,
@@ -256,201 +260,6 @@ fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
     let findings = classify_stores(&[census_entry], 1_000 * DAY);
     assert_eq!(findings[0].disposition, StoreDisposition::Live);
     assert!(plan_collection(findings, 0).collect.is_empty());
-}
-
-#[test]
-fn unreadable_manifest_is_unverifiable_never_orphaned() {
-    let dead = PathBuf::from("/definitely/not/here/gone");
-    let mut census_entry = entry(
-        "malformed",
-        dead,
-        None,
-        None,
-        PathBuf::from("/profile/stores/malformed"),
-        0,
-        4096,
-    );
-    census_entry.manifest_readable = false;
-
-    let findings = classify_stores(&[census_entry], 1_000 * DAY);
-    assert_eq!(
-        findings[0].disposition,
-        StoreDisposition::Unverifiable {
-            reason: UnverifiableReason::ManifestUnreadable
-        },
-        "a manifest that will not parse must fail closed, not read as an orphan"
-    );
-
-    // Even with a zero retention window the store is never collectable.
-    let plan = plan_collection(findings, 0);
-    assert!(plan.collect.is_empty());
-    assert!(plan.relink.is_empty());
-    assert_eq!(plan.unverifiable.len(), 1);
-}
-
-#[test]
-fn orphan_respects_retention_window() {
-    let dead = PathBuf::from("/definitely/not/here/gone");
-    let now = 100 * DAY;
-    // Written 10 days ago; manifest root also dead → orphaned.
-    let census = vec![entry(
-        "orphan",
-        dead.clone(),
-        None,
-        Some(PathBuf::from("/definitely/not/here/also-gone")),
-        PathBuf::from("/profile/stores/orphan"),
-        now - 10 * DAY,
-        1_000_000,
-    )];
-    let findings = classify_stores(&census, now);
-    assert_eq!(findings[0].disposition, StoreDisposition::Orphaned);
-    assert_eq!(findings[0].age_secs, 10 * DAY);
-    assert_eq!(findings[0].size_bytes, 1_000_000);
-
-    // 30-day window → still immature, not collected.
-    let plan = plan_collection(findings.clone(), 30 * DAY);
-    assert!(plan.collect.is_empty());
-    assert_eq!(plan.retained_immature.len(), 1);
-
-    // 7-day window → past retention, eligible for collection.
-    let plan = plan_collection(findings, 7 * DAY);
-    assert_eq!(plan.collect.len(), 1);
-    assert_eq!(plan.collectable_bytes(), 1_000_000);
-    assert!(plan.retained_immature.is_empty());
-}
-
-/// Delete the on-disk data directories for every store in `plan.collect`.
-/// Re-linkable and immature stores are left untouched. A directory that is
-/// already gone counts as collected (idempotent). Best-effort: a failed
-/// removal is recorded in `errors` and does not abort the rest.
-///
-/// Production collects through [`execute_registered_collection`], which
-/// re-proves registry, manifest, and payload identity before removing
-/// anything. This is the unverified core, kept here so the two tests below can
-/// pin the profile containment fence and the idempotent-delete contract on
-/// their own.
-fn execute_collection(plan: &CollectionPlan, profile_root: &Path) -> CollectionOutcome {
-    let mut outcome = CollectionOutcome::default();
-    let canonical_profile = match profile_root.canonicalize() {
-        Ok(path) => path,
-        Err(_) => {
-            outcome
-                .errors
-                .extend(plan.collect.iter().map(|finding| CollectionFailure {
-                    store_id: finding.store_id.clone(),
-                    kind: CollectionFailureKind::InspectFailed,
-                }));
-            return outcome;
-        }
-    };
-    for finding in &plan.collect {
-        let canonical_target = match finding.data_root.canonicalize() {
-            Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let is_profile_child = finding
-                    .data_root
-                    .parent()
-                    .and_then(|parent| parent.canonicalize().ok())
-                    .is_some_and(|parent| {
-                        parent.starts_with(&canonical_profile) && parent != canonical_profile
-                    });
-                if !is_profile_child {
-                    outcome.errors.push(CollectionFailure {
-                        store_id: finding.store_id.clone(),
-                        kind: CollectionFailureKind::OutsideProfile,
-                    });
-                    continue;
-                }
-                outcome.reclaimed_bytes =
-                    outcome.reclaimed_bytes.saturating_add(finding.size_bytes);
-                outcome.collected.push(CollectedStore {
-                    project_id: finding.project_id.clone(),
-                    store_id: finding.store_id.clone(),
-                    data_root: finding.data_root.clone(),
-                    size_bytes: finding.size_bytes,
-                });
-                continue;
-            }
-            Err(_) => {
-                outcome.errors.push(CollectionFailure {
-                    store_id: finding.store_id.clone(),
-                    kind: CollectionFailureKind::InspectFailed,
-                });
-                continue;
-            }
-        };
-        if canonical_target == canonical_profile
-            || !canonical_target.starts_with(&canonical_profile)
-        {
-            outcome.errors.push(CollectionFailure {
-                store_id: finding.store_id.clone(),
-                kind: CollectionFailureKind::OutsideProfile,
-            });
-            continue;
-        }
-        match std::fs::remove_dir_all(&finding.data_root) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                outcome.errors.push(CollectionFailure {
-                    store_id: finding.store_id.clone(),
-                    kind: CollectionFailureKind::RemoveFailed(
-                        CollectionMutationFailure::from_io_error(
-                            CollectionMutationOperation::RecursiveRemove,
-                            finding.data_root.clone(),
-                            match &finding.expected_content_fence {
-                                StoreContentFence::Present(inventory) => {
-                                    Some(inventory.root.clone())
-                                }
-                                StoreContentFence::Missing | StoreContentFence::Unverifiable => {
-                                    None
-                                }
-                            },
-                            &error,
-                        ),
-                    ),
-                });
-                continue;
-            }
-        }
-        outcome.reclaimed_bytes = outcome.reclaimed_bytes.saturating_add(finding.size_bytes);
-        outcome.collected.push(CollectedStore {
-            project_id: finding.project_id.clone(),
-            store_id: finding.store_id.clone(),
-            data_root: finding.data_root.clone(),
-            size_bytes: finding.size_bytes,
-        });
-    }
-    outcome
-}
-
-#[test]
-fn already_missing_directory_collects_idempotently() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let stores = tmp.path().join("stores");
-    std::fs::create_dir_all(&stores).unwrap();
-    let plan = CollectionPlan {
-        collect: vec![OrphanStoreFinding {
-            project_id: "proj_gone".into(),
-            store_id: "gone".into(),
-            data_root: stores.join("gone"),
-            disposition: StoreDisposition::Orphaned,
-            age_secs: 90 * DAY,
-            size_bytes: 42,
-            expected_store_relpath: "stores/gone".into(),
-            expected_created_at: 0,
-            expected_last_write_at: None,
-            expected_payload_mtime_secs: 0,
-            expected_data_root_fence: StoreDirectoryFence::Missing,
-            expected_content_fence: StoreContentFence::Missing,
-            expected_manifest_bytes: None,
-            graph_scope_relpaths: Vec::new(),
-        }],
-        ..CollectionPlan::default()
-    };
-    let outcome = execute_collection(&plan, tmp.path());
-    assert_eq!(outcome.collected.len(), 1);
-    assert!(outcome.errors.is_empty());
 }
 
 #[tokio::test]
@@ -1009,5 +818,91 @@ fn portable_inventory_sidecar_writer_lock_serializes_concurrent_advances() {
     );
 }
 
-/// Cancellation is a typed page result and must prevent both inspection and
-/// collection; it is not an empty successful census.
+/// Build enough no-follow entries that a bounded apply can be interrupted in
+/// the payload-mtime fence itself, after the apply loop has admitted the
+/// finding. The production path must stop with a typed completion rather than
+/// recording `Cancelled` as an ordinary per-store error and claiming success.
+fn seed_payload_fence_work(data_root: &Path) {
+    std::fs::create_dir_all(data_root).unwrap();
+    for bucket_index in 0..32 {
+        std::fs::create_dir_all(data_root.join(format!("bucket-{bucket_index:03}"))).unwrap();
+    }
+    for index in 0..30_000usize {
+        let bucket = data_root.join(format!("bucket-{:03}", index % 32));
+        std::fs::write(bucket.join(format!("payload-{index:05}.bin")), b"x").unwrap();
+    }
+}
+
+fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> OrphanStoreFinding {
+    let profile_root = data_root
+        .parent()
+        .and_then(Path::parent)
+        .expect("fixture data root has a two-component profile path")
+        .to_path_buf();
+    OrphanStoreFinding {
+        project_id: "proj_payload_fence_interrupt".to_owned(),
+        store_id: "store_payload_fence_interrupt".to_owned(),
+        data_root: data_root.clone(),
+        disposition: StoreDisposition::Orphaned,
+        age_secs: 90 * DAY,
+        size_bytes: 30_000,
+        expected_store_relpath: expected_store_relpath.to_owned(),
+        expected_created_at: 1,
+        expected_last_write_at: None,
+        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs,
+        expected_data_root_fence: capture_store_directory_fence(&profile_root, &data_root).unwrap(),
+        // The mtime fence is the boundary under test; no later phase should be
+        // reached when this control is interrupted.
+        expected_content_fence: StoreContentFence::Missing,
+        expected_manifest_bytes: None,
+        graph_scope_relpaths: Vec::new(),
+    }
+}
+
+async fn prepare_registered_quarantine(
+    db: &RegisteredGlobalDb,
+    profile_root: &Path,
+    project_id: &str,
+    store_id: &str,
+    payload: &[u8],
+) -> (PathBuf, PathBuf) {
+    let data_root = seed_store(
+        db,
+        profile_root,
+        project_id,
+        store_id,
+        &profile_root.join("missing-project-root"),
+        1_700_000_000,
+    )
+    .await;
+    std::fs::write(data_root.join("payload.bin"), payload).unwrap();
+    let row = db
+        .try_list_store_instances_for_project(project_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.store_id == store_id)
+        .unwrap();
+    let expected = capture_store_content_fence(profile_root, &data_root).unwrap();
+    let quarantine = quarantine_store_for_verified_collection_controlled(
+        profile_root,
+        &data_root,
+        &expected,
+        QuarantineKindV1::Registered,
+        project_id,
+        store_id,
+        Some(QuarantineRegistryFenceV1 {
+            store_relpath: row.store_relpath,
+            created_at: row.created_at,
+            last_write_at: row.last_write_at,
+        }),
+        unbounded_collection_control(),
+    )
+    .unwrap();
+    let QuarantineStoreOutcome::Verified(quarantine) = quarantine else {
+        panic!("fixture must reach a verified registered quarantine");
+    };
+    let quarantine_path = quarantine.quarantine_path().to_path_buf();
+    drop(quarantine);
+    (data_root, quarantine_path)
+}

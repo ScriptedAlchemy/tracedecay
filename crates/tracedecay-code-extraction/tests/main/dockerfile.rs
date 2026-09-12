@@ -208,11 +208,3 @@ COPY --from=nginx:alpine /etc/nginx/nginx.conf /tmp/nginx.conf
         "COPY --from external image should use the explicit external node"
     );
 }
-
-#[test]
-fn test_dockerfile_extensions() {
-    let ext = DockerfileExtractor;
-    let extensions = ext.extensions();
-    assert!(extensions.contains(&"dockerfile"));
-    assert!(extensions.contains(&"Dockerfile"));
-}

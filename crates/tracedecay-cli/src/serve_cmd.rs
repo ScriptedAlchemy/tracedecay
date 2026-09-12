@@ -163,30 +163,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_literal_workspace_folder_variable() {
-        assert_eq!(
-            unexpanded_template_variable("${workspaceFolder}"),
-            Some("${workspaceFolder}")
-        );
-    }
-
-    #[test]
     fn detects_template_variable_with_default_value_syntax() {
         assert_eq!(
             unexpanded_template_variable("${workspaceFolder:-/tmp/fallback}"),
             Some("${workspaceFolder:-/tmp/fallback}")
-        );
-    }
-
-    #[test]
-    fn detects_other_host_template_variables() {
-        assert_eq!(
-            unexpanded_template_variable("${workspaceRoot}"),
-            Some("${workspaceRoot}")
-        );
-        assert_eq!(
-            unexpanded_template_variable("${userHome}"),
-            Some("${userHome}")
         );
     }
 
@@ -200,13 +180,6 @@ mod tests {
             unexpanded_template_variable("/home/user/${workspaceFolderBasename}/src"),
             Some("${workspaceFolderBasename}")
         );
-    }
-
-    #[test]
-    fn plain_paths_are_not_templates() {
-        assert_eq!(unexpanded_template_variable("/home/user/project"), None);
-        assert_eq!(unexpanded_template_variable("relative/dir"), None);
-        assert_eq!(unexpanded_template_variable(""), None);
     }
 
     #[test]

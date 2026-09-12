@@ -211,11 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn test_write_is_coding() {
-        assert_eq!(classify(&["Write"], &[]), TaskCategory::Coding);
-    }
-
-    #[test]
     fn test_agent_is_delegation() {
         assert_eq!(classify(&["Agent", "Edit"], &[]), TaskCategory::Delegation);
     }

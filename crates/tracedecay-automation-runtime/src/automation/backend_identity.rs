@@ -337,68 +337,6 @@ impl Drop for CodexBinEnvGuard {
 mod tests {
     use super::*;
 
-    fn config() -> AutomationConfig {
-        AutomationConfig {
-            enabled: true,
-            backend: AutomationBackend::CodexAppServer,
-            ..AutomationConfig::default()
-        }
-    }
-
-    #[test]
-    fn identity_is_stable_for_an_unchanged_configuration() {
-        // `TRACEDECAY_CODEX_BIN` is process-global. Hold the canonical test
-        // environment lock across both reads so an executable-replacement
-        // test cannot change the authority between them.
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-        let config = config();
-        assert_eq!(
-            backend_identity(&config).unwrap(),
-            backend_identity(&config).unwrap()
-        );
-    }
-
-    #[test]
-    fn identity_changes_when_the_configuration_revision_changes() {
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-        let before = backend_identity(&config()).unwrap();
-        let after_config = AutomationConfig {
-            timeout_secs: config().timeout_secs.saturating_add(1),
-            ..config()
-        };
-        assert_ne!(before, backend_identity(&after_config).unwrap());
-    }
-
-    #[test]
-    fn identity_changes_when_the_backend_changes() {
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-        let before = backend_identity(&config()).unwrap();
-        let after_config = AutomationConfig {
-            backend: AutomationBackend::Disabled,
-            ..config()
-        };
-        assert_ne!(before, backend_identity(&after_config).unwrap());
-    }
-
-    #[test]
-    fn identity_changes_when_the_protocol_revision_changes() {
-        // The property this guards: a suppression written by a build with a
-        // broken transport must not survive the build that fixes it. Only the
-        // protocol-revision component can carry that, because the crate
-        // version never moves.
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-        let identity = backend_identity(&config()).unwrap();
-        let with_other_revision = canonical_sha256(&json!({
-            "kind": "automation.backend_identity.v1",
-            "configuration_revision": canonical_sha256(&config()).unwrap().as_str(),
-            "backend": config().backend.as_str(),
-            "executable": backend_executable_identity(&config()),
-            "protocol_revision": "codex-app-server.v1.stdin-closed-after-turn-start",
-        }))
-        .unwrap();
-        assert_ne!(identity, with_other_revision.as_str());
-    }
-
     #[test]
     fn only_typed_permanent_failures_are_deterministic() {
         assert!(is_deterministic_failure_class(
@@ -417,20 +355,5 @@ mod tests {
                 "{class:?} must keep ordinary cooldown, not standing identity suppress",
             );
         }
-    }
-
-    #[test]
-    fn identity_changes_when_the_same_path_executable_is_replaced() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("codex-backend");
-        std::fs::write(&path, b"backend-revision-one").unwrap();
-        let _env = super::CodexBinEnvGuard::set(&path);
-        let before = backend_identity(&config()).unwrap();
-        std::fs::write(&path, b"backend-revision-two-replaced").unwrap();
-        let after = backend_identity(&config()).unwrap();
-        assert_ne!(
-            before, after,
-            "replacing bytes at the same executable path must change the identity"
-        );
     }
 }

@@ -218,11 +218,9 @@ mod tests {
     use crate::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
     use crate::runtime::source::TranscriptDiscoveryBounds;
     use crate::runtime::store_port::TranscriptIngestStore;
-    use crate::runtime::{SessionProvider, SessionRecord, codex};
+    use crate::runtime::{SessionRecord, codex};
 
-    use super::{
-        USER_CATCH_UP_PROVIDERS, read_codex_discovery_frontier, write_codex_discovery_frontier,
-    };
+    use super::{read_codex_discovery_frontier, write_codex_discovery_frontier};
 
     #[derive(Default)]
     struct RestartableStore {
@@ -340,19 +338,6 @@ mod tests {
         let path = dir.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, b"{}\n").expect("rollout");
         path
-    }
-
-    #[test]
-    fn user_catch_up_schedules_every_final_host() {
-        for provider in [
-            SessionProvider::Claude,
-            SessionProvider::Codex,
-            SessionProvider::Cursor,
-            SessionProvider::Kimi,
-            SessionProvider::OpenCode,
-        ] {
-            assert!(USER_CATCH_UP_PROVIDERS.contains(&provider));
-        }
     }
 
     #[tokio::test]

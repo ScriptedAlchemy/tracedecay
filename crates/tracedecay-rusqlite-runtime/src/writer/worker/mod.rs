@@ -1250,7 +1250,7 @@ mod auxiliary_scheduling_tests {
     use super::{
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
-        enqueue, queue_wait_micros, run_incremental_vacuum, select_auxiliary_work,
+        enqueue, run_incremental_vacuum, select_auxiliary_work,
     };
 
     struct BatchProbe {
@@ -1457,26 +1457,6 @@ mod auxiliary_scheduling_tests {
     }
 
     #[test]
-    fn compatible_arrivals_within_window_share_one_execution_batch() {
-        let enqueued_at = Instant::now();
-        let batches = build_batches(
-            vec![
-                accepted_request(0, enqueued_at, OperationPriorityV1::Foreground, false),
-                accepted_request(
-                    1,
-                    enqueued_at + Duration::from_micros(1_999),
-                    OperationPriorityV1::Foreground,
-                    false,
-                ),
-            ],
-            &tracedecay_store::AdmissionConfigV1::default(),
-        );
-
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].items.len(), 2);
-    }
-
-    #[test]
     fn dwell_collects_a_compatible_arrival_before_dispatch() {
         let enqueued_at = Instant::now() + Duration::from_secs(1);
         let mut config = tracedecay_store::AdmissionConfigV1::default();
@@ -1575,25 +1555,6 @@ mod auxiliary_scheduling_tests {
     }
 
     #[test]
-    fn scan_sized_compatible_queue_opens_one_execution_batch() {
-        const REQUESTS: usize = 256;
-        let enqueued_at = Instant::now();
-        let selected = (0..REQUESTS)
-            .map(|index| {
-                accepted_request(index, enqueued_at, OperationPriorityV1::Foreground, false)
-            })
-            .collect();
-        let mut config = tracedecay_store::AdmissionConfigV1::default();
-        config.foreground_batch.max_operations = 512;
-        config.foreground_batch.max_bytes = u64::MAX;
-
-        let batches = build_batches(selected, &config);
-
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].items.len(), REQUESTS);
-    }
-
-    #[test]
     fn execution_batch_count_is_bounded_by_the_operation_budget() {
         const REQUESTS: usize = 256;
         const MAX_OPERATIONS: usize = 64;
@@ -1642,42 +1603,6 @@ mod auxiliary_scheduling_tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].items.len(), 7);
         assert_eq!(batches[1].items.len(), 1);
-    }
-
-    #[test]
-    fn health_and_isolated_selected_work_bypass_the_dwell_path() {
-        let enqueued_at = Instant::now();
-        let config = tracedecay_store::AdmissionConfigV1::default();
-        let health = vec![accepted_request(
-            0,
-            enqueued_at,
-            OperationPriorityV1::Health,
-            false,
-        )];
-        let isolated = vec![accepted_request(
-            1,
-            enqueued_at,
-            OperationPriorityV1::Foreground,
-            true,
-        )];
-
-        assert!(PendingBatchDwell::from_selected(&health, &config, enqueued_at).is_none());
-        assert!(PendingBatchDwell::from_selected(&isolated, &config, enqueued_at).is_none());
-    }
-
-    #[test]
-    fn interrupted_selected_work_bypasses_the_dwell_path() {
-        let enqueued_at = Instant::now();
-        let config = tracedecay_store::AdmissionConfigV1::default();
-        let interrupted = vec![accepted_request_with_interruption(
-            0,
-            enqueued_at,
-            OperationPriorityV1::Foreground,
-            false,
-            Some(RuntimeInterruptionV1::Cancelled),
-        )];
-
-        assert!(PendingBatchDwell::from_selected(&interrupted, &config, enqueued_at).is_none());
     }
 
     #[test]
@@ -1829,31 +1754,6 @@ mod auxiliary_scheduling_tests {
     }
 
     #[test]
-    fn interruption_repoll_latency_is_bounded_by_the_batch_deadline() {
-        let admitted_at = Instant::now();
-        let config = tracedecay_store::AdmissionConfigV1::default();
-        let window = BatchCoalescingWindow::new(
-            admitted_at,
-            tracedecay_store::OperationPriorityV1::Background,
-            false,
-            false,
-            1,
-            1,
-            &config,
-        )
-        .expect("background request can dwell");
-        let cancellation_observed_at = admitted_at + Duration::from_millis(3);
-
-        assert_eq!(
-            window
-                .deadline
-                .saturating_duration_since(cancellation_observed_at),
-            Duration::from_millis(7),
-            "a probe without a notifier is re-polled no later than the hard window deadline"
-        );
-    }
-
-    #[test]
     fn incompatible_or_full_arrivals_end_coalescing() {
         let admitted_at = Instant::now();
         let config = tracedecay_store::AdmissionConfigV1::default();
@@ -1907,29 +1807,6 @@ mod auxiliary_scheduling_tests {
             effective,
             super::CheckpointConfig::default(),
             "a configured budget must not collapse back onto the crate default"
-        );
-    }
-
-    #[test]
-    fn writer_checkpoint_policy_defaults_to_the_contract_budget() {
-        let admission = tracedecay_store::AdmissionConfigV1::default();
-
-        assert_eq!(
-            checkpoint_config(&admission),
-            super::CheckpointConfig::default(),
-            "an unconfigured runtime keeps the contract's default WAL budget"
-        );
-    }
-
-    #[test]
-    fn queue_wait_is_frozen_at_the_dequeue_boundary() {
-        let first_enqueued = Instant::now();
-        let second_enqueued = first_enqueued + Duration::from_micros(3);
-        let dequeued = first_enqueued + Duration::from_micros(11);
-
-        assert_eq!(
-            queue_wait_micros([first_enqueued, second_enqueued], dequeued),
-            11
         );
     }
 

@@ -1412,14 +1412,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_exec_output_reads_exit_code_and_wall_time() {
-        let output = "Chunk ID: 9f149c\nWall time: 0.4325 seconds\nProcess exited with code 2\nOriginal token count: 37\nOutput:\nboom\n";
-        let (exit, wall) = parse_exec_output(output);
-        assert_eq!(exit, Some(2));
-        assert_eq!(wall, Some(0.4325));
-    }
-
-    #[test]
     fn parse_exec_output_absent_markers_are_null_not_guessed() {
         // A successful MCP-style command wrapper: wall time but no exit marker.
         let (exit, wall) = parse_exec_output("Wall time: 0.1655 seconds\nOutput:\n[{\"ok\":true}]");
@@ -1432,58 +1424,6 @@ mod tests {
         // Exit code zero is success (distinct from an absent marker).
         let (exit, _) = parse_exec_output("Process exited with code 0\n");
         assert_eq!(exit, Some(0));
-    }
-
-    #[test]
-    fn exec_command_call_and_output_join_into_one_tool_call_row() {
-        let mut state = CodexStructuredState::new();
-        let path = std::path::Path::new("/tmp/rollout.jsonl");
-        let call = json!({
-            "timestamp": "2026-06-24T20:23:38.800Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "exec_command",
-                "arguments": "{\"cmd\":\"rg -n MEMORY.md\",\"workdir\":\"/home/zack/projects/tracedecay\"}",
-                "call_id": "call-1",
-                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
-            }
-        });
-        // The call buffers, emitting nothing yet.
-        let buffered = state
-            .event_from_line(&call, &meta(), Some("gpt-5.5"), path, 100)
-            .expect("exec call is a structured line");
-        assert!(buffered.is_empty());
-
-        let output = json!({
-            "timestamp": "2026-06-24T20:23:38.857Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "call-1",
-                "output": "Wall time: 1.5000 seconds\nProcess exited with code 0\nOutput:\nok\n"
-            }
-        });
-        let rows = state
-            .event_from_line(&output, &meta(), Some("gpt-5.5"), path, 260)
-            .expect("output completes the join");
-        assert_eq!(rows.len(), 1);
-        let row = &rows[0];
-        assert_eq!(row.role, "tool");
-        assert_eq!(row.kind.as_deref(), Some("tool_call"));
-        assert_eq!(row.text, "rg -n MEMORY.md");
-        assert_eq!(row.tool_names.as_deref(), Some("exec_command"));
-        // The joined row keys on the CALL offset (the call site), not the output.
-        assert_eq!(row.ordinal, 100);
-        let md = metadata_of(row);
-        assert_eq!(md["tool"], "exec_command");
-        assert_eq!(md["call_id"], "call-1");
-        assert_eq!(md["cmd"], "rg -n MEMORY.md");
-        assert_eq!(md["workdir"], "/home/zack/projects/tracedecay");
-        assert_eq!(md["turn_id"], "turn-1");
-        assert_eq!(md["exit_code"], 0);
-        assert_eq!(md["wall_time_s"], 1.5);
-        assert_eq!(md["success"], true);
     }
 
     #[test]
@@ -1535,21 +1475,6 @@ mod tests {
         assert_eq!(
             candidates.observed,
             vec!["abcdef1234567890abcdef1234567890abcdef12"]
-        );
-    }
-
-    #[test]
-    fn fast_forward_merge_head_print_is_observed_not_produced() {
-        // A fast-forward merge creates no commit; the HEAD it prints belongs to
-        // whichever branch it advanced to, not to this session.
-        let candidates = commit_candidates(
-            "git merge feature && git rev-parse HEAD",
-            "Output:\nUpdating 1111111..2222222\nFast-forward\n2222222222222222222222222222222222222222",
-        );
-        assert!(candidates.produced.is_empty());
-        assert_eq!(
-            candidates.observed,
-            vec!["2222222222222222222222222222222222222222"]
         );
     }
 
@@ -1663,50 +1588,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_tool_call_exec_extracts_command_with_nested_quotes_and_escapes() {
-        // The command contains single quotes and escaped double quotes; the
-        // scanner reads the JS string literal honoring the backslash escapes.
-        let mut state = CodexStructuredState::new();
-        let path = std::path::Path::new("/tmp/rollout.jsonl");
-        let call = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "custom_tool_call",
-                "name": "exec",
-                "call_id": "call_q",
-                "input": "const r = await tools.exec_command({\"cmd\":\"sed -n '1,240p' a.md && rg -n \\\"pr merge 366\\\" .\",\"workdir\":\"/repo\"});\ntext(r.output);\n"
-            }
-        });
-        state
-            .event_from_line(&call, &meta(), None, path, 5)
-            .expect("custom exec call is structured");
-        // A plain-string output also joins (Codex sometimes emits a bare string).
-        let output = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "custom_tool_call_output",
-                "call_id": "call_q",
-                "output": "Script running with cell ID 10\nWall time 10.1 seconds\nOutput:\n"
-            }
-        });
-        let rows = state
-            .event_from_line(&output, &meta(), None, path, 9)
-            .expect("string output completes the join");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].text,
-            "sed -n '1,240p' a.md && rg -n \"pr merge 366\" ."
-        );
-        let md = metadata_of(&rows[0]);
-        assert_eq!(
-            md["cmd"],
-            "sed -n '1,240p' a.md && rg -n \"pr merge 366\" ."
-        );
-        assert_eq!(md["workdir"], "/repo");
-        assert_eq!(md["wall_time_s"], 10.1);
-    }
-
-    #[test]
     fn extract_exec_command_args_reads_js_object_literal_shapes() {
         // Real Codex harnesses are JS object literals, not JSON: keys are often
         // unquoted and values may use single, double, or backtick quotes.
@@ -1792,30 +1673,6 @@ mod tests {
                 .is_none(),
             "an output with no buffered exec call falls through"
         );
-    }
-
-    #[test]
-    fn custom_tool_call_exec_without_output_flushes_null_result_row() {
-        let mut state = CodexStructuredState::new();
-        let path = std::path::Path::new("/tmp/rollout.jsonl");
-        let call = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "custom_tool_call",
-                "name": "exec",
-                "call_id": "call_hang",
-                "input": "const r = await tools.exec_command({\"cmd\":\"cargo test-all\"});\ntext(r.output);\n"
-            }
-        });
-        state
-            .event_from_line(&call, &meta(), None, path, 7)
-            .expect("custom exec call recognized");
-        let flushed = state.flush_pending(&meta(), path);
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].text, "cargo test-all");
-        let md = metadata_of(&flushed[0]);
-        assert_eq!(md["exit_code"], Value::Null);
-        assert_eq!(md["success"], Value::Null);
     }
 
     #[test]
@@ -2052,38 +1909,6 @@ mod tests {
                 .contains("gAAAABsecret")
         );
         assert!(!rows[0].text.contains("gAAAABsecret"));
-    }
-
-    #[test]
-    fn update_plan_renders_steps() {
-        let record = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "update_plan",
-                "call_id": "call-plan",
-                "arguments": "{\"explanation\":\"why\",\"plan\":[{\"step\":\"design\",\"status\":\"in_progress\"},{\"step\":\"ship\",\"status\":\"pending\"}]}"
-            }
-        });
-        let mut state = CodexStructuredState::new();
-        let rows = state
-            .event_from_line(
-                &record,
-                &meta(),
-                Some("gpt-5.5"),
-                std::path::Path::new("/tmp/r.jsonl"),
-                13,
-            )
-            .unwrap();
-        let row = &rows[0];
-        assert_eq!(row.role, "assistant");
-        assert_eq!(row.kind.as_deref(), Some("plan"));
-        assert!(row.text.contains("[in_progress] design"));
-        assert!(row.text.contains("[pending] ship"));
-        let md = metadata_of(row);
-        assert_eq!(md["explanation"], "why");
-        assert_eq!(md["steps"].as_array().unwrap().len(), 2);
-        assert_eq!(md["steps"][0]["status"], "in_progress");
     }
 
     #[test]

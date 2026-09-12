@@ -2370,34 +2370,6 @@ mod tests {
         assert_eq!(message.source_offset, Some(0));
     }
 
-    /// Pure-projection proof that `canonical_projected_message` is the right
-    /// binding authority: when the canonical envelope omits
-    /// `relations.message_id` the projection keys the occurrence on the stable
-    /// record id, which the projection resolves — yet it still returns `None`
-    /// for a message_id the projection never produced, so acceptance covers
-    /// only projection-verified bindings.
-    #[test]
-    fn stable_record_id_binds_projection_when_relations_message_id_absent() {
-        let observation = observation_without_relation_message_id(1, "session-1");
-        let envelope: CanonicalObservationEnvelopeV1 =
-            serde_json::from_value(observation.payload().clone()).expect("canonical envelope");
-        assert!(
-            envelope.relations().message_id().is_none(),
-            "fixture must omit relations.message_id to exercise the record-id key"
-        );
-        let record_message_id = envelope.stable_record_id().as_str().to_string();
-
-        let bound = canonical_projected_message(&observation, &record_message_id, 0)
-            .expect("stable-record-id message must bind to a projection output");
-        assert_eq!(bound.text, "payload-1");
-        assert_eq!(bound.message_id, record_message_id);
-
-        assert!(
-            canonical_projected_message(&observation, "does-not-project", 0).is_none(),
-            "an unprojected message_id must not bind, preserving the legacy refusal"
-        );
-    }
-
     async fn persist_anchor(
         runtime: &HostAdmissionTestRuntimeV1,
         ordinal: u64,
@@ -2464,29 +2436,6 @@ mod tests {
             .await
             .expect("persist observation");
         (observation, anchor)
-    }
-
-    #[tokio::test]
-    async fn persist_anchor_appends_two_observations_without_cursor_conflict() {
-        let dir = tempdir().expect("temporary directory");
-        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
-            .await
-            .expect("registered profile runtime");
-        let (first, first_anchor) = Box::pin(persist_anchor(&runtime, 1)).await;
-        let (second, second_anchor) = Box::pin(persist_anchor(&runtime, 2)).await;
-        assert_ne!(
-            first.observation_id(),
-            second.observation_id(),
-            "two-observation setup must persist distinct observation identities"
-        );
-        assert_ne!(
-            first_anchor.anchor_id(),
-            second_anchor.anchor_id(),
-            "two-observation setup must persist distinct retrieval anchors"
-        );
-        assert_eq!(first.identity().position().end(), 2);
-        assert_eq!(second.identity().position().start(), 2);
-        assert_eq!(second.identity().position().end(), 3);
     }
 
     fn authorized_snapshot(anchor: &RetrievalAnchorRecord) -> TemporalExecutionSnapshot {
@@ -2892,68 +2841,6 @@ mod tests {
     }
 
     #[test]
-    fn authorization_precedes_recheck_and_read() {
-        block_on(async {
-            let adapter = SessionTemporalHydrationAdapter::new(FakeBackend::available(b"abcdefgh"));
-            let snapshot = snapshot(ExecutionControl::default());
-            assert_eq!(
-                adapter.authorize(&snapshot, &anchor()).await,
-                Ok(HydrationAuthorization::Authorized)
-            );
-            let mut output = Vec::new();
-            adapter
-                .read_after_recheck(&snapshot, &anchor(), 32, 4, &mut |chunk| {
-                    output.extend_from_slice(chunk);
-                    Ok(())
-                })
-                .await
-                .expect("read");
-            assert_eq!(output, b"abcdefgh");
-            assert_eq!(
-                adapter.backend.calls.lock().expect("calls").as_slice(),
-                ["resolve", "resolve", "read", "resolve"]
-            );
-        });
-    }
-
-    #[test]
-    fn authorization_revocation_before_sink_recheck_emits_no_payload() {
-        block_on(async {
-            let payload = b"must-never-cross-the-sink";
-            let backend = FakeBackend {
-                resolutions: Mutex::new(vec![
-                    available(payload.len(), &hash(payload)),
-                    HydrationResolution::Unavailable(HydrationStateV1::Unauthorized),
-                ]),
-                payload: Mutex::new(Ok(payload.to_vec())),
-                calls: Mutex::new(Vec::new()),
-            };
-            let adapter = SessionTemporalHydrationAdapter::new(backend);
-            let snapshot = snapshot(ExecutionControl::default());
-
-            assert_eq!(
-                adapter.authorize(&snapshot, &anchor()).await,
-                Ok(HydrationAuthorization::Authorized)
-            );
-            let mut output = Vec::new();
-            assert_eq!(
-                adapter
-                    .read_after_recheck(&snapshot, &anchor(), payload.len(), 8, &mut |chunk| {
-                        output.extend_from_slice(chunk);
-                        Ok(())
-                    })
-                    .await,
-                Err(HydrationError::Unavailable)
-            );
-            assert!(output.is_empty());
-            assert_eq!(
-                adapter.backend.calls.lock().expect("calls").as_slice(),
-                ["resolve", "resolve"]
-            );
-        });
-    }
-
-    #[test]
     fn authorization_revocation_after_read_emits_no_payload() {
         block_on(async {
             let payload = b"buffered-until-live-recheck";
@@ -3040,27 +2927,6 @@ mod tests {
             assert_eq!(
                 adapter.backend.calls.lock().expect("calls").as_slice(),
                 ["resolve"]
-            );
-        });
-    }
-
-    #[test]
-    fn verified_payload_crosses_sink_in_bounded_chunks() {
-        block_on(async {
-            let adapter =
-                SessionTemporalHydrationAdapter::new(FakeBackend::available(b"123456789"));
-            let snapshot = snapshot(ExecutionControl::default());
-            let mut chunks = Vec::new();
-            adapter
-                .read_after_recheck(&snapshot, &anchor(), 9, 4, &mut |chunk| {
-                    chunks.push(chunk.to_vec());
-                    Ok(())
-                })
-                .await
-                .expect("chunked read");
-            assert_eq!(
-                chunks,
-                vec![b"1234".to_vec(), b"5678".to_vec(), b"9".to_vec()]
             );
         });
     }

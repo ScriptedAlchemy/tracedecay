@@ -67,7 +67,10 @@ pub(super) fn execution_history(
     deadline: Deadline,
     request: WorkAttemptListRequestV1,
 ) -> DaemonInvocationResponse {
-    let attempts = services.attempts().list(context, &request, |_authority| {
+    // Initial attempt admission appends the accepted-attempt graph event and
+    // inserts the attempt row in one transaction. Read both from that committed
+    // generation; a fresh attempt does not need a session correlation.
+    let attempts = services.attempts().list(context, &request, || {
         preparation::current_work_product_attempt_topology(
             registered,
             context,

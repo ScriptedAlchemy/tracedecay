@@ -99,6 +99,7 @@ fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
                 source_generation: Some(generation),
                 watermark_digest: Some(digest('e')),
                 freshness: FreshnessState::Current,
+                code_graph_freshness: None,
             },
             coverage: EvidenceCoverage {
                 requested_domains: vec![EvidenceDomain::Diagnostic],

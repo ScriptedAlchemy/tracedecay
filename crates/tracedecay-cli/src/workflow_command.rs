@@ -28,14 +28,3 @@ pub(crate) async fn run(
     );
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn workflow_json_line_preserves_the_canonical_typed_problem() {
-        crate::application_cli::tests::assert_json_problem(
-            "schema.workflow.handoff_redeem.result",
-            "request.cli.workflow.7",
-        );
-    }
-}

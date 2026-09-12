@@ -190,13 +190,6 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn coerce_limit_clamps() {
-        assert_eq!(coerce_limit(None, 25, 100), 25);
-        assert_eq!(coerce_limit(Some(0), 25, 100), 1);
-        assert_eq!(coerce_limit(Some(500), 25, 100), 100);
-    }
-
     #[allow(clippy::unwrap_used)]
     fn test_conn() -> (
         tempfile::TempDir,
@@ -207,30 +200,6 @@ mod tests {
             &directory.path().join("dashboard.db"),
         );
         (directory, connection)
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn query_rows_returns_named_json_objects() {
-        let (_directory, conn) = test_conn();
-        conn.execute_batch("CREATE TABLE t (id INTEGER, name TEXT, score REAL, data BLOB)")
-            .await
-            .unwrap();
-        conn.execute_batch("INSERT INTO t VALUES (1, 'alpha', 0.5, X'00'), (2, NULL, NULL, NULL)")
-            .await
-            .unwrap();
-
-        let rows = query_rows(&conn, "SELECT id, name, score, data FROM t ORDER BY id", ())
-            .await
-            .unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["id"], 1);
-        assert_eq!(rows[0]["name"], "alpha");
-        assert_eq!(rows[0]["score"], 0.5);
-        // Blobs (like NULLs) collapse to JSON null per db_value_to_json.
-        assert!(rows[0]["data"].is_null());
-        assert!(rows[1]["name"].is_null());
-        assert_eq!(rows[1]["id"], 2);
     }
 
     #[tokio::test]

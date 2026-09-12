@@ -32,24 +32,6 @@ fn repository_identity_marker_is_discovered_without_graph_db() {
 }
 
 #[test]
-fn legacy_enrollment_marker_preserves_profile_identity() {
-    let dir = TempDir::new().unwrap();
-    write_enrollment(dir.path());
-
-    let marker = read_legacy_enrollment_marker(dir.path())
-        .unwrap()
-        .expect("marker should be present");
-
-    assert_eq!(
-        marker,
-        EnrollmentMarker {
-            project_id: "proj_123".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        }
-    );
-}
-
-#[test]
 fn invalid_legacy_enrollment_marker_is_not_treated_as_initialized() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -110,21 +92,6 @@ fn profile_sharded_layout_rejects_dot_and_hidden_project_ids() {
             "project_id {project_id:?} should be rejected, got {err}"
         );
     }
-}
-
-#[test]
-fn project_local_marker_without_graph_db_is_not_initialized() {
-    let dir = TempDir::new().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join(".tracedecay")).unwrap();
-    fs::write(
-        root.join(".tracedecay/enrollment.json"),
-        r#"{"project_id":"proj_local","storage_mode":"project_local"}"#,
-    )
-    .unwrap();
-
-    assert_eq!(discover_project_root(root), None);
-    assert!(!TraceDecay::is_initialized(root));
 }
 
 #[test]

@@ -4,8 +4,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+    CodeGraphInteractiveReader, CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_contracts::retrieval::{
     ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationSelector,
     ImplementationsRequest, PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap,
@@ -30,7 +31,7 @@ use crate::primitives::concrete::SymbolGraphCursorSnapshot;
 
 const MAX_COMPATIBILITY_RESULTS: usize = 500;
 const MAX_IMPLEMENTATION_RESULTS: usize = 200;
-const MAX_GRAPH_SCAN: usize = 500_000;
+const MAX_IMPLEMENTATION_RELATIONS: usize = 500_000;
 
 pub type SymbolGraphCursorFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, PrimitiveFailure>> + Send + 'a>>;
@@ -145,24 +146,47 @@ where
                 if let Err(failure) = validate_claim_generation(&claim, &graph.reader) {
                     return failed_with(context, failure);
                 }
-                let Ok(symbols) = all_symbols(&graph.reader, Arc::clone(&graph.cancellation))
-                else {
+                let query = request.query.as_str();
+                let Ok(exact) = graph.reader.resolve_simple_name(
+                    query,
+                    None,
+                    MAX_COMPATIBILITY_RESULTS,
+                    Arc::clone(&graph.cancellation),
+                ) else {
                     return failed(context, "canonical symbol search failed");
                 };
-                let query = request.query.as_str().to_ascii_lowercase();
-                let records = symbols
+                let mut symbols = exact
                     .into_iter()
                     .filter(|symbol| in_scope(symbol, &request.scope))
-                    .filter(|symbol| {
-                        symbol.metadata.as_ref().is_some_and(|metadata| {
-                            metadata.simple_name.to_ascii_lowercase().contains(&query)
-                                || metadata
-                                    .qualified_name
-                                    .to_ascii_lowercase()
-                                    .contains(&query)
-                        })
-                    })
                     .take(MAX_COMPATIBILITY_RESULTS)
+                    .collect::<Vec<_>>();
+                if symbols.len() < MAX_COMPATIBILITY_RESULTS {
+                    let exact_occurrences = symbols
+                        .iter()
+                        .map(|symbol| symbol.occurrence.clone())
+                        .collect::<HashSet<_>>();
+                    let remaining = MAX_COMPATIBILITY_RESULTS - symbols.len();
+                    let Ok(mut containing) = graph.reader.find_symbols(
+                        &|occurrence, binding, metadata| {
+                            !exact_occurrences.contains(occurrence)
+                                && in_scope_parts(binding, &request.scope)
+                                && metadata.is_some_and(|metadata| {
+                                    contains_ignore_ascii_case(&metadata.simple_name, query)
+                                        || contains_ignore_ascii_case(
+                                            &metadata.qualified_name,
+                                            query,
+                                        )
+                                })
+                        },
+                        remaining,
+                        Arc::clone(&graph.cancellation),
+                    ) else {
+                        return failed(context, "canonical symbol search failed");
+                    };
+                    symbols.append(&mut containing);
+                }
+                let records = symbols
+                    .into_iter()
                     .map(|symbol| symbol_record(symbol, None))
                     .collect::<Result<Vec<_>, _>>();
                 let Ok(records) = records else {
@@ -192,6 +216,7 @@ where
                     &request.meta.page,
                     "search",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -262,6 +287,7 @@ where
                     &request.meta.page,
                     "exact",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -289,23 +315,26 @@ where
                 let Ok(graph) = open_graph(&self.code_graph, context).await else {
                     return failed(context, "signature symbol lookup failed");
                 };
-                let Ok(nodes) = all_symbols(&graph.reader, Arc::clone(&graph.cancellation)) else {
+                let Ok(nodes) = graph.reader.find_symbols(
+                    &|_, binding, metadata| {
+                        in_scope_parts(binding, &request.scope)
+                            && metadata.is_some_and(|metadata| {
+                                matches!(
+                                    NodeKind::from_str(&metadata.kind),
+                                    Some(NodeKind::Function | NodeKind::Method)
+                                ) && signature_metadata_matches(metadata, request)
+                            })
+                    },
+                    MAX_COMPATIBILITY_RESULTS,
+                    Arc::clone(&graph.cancellation),
+                ) else {
                     return failed(context, "signature symbol lookup failed");
                 };
 
                 let mut records = Vec::new();
                 for node in nodes {
-                    let Some(metadata) = node.metadata.as_ref() else {
+                    if node.metadata.is_none() {
                         return failed(context, "signature symbol evidence was incomplete");
-                    };
-                    if !matches!(
-                        NodeKind::from_str(&metadata.kind),
-                        Some(NodeKind::Function | NodeKind::Method)
-                    ) {
-                        continue;
-                    }
-                    if !in_scope(&node, &request.scope) || !signature_matches(&node, request) {
-                        continue;
                     }
                     let Ok(record) = symbol_record(node, None) else {
                         return failed(context, "signature symbol evidence was incomplete");
@@ -321,6 +350,7 @@ where
                     &request.meta.page,
                     "signature",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -409,6 +439,7 @@ where
                     &request.meta.page,
                     "implementations",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -451,6 +482,7 @@ where
                             &request.meta.page,
                             "hierarchy",
                             &claim,
+                            graph.freshness,
                             Vec::new(),
                             Vec::new(),
                             None,
@@ -515,6 +547,7 @@ where
                     &request.meta.page,
                     "hierarchy",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -559,6 +592,7 @@ where
                     &request.meta.page,
                     "callers",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -656,6 +690,7 @@ where
                     &request.meta.page,
                     "callees",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     None,
@@ -714,6 +749,7 @@ where
                     &request.meta.page,
                     "impact",
                     &claim,
+                    graph.freshness,
                     records,
                     Vec::new(),
                     Some(edge_count),
@@ -728,6 +764,7 @@ where
 struct OpenSymbolGraph {
     reader: CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
 }
 
 #[hotpath::measure(label = "usecases.primitives.open_graph", future = true)]
@@ -744,6 +781,7 @@ async fn open_graph(
         ))
         .await
         .map_err(|_| ())?;
+    let freshness = verified.freshness();
     let reader = verified
         .reader_with_cancellation(
             context.request,
@@ -754,30 +792,8 @@ async fn open_graph(
     Ok(OpenSymbolGraph {
         reader,
         cancellation,
+        freshness,
     })
-}
-
-#[hotpath::measure(label = "usecases.primitives.graph_census")]
-fn all_symbols(
-    graph: &CodeGraphInteractiveReader,
-    cancellation: Arc<dyn GraphCancellation>,
-) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
-    const PAGE_SIZE: usize = 4_096;
-    let mut after = None;
-    let mut symbols = Vec::new();
-    loop {
-        let page = graph
-            .symbols_page(after.as_ref(), PAGE_SIZE, Arc::clone(&cancellation))
-            .map_err(|_| ())?;
-        if symbols.len().saturating_add(page.symbols.len()) > MAX_GRAPH_SCAN {
-            return Err(());
-        }
-        after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
-        symbols.extend(page.symbols);
-        if !page.has_more {
-            return Ok(symbols);
-        }
-    }
 }
 
 pub(super) fn trait_implementations(
@@ -786,17 +802,33 @@ pub(super) fn trait_implementations(
     name: &str,
     scope: &SymbolGraphScope,
 ) -> Result<Vec<SymbolRelationRecord>, ()> {
-    let symbols = all_symbols(graph, Arc::clone(&cancellation))?;
-    let exact_candidates = symbols
-        .iter()
-        .filter(|node| is_trait_named(node, name, true))
-        .cloned()
+    let indexed = graph
+        .resolve_simple_name(
+            name.rsplit("::").next().unwrap_or(name),
+            None,
+            MAX_IMPLEMENTATION_RESULTS,
+            Arc::clone(&cancellation),
+        )
+        .map_err(|_| ())?;
+    let qualified = name.contains("::") || name.contains('.');
+    let exact_candidates = indexed
+        .into_iter()
+        .filter(|node| is_trait_named(node, name, qualified))
         .collect::<Vec<_>>();
     let candidates = if exact_candidates.is_empty() {
-        symbols
-            .into_iter()
-            .filter(|node| is_trait_named(node, name, false))
-            .collect()
+        graph
+            .find_symbols(
+                &|_, _, metadata| {
+                    metadata.is_some_and(|metadata| {
+                        is_trait_metadata(metadata)
+                            && (contains_ignore_ascii_case(&metadata.simple_name, name)
+                                || contains_ignore_ascii_case(&metadata.qualified_name, name))
+                    })
+                },
+                MAX_IMPLEMENTATION_RESULTS,
+                Arc::clone(&cancellation),
+            )
+            .map_err(|_| ())?
     } else {
         exact_candidates
     };
@@ -813,7 +845,7 @@ pub(super) fn trait_implementations(
             .callers(
                 std::slice::from_ref(&trait_node.occurrence),
                 &[RelationEdgeKindV1::Implements],
-                MAX_GRAPH_SCAN,
+                MAX_IMPLEMENTATION_RELATIONS,
                 Arc::clone(&cancellation),
             )
             .map_err(|_| ())?;
@@ -844,21 +876,26 @@ pub(super) fn trait_implementations(
 
 fn is_trait_named(node: &CodeGraphSymbolSummaryV1, name: &str, qualified: bool) -> bool {
     node.metadata.as_ref().is_some_and(|metadata| {
-        matches!(
-            NodeKind::from_str(&metadata.kind),
-            Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
-        ) && if qualified {
-            metadata.qualified_name == name
-        } else {
-            metadata.simple_name.eq_ignore_ascii_case(name)
-        }
+        is_trait_metadata(metadata)
+            && if qualified {
+                metadata.qualified_name == name
+            } else {
+                metadata.simple_name.eq_ignore_ascii_case(name)
+            }
     })
 }
 
-fn signature_matches(node: &CodeGraphSymbolSummaryV1, request: &SignatureSearchRequest) -> bool {
-    let Some(metadata) = node.metadata.as_ref() else {
-        return false;
-    };
+fn is_trait_metadata(metadata: &LineageSymbolRecordV1) -> bool {
+    matches!(
+        NodeKind::from_str(&metadata.kind),
+        Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+    )
+}
+
+fn signature_metadata_matches(
+    metadata: &LineageSymbolRecordV1,
+    request: &SignatureSearchRequest,
+) -> bool {
     if request
         .is_async
         .is_some_and(|want_async| metadata.is_async != want_async)
@@ -1052,16 +1089,25 @@ pub(crate) fn symbol_record(
 }
 
 fn in_scope(node: &CodeGraphSymbolSummaryV1, scope: &SymbolGraphScope) -> bool {
-    let Some(file) = node
-        .binding
-        .as_ref()
-        .and_then(|binding| binding.logical_path.as_deref())
-    else {
+    in_scope_parts(node.binding.as_ref(), scope)
+}
+
+fn in_scope_parts(binding: Option<&CodeGraphSymbolBindingV1>, scope: &SymbolGraphScope) -> bool {
+    let Some(file) = binding.and_then(|binding| binding.logical_path.as_deref()) else {
         return false;
     };
     scope.path_prefix.as_deref().is_none_or(|path_prefix| {
         tracedecay_runtime_core::path_scope::path_matches_scope(file, Some(path_prefix))
     })
+}
+
+fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
+    query.is_empty()
+        || (query.len() <= value.len()
+            && value
+                .as_bytes()
+                .windows(query.len())
+                .any(|window| window.eq_ignore_ascii_case(query.as_bytes())))
 }
 
 /// Binds a read to the live graph generation before any row is read, and
@@ -1092,11 +1138,12 @@ async fn complete_or_failed<T: Send>(
     request: &PageRequest,
     lane: &str,
     claim: &SymbolGraphPageClaim,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     items: Vec<T>,
     gaps: Vec<PrimitiveSupportGap>,
     related_edge_count: Option<u64>,
 ) -> SymbolGraphPortOutcome<T> {
-    let mut page = match paginate(cursors, context, request, lane, claim, items).await {
+    let mut page = match paginate(cursors, context, request, lane, claim, freshness, items).await {
         Ok(page) => page,
         Err(failure) => {
             return SymbolGraphPortOutcome::Failed {
@@ -1129,6 +1176,7 @@ async fn paginate<T: Send>(
     request: &PageRequest,
     lane: &str,
     claim: &SymbolGraphPageClaim,
+    freshness: tracedecay_graph_query::CodeGraphReadFreshnessV1,
     items: Vec<T>,
 ) -> Result<SymbolGraphPage<T>, PrimitiveFailure> {
     let offset = claim.offset();
@@ -1159,6 +1207,8 @@ async fn paginate<T: Send>(
         )
         .await?;
     Ok(SymbolGraphPage::complete(
+        claim.snapshot.code_generation_id().clone(),
+        freshness,
         page_items,
         Some(total as u64),
         next_cursor,

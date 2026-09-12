@@ -30,7 +30,7 @@ try {
   url.searchParams.set('loom_time',String(time('14:32:17.803')));
   await page.goto(url.href);
   await page.locator('.journey-group').first().waitFor();
-  assert.match(await page.locator('.loom-head').innerText(),/1 ILLUSTRATIVE AGENTS/);
+  assert.match(await page.locator('.loom-head').innerText(),/1 UNIQUE AGENTS.*2 WORKSTREAM PARTICIPATIONS/);
   assert.equal(await page.locator('.journey-group').count(),2,'the revealed identity retains both workstream memberships');
 
   url.searchParams.delete('loom_query'); url.searchParams.delete('loom_event');
@@ -38,7 +38,7 @@ try {
   url.searchParams.set('loom_unresolved_only','1');
   await page.goto(url.href);
   await page.locator('.journey-group').first().waitFor();
-  assert.match(await page.locator('.loom-head').innerText(),/103 ILLUSTRATIVE AGENTS/,'a future session end cannot resolve a session during replay');
+  assert.match(await page.locator('.loom-head').innerText(),/103 UNIQUE AGENTS.*123 WORKSTREAM PARTICIPATIONS/,'a future session end cannot resolve a session during replay');
   await page.getByRole('button',{name:'Play replay',exact:true}).click();
   const announcement = await page.getByRole('status').innerText();
   const start = Number(new URL(page.url()).searchParams.get('loom_time'));

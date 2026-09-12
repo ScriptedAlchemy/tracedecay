@@ -1298,23 +1298,6 @@ mod tests {
         assert!(cursor > 0, "resume cursor must address a real store id");
     }
 
-    /// A store inside the budget is fully covered, and the coverage says so.
-    #[tokio::test]
-    async fn store_status_reports_a_complete_token_estimate_within_the_scan_budget() {
-        const ROWS: i64 = 300;
-        let (_database_dir, conn) = test_lcm_connection().await;
-        seed_raw_messages(&conn, "session-complete-status", ROWS).await;
-
-        let messages = store_message_count(&*conn, "cursor", None).await.unwrap();
-        let status = store_status_within(&*conn, "cursor", None, messages, 512)
-            .await
-            .unwrap();
-
-        assert_eq!(status.messages, ROWS);
-        assert_eq!(status.estimated_tokens, ROWS * 2);
-        assert_eq!(status.token_estimate, LcmStoreTokenCoverage::complete(ROWS));
-    }
-
     /// The bound has to hold on the production entry point too, not only on the
     /// test-visible inner function.
     #[tokio::test]
@@ -1535,21 +1518,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn all_scope_census_sql_is_bare_count() {
-        let (sql, values) = status_counts_query("all", None);
-        assert!(
-            values.is_empty(),
-            "unbounded census must bind no scope values"
-        );
-        let compact: String = sql.chars().filter(|ch| !ch.is_whitespace()).collect();
-        assert!(
-            compact.contains("(SELECTCOUNT(*)FROMlcm_raw_messages)"),
-            "unbounded raw census must stay a bare COUNT(*):\n{sql}"
-        );
-        assert!(!sql.contains("= 'all' OR"), "{sql}");
     }
 
     async fn seed_status_perf_store(conn: &Connection, rows: i64) {

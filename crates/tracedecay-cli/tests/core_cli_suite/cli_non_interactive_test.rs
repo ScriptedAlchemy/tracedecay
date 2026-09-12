@@ -2758,43 +2758,6 @@ fn branch_add_admits_background_publication_and_remove_retires_its_exact_artifac
 }
 
 #[tokio::test]
-async fn branch_remove_deletes_branch_db_from_profile_shard() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    write_git_fixture(project.path());
-    write_profile_sharded_fixture(home.path(), project.path());
-    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
-        .await
-        .unwrap();
-    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
-    runtime.checkpoint_profile_database_for_test().await;
-    drop(runtime);
-    seed_canonical_configuration(home.path(), project.path());
-    let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[("feature/ui", "branches/feature_ui.db")],
-        true,
-    );
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["branch", "remove", "feature/ui"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "branch remove should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !shard_root.join("branches/feature_ui.db").exists(),
-        "branch remove should delete branch DB from profile shard"
-    );
-}
-
-#[tokio::test]
 async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

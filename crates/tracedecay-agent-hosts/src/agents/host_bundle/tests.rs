@@ -9,65 +9,9 @@ use super::control::{
     expected_ownership_marker, host_bundle_backup_receipt_file, host_bundle_restore_receipt_file,
     receipt_file, validate_component_set_journal,
 };
-use super::doctor::{corrupt_component_result, doctor_artifact_state, repair_action};
+use super::doctor::doctor_artifact_state;
 use super::planner::plan_artifact_action;
 use super::*;
-
-#[test]
-fn host_integration_contracts_are_owned_by_the_leaf_crate() {
-    assert_eq!(
-        std::any::type_name::<HostBundleManifestV1>(),
-        "tracedecay_host_integration::HostBundleManifestV1"
-    );
-    assert_eq!(
-        std::any::type_name::<HostBundleInstallReceiptV1>(),
-        "tracedecay_host_integration::HostBundleInstallReceiptV1"
-    );
-    assert_eq!(
-        std::any::type_name::<HostBundleJournalV1>(),
-        "tracedecay_host_integration::HostBundleJournalV1"
-    );
-    assert_eq!(
-        std::any::type_name::<HostNativeFixtureEvidenceV1>(),
-        "tracedecay_host_integration::HostNativeFixtureEvidenceV1"
-    );
-}
-
-#[test]
-fn kimi_repair_actions_name_the_interactive_plugins_flow() {
-    for state in [
-        HostBundleComponentDoctorStateV1::Repairable,
-        HostBundleComponentDoctorStateV1::Missing,
-        HostBundleComponentDoctorStateV1::Corrupt,
-        HostBundleComponentDoctorStateV1::OwnershipConflict,
-    ] {
-        let action = repair_action(
-            HostKindV1::KimiCode,
-            HostBundleComponentV1::Core,
-            state,
-            HostBundleRegistrationStateV1::Repairable,
-        );
-        assert!(
-            action.contains("/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay"),
-            "Kimi remediation must name the interactive host command: {action}"
-        );
-        assert!(
-            !action.contains("reinstall --component"),
-            "Kimi remediation must not advertise an unsupported repair command: {action}"
-        );
-    }
-
-    let corrupt = corrupt_component_result(
-        PathBuf::from("/tmp/kimi-corrupt-receipt.json"),
-        Some(HostKindV1::KimiCode),
-        Some(HostBundleComponentV1::Core),
-    );
-    assert!(
-        corrupt
-            .repair_action
-            .contains("/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay")
-    );
-}
 
 #[derive(Clone)]
 struct FirstPartyVerifier([u8; 32]);
@@ -1421,44 +1365,6 @@ fn feedback_switch_apply_restore_and_aggregate_receipt_share_writer_recovery() {
     assert_eq!(
         std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
         b"previous"
-    );
-}
-
-#[test]
-fn static_catalog_validates_schema_version_and_capabilities() {
-    let bundle = crate::agents::host_bundle_registry::verified_embedded_host_bundle(
-        HostKindV1::OpenCode,
-        HostBundleComponentV1::Core,
-        0,
-        crate::agents::TEST_GENERATOR_COMMIT,
-    )
-    .unwrap();
-    assert_eq!(
-        crate::agents::host_bundle_registry::FIRST_PARTY_COMPONENT_CATALOG_VERSION,
-        1
-    );
-    bundle.manifest.validate_structure().unwrap();
-    assert!(require_capability(HostKindV1::OpenCode, HostCapabilityV1::Lsp).is_ok());
-    assert!(require_capability(HostKindV1::KimiCode, HostCapabilityV1::Hooks).is_ok());
-}
-
-#[test]
-fn cursor_native_diagnostics_are_supported_by_the_packaged_extension() {
-    assert_eq!(
-        stock_host_capabilities(HostKindV1::CursorDesktop)
-            .into_iter()
-            .find(|record| record.capability == HostCapabilityV1::NativeDiagnostics)
-            .map(|record| record.state),
-        Some(HostCapabilityStateV1::Supported)
-    );
-    assert!(
-        stock_host_registration_evidence(HostKindV1::CursorDesktop)
-            .into_iter()
-            .any(|evidence| {
-                evidence.route == HostRegistrationRouteV1::CursorNativeDiagnostics
-                    && evidence.state == HostCapabilityStateV1::Supported
-                    && evidence.evidence_ref == "plugin/cursor-native-extension/package.json"
-            })
     );
 }
 

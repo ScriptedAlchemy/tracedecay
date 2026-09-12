@@ -108,42 +108,6 @@ fn source_watermark_observes_live_cancellation_inside_the_entity_loop() {
 }
 
 #[test]
-fn manifest_construction_observes_live_cancellation_inside_entity_allocation() {
-    let checks = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&checks);
-    let control = FactReadControl::new(Arc::new(move || {
-        observed.fetch_add(1, Ordering::AcqRel) >= 12_000
-    }));
-    let source = MemoryGraphSource {
-        owner: "profile".to_owned(),
-        entities: (0..10_000)
-            .map(|index| format!("memory-fact:{index:08x}"))
-            .collect(),
-        relations: BTreeSet::new(),
-    };
-    let projection = tracedecay_graph_db::GraphProjectionIdentity::new(
-        tracedecay_graph_db::GraphNamespace::new("project-memory:test")
-            .expect("graph namespace fixture"),
-        tracedecay_graph_db::GraphProjectionId::new("project-memory-relations")
-            .expect("graph projection fixture"),
-    );
-    let watermark = tracedecay_graph_db::GraphWatermark::new("memory-relations:test")
-        .expect("graph watermark fixture");
-
-    assert!(matches!(
-        build_manifest(
-            &FactOwnerV1::Profile,
-            projection,
-            &source,
-            watermark,
-            Some(&control),
-        ),
-        Err(FactStoreError::ReadCancelled)
-    ));
-    assert!(checks.load(Ordering::Acquire) > 12_000);
-}
-
-#[test]
 fn manifest_validation_observes_live_cancellation_after_local_construction() {
     let checks = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&checks);

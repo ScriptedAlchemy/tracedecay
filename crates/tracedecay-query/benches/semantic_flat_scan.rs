@@ -31,9 +31,10 @@ use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl, RetrievalPortError,
 };
 use tracedecay_query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, SemanticCodeRetriever, SemanticLaneRetriever, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
-    SemanticRetrievalRequestV1, SemanticVectorReadPort, SemanticVectorReadRequestV1,
-    SemanticVectorRecordV1, SemanticVectorScanSummaryV1,
+    EphemeralQueryEmbeddingV1, SemanticCodeRetriever, SemanticLaneRetriever,
+    SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1, SemanticRetrievalRequestV1,
+    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
+    SemanticVectorScanSummaryV1,
 };
 
 // Row counts stop at the production resident-row cap
@@ -77,6 +78,7 @@ fn projection(dimensions: u32) -> AdmittedEmbeddingProjectionKeyV1 {
         runtime_backend: "onnx.cpu".to_owned(),
         runtime_build_revision: "runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,

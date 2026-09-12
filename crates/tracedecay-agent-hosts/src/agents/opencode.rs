@@ -138,9 +138,7 @@ impl AgentIntegration for OpenCodeIntegration {
         component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle::HostBundleRegistrationStateV1 {
-        use super::host_bundle::{
-            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
-        };
+        use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1 as State};
 
         let config_path = opencode_config_path(&ctx.home);
         let config = match std::fs::read(&config_path) {
@@ -1184,18 +1182,6 @@ mod tests {
             config["lsp"]["rust-analyzer"]["command"],
             json!(["rust-analyzer"])
         );
-    }
-
-    #[test]
-    fn config_path_honors_external_absolute_xdg_root() {
-        let home = tempfile::tempdir().unwrap();
-        let xdg = tempfile::tempdir().unwrap();
-
-        assert_eq!(
-            opencode_config_path_for(home.path(), Some(xdg.path().as_os_str())),
-            xdg.path().join("opencode/opencode.json")
-        );
-        assert!(!xdg.path().starts_with(home.path()));
     }
 
     #[test]

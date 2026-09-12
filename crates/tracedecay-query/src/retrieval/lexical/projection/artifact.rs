@@ -30,7 +30,7 @@ pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{CodeExactLexicalArtifactReaderV1, CodeLexicalArtifactReaderV1};
 pub use schema::CodeLexicalArtifactWriterRevisionV1;
 
-/// Default and maximum budget for the artifact build memory ledger.
+/// Floor for the artifact build memory ledger.
 ///
 /// This is a *ledger claim over tracked allocations*, not a hard RSS bound.
 /// The enforced ledger charges, as if simultaneous: the SQLite page-cache
@@ -41,10 +41,27 @@ pub use schema::CodeLexicalArtifactWriterRevisionV1;
 /// exceeds the budget is refused before SQLite mutation or source advance.
 ///
 /// Explicitly outside the claim (the narrowed part): SQLite's `cache_size`
-/// is a target the engine may transiently exceed, per-statement and
-/// allocator metadata overhead are unaccounted, and `temp_store = FILE`
-/// keeps temporary b-trees on disk rather than bounding them in memory.
+/// is a target the engine may transiently exceed, and per-statement and
+/// allocator metadata overhead are unaccounted.
 pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1: usize = 1536 * 1024 * 1024;
+const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_FRACTION_DENOMINATOR_V1: u64 = 8;
+pub const CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1: usize = 16 * 1024 * 1024 * 1024;
+
+/// Host-derived lexical artifact build budget.
+///
+/// Small hosts retain the established 1.5 GiB behavior. Larger hosts grant
+/// one eighth of the process resident authority, capped so one background
+/// artifact cannot crowd out graph, semantic, and serving residents.
+#[must_use]
+pub fn code_lexical_artifact_build_memory_budget_for(admitted_process_bytes: u64) -> usize {
+    let floor = CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1 as u64;
+    usize::try_from(
+        (admitted_process_bytes / CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_FRACTION_DENOMINATOR_V1)
+            .max(floor)
+            .min(CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1 as u64),
+    )
+    .unwrap_or(usize::MAX)
+}
 /// Maximum reader cache budget: the stored metadata copy plus the SQLite
 /// page-cache grant, which stays inside the kernel SQLite window ([2, 64]
 /// MiB page cache). Sealed read-only readers also mmap the immutable file
@@ -143,14 +160,15 @@ fn sqlite_corrupt(error: rusqlite::Error) -> CodeLexicalArtifactErrorV1 {
 /// persists its own verified progress, so rollback-journal durability suffices.
 /// SQLite's auxiliary sorter width reuses the canonical code-index worker
 /// authority: the connection thread occupies one admitted worker and SQLite
-/// may use only the remainder. `temp_store = FILE` keeps corpus-wide CREATE
-/// INDEX runs disk-backed; their allocator/statement overhead remains outside
-/// this module's narrowed memory-ledger claim. The modeled-reservation gauge
+/// may use only the memory-backed remainder. Corpus-wide CREATE INDEX runs use
+/// in-memory temporary b-trees only when the same budget holds their modeled
+/// reservation; otherwise they spill to files. The modeled-reservation gauge
 /// reports the caller plus effective helpers at the canonical 128 MiB worker
 /// charge; it is a subset of the scheduler's existing admission, not another
 /// cache or a second memory authority.
 fn open_builder_connection(
     path: &Path,
+    memory_budget_bytes: usize,
 ) -> Result<rusqlite::Connection, CodeLexicalArtifactErrorV1> {
     let connection = rusqlite::Connection::open(path).map_err(sqlite_error)?;
     connection
@@ -160,9 +178,6 @@ fn open_builder_connection(
         .pragma_update(None, "synchronous", "NORMAL")
         .map_err(sqlite_error)?;
     connection
-        .pragma_update(None, "temp_store", "FILE")
-        .map_err(sqlite_error)?;
-    connection
         .pragma_update(None, "mmap_size", 0i64)
         .map_err(sqlite_error)?;
     let cache_kib = -i64::try_from(ARTIFACT_SQLITE_CACHE_BYTES / 1024)
@@ -170,8 +185,16 @@ fn open_builder_connection(
     connection
         .pragma_update(None, "cache_size", cache_kib)
         .map_err(sqlite_error)?;
-    let requested_sorter_workers =
-        tracedecay_code_index::parallelism::indexing_workers().saturating_sub(1);
+    let sorter_budget_bytes =
+        u64::try_from(memory_budget_bytes.saturating_sub(ARTIFACT_SQLITE_CACHE_BYTES))
+            .unwrap_or(u64::MAX);
+    let requested_sorter_workers = (0..tracedecay_code_index::parallelism::indexing_workers())
+        .rev()
+        .find(|helpers| {
+            tracedecay_code_index::parallelism::worker_reservation_bytes(helpers.saturating_add(1))
+                <= sorter_budget_bytes
+        })
+        .unwrap_or(0);
     let requested_sorter_workers_i64 = i64::try_from(requested_sorter_workers)
         .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
     connection
@@ -192,12 +215,20 @@ fn open_builder_connection(
     }
     hotpath::gauge!("query.artifact.sqlite_sorter_workers.requested").set(requested_sorter_workers);
     hotpath::gauge!("query.artifact.sqlite_sorter_workers.effective").set(effective_sorter_workers);
-    hotpath::gauge!("query.artifact.sqlite_sorter.modeled_reservation_bytes").set(
-        tracedecay_code_index::parallelism::worker_reservation_bytes(
-            effective_sorter_workers.saturating_add(1),
-        ),
+    let modeled_reservation_bytes = tracedecay_code_index::parallelism::worker_reservation_bytes(
+        effective_sorter_workers.saturating_add(1),
     );
-    hotpath::gauge!("query.artifact.sqlite_sorter.temp_store_file").set(1u64);
+    let temp_store_file = modeled_reservation_bytes > sorter_budget_bytes;
+    connection
+        .pragma_update(
+            None,
+            "temp_store",
+            if temp_store_file { "FILE" } else { "MEMORY" },
+        )
+        .map_err(sqlite_error)?;
+    hotpath::gauge!("query.artifact.sqlite_sorter.modeled_reservation_bytes")
+        .set(modeled_reservation_bytes);
+    hotpath::gauge!("query.artifact.sqlite_sorter.temp_store_file").set(u64::from(temp_store_file));
     Ok(connection)
 }
 
@@ -238,7 +269,11 @@ mod tests {
 
     use tracedecay_code_index::parallelism::ProcessBackgroundCpuV1;
 
-    use super::{ARTIFACT_SQLITE_CACHE_BYTES, builder_sorter_cpu_units, open_builder_connection};
+    use super::{
+        ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        builder_sorter_cpu_units, code_lexical_artifact_build_memory_budget_for,
+        open_builder_connection,
+    };
 
     /// Staging builder connections stay inside the kernel SQLite window:
     /// no mmap grant, page cache at most 64 MiB, and `synchronous = NORMAL`
@@ -247,8 +282,11 @@ mod tests {
     #[test]
     fn builder_connections_stay_inside_the_kernel_sqlite_window() {
         let directory = tempfile::tempdir().expect("artifact tempdir");
-        let connection = open_builder_connection(&directory.path().join("window.sqlite"))
-            .expect("builder connection");
+        let connection = open_builder_connection(
+            &directory.path().join("window.sqlite"),
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+        .expect("builder connection");
         let mmap: i64 = connection
             .pragma_query_value(None, "mmap_size", |row| row.get(0))
             .expect("mmap pragma");
@@ -279,16 +317,19 @@ mod tests {
             .pragma_query_value(None, "temp_store", |row| row.get(0))
             .expect("temp-store pragma");
         assert_eq!(
-            temp_store, 1,
-            "SQLite sorter PMAs must spill to files rather than retaining the corpus in memory"
+            temp_store, 2,
+            "an admitted SQLite sorter reservation may retain temporary b-trees in memory"
         );
     }
 
     #[test]
     fn builder_connections_reuse_canonical_worker_width_for_sqlite_sorters() {
         let directory = tempfile::tempdir().expect("artifact tempdir");
-        let connection = open_builder_connection(&directory.path().join("workers.sqlite"))
-            .expect("builder connection");
+        let connection = open_builder_connection(
+            &directory.path().join("workers.sqlite"),
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+        .expect("builder connection");
         let capability_probe =
             rusqlite::Connection::open_in_memory().expect("open SQLite worker capability probe");
         capability_probe
@@ -297,11 +338,22 @@ mod tests {
         let sqlite_worker_ceiling: i64 = capability_probe
             .pragma_query_value(None, "threads", |row| row.get(0))
             .expect("read SQLite worker ceiling");
-        let admitted_auxiliary_threads = tracedecay_code_index::parallelism::indexing_workers()
-            .saturating_sub(1)
-            .min(
-                usize::try_from(sqlite_worker_ceiling).expect("nonnegative SQLite worker ceiling"),
-            );
+        let sorter_budget = u64::try_from(
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1 - ARTIFACT_SQLITE_CACHE_BYTES,
+        )
+        .expect("sorter budget");
+        let admitted_auxiliary_threads =
+            (0..tracedecay_code_index::parallelism::indexing_workers())
+                .rev()
+                .find(|helpers| {
+                    tracedecay_code_index::parallelism::worker_reservation_bytes(helpers + 1)
+                        <= sorter_budget
+                })
+                .expect("one builder worker fits")
+                .min(
+                    usize::try_from(sqlite_worker_ceiling)
+                        .expect("nonnegative SQLite worker ceiling"),
+                );
         let configured_threads: i64 = connection
             .pragma_query_value(None, "threads", |row| row.get(0))
             .expect("read artifact SQLite worker limit");
@@ -323,8 +375,11 @@ mod tests {
             NonZeroUsize::new(worker_width).expect("nonzero code-index worker width"),
         ));
         let directory = tempfile::tempdir().expect("artifact tempdir");
-        let connection = open_builder_connection(&directory.path().join("weighted.sqlite"))
-            .expect("builder connection");
+        let connection = open_builder_connection(
+            &directory.path().join("weighted.sqlite"),
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+        .expect("builder connection");
         let configured_threads: i64 = connection
             .pragma_query_value(None, "threads", |row| row.get(0))
             .expect("read configured SQLite helper width");
@@ -350,6 +405,24 @@ mod tests {
             authority.active_units(),
             0,
             "weighted admission must release every unit after the statement"
+        );
+    }
+
+    #[test]
+    fn build_memory_budget_scales_from_process_admission() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+
+        assert_eq!(
+            code_lexical_artifact_build_memory_budget_for(6 * GIB),
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+        );
+        assert_eq!(
+            code_lexical_artifact_build_memory_budget_for(96 * GIB),
+            12 * GIB as usize
+        );
+        assert_eq!(
+            code_lexical_artifact_build_memory_budget_for(256 * GIB),
+            16 * GIB as usize
         );
     }
 }

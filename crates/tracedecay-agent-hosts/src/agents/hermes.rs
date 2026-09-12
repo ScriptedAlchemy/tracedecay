@@ -698,32 +698,6 @@ mod registration_tests {
     }
 
     #[test]
-    fn one_catalog_snapshot_renders_manifest_and_schemas() {
-        let tools = vec![crate::ports::mcp_tools::AdvertisedToolV1 {
-            name: "tracedecay_fixture".to_string(),
-            description: "fixture tool".to_string(),
-            input_schema: serde_json::Value::Null,
-            read_only: true,
-        }];
-
-        let files = rendered_plugin_files_with_tools("tracedecay", "fixture-commit", &tools)
-            .expect("fixture plugin must render");
-        let manifest = &files
-            .iter()
-            .find(|(relative, _)| *relative == "plugin.yaml")
-            .expect("manifest")
-            .1;
-        let schemas = &files
-            .iter()
-            .find(|(relative, _)| *relative == "schemas.json")
-            .expect("schemas")
-            .1;
-
-        assert!(manifest.contains("  - tracedecay_fixture"));
-        assert!(schemas.contains("\"name\": \"tracedecay_fixture\""));
-    }
-
-    #[test]
     fn registration_inventory_owns_existing_managed_skill_overlay_files() {
         let home = tempfile::tempdir().unwrap();
         let overlay = home

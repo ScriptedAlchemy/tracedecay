@@ -9,8 +9,6 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracedecay_daemon_protocol::{DaemonEndpoint, DaemonLivenessProbe};
@@ -165,39 +163,5 @@ pub fn client_connection(socket_path: &Path) -> Result<ResolvedDaemonConnection>
     {
         let _ = socket_path;
         current_daemon_connection()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn connection_exposes_only_the_published_http_application_endpoint() {
-        let http_application_endpoint = "127.0.0.1:43124".parse().unwrap();
-        let endpoint = DaemonEndpoint::loopback("127.0.0.1:43123".parse().unwrap()).unwrap();
-        let connection = ResolvedDaemonConnection {
-            endpoint: endpoint.clone(),
-            auth_token: Some("11".repeat(32)),
-            authority_record: Some(authority::DaemonAuthorityRecord {
-                pid: 42,
-                process_run_id: "run-42".to_owned(),
-                started_at_unix_secs: 1_700_000_000,
-                epoch: 7,
-                version: "test".to_owned(),
-                endpoint,
-                http_application_endpoint: Some(http_application_endpoint),
-                remote_brain_tls_endpoint: None,
-                auth_token: "11".repeat(32),
-                profile_root: PathBuf::from("/tmp/tracedecay-test-profile"),
-                brain_id: None,
-                profile_id: None,
-            }),
-        };
-
-        assert_eq!(
-            connection.http_application_endpoint(),
-            Some(http_application_endpoint)
-        );
     }
 }

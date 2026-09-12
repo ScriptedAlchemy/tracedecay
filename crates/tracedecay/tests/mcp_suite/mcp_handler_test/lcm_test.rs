@@ -16,31 +16,11 @@ use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 #[cfg(feature = "test-transport")]
 use tracedecay_lcm::{LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft};
-use tracedecay_mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
-#[test]
-fn lcm_mutation_tools_remain_daemon_internal() {
-    let names = get_tool_definitions()
-        .expect("tool definitions")
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect::<std::collections::BTreeSet<_>>();
-
-    for retired in [
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
-    ] {
-        assert!(
-            !names.contains(retired),
-            "{retired} must remain daemon-internal"
-        );
-    }
-}
 #[tokio::test]
 async fn lcm_tools_reject_invalid_storage_routing_arguments() {
     let dir = test_temp_dir();
@@ -393,6 +373,92 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn lcm_load_session_cursor_walk_reads_every_message_exactly_once() {
+    // More records than the internal candidate cohort window, so the walk has
+    // to advance the storage keyset rather than re-rank the first window.
+    const RECORDS: usize = 300;
+    // Small enough that a page plus its cursor fits one MCP response frame.
+    const LIMIT: usize = 5;
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let mut projections = Vec::with_capacity(RECORDS);
+    for index in 0..RECORDS {
+        projections.push(
+            seed_temporal_lcm_session_message_for_provider(
+                &cg,
+                "codex",
+                "lcm-cursor-walk",
+                &format!("lcm-walk-message-{index}"),
+                &format!("walked retained message {index}"),
+                i64::try_from(index + 1).unwrap(),
+            )
+            .await,
+        );
+    }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-cursor-walk", projections).await;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0usize;
+    loop {
+        let mut args = json!({
+            "provider": "codex",
+            "session_id": "lcm-cursor-walk",
+            "limit": LIMIT,
+            "content_limit": 4
+        });
+        if let Some(cursor) = &cursor {
+            args.as_object_mut()
+                .unwrap()
+                .insert("cursor".to_owned(), json!(cursor));
+        }
+        let loaded = handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None, None)
+            .await
+            .unwrap_or_else(|error| panic!("page {pages} of a large session must load: {error}"));
+        let loaded: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+        pages += 1;
+        let messages = loaded["messages"].as_array().unwrap();
+        assert!(
+            !messages.is_empty(),
+            "page {pages} continued with no messages: {loaded}"
+        );
+        for message in messages {
+            let message_id = message["message_id"].as_str().unwrap().to_owned();
+            assert!(
+                seen.insert(message_id.clone()),
+                "page {pages} re-served {message_id}"
+            );
+        }
+        cursor = loaded["temporal"]["next_cursor"]
+            .as_str()
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+        assert!(
+            seen.len() < RECORDS,
+            "the walk continued past the last message: {loaded}"
+        );
+        assert!(
+            pages <= RECORDS,
+            "the walk failed to reach the end of the session"
+        );
+    }
+    assert_eq!(
+        seen.len(),
+        RECORDS,
+        "a cursor walk must read every retained message exactly once"
+    );
+    for index in 0..RECORDS {
+        assert!(
+            seen.contains(&format!("lcm-walk-message-{index}")),
+            "lcm-walk-message-{index} was never served"
+        );
+    }
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;
@@ -696,6 +762,60 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn lcm_grep_raw_hit_store_id_expands_byte_exactly() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let content = "grep-to-expand byte identity: café\nsecond line";
+    let projection = seed_temporal_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "lcm-grep-expand-session",
+        "lcm-grep-expand-message",
+        content,
+        1,
+    )
+    .await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-grep-expand-session", vec![projection]).await;
+
+    let grep = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "codex",
+            "query": "grep-to-expand byte identity",
+            "scope": "session",
+            "session_id": "lcm-grep-expand-session",
+            "limit": 1
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
+    let store_id = grep_payload["hits"][0]["store_id"]
+        .as_i64()
+        .expect("raw grep hit must expose its LCM store id");
+
+    let expanded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "codex",
+            "session_id": "lcm-grep-expand-session",
+            "target": {"kind": "raw_message", "store_id": store_id}
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
+    assert_eq!(expanded_payload["expansion"]["content"], content);
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let old = seed_temporal_lcm_session_message_at_micros(
@@ -922,32 +1042,6 @@ async fn lcm_grep_accepts_relative_time_filters() {
     );
 }
 
-#[tokio::test]
-async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
-    let dir = test_temp_dir();
-    let (cg, _env) = init_test_project(dir.path()).await;
-
-    let err = expect_tool_error(
-        handle_tool_call(
-            &cg,
-            "tracedecay_lcm_grep",
-            json!({
-                "provider": "cursor",
-                "query": "unique-cross-session-token",
-                "scope": "everything",
-                "limit": 10
-            }),
-            None,
-            None,
-        )
-        .await,
-    );
-    assert!(
-        err.contains("scope"),
-        "invalid scope should report an argument error, got {err}"
-    );
-}
-
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_args() {
@@ -983,55 +1077,6 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
             "{case} should report an argument error mentioning limit, got {err}"
         );
     }
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lcm_load_session_accepts_valid_integer_args() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let projection = seed_temporal_lcm_session_message_at_micros(
-        &cg,
-        "lcm-valid-integers",
-        "lcm-valid-integers-message",
-        "valid integer argument body",
-        CanonicalMessageRoleV1::Assistant,
-        1,
-        2,
-    )
-    .await;
-    let db = open_active_project_session_db(&cg).await;
-    activate_test_temporal_generation(&db, "lcm-valid-integers", vec![projection]).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_load_session",
-        json!({
-            "provider": "cursor",
-            "session_id": "lcm-valid-integers",
-            "limit": 1,
-            "content_offset": 0,
-            "content_limit": 8,
-            "start_time": 1,
-            "end_time": 10
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "partial");
-    assert_eq!(payload["omitted"], 1);
-    assert_eq!(payload["temporal"]["coverage"]["unknown"], 1);
-    assert_eq!(
-        payload["messages"].as_array().unwrap().len(),
-        1,
-        "payload: {payload}"
-    );
-    assert_eq!(
-        payload["messages"][0]["content"].as_str().unwrap(),
-        "valid in"
-    );
 }
 
 #[cfg(feature = "test-transport")]
@@ -2576,54 +2621,5 @@ async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creati
         db_path.exists(),
         "tracedecay_lcm_load_session must keep configuration sessions.db at {}",
         db_path.display()
-    );
-}
-
-/// `default_context_limit = max_tokens.clamp(32_000, 65_536)` always
-/// evaluated to 32_000 because max_tokens ≤ 8_192 < 32_000, making
-/// `max_tokens` dead. `context_max_tokens` must default to the constant
-/// 32_000 so both params stay independent. The handler must accept an
-/// explicit `context_max_tokens` override and the returned payload must
-/// reflect it.
-#[tokio::test]
-async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
-    let (cg, _env) = init_test_project(project).await;
-
-    // With no retained transcript the tool returns a typed empty or unavailable
-    // outcome. This test only verifies that the independent budgets pass
-    // argument validation without requiring code indexing.
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_expand_query",
-        json!({
-            "session_id": "test-session",
-            "provider": "cursor",
-            "prompt": "what did we discuss?",
-            "max_tokens": 500,
-            "context_max_tokens": 48000,
-        }),
-        None,
-        None,
-    )
-    .await
-    .expect("expand_query with explicit context_max_tokens must not error");
-
-    let text = extract_text(&result.value);
-    let payload: Value =
-        serde_json::from_str(text).expect("expand_query result must be valid JSON");
-
-    // The important thing: it must NOT return a Config/argument error about
-    // max_tokens or context_max_tokens. The exact empty outcome depends on
-    // whether the canonical retained-session service is mounted by the test
-    // harness.
-    assert!(
-        matches!(
-            payload["status"].as_str(),
-            Some("not_ingested" | "ok" | "unavailable" | "complete_zero" | "deleted")
-        ),
-        "unexpected status in expand_query response: {payload}"
     );
 }

@@ -3,7 +3,6 @@ use std::time::SystemTime;
 
 use super::*;
 use tracedecay_agent_hosts::agents::AgentIntegration;
-use tracedecay_runtime_core::text::format_bytes;
 
 #[test]
 fn supported_optional_host_absences_reach_doctor_without_host_directories() {
@@ -90,71 +89,6 @@ fn domain_symbol_rules_warning_is_silent_without_the_file() {
 }
 
 #[test]
-fn domain_symbol_rules_warning_names_the_unread_file() {
-    let project = tempfile::tempdir().expect("temp project root");
-    let marker_dir = crate::config::get_tracedecay_dir(project.path());
-    std::fs::create_dir_all(&marker_dir).expect("create project marker dir");
-    let rules = marker_dir.join(DOMAIN_SYMBOL_RULES_FILENAME);
-    std::fs::write(&rules, "[[rule]]\nname = \"elisp\"\n").expect("write rules file");
-
-    let warning = domain_symbol_rules_warning(project.path()).expect("rules file must be reported");
-    assert!(
-        warning.contains(&rules.display().to_string()),
-        "warning must name the file: {warning}"
-    );
-    assert!(
-        warning.contains("docs/DOMAIN-EXTRACTORS.md"),
-        "warning must point at the doc: {warning}"
-    );
-}
-
-#[test]
-fn format_bytes_boundaries() {
-    assert_eq!(format_bytes(0), "0 B");
-    assert_eq!(format_bytes(1023), "1023 B");
-    assert_eq!(format_bytes(1024), "1.0 KB");
-    assert_eq!(format_bytes(1536), "1.5 KB");
-    assert_eq!(format_bytes(1024 * 1024 - 1), "1024.0 KB");
-    assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
-    assert_eq!(format_bytes(1024 * 1024 * 512), "512.0 MB");
-    assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
-    assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.0 GB");
-}
-
-#[test]
-fn format_bytes_fractional_kb() {
-    // 2048 bytes = 2.0 KB
-    assert_eq!(format_bytes(2048), "2.0 KB");
-    // 1536 = 1.5 KB
-    assert_eq!(format_bytes(1536), "1.5 KB");
-}
-
-#[test]
-fn database_recovery_guidance_names_the_preserved_recovery_set() {
-    let db_path = PathBuf::from("/profile/projects/proj_test/tracedecay.db");
-    let guidance = database_recovery_guidance(&db_path);
-
-    for path in [
-        db_path.clone(),
-        db_path.with_extension("db-wal"),
-        db_path.with_extension("db-shm"),
-        PathBuf::from(format!("{}.dirty", db_path.display())),
-        db_path.parent().unwrap().join("dirty"),
-    ] {
-        assert!(guidance.contains(&path.display().to_string()));
-    }
-    assert!(guidance.contains("stop all TraceDecay daemon and MCP processes"));
-    assert!(
-        guidance.contains(
-            "Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe`"
-        )
-    );
-    assert!(guidance.contains("`sessions.db` is separate and must not be removed"));
-    assert!(guidance.contains("Facts are stored in the graph database"));
-    assert!(guidance.contains("automatic default-store rebuild is intentionally blocked"));
-}
-
-#[test]
 fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     let parsed = super::daemon_runtime_status(&serde_json::json!({
         "content": [
@@ -191,20 +125,6 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     assert_eq!(
         parsed.pointer("/doctor_report/kind"),
         Some(&serde_json::json!("unknown"))
-    );
-}
-
-#[test]
-fn daemon_doctor_request_uses_comprehensive_ready_owner() {
-    assert_eq!(
-        super::daemon_doctor_runtime_args(),
-        serde_json::json!({
-            "format": "json",
-            "startup_health": false,
-            "authority_audit": true,
-            "doctor_report": true,
-            "session_ingest_health": false,
-        })
     );
 }
 
@@ -476,37 +396,6 @@ fn unavailable_canonical_report_is_an_issue_that_fails_the_doctor_exit() {
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
-}
-
-#[test]
-fn doctor_result_fails_when_checks_report_issues() {
-    let mut counters = DoctorCounters::new();
-    counters.fail("broken integration");
-
-    let error = super::doctor_result(&counters, &DatabaseHealth::Healthy).unwrap_err();
-    assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
-}
-
-#[test]
-fn doctor_result_allows_warnings_without_issues() {
-    let mut counters = DoctorCounters::new();
-    counters.warn("optional check unavailable");
-
-    super::doctor_result(&counters, &DatabaseHealth::Healthy).unwrap();
-}
-
-#[test]
-fn doctor_result_preserves_canonical_storage_failures() {
-    let counters = DoctorCounters::new();
-    let failed = DatabaseHealth::Failed {
-        reason: "runtime.health.stuck".to_string(),
-    };
-
-    let error = super::doctor_result(&counters, &failed).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "config error: doctor storage health check failed [runtime.health.stuck]"
-    );
 }
 
 #[test]

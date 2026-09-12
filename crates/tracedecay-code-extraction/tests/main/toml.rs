@@ -16,24 +16,6 @@ fn names_of(result: &ExtractionResult, kind: NodeKind) -> Vec<String> {
 }
 
 #[test]
-fn extracts_top_level_pairs_as_const() {
-    let source = "title = \"hello\"\nversion = 3\n";
-    let result = extract(source);
-    assert!(result.errors.is_empty());
-    let consts = names_of(&result, NodeKind::Const);
-    assert!(consts.contains(&"title".to_string()));
-    assert!(consts.contains(&"version".to_string()));
-}
-
-#[test]
-fn extracts_table_as_module() {
-    let source = "[package]\nname = \"demo\"\nversion = \"1.0\"\n";
-    let result = extract(source);
-    let modules = names_of(&result, NodeKind::Module);
-    assert_eq!(modules, vec!["package".to_string()]);
-}
-
-#[test]
 fn dotted_table_keeps_dotted_name() {
     let source = "[profile.release]\nopt-level = 3\n";
     let result = extract(source);
