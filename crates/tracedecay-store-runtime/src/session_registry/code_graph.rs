@@ -1448,9 +1448,16 @@ impl RetainedCodeGraphRuntimeV1 {
             request_cancelled,
         };
         let mut staging_release = None;
-        let published = self
-            .publish_prepared_sealed_generation(&prepared, &probe, &context, &mut staging_release)
-            .map_err(refuse_if_resident_memory);
+        let published = tracedecay_code_index::parallelism::install(|| {
+            self.publish_prepared_sealed_generation(
+                &prepared,
+                &probe,
+                &context,
+                &mut staging_release,
+            )
+        })
+        .map_err(|error| GraphDbError::unavailable(error.to_string()))?
+        .map_err(refuse_if_resident_memory);
         // Everything corpus-sized this publication built — the projection
         // manifest, the staged relational rows, the sealed copy buffers — is
         // dead by here. Free it, release the duplicate staging rows the seal
