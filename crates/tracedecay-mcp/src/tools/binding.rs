@@ -14,9 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use tracedecay_contracts::RetainedSurfaceOperation;
-use tracedecay_contracts::multi_root::{
-    MultiRootApplicationOperation, multi_root_capability_manifest,
-};
+use tracedecay_contracts::multi_root::multi_root_capability_manifest;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CancellationContract, CancellationPoint,
     EffectClass, ExecutableBindingV1, McpDeadlineContractV1, McpDispatchAvailability,
@@ -28,6 +26,7 @@ use tracedecay_tool_catalog::{
 mod work;
 mod workflow;
 
+use crate::handlers::multi_root_operation_for_tool;
 use work::work_executable_binding_for_tool;
 pub use work::work_operation_for_tool;
 use workflow::workflow_executable_binding_for_tool;
@@ -494,22 +493,6 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_session_refresh_cancel"
         | "tracedecay_run_affected_tests" => EffectClass::Administrative,
         _ => EffectClass::Read,
-    }
-}
-
-/// The multi-root operation a tool name resolves to, if any.
-///
-/// The three multi-root tools are daemon-owned: they carry no application
-/// surface binding, so their contract comes from the multi-root capability
-/// catalog rather than [`application_capability_for_tool`].
-fn multi_root_operation_for_tool(tool_name: &str) -> Option<MultiRootApplicationOperation> {
-    match tool_name {
-        "tracedecay_multi_root_scope_set_read" => Some(MultiRootApplicationOperation::ScopeSetRead),
-        "tracedecay_multi_root_scope_set_compare_and_swap" => {
-            Some(MultiRootApplicationOperation::ScopeSetCompareAndSwap)
-        }
-        "tracedecay_multi_root_execute" => Some(MultiRootApplicationOperation::Execute),
-        _ => None,
     }
 }
 

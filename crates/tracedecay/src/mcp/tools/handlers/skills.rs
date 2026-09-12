@@ -26,7 +26,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::ToolResult;
 
-use super::support::{tool_json, tool_json_with_md};
+use tracedecay_mcp::handlers::{tool_json, tool_json_with_md};
 use tracedecay_mcp::tools::renderers;
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;

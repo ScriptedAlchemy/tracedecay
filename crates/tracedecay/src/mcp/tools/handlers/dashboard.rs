@@ -28,9 +28,9 @@ use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
-use super::support::generic_tool_result;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter;
+use tracedecay_mcp::handlers::generic_tool_result;
 
 use tracedecay_dashboard_api::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,

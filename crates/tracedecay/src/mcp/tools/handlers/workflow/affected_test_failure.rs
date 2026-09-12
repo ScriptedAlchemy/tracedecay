@@ -148,7 +148,7 @@ pub(super) async fn terminal_failure(
         });
         body
     });
-    Ok(super::super::support::generic_tool_result(
+    Ok(tracedecay_mcp::handlers::generic_tool_result(
         None,
         args,
         &body,

@@ -33,8 +33,8 @@ use tracedecay_application::operation_stream::{
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::support::{generic_tool_result, rendered_tool_result, unique_file_paths};
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::{generic_tool_result, rendered_tool_result, unique_file_paths};
 use tracedecay_mcp::tools::render;
 
 mod affected_test_failure;

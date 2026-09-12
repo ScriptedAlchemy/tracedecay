@@ -16,8 +16,8 @@ use tracedecay_domain::ManifestDigest;
 use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::support::{generic_tool_result, rendered_tool_result};
 use tracedecay_mcp::ToolResult;
+use tracedecay_mcp::handlers::{generic_tool_result, rendered_tool_result};
 use tracedecay_mcp::tools::render;
 
 fn missing_required_param(name: &str) -> TraceDecayError {
