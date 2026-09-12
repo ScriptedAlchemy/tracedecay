@@ -2511,13 +2511,30 @@ def profile_refresh_selectors(fixture: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _refresh_payload(response: dict[str, Any], family: str) -> dict[str, Any]:
+    """Read the refresh payload through its canonical application envelope."""
+    for value in objects(response):
+        outcome = value.get("outcome")
+        if not isinstance(outcome, dict) or outcome.get("outcome") != family:
+            continue
+        result = outcome.get("value")
+        payload = result.get("payload") if isinstance(result, dict) else None
+        if isinstance(payload, dict):
+            return payload
+    raise JourneyError(f"session refresh did not return a typed {family} payload")
+
+
 def _terminal_refresh_state(response: dict[str, Any], operation_id: str) -> str:
     """The receipt-backed terminal state a durable cancel must return."""
-    terminal_state = first_value(response, {"state"})
-    if first_value(response, {"operation_id"}) != operation_id or terminal_state not in {
-        "cancelled",
-        "complete",
-    }:
+    payload = _refresh_payload(response, "effect")
+    terminal_state = payload.get("outcome")
+    receipt = payload.get("receipt")
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("operation_id") != operation_id
+        or receipt.get("state") != terminal_state
+        or terminal_state not in {"cancelled", "complete"}
+    ):
         raise JourneyError(
             f"durable cancel did not return the operation's terminal receipt (state {terminal_state!r})"
         )
@@ -2538,22 +2555,27 @@ def _require_settled_refresh(
         {"handle": handle, **selectors},
         deadline("tracedecay_session_refresh_status"),
     )
+    payload = _refresh_payload(settled, "evidence")
+    receipt = payload.get("receipt")
     if (
-        first_value(settled, {"operation_id"}) != operation_id
-        or first_value(settled, {"state"}) != terminal_state
+        payload.get("outcome") != terminal_state
+        or not isinstance(receipt, dict)
+        or receipt.get("operation_id") != operation_id
+        or receipt.get("state") != terminal_state
     ):
         raise JourneyError("terminal refresh receipt did not stay durable after cancellation")
 
 
 def _begun_refresh(response: dict[str, Any]) -> tuple[str, str]:
     """The opaque handle and durable operation identity a begin must return."""
-    outcome = first_value(response, {"outcome"})
+    payload = _refresh_payload(response, "effect")
+    outcome = payload.get("outcome")
     if outcome not in {"started", "joined"}:
         raise JourneyError(
             f"session refresh begin did not report started or joined (observed {outcome!r})"
         )
-    handle = response_handle(response)
-    operation_id = first_value(response, {"operation_id"})
+    handle = payload.get("handle")
+    operation_id = payload.get("operation_id")
     if not handle or not isinstance(operation_id, str) or not operation_id:
         raise JourneyError("session refresh begin omitted its opaque handle or operation identity")
     return handle, operation_id

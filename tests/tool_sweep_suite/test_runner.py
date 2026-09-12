@@ -937,6 +937,7 @@ class MutationJourneyTests(unittest.TestCase):
     def response(payload: str):
         return {"result": {"content": [{"type": "text", "text": payload}]}}
 
+
     def test_fact_reads_consume_one_seeded_connected_graph(self) -> None:
         runner = load_runner()
         fixture = {}
@@ -978,6 +979,19 @@ class MutationJourneyTests(unittest.TestCase):
                 }]})),
                 fixture,
             )
+
+    @classmethod
+    def refresh_response(cls, family: str, payload: dict[str, object]):
+        return cls.response(json.dumps({
+            "contract": {
+                "schema_id": "schema.application.retained.session-refresh.result",
+                "schema_revision": 1,
+            },
+            "request_id": "request.fixture",
+            "scope": {"project_id": "profile.fixture"},
+            "outcome": {"outcome": family, "value": {"payload": payload}},
+        }))
+
 
     def test_fact_feedback_journey_requires_a_real_trust_change(self) -> None:
         """Helpful feedback must move the seeded fact's trust, then remove the fact."""
@@ -1274,14 +1288,22 @@ class MutationJourneyTests(unittest.TestCase):
             self.assertEqual(arguments["handle"], "srh_fixture")
             if tool == "tracedecay_session_refresh_cancel":
                 state["terminal"] = True
-                return self.response(
-                    '{"outcome":"cancelled","receipt":{"operation_id":"refresh.op","state":"cancelled"}}'
+                return self.refresh_response(
+                    "effect",
+                    {"outcome": "cancelled", "receipt": {
+                        "operation_id": "refresh.op", "state": "cancelled",
+                    }},
                 )
             self.assertEqual(tool, "tracedecay_session_refresh_status")
             if not state["terminal"]:
-                return self.response('{"outcome":"running","progress":{"operation_id":"refresh.op"}}')
-            return self.response(
-                '{"outcome":"cancelled","receipt":{"operation_id":"refresh.op","state":"cancelled"}}'
+                return self.refresh_response(
+                    "evidence", {"outcome": "running", "progress": {"operation_id": "refresh.op"}}
+                )
+            return self.refresh_response(
+                "evidence",
+                {"outcome": "cancelled", "receipt": {
+                    "operation_id": "refresh.op", "state": "cancelled",
+                }},
             )
 
         prepared = runner.prepare_journey(
@@ -1293,11 +1315,12 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertNotIn("handle", prepared.arguments)
 
         with self.assertRaises(Exception):
-            prepared.cleanup(self.response('{"outcome":"running"}'))
+            prepared.cleanup(self.refresh_response("effect", {"outcome": "running"}))
 
         note = prepared.cleanup(
-            self.response(
-                '{"outcome":"started","handle":"srh_fixture","operation_id":"refresh.op"}'
+            self.refresh_response(
+                "effect",
+                {"outcome": "started", "handle": "srh_fixture", "operation_id": "refresh.op"},
             )
         )
         self.assertIn("terminal", note)
@@ -1310,13 +1333,17 @@ class MutationJourneyTests(unittest.TestCase):
         def call(tool, arguments, _deadline_ms):
             if tool == "tracedecay_session_refresh_begin":
                 self.assertNotIn("handle", arguments)
-                return self.response(
-                    '{"outcome":"started","handle":"srh_fixture","operation_id":"refresh.op"}'
+                return self.refresh_response(
+                    "effect",
+                    {"outcome": "started", "handle": "srh_fixture", "operation_id": "refresh.op"},
                 )
             self.assertEqual(tool, "tracedecay_session_refresh_status")
             self.assertEqual(arguments["handle"], "srh_fixture")
-            return self.response(
-                '{"outcome":"cancelled","receipt":{"operation_id":"refresh.op","state":"cancelled"}}'
+            return self.refresh_response(
+                "evidence",
+                {"outcome": "cancelled", "receipt": {
+                    "operation_id": "refresh.op", "state": "cancelled",
+                }},
             )
 
         prepared = runner.prepare_journey(
@@ -1326,11 +1353,16 @@ class MutationJourneyTests(unittest.TestCase):
         self.assertEqual(prepared.arguments["scope"]["kind"], "profile")
 
         with self.assertRaises(Exception):
-            prepared.cleanup(self.response('{"outcome":"running","progress":{"operation_id":"refresh.op"}}'))
+            prepared.cleanup(self.refresh_response(
+                "effect", {"outcome": "running", "progress": {"operation_id": "refresh.op"}}
+            ))
 
         note = prepared.cleanup(
-            self.response(
-                '{"outcome":"cancelled","receipt":{"operation_id":"refresh.op","state":"cancelled"}}'
+            self.refresh_response(
+                "effect",
+                {"outcome": "cancelled", "receipt": {
+                    "operation_id": "refresh.op", "state": "cancelled",
+                }},
             )
         )
         self.assertIn("terminal", note)
@@ -1565,6 +1597,18 @@ class FixturePrimingRetryTests(unittest.TestCase):
             }
         }
 
+    @classmethod
+    def application_response(cls, family, payload):
+        return cls.response(json.dumps({
+            "contract": {
+                "schema_id": f"schema.application.retained.session-refresh-{family}.result",
+                "schema_revision": 1,
+            },
+            "request_id": "request.fixture",
+            "scope": {"project_id": "profile.fixture"},
+            "outcome": {"outcome": family, "value": {"payload": payload}},
+        }))
+
     @staticmethod
     def project_route_error(reason_code, *, retryable):
         return {
@@ -1619,14 +1663,24 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_lcm_load_session": cls.response(
                 '{"messages":[{"store_id":41,"content":"catalog sweep captured LCM message"}]}'
             ),
-            "tracedecay_session_refresh_begin": cls.response(
-                '{"outcome":"started","handle":"srh_fixture",'
-                '"operation_id":"refresh.operation.fixture"}'
+            "tracedecay_session_refresh_begin": cls.application_response(
+                "effect",
+                {
+                    "outcome": "started",
+                    "handle": "srh_fixture",
+                    "operation_id": "refresh.operation.fixture",
+                },
             ),
-            "tracedecay_session_refresh_status": cls.response(
-                '{"tool":"tracedecay_session_refresh_status",'
-                '"outcome":"complete","receipt":{"operation_id":'
-                '"refresh.operation.fixture"}}'
+            "tracedecay_session_refresh_status": cls.application_response(
+                "evidence",
+                {
+                    "tool": "tracedecay_session_refresh_status",
+                    "outcome": "complete",
+                    "receipt": {
+                        "operation_id": "refresh.operation.fixture",
+                        "state": "complete",
+                    },
+                },
             ),
             "tracedecay_active_project": cls.response(
                 '{"project_id":"project.fixture"}'
