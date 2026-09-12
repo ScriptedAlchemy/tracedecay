@@ -139,5 +139,53 @@ async fn selected_project_source_route_survives_physical_daemon_restart() {
         project_a_id,
         "caller project identity changed after restart"
     );
+    await_published_code_index(environment.home(), &project_b);
     assert_selected_target_source(&caller, &project_b_id, TARGET_MARKER, CALLER_MARKER).await;
+}
+
+/// Poll the product `code_index_freshness` readiness signals a selected-source
+/// route depends on. A sleep cannot stand in for catalog publication after a
+/// physical restart.
+///
+/// The aggregate `status` label is not the predicate: it also reports whether a
+/// reconcile pass is in flight, and this read admits a query that arms one, so
+/// a poller perturbs the very label it samples. A published generation, graph
+/// serving readiness, and an empty convergence park are durable state the read
+/// cannot move, and a parked restore fails all three.
+fn await_published_code_index(home: &Path, project: &Path) {
+    let project_arg = project.to_string_lossy().into_owned();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let output = common::tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args([
+                "tool",
+                "--project",
+                project_arg.as_str(),
+                "status",
+                "--args",
+                r#"{"format":"json"}"#,
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run status");
+        if output.status.success()
+            && let Ok(status) = serde_json::from_slice::<Value>(&output.stdout)
+        {
+            let freshness = &status["code_index_freshness"];
+            let worktree = &freshness["worktree"];
+            if worktree["code_graph_serving"]["state"] == "ready"
+                && worktree["latest_generation_id"].is_string()
+                && worktree["parked"].is_null()
+            {
+                return;
+            }
+            last = freshness.to_string();
+        } else {
+            last = String::from_utf8_lossy(&output.stderr).into_owned();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("daemon never published a serving code-index generation; last status: {last}");
 }
