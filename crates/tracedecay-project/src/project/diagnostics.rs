@@ -16,13 +16,13 @@ use super::TraceDecay;
 pub use tracedecay_application::tracedecay::{BranchDiagnostics, TrackedBranchDiagnostic};
 
 impl TraceDecay {
-    pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
+    pub fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
         std::sync::Arc::new(self.db.clone())
     }
 
     /// Filesystem path of the project's tracedecay directory, for display in
     /// dashboard payloads (mirrors the `path` field of the Hermes plugin API).
-    pub(crate) fn dashboard_db_path(&self) -> std::path::PathBuf {
+    pub fn dashboard_db_path(&self) -> std::path::PathBuf {
         self.db_path()
     }
 
@@ -111,7 +111,7 @@ impl TraceDecay {
         &self.store_layout
     }
 
-    pub(crate) fn retained_project_store_db(&self) -> Result<Database> {
+    pub fn retained_project_store_db(&self) -> Result<Database> {
         if !tracedecay_runtime_core::path_safety::same_canonical_path(
             self.db.canonical_database_path(),
             &self.store_layout.graph_db_path,

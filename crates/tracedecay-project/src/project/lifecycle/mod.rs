@@ -12,7 +12,7 @@ use crate::config::{
     open_runtime_configuration_for_registered_database_read_only,
 };
 use crate::project_store_runtime::join_standalone_session_registry;
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers"))]
 use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -22,7 +22,7 @@ use tracedecay_runtime_core::branch_meta::{self, BranchMeta};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_store::ProjectId;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
@@ -52,7 +52,7 @@ static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
 /// are weak: once every graph holding the runtime drops, the next open
 /// constructs a fresh runtime, so close-then-reopen journeys still observe
 /// fresh mounts.
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers"))]
 static STANDALONE_TEST_RUNTIMES: LazyLock<
     AsyncMutex<
         WeakRegistry<
@@ -92,7 +92,7 @@ impl TraceDecay {
         Ok(scope)
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn standalone_test_open_options(
         project_root: &Path,
         mut open_options: TraceDecayOpenOptions,
@@ -106,7 +106,7 @@ impl TraceDecay {
         open_options
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     async fn standalone_test_runtime(
         project_root: &Path,
@@ -144,6 +144,63 @@ impl TraceDecay {
         );
         runtimes.insert(registry_key, &runtime);
         Ok(runtime)
+    }
+
+    /// Initializes a project through the shared registered test runtime for
+    /// its (profile, project) key instead of the exclusive maintenance lease
+    /// a production standalone init takes, so a test process that also holds
+    /// daemon-scoped fixtures on the same profile can open it. The graph keeps
+    /// the runtime alive for its lifetime ([`Self::test_runtime_for_test`]).
+    ///
+    /// `test-transport` builds route [`Self::init_with_options`] here; every
+    /// other test build names this constructor explicitly.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
+    pub async fn init_with_options_for_test(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let open_options = Self::standalone_test_open_options(project_root, open_options);
+        let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+        let mut graph = runtime
+            .initialize_project_graph_for_test(project_root, open_options)
+            .await?;
+        graph.test_runtime_guard = Some(runtime);
+        Ok(graph)
+    }
+
+    /// [`Self::open_with_options`] through the shared registered test runtime;
+    /// see [`Self::init_with_options_for_test`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
+    pub async fn open_with_options_for_test(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let open_options = Self::standalone_test_open_options(project_root, open_options);
+        let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+        let mut graph = runtime
+            .open_project_graph_for_test(project_root, open_options)
+            .await?;
+        graph.test_runtime_guard = Some(runtime);
+        Ok(graph)
+    }
+
+    /// [`Self::open_read_only_with_options`] through the shared registered
+    /// test runtime; see [`Self::init_with_options_for_test`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
+    pub async fn open_read_only_with_options_for_test(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let open_options = Self::standalone_test_open_options(project_root, open_options);
+        let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+        let mut graph = runtime
+            .open_project_graph_read_only_for_test(project_root, open_options)
+            .await?;
+        graph.test_runtime_guard = Some(runtime);
+        Ok(graph)
     }
 
     #[hotpath::measure(label = "lifecycle.mount_project_graph", future = true)]
@@ -189,13 +246,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         #[cfg(any(test, feature = "test-transport"))]
         {
-            let open_options = Self::standalone_test_open_options(project_root, open_options);
-            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
-            let mut graph = runtime
-                .initialize_project_graph_for_test(project_root, open_options)
-                .await?;
-            graph.test_runtime_guard = Some(runtime);
-            Ok(graph)
+            Self::init_with_options_for_test(project_root, open_options).await
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
@@ -271,9 +322,9 @@ impl TraceDecay {
         .await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
-    pub(crate) async fn init_test_fixture_with_registered_runtime(
+    pub async fn init_test_fixture_with_registered_runtime(
         project_root: &Path,
         project_id: &str,
     ) -> Result<(
@@ -307,7 +358,7 @@ impl TraceDecay {
     }
 
     #[hotpath::measure(label = "lifecycle.init.registered", future = true)]
-    pub(crate) async fn init_with_registered_configuration(
+    pub async fn init_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
         store_layout: StoreLayout,
@@ -365,7 +416,7 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
         };
@@ -373,7 +424,7 @@ impl TraceDecay {
         // refuses to advertise an identity-bearing project whose Context
         // Scout owner is absent, so init must start it too.
         tracedecay_agent_hosts::hooks::publish_hook_bindings(
-            &crate::runtime_ports::hook_runtime(),
+            &crate::runtime_ports::hook_runtime()?,
             &ts.store_layout,
         )?;
         if let Some(project_id) =
@@ -472,13 +523,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         #[cfg(any(test, feature = "test-transport"))]
         {
-            let open_options = Self::standalone_test_open_options(project_root, open_options);
-            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
-            let mut graph = runtime
-                .open_project_graph_for_test(project_root, open_options)
-                .await?;
-            graph.test_runtime_guard = Some(runtime);
-            Ok(graph)
+            Self::open_with_options_for_test(project_root, open_options).await
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
@@ -542,7 +587,7 @@ impl TraceDecay {
     }
 
     #[hotpath::measure(label = "lifecycle.open.registered", future = true)]
-    pub(crate) async fn open_with_registered_configuration(
+    pub async fn open_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
         store_layout: StoreLayout,
@@ -600,13 +645,13 @@ impl TraceDecay {
             fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
         };
 
         tracedecay_agent_hosts::hooks::publish_hook_bindings(
-            &crate::runtime_ports::hook_runtime(),
+            &crate::runtime_ports::hook_runtime()?,
             &ts.store_layout,
         )?;
         if let Some(project_id) =
@@ -680,13 +725,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         #[cfg(any(test, feature = "test-transport"))]
         {
-            let open_options = Self::standalone_test_open_options(project_root, open_options);
-            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
-            let mut graph = runtime
-                .open_project_graph_read_only_for_test(project_root, open_options)
-                .await?;
-            graph.test_runtime_guard = Some(runtime);
-            Ok(graph)
+            Self::open_read_only_with_options_for_test(project_root, open_options).await
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
@@ -750,7 +789,7 @@ impl TraceDecay {
     }
 
     #[hotpath::measure(label = "lifecycle.open_read_only.registered", future = true)]
-    pub(crate) async fn open_read_only_with_registered_configuration(
+    pub async fn open_read_only_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
         store_layout: StoreLayout,
@@ -807,14 +846,14 @@ impl TraceDecay {
             fallback_warning,
             read_only: true,
             db_path_cache: OnceLock::new(),
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
         })
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers"))]
 fn configuration_runtime_unavailable() -> TraceDecayError {
     TraceDecayError::Config {
         message:

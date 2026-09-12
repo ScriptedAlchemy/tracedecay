@@ -741,7 +741,17 @@ pub(crate) async fn handle_tool_call_with_runtime(
         obj.entry("format".to_string())
             .or_insert_with(|| serde_json::json!("json"));
     }
-    Box::pin(runtime.call_mcp_tool_for_test(cg, tool_name, args, server_stats, scope_prefix)).await
+    Box::pin(
+        tracedecay::test_support::host_admission::call_mcp_tool_for_test(
+            runtime,
+            cg,
+            tool_name,
+            args,
+            server_stats,
+            scope_prefix,
+        ),
+    )
+    .await
 }
 
 #[cfg(feature = "test-transport")]

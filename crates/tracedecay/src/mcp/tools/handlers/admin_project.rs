@@ -356,7 +356,7 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let project_root = std::fs::canonicalize(project_root).unwrap();
         let profile_root = std::fs::canonicalize(profile_root).unwrap();
-        let cg = TraceDecay::init_with_options(
+        let cg = TraceDecay::init_with_options_for_test(
             &project_root,
             crate::project::TraceDecayOpenOptions {
                 global_db_path: Some(profile_root.join("global.db")),
