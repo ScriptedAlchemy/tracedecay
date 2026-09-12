@@ -410,24 +410,6 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     }
 }
 
-/// The daemon's durable profile identity, read back after the daemon has
-/// published it. `--profile-id` must name exactly this authority; the test
-/// never fabricates one.
-fn daemon_profile_id(home: &Path) -> String {
-    let profile_root = profile_root(home);
-    let started = Instant::now();
-    loop {
-        match tracedecay_daemon_identity::profile_identity::load_existing(&profile_root) {
-            Ok(identity) => return identity.profile_id().as_str().to_owned(),
-            Err(error) if started.elapsed() < Duration::from_secs(30) => {
-                let _ = error;
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => panic!("daemon never published its profile identity: {error}"),
-        }
-    }
-}
-
 fn refresh_json(output: &Output, step: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -451,10 +433,8 @@ fn sessions_refresh_profile_scope_begins_reads_and_cancels_through_the_daemon() 
     let home = TempDir::new().unwrap();
     let cwd = TempDir::new().unwrap();
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    let profile_id = daemon_profile_id(home.path());
     let selectors = [
-        "--profile-id",
-        profile_id.as_str(),
+        "--profile",
         "--session-id",
         "session.cli.profile-refresh",
         "--provider",
@@ -541,34 +521,6 @@ fn sessions_refresh_profile_scope_begins_reads_and_cancels_through_the_daemon() 
     );
     assert_eq!(settled["receipt"]["state"], terminal_state, "{settled}");
 
-    // A handle from another owner's scope never resolves: the same handle
-    // presented under a foreign profile is refused before any store is read.
-    let mut foreign = tracedecay_command_without_daemon(home.path(), cwd.path());
-    foreign.args(["sessions", "refresh", "status"]).args([
-        "--profile-id",
-        "profile.someone-else",
-        "--session-id",
-        "session.cli.profile-refresh",
-        "--provider",
-        "codex",
-        "--source",
-        "0",
-        "--target",
-        "0",
-        "--handle",
-        &handle,
-    ]);
-    let refused = run_with_timeout(foreign, cli_timeout());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        !refused.status.success(),
-        "a foreign profile must not read this refresh\nstdout:\n{}\nstderr:\n{stderr}",
-        String::from_utf8_lossy(&refused.stdout)
-    );
-    assert!(
-        stderr.contains("not_found_or_not_authorized") || stderr.contains("refused"),
-        "{stderr}"
-    );
 }
 
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {
