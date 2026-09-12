@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use schemars::schema_for;
 use tracedecay_contracts::{
@@ -132,10 +132,10 @@ impl MultiRootQueryPort<String, String> for Port {
     }
 }
 
-#[derive(Clone, Default)]
-struct PagingPort(Arc<Mutex<Vec<(String, Option<String>)>>>);
+#[derive(Default)]
+struct PagingPort(Mutex<Vec<(String, Option<String>)>>);
 
-impl MultiRootQueryPort<String, String> for PagingPort {
+impl MultiRootQueryPort<String, String> for &PagingPort {
     fn query_root(
         &self,
         context: &RequestContext,
@@ -218,7 +218,7 @@ fn two_root_query_returns_partial_truth_and_frozen_continuation() {
 fn child_cursors_advance_only_their_own_root_and_terminate() {
     let (set, contexts) = setup();
     let port = PagingPort::default();
-    let first = AuthorizedMultiRootQueryService::new(port.clone())
+    let first = AuthorizedMultiRootQueryService::new(&port)
         .execute(request(set.clone(), contexts.clone(), digest('d'), 0, None))
         .unwrap();
     assert_eq!(
@@ -229,7 +229,7 @@ fn child_cursors_advance_only_their_own_root_and_terminate() {
         ])
     );
     let continuation = first.continuation.expect("main root has another page");
-    let second = AuthorizedMultiRootQueryService::new(port.clone())
+    let second = AuthorizedMultiRootQueryService::new(&port)
         .execute(request(set, contexts, digest('d'), 1, Some(continuation)))
         .unwrap();
     assert_ne!(first.roots, second.roots);
