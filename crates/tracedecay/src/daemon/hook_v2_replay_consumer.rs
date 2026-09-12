@@ -107,7 +107,7 @@ impl Drop for HookReplaySweepObservation {
 
 #[hotpath::measure(label = "daemon.hook_replay.sweep", future = true)]
 async fn drain_all_hosts(
-    graph: &crate::tracedecay::TraceDecay,
+    graph: &crate::project::TraceDecay,
     data_root: &Path,
     delivery_settlements: &tracedecay_application::observability::DeliverySettlementAuthorityV1,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
@@ -175,7 +175,7 @@ async fn drain_admitted_host_spool(
     host: HookHostV1,
     project_id: [u8; 16],
     now: UtcMicros,
-    graph: &crate::tracedecay::TraceDecay,
+    graph: &crate::project::TraceDecay,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
     background_cpu: &Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> Option<HookReplayPassReportV1> {
@@ -246,7 +246,7 @@ fn hook_replay_now() -> UtcMicros {
 }
 
 struct RegisteredReplayConsumer {
-    graph: Weak<crate::tracedecay::TraceDecay>,
+    graph: Weak<crate::project::TraceDecay>,
     delivery_settlements:
         Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -269,7 +269,7 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
 /// Start the per-project replay consumer exactly once per hook data root.
 /// Returns `false` when one is already running for this root.
 pub(crate) fn register_hook_v2_replay_consumer(
-    graph: Arc<crate::tracedecay::TraceDecay>,
+    graph: Arc<crate::project::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,

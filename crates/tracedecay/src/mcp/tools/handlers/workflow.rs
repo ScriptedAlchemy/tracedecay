@@ -22,7 +22,7 @@ use tracedecay_domain::{CommitId, UtcMicros};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
-use crate::tracedecay::{TraceDecay, is_test_file};
+use crate::project::{TraceDecay, is_test_file};
 use tracedecay_application::diagnose::{Severity, parse_cargo_output};
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_application::diagnostics_query::DiagnosticsQuery;

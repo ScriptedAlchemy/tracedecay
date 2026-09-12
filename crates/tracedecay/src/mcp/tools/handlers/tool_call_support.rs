@@ -2,8 +2,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::tracedecay::TraceDecay;
-use crate::tracedecay::current_timestamp;
+use crate::project::TraceDecay;
+use crate::project::current_timestamp;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::response_handles::{

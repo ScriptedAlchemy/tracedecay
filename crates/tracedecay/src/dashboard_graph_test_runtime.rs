@@ -112,19 +112,19 @@ impl DashboardGraphTestRuntimeV1 {
         &self,
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
-    ) -> tracedecay_domain::errors::Result<crate::tracedecay::TraceDecay> {
+    ) -> tracedecay_domain::errors::Result<crate::project::TraceDecay> {
         // Fixture identity is pinned in the sanctioned `.git/` repository
         // identity marker; nothing is written into the working tree.
         tracedecay_runtime_core::storage::pin_fixture_repository_identity(
             project_root,
             project_id.as_str(),
         )?;
-        let options = crate::tracedecay::TraceDecayOpenOptions {
+        let options = crate::project::TraceDecayOpenOptions {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
         };
         let layout = hotpath::future!(
-            crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            crate::project::TraceDecay::resolve_registered_configuration_layout(
                 project_root,
                 &options,
                 self.profile_database.as_ref(),
@@ -139,7 +139,7 @@ impl DashboardGraphTestRuntimeV1 {
         }
         let project_database = self.project_sessions(project_root, project_id).await?;
         hotpath::future!(
-            crate::tracedecay::TraceDecay::init_with_registered_configuration(
+            crate::project::TraceDecay::init_with_registered_configuration(
                 project_root,
                 options,
                 layout,
@@ -156,13 +156,13 @@ impl DashboardGraphTestRuntimeV1 {
     pub async fn reopen(
         &self,
         project_root: &std::path::Path,
-    ) -> tracedecay_domain::errors::Result<crate::tracedecay::TraceDecay> {
-        let options = crate::tracedecay::TraceDecayOpenOptions {
+    ) -> tracedecay_domain::errors::Result<crate::project::TraceDecay> {
+        let options = crate::project::TraceDecayOpenOptions {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
         };
         let layout = hotpath::future!(
-            crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            crate::project::TraceDecay::resolve_registered_configuration_layout(
                 project_root,
                 &options,
                 self.profile_database.as_ref(),
@@ -186,7 +186,7 @@ impl DashboardGraphTestRuntimeV1 {
             })?;
         let project_database = self.project_sessions(project_root, project_id).await?;
         hotpath::future!(
-            crate::tracedecay::TraceDecay::open_with_registered_configuration(
+            crate::project::TraceDecay::open_with_registered_configuration(
                 project_root,
                 options,
                 layout,

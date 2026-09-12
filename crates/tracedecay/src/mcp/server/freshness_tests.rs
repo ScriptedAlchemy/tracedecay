@@ -1,6 +1,6 @@
 use super::{DatabaseOwnerReconciler, McpServer, McpServerConstructionContext};
 use crate::config::PinnedUserDataDir;
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -139,7 +139,7 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
     git(root, &["checkout", "-q", "main"]);
     let main = fixture_authority
         ._runtime
-        .open_project_graph_for_test(root, crate::tracedecay::TraceDecayOpenOptions::default())
+        .open_project_graph_for_test(root, crate::project::TraceDecayOpenOptions::default())
         .await
         .unwrap();
     let observed = Arc::new(Mutex::new(Vec::new()));

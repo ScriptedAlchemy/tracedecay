@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracedecay::daemon::call_tool;
-use tracedecay::tracedecay::MovedStoreAdoption;
+use tracedecay::project::MovedStoreAdoption;
 use tracedecay_daemon_protocol::transport::DaemonAuthPreface;
 use tracedecay_daemon_protocol::{
     DaemonClientIdentity, DaemonHandshake, DaemonHandshakeRefusal, DaemonHandshakeRefusalReason,

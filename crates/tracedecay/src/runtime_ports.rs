@@ -145,7 +145,7 @@ pub fn hook_runtime() -> HookRuntimeV1 {
         scope_resolver: resolve_hook_scope,
         event_notifier: notify_hook_event,
         timing_gate: hook_timings_enabled,
-        project_initialization_gate: crate::tracedecay::TraceDecay::is_initialized,
+        project_initialization_gate: crate::project::TraceDecay::is_initialized,
         store_layout_resolver: resolve_hook_store_layout,
     }
 }
@@ -252,7 +252,7 @@ fn resolve_hook_store_layout(
 ) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + '_>>
 {
     Box::pin(hotpath::future!(
-        crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root),
+        crate::project::TraceDecay::resolve_store_layout_for_identity(project_root),
         label = "runtime_ports.resolve_store_layout"
     ))
 }

@@ -5,7 +5,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, find_run_record, load_run_records_page,
 };
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::ToolResult;
 

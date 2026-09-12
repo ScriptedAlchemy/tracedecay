@@ -24,7 +24,7 @@ fn assert_ready_verified_generation(body: &Value) {
     );
 }
 use tracedecay::dashboard;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::project::TraceDecay;
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
@@ -210,7 +210,7 @@ async fn setup_project(
     let graph = runtime
         .initialize_project_graph_for_test(
             project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions {
+            tracedecay::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.to_path_buf()),
                 global_db_path: None,
             },

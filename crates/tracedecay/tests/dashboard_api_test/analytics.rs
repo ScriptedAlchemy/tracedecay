@@ -494,7 +494,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     let cg = host_runtime
         .initialize_project_graph_for_test(
             &project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions {
+            tracedecay::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: Some(global_db_path),
             },
@@ -939,7 +939,7 @@ fn observatory_counts_canonical_failed_outcomes() {
                 HostAdmissionScope::Profile,
                 &observability_event(
                     &project_id,
-                    tracedecay::tracedecay::current_timestamp(),
+                    tracedecay::project::current_timestamp(),
                     ObservabilityTerminalResultV1::Failed,
                 ),
             )
@@ -972,7 +972,7 @@ fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
         let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
-        let timestamp = tracedecay::tracedecay::current_timestamp();
+        let timestamp = tracedecay::project::current_timestamp();
         fixture
             .host_runtime
             .append_analytics_event_for_test(

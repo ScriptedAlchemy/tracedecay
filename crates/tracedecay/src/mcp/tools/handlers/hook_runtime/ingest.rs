@@ -1,4 +1,4 @@
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
@@ -703,7 +703,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
                     cg.project_root()
                 )),
                 cg.project_root(),
-                crate::tracedecay::current_timestamp()
+                crate::project::current_timestamp()
             ),
             label = "mcp.hook_runtime.hint_settle"
         )

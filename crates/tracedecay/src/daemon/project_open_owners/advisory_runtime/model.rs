@@ -13,7 +13,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
     pub(in crate::daemon::project_open_owners) database: tracedecay_runtime_core::db::Database,
     pub(in crate::daemon::project_open_owners) session_db:
         tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    pub(in crate::daemon::project_open_owners) graph: Arc<crate::tracedecay::TraceDecay>,
+    pub(in crate::daemon::project_open_owners) graph: Arc<crate::project::TraceDecay>,
     pub(in crate::daemon::project_open_owners) code_graph:
         Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     pub(in crate::daemon::project_open_owners) scope: tracedecay_contracts::ResolvedScope,

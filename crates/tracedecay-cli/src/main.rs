@@ -70,7 +70,7 @@ use cli::*;
 use tracedecay::daemon::StderrTracingDefault;
 
 pub(crate) fn current_unix_timestamp() -> i64 {
-    tracedecay::tracedecay::current_timestamp()
+    tracedecay::project::current_timestamp()
 }
 
 /// A self-animating spinner that ticks on a background thread.

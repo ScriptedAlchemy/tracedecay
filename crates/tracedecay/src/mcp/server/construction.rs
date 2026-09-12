@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_contracts::{
     ProfileIdentityReadPort, SessionTemporalRefreshWakePort,
     remote::status::RemoteOperationalStatusReaderV1,

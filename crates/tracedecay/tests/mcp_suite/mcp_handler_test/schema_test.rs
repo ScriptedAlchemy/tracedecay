@@ -2,7 +2,7 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::project::TraceDecay;
 use tracedecay_mcp::get_tool_definitions;
 #[test]
 fn outline_schema_requires_file_without_provider_property() {

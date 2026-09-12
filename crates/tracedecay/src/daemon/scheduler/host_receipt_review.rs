@@ -4,7 +4,7 @@ use std::pin::Pin;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{DaemonEngine, DaemonHandshake, effective_automation_config_for_project};
@@ -312,12 +312,12 @@ mod tests {
         std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
         std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
             .expect("project source");
-        let options = crate::tracedecay::TraceDecayOpenOptions {
+        let options = crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
             global_db_path: Some(profile_root.join("global.db")),
         };
         let writable =
-            crate::tracedecay::TraceDecay::init_with_options(&project_root, options.clone())
+            crate::project::TraceDecay::init_with_options(&project_root, options.clone())
                 .await
                 .expect("initialize host receipt project");
         let dashboard_root = writable.store_layout().dashboard_root.clone();
@@ -350,7 +350,7 @@ mod tests {
         .expect("mark host receipt ready");
         writable.close();
         let read_only =
-            crate::tracedecay::TraceDecay::open_read_only_with_options(&project_root, options)
+            crate::project::TraceDecay::open_read_only_with_options(&project_root, options)
                 .await
                 .expect("open read-only host receipt project");
         let handshake = DaemonHandshake {
