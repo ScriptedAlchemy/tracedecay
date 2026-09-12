@@ -35,6 +35,28 @@ impl ManifestDigest {
     }
 }
 
+pub struct ManifestDigestHasher(Sha256);
+
+impl ManifestDigestHasher {
+    pub fn new() -> Self {
+        Self(Sha256::new())
+    }
+
+    pub fn update(&mut self, bytes: impl AsRef<[u8]>) {
+        self.0.update(bytes.as_ref());
+    }
+
+    pub fn finalize(self) -> Result<ManifestDigest, DomainError> {
+        ManifestDigest::from_sha256_bytes(&self.0.finalize())
+    }
+}
+
+impl Default for ManifestDigestHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(super) type CanonicalError = serde_json::Error;
 pub(super) type CanonicalResult<T = ()> = Result<T, CanonicalError>;
 pub(super) const SERDE_JSON_PRIVATE_TOKEN_PREFIX: &str = "$serde_json::private::";

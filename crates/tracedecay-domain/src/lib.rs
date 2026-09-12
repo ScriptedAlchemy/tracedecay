@@ -307,7 +307,7 @@ pub use research::{
     GitHubStackLayerSnapshotV1, GitHubStackSnapshotV1, GitTopologyAnchorTargetV1,
     GitTopologyGenerationRefV1, GitTopologySourceRoleV1, HostInstanceId,
     IntegrationReceiptAnchorRefV1, LocatorDigest, LogSafeText, ManifestDigest,
-    MechanicalIntegrationModeV1, MessageId, NativeAliasKindV2, NativeAliasV2,
+    ManifestDigestHasher, MechanicalIntegrationModeV1, MessageId, NativeAliasKindV2, NativeAliasV2,
     NativeGitObjectAnchorRefV1, NativeGitObjectKindV1, NativeIntegrationApprovalId,
     NativeIntegrationApprovalV1, NativeIntegrationDirectionV1, NativeIntegrationPhaseV1,
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
