@@ -43,7 +43,10 @@ use crate::runtime::source::{
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
     path_byte_len, run_blocking_transcript_section, stream_new_jsonl,
 };
-use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_privacy::{
+    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
+    protect_sensitive_structural_id,
+};
 
 const PROVIDER: &str = "vibe";
 const MAX_SCAN_DEPTH: u8 = 4;
@@ -274,7 +277,9 @@ async fn capture_vibe_path(
     };
     let provider = ProviderId::new(PROVIDER)
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
-    let session_id = SessionId::new(&meta.session_id)
+    let canonical_session_id = protect_sensitive_structural_id(&meta.session_id)
+        .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
+    let session_id = SessionId::new(&canonical_session_id)
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
     let observation_source = ObservationSourceIdentityV1::for_provider(provider, session_id)
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
@@ -290,14 +295,14 @@ async fn capture_vibe_path(
     )
     .with_max_new_bytes(max_new_bytes)
     .with_cancellation(cancellation.clone());
-    let session_id = meta.session_id;
+    let native_session_id = meta.session_id;
     let model = meta.model;
 
     admit_jsonl_observations(
         request,
         |_| (),
         move |(), bytes, range, _, _prepared, _hints| {
-            let native_record_id = vibe_capture::native_record_id(&session_id, range)
+            let native_record_id = vibe_capture::native_record_id(&native_session_id, range)
                 .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })?;
             match parse_normalized_observation_record_v1(
                 bytes,
@@ -306,7 +311,7 @@ async fn capture_vibe_path(
                 |native| {
                     vibe_capture::normalize_observation(
                         &native,
-                        &session_id,
+                        &canonical_session_id,
                         model.as_deref(),
                         native_record_id.clone(),
                         range,
