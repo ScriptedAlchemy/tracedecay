@@ -3,6 +3,7 @@ use std::io;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::ManifestDigest;
 
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
 use crate::executable::ExecutableSchemaAuthority;
@@ -341,8 +342,8 @@ pub struct CatalogSnapshotV1 {
 }
 
 impl CatalogSnapshotV1 {
-    pub const fn digest(&self) -> CatalogDigest {
-        self.digest
+    pub fn digest(&self) -> CatalogDigest {
+        self.digest.clone()
     }
 
     pub fn capability(&self, capability_id: &CapabilityId) -> Option<&CapabilityManifestV1> {
@@ -559,7 +560,16 @@ fn calculate_digest(
             reason: error.to_string(),
         }
     })?;
-    Ok(CatalogDigest::from_bytes(hasher.0.finalize().into()))
+    let digest = ManifestDigest::from_sha256_bytes(&hasher.0.finalize()).map_err(|error| {
+        CatalogValidationError::DigestSerialization {
+            reason: error.to_string(),
+        }
+    })?;
+    CatalogDigest::from_manifest_digest(digest).map_err(|error| {
+        CatalogValidationError::DigestSerialization {
+            reason: error.to_string(),
+        }
+    })
 }
 
 struct DigestWriter(Sha256);

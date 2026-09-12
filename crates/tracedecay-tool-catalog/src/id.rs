@@ -3,8 +3,8 @@ use std::str::FromStr;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_domain::ManifestDigest;
 
 /// Maximum UTF-8 byte length for a catalog-owned stable identifier.
 pub const MAX_CATALOG_IDENTIFIER_BYTES: usize = 192;
@@ -125,56 +125,34 @@ catalog_id!(
 );
 
 /// SHA-256 digest of a versioned, canonically ordered catalog snapshot.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CatalogDigest([u8; 32]);
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CatalogDigest(ManifestDigest);
 
 impl CatalogDigest {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    pub fn sha256(payload: impl AsRef<[u8]>) -> Self {
-        let digest: [u8; 32] = Sha256::digest(payload.as_ref()).into();
-        Self(digest)
-    }
-
-    pub const fn as_bytes(self) -> [u8; 32] {
-        self.0
+    pub fn from_manifest_digest(digest: ManifestDigest) -> Result<Self, CatalogDigestError> {
+        Self::parse(digest.as_str())
     }
 
     pub fn parse(value: &str) -> Result<Self, CatalogDigestError> {
         let Some(encoded) = value.strip_prefix("sha256:") else {
             return Err(CatalogDigestError::Malformed);
         };
-        if encoded.len() != 64 {
+        if encoded.len() != 64
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err(CatalogDigestError::Malformed);
         }
-
-        let mut bytes = [0_u8; 32];
-        for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
-            let high = decode_hex(pair[0]).ok_or(CatalogDigestError::Malformed)?;
-            let low = decode_hex(pair[1]).ok_or(CatalogDigestError::Malformed)?;
-            bytes[index] = (high << 4) | low;
-        }
-        Ok(Self(bytes))
-    }
-}
-
-fn decode_hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        _ => None,
+        ManifestDigest::new(value)
+            .map(Self)
+            .map_err(|_| CatalogDigestError::Malformed)
     }
 }
 
 impl fmt::Display for CatalogDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("sha256:")?;
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        formatter.write_str(self.0.as_str())
     }
 }
 

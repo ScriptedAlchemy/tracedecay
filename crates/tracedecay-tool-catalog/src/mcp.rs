@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use thiserror::Error;
+use tracedecay_domain::canonical_sha256;
 
 use crate::{
     CancellationContract, CatalogDigest, EffectClass, PaginationContract, StreamingContract,
@@ -232,10 +233,7 @@ pub struct McpDispatchCatalogV1 {
 }
 
 impl McpDispatchCatalogV1 {
-    #[cfg_attr(
-        feature = "hotpath",
-        hotpath::measure(label = "tool_catalog.mcp.load")
-    )]
+    #[cfg_attr(feature = "hotpath", hotpath::measure(label = "tool_catalog.mcp.load"))]
     pub fn new(
         contracts: impl IntoIterator<Item = McpDispatchContractV1>,
     ) -> Result<Self, McpDispatchCatalogError> {
@@ -249,12 +247,14 @@ impl McpDispatchCatalogV1 {
         if by_name.is_empty() {
             return Err(McpDispatchCatalogError::EmptyCatalog);
         }
-        let canonical = serde_json::to_vec(&by_name)
+        let fingerprint = canonical_sha256(&by_name)
+            .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
+        let fingerprint = CatalogDigest::from_manifest_digest(fingerprint)
             .map_err(|error| McpDispatchCatalogError::Serialization(error.to_string()))?;
         crate::hotpath_observe::mcp_catalog_entries(by_name.len());
         Ok(Self {
             contracts: by_name,
-            fingerprint: CatalogDigest::sha256(canonical),
+            fingerprint,
         })
     }
 
@@ -262,8 +262,8 @@ impl McpDispatchCatalogV1 {
         MCP_DISPATCH_CONTRACT_VERSION
     }
 
-    pub const fn fingerprint(&self) -> CatalogDigest {
-        self.fingerprint
+    pub fn fingerprint(&self) -> CatalogDigest {
+        self.fingerprint.clone()
     }
 
     pub fn contract(&self, tool_name: &str) -> Option<&McpDispatchContractV1> {
