@@ -67,9 +67,12 @@ async fn server_with_authorities() -> (Arc<McpServer>, TempDir, crate::config::P
         .initialize_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
         .await
         .expect("daemon-owned project init");
-    let context = runtime
-        .into_mcp_server_context_for_test(graph, None)
-        .expect("registered MCP server context");
+    let context = crate::test_support::host_admission::mcp_server_context_for_test(
+        std::sync::Arc::new(runtime),
+        graph,
+        None,
+    )
+    .expect("registered MCP server context");
     let server =
         crate::daemon::retained_test_support::mcp_server_with_project_retained_owner_for_test(
             context,

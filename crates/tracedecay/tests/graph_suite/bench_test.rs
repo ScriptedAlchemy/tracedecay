@@ -4,6 +4,7 @@ use tracedecay::project::TraceDecay;
 
 #[tokio::test]
 async fn bench_fails_closed_until_admitted_graph_authority_is_mounted() {
+    crate::common::register_process_runtime_ports();
     let tmp = TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("a.rs"),

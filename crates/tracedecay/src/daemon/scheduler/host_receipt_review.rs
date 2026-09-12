@@ -317,7 +317,7 @@ mod tests {
             global_db_path: Some(profile_root.join("global.db")),
         };
         let writable =
-            crate::project::TraceDecay::init_with_options(&project_root, options.clone())
+            crate::project::TraceDecay::init_with_options_for_test(&project_root, options.clone())
                 .await
                 .expect("initialize host receipt project");
         let dashboard_root = writable.store_layout().dashboard_root.clone();
@@ -349,10 +349,12 @@ mod tests {
         .await
         .expect("mark host receipt ready");
         writable.close();
-        let read_only =
-            crate::project::TraceDecay::open_read_only_with_options(&project_root, options)
-                .await
-                .expect("open read-only host receipt project");
+        let read_only = crate::project::TraceDecay::open_read_only_with_options_for_test(
+            &project_root,
+            options,
+        )
+        .await
+        .expect("open read-only host receipt project");
         let handshake = DaemonHandshake {
             project_path: Some(project_root.clone()),
             scope_prefix: None,

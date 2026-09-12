@@ -110,7 +110,7 @@ fn validated(
     let invalid = |reason: String| ProductRuntimeError::InvalidProvider { reason };
     if provider.release_version != PACKAGE_VERSION {
         return Err(invalid(format!(
-            "release_version {:?} must equal the composition crate's package version {PACKAGE_VERSION:?}",
+            "release_version {:?} must equal the workspace package version {PACKAGE_VERSION:?}",
             provider.release_version
         )));
     }
