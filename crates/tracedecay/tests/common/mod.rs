@@ -414,7 +414,7 @@ impl TraceDecayStorageEnvGuard {
             // talk to a daemon it started itself.
             _daemon_socket_guard: EnvVarGuard::set(
                 tracedecay_daemon_protocol::SOCKET_ENV,
-                &profile_root.join("daemon.sock"),
+                profile_root.join("daemon.sock"),
             ),
         }
     }
