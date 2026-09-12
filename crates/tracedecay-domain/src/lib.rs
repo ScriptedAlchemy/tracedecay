@@ -442,6 +442,7 @@ pub use work_read::{
 };
 pub use work_routing::{
     WorkContentLocationClassV1, WorkEffortClassV1, WorkOrdinalBandV1, WorkRouteCandidateV1,
+    WorkRouteExecutionProfileV1,
 };
 pub use work_run_control::{
     MAX_FENCED_WORK_ATTEMPTS, WorkBlockedIntervalCauseV1, WorkBlockedIntervalClosureV1,

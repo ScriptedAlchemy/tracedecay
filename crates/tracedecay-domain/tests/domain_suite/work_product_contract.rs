@@ -907,6 +907,7 @@ fn accepting_a_decomposition_proposal_fans_out_without_changing_parent_identity(
         WorkRouteDecisionV1::abstain("No admitted provider route").unwrap(),
         "Split independent preparation from the gated delivery step".to_owned(),
         digest('f'),
+        digest('e'),
     )
     .unwrap();
 

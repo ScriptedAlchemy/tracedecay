@@ -83,6 +83,7 @@ fn fan_out_input(identity: &str, input_digest: ManifestDigest) -> WorkflowFanOut
         WorkRouteDecisionV1::abstain("fixture route").unwrap(),
         format!("Proposal {identity}"),
         input_digest.clone(),
+        input_digest.clone(),
     )
     .unwrap();
     WorkflowFanOutInput {

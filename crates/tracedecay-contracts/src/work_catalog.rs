@@ -24,14 +24,15 @@ use crate::capability_manifest::{
 use crate::work_retry::{RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1};
 use crate::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
-    DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
-    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
-    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
-    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+    AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, CancelWorkAttemptCommand,
+    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
+    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
+    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand,
+    ResumeWorkRunCommand, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
@@ -243,12 +244,12 @@ fn build_work_executable_binding_registry()
             "tracedecay_contracts::DecideWorkProposalRequestV1",
             "tracedecay_contracts::WorkProductMutationReceiptV1",
         )?,
-        available::<AdmitWorkExecutionRequestV1, WorkProductMutationReceiptV1>(
+        available::<AdmitWorkExecutionRequestV1, AdmittedWorkExecutionV1>(
             "admit_execution",
             "/application/work/admit-execution",
             EffectClass::Administrative,
             "tracedecay_contracts::AdmitWorkExecutionRequestV1",
-            "tracedecay_contracts::WorkProductMutationReceiptV1",
+            "tracedecay_contracts::AdmittedWorkExecutionV1",
         )?,
         available::<StartWorkAttemptCommand, WorkAttemptV1>(
             "start_attempt",

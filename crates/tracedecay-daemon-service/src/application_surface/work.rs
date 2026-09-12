@@ -10,14 +10,14 @@ use axum::response::Response;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
 use tracedecay_contracts::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-    AdmitWorkSynthesisCommand, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
-    DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
-    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
-    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
-    RetryWorkAttemptCommandV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
-    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1, CancelWorkAttemptCommand,
+    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
+    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
+    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand,
+    ResumeWorkRunCommand, RetryWorkAttemptCommandV1, StartWorkAttemptCommand,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
@@ -201,7 +201,7 @@ pub(crate) async fn invoke_work_operation(
             core!(
                 AdmitWorkExecutionRequestV1,
                 AdmitExecution,
-                WorkProductMutationReceiptV1
+                AdmittedWorkExecutionV1
             )
         }
         WorkOperation::StartAttempt => {
