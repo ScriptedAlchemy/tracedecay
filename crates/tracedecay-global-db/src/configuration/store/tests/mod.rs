@@ -7,8 +7,7 @@ use super::{
     ConfigurationMutationAuthority, ConfigurationMutationReceiptV1,
     ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
     ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationValueV1,
-    GlobalDbConfigurationControlStore, ManifestDigest, TestConnection, TransactionBehavior,
-    ensure_configuration_schema,
+    GlobalDbConfigurationControlStore, ManifestDigest, TestConnection,
 };
 use crate::configuration::contracts::ScopeRevalidationEvidenceV1;
 use crate::configuration::registry::ConfigurationRegistry;
