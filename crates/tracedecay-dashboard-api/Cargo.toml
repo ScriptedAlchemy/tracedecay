@@ -9,6 +9,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 axum = "0.8"
+clru = "0.6"
 hotpath.workspace = true
 schemars = "1.2.1"
 semver = "1"
