@@ -492,6 +492,33 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
             }
         ),
     )
+    rollout_dir = Path(os.environ["HOME"]) / ".codex/sessions/2026/09/12"
+    rollout_dir.mkdir(parents=True, exist_ok=True)
+    (rollout_dir / f"rollout-2026-09-12T00-00-00-{session_id}.jsonl").write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "timestamp": "2026-09-12T00:00:00.000Z",
+                        "type": "session_meta",
+                        "payload": {
+                            "id": session_id,
+                            "cwd": str(root),
+                            "model": "gpt-6-astra",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "timestamp": "2026-09-12T00:00:01.000Z",
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": lcm_message},
+                    }
+                ),
+            )
+        )
+        + "\n"
+    )
     return root, {
         "file": "src/lib.rs",
         "path": "src/lib.rs",
@@ -588,7 +615,7 @@ def prime_fixture_values(
         if node_id is None:
             if time.monotonic() >= ends_at:
                 break
-            time.sleep(0.1)
+            time.sleep(MOUNT_RETRY_DELAY_S)
     if node_id is None:
         raise SweepError("qualified-name producer did not publish the fixture node id")
     node = _producer_call(client, "tracedecay_node", {"node_id": node_id}, deadline("tracedecay_node"))
@@ -736,64 +763,168 @@ def prime_fixture_values(
         }
     )
 
-    runs = _producer_call(
-        client,
-        "tracedecay_automation_run_list",
-        {"limit": 1, "format": "json"},
-        deadline("tracedecay_automation_run_list"),
-    )
-    run_id = first_value(runs, {"run_id"})
-    if not isinstance(run_id, str) or not run_id:
-        raise SweepError("automation run list producer returned no inspectable run identity")
-    fixture["automation_run_id"] = run_id
+    if effect_target is None:
+        ready_at = time.monotonic() + 10
+        while True:
+            runs = _producer_call(
+                client,
+                "tracedecay_automation_run_list",
+                {"limit": 1, "format": "json"},
+                deadline("tracedecay_automation_run_list"),
+            )
+            run_id = first_value(runs, {"run_id"})
+            if isinstance(run_id, str) and run_id:
+                fixture["automation_run_id"] = run_id
+                break
+            if time.monotonic() >= ready_at:
+                raise SweepError("automation run list producer returned no inspectable run identity")
+            time.sleep(MOUNT_RETRY_DELAY_S)
 
-    loaded = _producer_call(
-        client,
-        "tracedecay_lcm_load_session",
-        {
-            "provider": "codex",
-            "session_id": fixture["session_id"],
-            "limit": 10,
-            "format": "json",
-        },
-        deadline("tracedecay_lcm_load_session"),
-    )
-    raw_message = next(
-        (
-            value
-            for value in _objects(loaded)
-            if isinstance(value.get("store_id"), int)
-            and value.get("content") == fixture["lcm_message"]
-        ),
-        None,
-    )
-    if raw_message is None:
-        raise SweepError("LCM session producer omitted the captured prompt message")
-    fixture["lcm_store_id"] = raw_message["store_id"]
+        refresh_selectors = profile_refresh_selectors(fixture)
+        refresh_deadline_ms = deadline("tracedecay_session_refresh_begin")
+        begun_refresh, elapsed_ms = client.call_tool(
+            "tracedecay_session_refresh_begin",
+            refresh_selectors,
+            refresh_deadline_ms,
+        )
+        refresh_row = response_row(
+            "tool",
+            "tracedecay_session_refresh_begin",
+            begun_refresh,
+            elapsed_ms,
+            refresh_deadline_ms,
+        )
+        if refresh_row["verdict"] != "PASS":
+            raise SweepError(
+                "tracedecay_session_refresh_begin setup failed: "
+                f"{refresh_row['problem_code'] or refresh_row['note']}"
+            )
+        # This call only admits the captured rollout for the LCM journey. Its
+        # own effect row independently audits the timing receipt.
+        refresh_receipt = next(
+            (
+                value
+                for value in _objects(begun_refresh)
+                if isinstance(value.get("outcome"), str)
+                and value["outcome"] in {"started", "joined"}
+                and isinstance(value.get("handle"), str)
+                and value["handle"]
+                and isinstance(value.get("operation_id"), str)
+                and value["operation_id"]
+            ),
+            None,
+        )
+        if refresh_receipt is None:
+            raise SweepError("session refresh begin producer omitted its public status identity")
+        refresh_handle = refresh_receipt["handle"]
+        refresh_operation_id = refresh_receipt["operation_id"]
+        fixture.update(
+            {
+                "session_refresh_handle": refresh_handle,
+                "session_refresh_operation_id": refresh_operation_id,
+            }
+        )
 
-    refresh_selectors = profile_refresh_selectors(fixture)
-    begun_refresh = _producer_call(
-        client,
-        "tracedecay_session_refresh_begin",
-        refresh_selectors,
-        deadline("tracedecay_session_refresh_begin"),
-    )
-    refresh_handle = response_handle(begun_refresh)
-    refresh_operation_id = first_value(begun_refresh, {"operation_id"})
-    if (
-        first_value(begun_refresh, {"outcome"}) not in {"started", "joined"}
-        or not isinstance(refresh_handle, str)
-        or not refresh_handle
-        or not isinstance(refresh_operation_id, str)
-        or not refresh_operation_id
-    ):
-        raise SweepError("session refresh begin producer omitted its public status identity")
-    fixture.update(
-        {
-            "session_refresh_handle": refresh_handle,
-            "session_refresh_operation_id": refresh_operation_id,
-        }
-    )
+        refresh_ready_at = time.monotonic() + 10
+        while True:
+            status_deadline_ms = deadline("tracedecay_session_refresh_status")
+            refresh_status, elapsed_ms = client.call_tool(
+                "tracedecay_session_refresh_status",
+                {"handle": refresh_handle, **refresh_selectors},
+                status_deadline_ms,
+            )
+            status_row = response_row(
+                "tool",
+                "tracedecay_session_refresh_status",
+                refresh_status,
+                elapsed_ms,
+                status_deadline_ms,
+            )
+            if status_row["verdict"] != "PASS":
+                problem_kind, _problem_code = response_problem_code(refresh_status)
+                if problem_kind == "unavailable" and time.monotonic() < refresh_ready_at:
+                    time.sleep(MOUNT_RETRY_DELAY_S)
+                    continue
+                raise SweepError(
+                    "tracedecay_session_refresh_status setup failed: "
+                    f"{status_row['problem_code'] or status_row['note']}"
+                )
+            status_receipt = next(
+                (
+                    value
+                    for value in _objects(refresh_status)
+                    if value.get("tool") == "tracedecay_session_refresh_status"
+                    and isinstance(value.get("outcome"), str)
+                ),
+                None,
+            )
+            refresh_state = status_receipt.get("outcome") if status_receipt else None
+            if refresh_state == "complete":
+                if first_value(refresh_status, {"operation_id"}) != refresh_operation_id:
+                    raise SweepError(
+                        "completed session refresh changed its durable operation identity"
+                    )
+                break
+            if refresh_state != "running" or time.monotonic() >= refresh_ready_at:
+                raise SweepError(
+                    "session refresh did not complete for the captured rollout "
+                    f"(state {refresh_state!r})"
+                )
+            time.sleep(MOUNT_RETRY_DELAY_S)
+
+        ready_at = time.monotonic() + 10
+        while True:
+            load_deadline_ms = deadline("tracedecay_lcm_load_session")
+            loaded, elapsed_ms = client.call_tool(
+                "tracedecay_lcm_load_session",
+                {
+                    "provider": "codex",
+                    "session_id": fixture["session_id"],
+                    "limit": 10,
+                    "format": "json",
+                },
+                load_deadline_ms,
+            )
+            load_row = response_row(
+                "tool",
+                "tracedecay_lcm_load_session",
+                loaded,
+                elapsed_ms,
+                load_deadline_ms,
+            )
+            if load_row["verdict"] != "PASS":
+                problem_kind, _problem_code = response_problem_code(loaded)
+                if problem_kind != "unavailable" or time.monotonic() >= ready_at:
+                    raise SweepError(
+                        "tracedecay_lcm_load_session producer failed: "
+                        f"{load_row['problem_code'] or load_row['note']}"
+                    )
+                time.sleep(MOUNT_RETRY_DELAY_S)
+                continue
+            if duration_us(loaded) is None:
+                raise SweepError(
+                    "tracedecay_lcm_load_session producer omitted the enabled "
+                    "_meta.duration_us receipt"
+                )
+            captured_message = next(
+                (
+                    value
+                    for value in _objects(loaded)
+                    if value.get("content") == fixture["lcm_message"]
+                ),
+                None,
+            )
+            if captured_message is not None:
+                store_id = captured_message.get("store_id")
+                if not isinstance(store_id, int) or isinstance(store_id, bool):
+                    raise SweepError(
+                        "LCM captured prompt has no expandable raw-message store identity"
+                    )
+                fixture["lcm_store_id"] = store_id
+                break
+            if time.monotonic() >= ready_at:
+                raise SweepError("LCM session producer omitted the captured prompt message")
+            time.sleep(MOUNT_RETRY_DELAY_S)
 
     # The callable code-query surface serves only complete immutable index
     # generations, and a cold fixture publishes its first generation
@@ -1661,12 +1792,15 @@ def run_phase(args: argparse.Namespace) -> int:
                 name = definition.get("name") if isinstance(definition.get("name"), str) else "<invalid>"
                 report["entries"].append(_failure_row("tool", name, 0, "tool_sweep.dispatch_metadata_invalid", str(error)))
         policy_index = {policy.name: policy for _, policy in policies}
-        prime_fixture_values(
-            client,
-            fixture,
-            policy_index,
-            args.effect if args.phase == "effect" else None,
-        )
+        try:
+            prime_fixture_values(
+                client,
+                fixture,
+                policy_index,
+                args.effect if args.phase == "effect" else None,
+            )
+        except Exception as error:
+            fixture["priming_error"] = str(error)
         if args.phase == "reads":
             for definition, policy in policies:
                 if policy.availability == "unavailable":
