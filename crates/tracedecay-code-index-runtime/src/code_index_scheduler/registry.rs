@@ -7122,7 +7122,7 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let replay_binding = historical_generation_owner.sealed_replay_binding(generation_id)?;
         if !graph_activation
-            .recover_verified_head(
+            .recover_verified_generation(
                 &project_id,
                 &repository_id,
                 &worktree_id,
