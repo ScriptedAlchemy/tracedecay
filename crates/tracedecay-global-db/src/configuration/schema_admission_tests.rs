@@ -182,3 +182,116 @@ async fn sqlite_objects(
     }
     objects
 }
+
+/// Every release from beta.25 through beta.37 published one configuration
+/// shape: the final one plus the inert `configuration_credential_references`
+/// table. Its verbatim DDL is the fixture; a store carrying it must be
+/// admitted read-only, converged by the writer with every row intact, and
+/// refused only when the retired table holds data no shipped binary wrote.
+const RELEASED_BETA37_CONFIGURATION_SQL: &str =
+    include_str!("../../tests/fixtures/configuration-released-beta37.sql");
+
+async fn released_connection() -> (
+    tempfile::TempDir,
+    tracedecay_runtime_core::db::engine::TestConnection,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("configuration-released.db"),
+    );
+    connection
+        .execute_batch(RELEASED_BETA37_CONFIGURATION_SQL)
+        .await
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO configuration_revisions VALUES
+                ('revision.1', NULL, 'snapshot.1',
+                 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 'actor.1', 'canonical_initialization', 1);
+             INSERT INTO configuration_entries VALUES
+                ('revision.1', 'analyzer.settings.v1', 'project', 'project.1', 1, '{\"kept\":true}');",
+        )
+        .await
+        .unwrap();
+    (directory, connection)
+}
+
+async fn count(connection: &impl QueryExecutor, sql: &str) -> i64 {
+    let mut rows = connection.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+#[tokio::test]
+async fn released_configuration_shape_is_admitted_and_converged_with_rows_intact() {
+    let (_directory, connection) = released_connection().await;
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'configuration_credential_references'"
+        )
+        .await,
+        1,
+        "fixture carries the shipped table"
+    );
+
+    super::admit_configuration_schema(&*connection, None)
+        .await
+        .expect("a shipped shape is admissible read-only");
+    ensure_configuration_schema(&*connection, None)
+        .await
+        .expect("a shipped shape converges instead of demanding a reset");
+
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'configuration_credential_references%'"
+        )
+        .await,
+        0,
+        "retired table and its triggers are gone"
+    );
+    let mut rows = connection
+        .query(
+            "SELECT typed_value FROM configuration_entries WHERE revision_id = 'revision.1'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "{\"kept\":true}"
+    );
+    drop(rows);
+    ensure_configuration_schema(&*connection, None)
+        .await
+        .expect("the converged store is the exact final shape");
+}
+
+#[tokio::test]
+async fn released_configuration_shape_with_credential_rows_stays_reset_required() {
+    let (_directory, connection) = released_connection().await;
+    connection
+        .execute_batch(
+            "INSERT INTO configuration_credential_references VALUES
+                ('credential.1', 'api_token', 'sha256:ac', 'sha256:ad', 1, 'sha256:ae', 1, 1, 2, 0);",
+        )
+        .await
+        .unwrap();
+    assert_reset_required(ensure_configuration_schema(&*connection, None).await);
+    assert_eq!(
+        count(
+            &*connection,
+            "SELECT COUNT(*) FROM configuration_credential_references"
+        )
+        .await,
+        1,
+        "refusal must not discard the unknown row"
+    );
+}
