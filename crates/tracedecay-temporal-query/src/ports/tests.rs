@@ -942,8 +942,33 @@ impl TemporalReadPort for OversizedRecordPort {
     }
 }
 
+/// A candidate cohort is a bounded window over storage order, so filling the
+/// item cap while the producer still holds rows yields the window plus the key
+/// the next window resumes from — never a refusal that hides the remainder.
 #[test]
-fn candidate_total_bytes_cap_with_producer_more_is_incomplete_coverage() {
+fn candidate_item_cap_with_producer_more_is_a_resumable_window() {
+    block_on(async {
+        let port = AlwaysMorePort::new(vec!["c0", "c1"], Vec::new());
+        let snapshot = snapshot_with_control(ExecutionControl::default());
+        let mut state =
+            CandidateReadState::new(PageLimits::new(1, 16 * 1024, 4 * 1024, 1).expect("limits"));
+
+        let page = pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state)
+            .await
+            .expect("a full item cap is a bounded window, not incomplete coverage");
+        assert_eq!(page.status(), PageStatus::More);
+        assert_eq!(page.items().len(), 1);
+        assert_eq!(state.consumed_items(), 1);
+        assert!(state.is_exhausted());
+        assert_eq!(
+            state.keyset().map(|key| key.as_str().to_owned()),
+            Some("1".to_owned())
+        );
+    });
+}
+
+#[test]
+fn candidate_total_bytes_cap_with_producer_more_is_a_resumable_window() {
     block_on(async {
         let first = candidate("c0");
         let encoded = first.measured_encoded_bytes().expect("measured");
@@ -952,14 +977,17 @@ fn candidate_total_bytes_cap_with_producer_more_is_incomplete_coverage() {
         let mut state =
             CandidateReadState::new(PageLimits::new(8, encoded, encoded, 1).expect("limits"));
 
-        assert_eq!(
-            pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state).await,
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate total bytes"
-            })
-        );
+        let page = pull_candidate_page(&port, &snapshot, &CandidatePlan::default(), &mut state)
+            .await
+            .expect("a full byte cap is a bounded window, not incomplete coverage");
+        assert_eq!(page.status(), PageStatus::More);
         assert_eq!(state.consumed_bytes(), encoded);
         assert!(state.consumed_items() < 8);
+        assert!(state.is_exhausted());
+        assert_eq!(
+            state.keyset().map(|key| key.as_str().to_owned()),
+            Some("1".to_owned())
+        );
     });
 }
 
@@ -1119,21 +1147,19 @@ fn exhausted_caps_never_synthesize_complete_or_silently_drop_unread_work() {
             PageLimits::new(1, 16 * 1024, 4 * 1024, 1).expect("limits"),
         );
 
-        let candidate_err = pull_candidate_page(
+        let candidate_window = pull_candidate_page(
             &port,
             &snapshot,
             &CandidatePlan::default(),
             &mut candidate_state,
         )
         .await
-        .expect_err("More + candidate cap must not complete");
-        assert_eq!(
-            candidate_err,
-            TemporalPortError::BudgetExceeded {
-                resource: "candidate item count"
-            }
-        );
-        // A follow-up pull must keep failing closed — never empty Complete.
+        .expect("More + candidate cap is a bounded window");
+        assert_eq!(candidate_window.status(), PageStatus::More);
+        assert!(candidate_state.is_exhausted());
+        // The window is closed: a follow-up pull on the same exhausted state
+        // must keep failing closed — never an empty Complete that would drop
+        // the rows the continuation key still owes.
         let candidate_follow_up = pull_candidate_page(
             &port,
             &snapshot,

@@ -373,6 +373,92 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn lcm_load_session_cursor_walk_reads_every_message_exactly_once() {
+    // More records than the internal candidate cohort window, so the walk has
+    // to advance the storage keyset rather than re-rank the first window.
+    const RECORDS: usize = 300;
+    // Small enough that a page plus its cursor fits one MCP response frame.
+    const LIMIT: usize = 5;
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let mut projections = Vec::with_capacity(RECORDS);
+    for index in 0..RECORDS {
+        projections.push(
+            seed_temporal_lcm_session_message_for_provider(
+                &cg,
+                "codex",
+                "lcm-cursor-walk",
+                &format!("lcm-walk-message-{index}"),
+                &format!("walked retained message {index}"),
+                i64::try_from(index + 1).unwrap(),
+            )
+            .await,
+        );
+    }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-cursor-walk", projections).await;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0usize;
+    loop {
+        let mut args = json!({
+            "provider": "codex",
+            "session_id": "lcm-cursor-walk",
+            "limit": LIMIT,
+            "content_limit": 4
+        });
+        if let Some(cursor) = &cursor {
+            args.as_object_mut()
+                .unwrap()
+                .insert("cursor".to_owned(), json!(cursor));
+        }
+        let loaded = handle_tool_call(&cg, "tracedecay_lcm_load_session", args, None, None)
+            .await
+            .unwrap_or_else(|error| panic!("page {pages} of a large session must load: {error}"));
+        let loaded: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+        pages += 1;
+        let messages = loaded["messages"].as_array().unwrap();
+        assert!(
+            !messages.is_empty(),
+            "page {pages} continued with no messages: {loaded}"
+        );
+        for message in messages {
+            let message_id = message["message_id"].as_str().unwrap().to_owned();
+            assert!(
+                seen.insert(message_id.clone()),
+                "page {pages} re-served {message_id}"
+            );
+        }
+        cursor = loaded["temporal"]["next_cursor"]
+            .as_str()
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+        assert!(
+            seen.len() < RECORDS,
+            "the walk continued past the last message: {loaded}"
+        );
+        assert!(
+            pages <= RECORDS,
+            "the walk failed to reach the end of the session"
+        );
+    }
+    assert_eq!(
+        seen.len(),
+        RECORDS,
+        "a cursor walk must read every retained message exactly once"
+    );
+    for index in 0..RECORDS {
+        assert!(
+            seen.contains(&format!("lcm-walk-message-{index}")),
+            "lcm-walk-message-{index} was never served"
+        );
+    }
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;

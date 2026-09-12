@@ -704,15 +704,14 @@ impl TemporalExecutionSnapshot {
         Ok(self)
     }
 
-    pub fn with_observed_candidate_cohort(
-        mut self,
-        candidates: &[RankingCandidate],
-    ) -> Result<Self, TemporalPortError> {
-        self.candidate_cohort_digest = candidate_cohort_digest(candidates)?;
-        self.prepared_candidate_cohort = None;
-        Ok(self)
-    }
-
+    /// Digest of the cohort frozen into this snapshot.
+    ///
+    /// Only a prepared (root-wide) cohort is frozen: it is carried in the
+    /// snapshot, so a cursor can bind its exact contents. An ordinary session
+    /// read materializes a bounded window of storage instead, and binds its
+    /// position by keyset — the window's contents cannot be named before it is
+    /// read, and the generation the candidate read is pinned to already keeps
+    /// the rows behind that keyset immutable.
     pub fn candidate_cohort_digest(&self) -> &BindingDigest {
         &self.candidate_cohort_digest
     }
