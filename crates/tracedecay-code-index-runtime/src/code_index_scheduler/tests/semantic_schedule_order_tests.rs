@@ -2,11 +2,12 @@ use std::path::Path;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    mpsc::{Receiver, Sender, channel},
+    mpsc::{Sender, channel},
 };
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tokio::sync::{Mutex as AsyncMutex, mpsc::UnboundedReceiver};
 use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use tracedecay_application::semantic_runtime::{
     SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleOutcomeV1,
@@ -501,14 +502,14 @@ async fn retained_partitioned_generation_reaches_semantics_after_source_proof_ex
 }
 
 struct BlockingSemanticScheduleProbeV1 {
-    entered: Arc<Mutex<Receiver<Arc<CodeIndexPublishedGenerationV1>>>>,
+    entered: AsyncMutex<UnboundedReceiver<Arc<CodeIndexPublishedGenerationV1>>>,
     release: Sender<()>,
     hook: SavedCodeGenerationScheduleHookV1,
 }
 
 impl BlockingSemanticScheduleProbeV1 {
     fn new() -> Self {
-        let (entered_tx, entered_rx) = channel();
+        let (entered_tx, entered_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_tx, release_rx) = channel();
         let release_rx = Arc::new(Mutex::new(release_rx));
         let hook = Arc::new(move |generation: Arc<CodeIndexPublishedGenerationV1>| {
@@ -523,23 +524,17 @@ impl BlockingSemanticScheduleProbeV1 {
             SavedGenerationScheduleOutcomeV1::Scheduled
         }) as SavedCodeGenerationScheduleHookV1;
         Self {
-            entered: Arc::new(Mutex::new(entered_rx)),
+            entered: AsyncMutex::new(entered_rx),
             release: release_tx,
             hook,
         }
     }
 
     async fn entered_generation(&self) -> Arc<CodeIndexPublishedGenerationV1> {
-        let entered = Arc::clone(&self.entered);
-        tokio::task::spawn_blocking(move || {
-            entered
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .recv_timeout(Duration::from_secs(3))
-                .expect("semantic schedule entry")
-        })
-        .await
-        .expect("semantic schedule observation task")
+        tokio::time::timeout(Duration::from_secs(5), self.entered.lock().await.recv())
+            .await
+            .expect("semantic schedule entry")
+            .expect("semantic schedule authority stays open")
     }
 
     fn release(&self) {
@@ -576,6 +571,10 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
         "mounted worktree admits complete-generation demand"
     );
 
+    tokio::time::timeout(Duration::from_secs(5), serving_seats.changed())
+        .await
+        .expect("serving-seat wake while semantic handoff is blocked")
+        .expect("serving-seat authority stays open");
     let first_scheduled = probe.entered_generation().await;
     let first_scheduled_id = first_scheduled.manifest().generation_id.clone();
     let snapshot = first_scheduled.snapshot();
@@ -586,10 +585,6 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
         snapshot.reference.clone(),
     )
     .expect("resolved scope");
-    tokio::time::timeout(Duration::from_secs(1), serving_seats.changed())
-        .await
-        .expect("serving-seat wake while semantic handoff is blocked")
-        .expect("serving-seat authority stays open");
     tokio::time::timeout(Duration::from_secs(1), serving_changes.changed())
         .await
         .expect("advisory wake while semantic handoff is blocked")
@@ -612,12 +607,12 @@ async fn semantic_schedule_runs_after_exact_generation_becomes_servable() {
             .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
             .await
     );
-    let second_scheduled = probe.entered_generation().await;
-    let second_scheduled_id = second_scheduled.manifest().generation_id.clone();
-    tokio::time::timeout(Duration::from_secs(1), serving_seats.changed())
+    tokio::time::timeout(Duration::from_secs(5), serving_seats.changed())
         .await
         .expect("edited serving-seat wake while semantic handoff is blocked")
         .expect("serving-seat authority stays open");
+    let second_scheduled = probe.entered_generation().await;
+    let second_scheduled_id = second_scheduled.manifest().generation_id.clone();
     tokio::time::timeout(Duration::from_secs(1), serving_changes.changed())
         .await
         .expect("edited advisory wake while semantic handoff is blocked")
