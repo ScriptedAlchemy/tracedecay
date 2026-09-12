@@ -48,11 +48,9 @@ impl EditSymbolV1 {
             .bytes()
             .filter(|byte| *byte == b'\n')
             .count();
-        // The attested byte span begins at the symbol's leading docs/attrs
-        // (they travel with the declaration), while `start_line`/`line_span`
-        // attest the declaration itself. Cross-check the two attestations on
-        // their shared facts: the declaration must begin inside the span and
-        // both must agree on where the symbol ends.
+        // The published byte span may include leading docs/attrs and trailing
+        // whitespace, while `start_line`/`line_span` attest the declaration.
+        // Accept only that known padding and keep it outside the edit range.
         let attested_start = usize::try_from(self.start_line).map_err(|error| {
             symbol_evidence_unavailable(format!("symbol start line exceeds this host: {error}"))
         })?;
@@ -64,12 +62,16 @@ impl EditSymbolV1 {
         let attested_end = attested_start
             .checked_add(self.line_span as usize - 1)
             .ok_or_else(|| symbol_evidence_unavailable("symbol line extent exceeds this host"))?;
-        if start_line > attested_start || end_inclusive != attested_end {
+        let trailing_is_whitespace = source[..end]
+            .lines()
+            .skip(attested_end.saturating_add(1))
+            .all(|line| line.trim().is_empty());
+        if start_line > attested_start || end_inclusive < attested_end || !trailing_is_whitespace {
             return Err(symbol_evidence_unavailable(
                 "symbol source span disagrees with its extraction-attested line bounds",
             ));
         }
-        Ok((start_line, end_inclusive))
+        Ok((start_line, attested_end))
     }
 }
 
@@ -338,5 +340,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn line_bounds_clip_only_attributed_trailing_whitespace() {
+        let source =
+            "pub fn subtotal(value: i32) -> i32 {\n    value * 2\n}\n\npub fn invoice_total() {}\n";
+        let mut subtotal = symbol(NodeKind::Function, "subtotal");
+        subtotal.source_span.end_byte =
+            source.find("pub fn invoice_total").expect("next symbol") as u64;
+        subtotal.line_span = 3;
+
+        assert_eq!(
+            subtotal.line_bounds(source).expect("consistent bounds"),
+            (0, 2)
+        );
+
+        subtotal.source_span.end_byte = source.len() as u64;
+        assert!(subtotal.line_bounds(source).is_err());
     }
 }
