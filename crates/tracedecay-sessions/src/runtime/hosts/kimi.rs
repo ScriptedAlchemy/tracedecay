@@ -8,7 +8,10 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1, ProviderId,
     RetentionClass, SessionId,
 };
-use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_privacy::{
+    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
+    protect_sensitive_structural_id,
+};
 use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
@@ -150,11 +153,7 @@ impl KimiSource {
                     else {
                         continue;
                     };
-                    if state.id
-                        != session_dir
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("")
+                    if state.session_id(&session_dir).is_none()
                         || !matcher.accepts(Some(&state.cwd))
                     {
                         continue;
@@ -548,7 +547,9 @@ pub async fn capture_kimi_observations(
                     }
                 };
                 let provider = ProviderId::new(PROVIDER).map_err(|_| invalid_frame())?;
-                let session = SessionId::new(&session_id).map_err(|_| invalid_frame())?;
+                let canonical_session_id =
+                    protect_sensitive_structural_id(&session_id).map_err(|_| invalid_frame())?;
+                let session = SessionId::new(&canonical_session_id).map_err(|_| invalid_frame())?;
                 let file_identity = match hotpath::measure_block!(
                     "sessions.hosts.kimi.identity_blocking",
                     run_blocking_transcript_section(|| jsonl_file_identity(&path))
@@ -568,8 +569,10 @@ pub async fn capture_kimi_observations(
                         continue;
                     }
                 };
-                let source_key = SessionId::new(format!("kimi-file-{file_identity:016x}"))
-                    .map_err(|_| invalid_frame())?;
+                let source_key =
+                    protect_sensitive_structural_id(&format!("kimi-file-{file_identity:016x}"))
+                        .map_err(|_| invalid_frame())?;
+                let source_key = SessionId::new(source_key).map_err(|_| invalid_frame())?;
                 let source_identity =
                     ObservationSourceIdentityV1::for_provider_source(provider, session, source_key)
                         .map_err(|_| invalid_frame())?;
@@ -600,7 +603,7 @@ pub async fn capture_kimi_observations(
                             |native| {
                                 kimi_capture::normalize_observation(
                                     &native,
-                                    &session_id,
+                                    &canonical_session_id,
                                     native_id.clone(),
                                     range,
                                 )
@@ -773,7 +776,6 @@ fn kimi_session_identity(path: &Path) -> TranscriptIngestResult<(String, String)
             provider: PROVIDER,
             path: path.to_path_buf(),
         })?;
-    let directory_id = session_dir.file_name().and_then(|name| name.to_str());
     let agent_id = path
         .parent()
         .and_then(Path::file_name)
@@ -783,13 +785,19 @@ fn kimi_session_identity(path: &Path) -> TranscriptIngestResult<(String, String)
             provider: PROVIDER,
             path: path.to_path_buf(),
         })?;
-    if directory_id != Some(state.id.as_str()) || !state.agents.contains_key(agent_id) {
+    let session_id = state.session_id(session_dir).ok_or_else(|| {
+        TranscriptIngestError::InvalidSourceIdentity {
+            provider: PROVIDER,
+            path: path.to_path_buf(),
+        }
+    })?;
+    if !state.agents.contains_key(agent_id) {
         return Err(TranscriptIngestError::InvalidSourceIdentity {
             provider: PROVIDER,
             path: path.to_path_buf(),
         });
     }
-    Ok((state.id, agent_id.to_owned()))
+    Ok((session_id, agent_id.to_owned()))
 }
 
 const fn invalid_frame() -> TranscriptIngestError {
@@ -929,6 +937,65 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(coverage.file_id, HostProviderCoverage::Complete as u64);
+    }
+
+    #[tokio::test]
+    async fn legacy_current_state_and_non_message_prefix_reach_visible_message() {
+        let (_temp, project, original_path, source) = fixture();
+        let original_session = original_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .unwrap();
+        let session_id = "session_280d6113-53d5-460d-b519-9cf819759a28";
+        let session = original_session.parent().unwrap().join(session_id);
+        std::fs::rename(original_session, &session).unwrap();
+        let path = session.join("agents/main/wire.jsonl");
+        std::fs::write(
+            session.join("state.json"),
+            serde_json::json!({
+                "workDir": project,
+                "agents": {
+                    "main": {
+                        "type": "main",
+                        "homedir": session.join("agents/main")
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let metadata = serde_json::json!({"type":"metadata","version":1}).to_string() + "\n";
+        let prompt = serde_json::json!({"type":"turn.prompt","text":"ignored"}).to_string() + "\n";
+        let message = wire_message("user", "visible after metadata", 1);
+        std::fs::write(&path, format!("{metadata}{prompt}{message}")).unwrap();
+        let admission = MemoryHostAdmission::default();
+
+        let outcome = capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!outcome.deferred);
+        let observations = admission.observations();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].observation().source().session_id().as_str(),
+            tracedecay_privacy::protect_sensitive_structural_id(session_id).unwrap()
+        );
+        assert!(
+            observations[0]
+                .observation()
+                .payload()
+                .to_string()
+                .contains("visible after metadata")
+        );
     }
 
     #[test]
