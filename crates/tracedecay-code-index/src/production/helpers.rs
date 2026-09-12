@@ -216,22 +216,22 @@ pub(crate) fn edge_order(
 
 pub(crate) fn collect_edge_evidence<T>(
     files: &[T],
-) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>)
+) -> Result<(Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>), CodeIndexProductionErrorV1>
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
     let mut edges = files
         .iter()
         .flat_map(|file| file.as_ref().artifacts.edges.clone())
         .collect::<Vec<_>>();
-    edges.extend(resolve_cross_file_references(files));
+    edges.extend(resolve_cross_file_references(files)?);
     edges.sort_by(edge_order);
     let mut abstentions = files
         .iter()
         .flat_map(|file| file.as_ref().artifacts.edge_abstentions.clone())
         .collect::<Vec<_>>();
     abstentions.sort();
-    (edges, abstentions)
+    Ok((edges, abstentions))
 }
 
 /// Resolve the retained per-file unresolved references against the whole
@@ -246,15 +246,18 @@ where
 /// authority and stay unresolved. Bound edges carry the `NameResolved`
 /// authority class, not `SyntaxExact`.
 #[hotpath::measure(label = "code_index.seal.resolve")]
-fn resolve_cross_file_references<T>(files: &[T]) -> Vec<CanonicalRelationEdgeV1>
+fn resolve_cross_file_references<T>(
+    files: &[T],
+) -> Result<Vec<CanonicalRelationEdgeV1>, CodeIndexProductionErrorV1>
 where
-    T: AsRef<FileGenerationArtifactsV1>,
+    T: AsRef<FileGenerationArtifactsV1> + Sync,
 {
     #[cfg(test)]
     SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.set(resolutions.get() + 1));
+    let workers = crate::parallelism::indexing_workers().max(1);
     #[cfg(feature = "hotpath")]
     {
-        hotpath::gauge!("code_index.seal.resolve.effective_workers").set(1);
+        hotpath::gauge!("code_index.seal.resolve.effective_workers").set(workers);
         hotpath::gauge!("code_index.seal.resolve.unresolved_references").set(
             files
                 .iter()
@@ -276,48 +279,113 @@ where
             }
             (by_simple_name, RustFileIndexV1::new(files))
         });
-    let mut resolved_references = ResolvedReferenceCacheV1::new();
-    let mut reexport_cache = BTreeMap::new();
-    let mut edges = Vec::new();
-    for (index, file) in files.iter().enumerate() {
-        for reference in &file.as_ref().artifacts.unresolved_references {
-            let cache_key = (index, reference.reference_name.as_str(), reference.kind);
-            let resolved = if let Some(resolved) = resolved_references.get(&cache_key) {
-                resolved.clone()
-            } else {
-                let resolved = hotpath::measure_block!(
-                    "code_index.seal.reference_candidate_lookup",
-                    resolve_cross_file_reference(
-                        files,
-                        &by_simple_name,
-                        &rust_files,
-                        &mut reexport_cache,
-                        index,
-                        reference,
-                    )
-                );
-                resolved_references.insert(cache_key, resolved.clone());
-                resolved
-            };
-            let Some((target_index, target)) = resolved else {
-                continue;
-            };
-            if target_index == index {
-                continue;
-            }
-            edges.push(CanonicalRelationEdgeV1 {
-                from_occurrence: reference.from_occurrence.clone(),
-                to_occurrence: target,
-                kind: reference.kind,
-                authority: EdgeAuthorityV1::NameResolved,
-                evidence_span: reference.evidence_span,
-            });
-        }
-    }
+    // Every file resolves against the same immutable whole-set index, so this
+    // is one ordered fan-out over the indexing pool. Concatenating each file's
+    // edges in file-index order reproduces the exact sequence the serial loop
+    // pushed, so the stable sort and dedup below — and therefore every edge
+    // digest downstream — do not depend on the width.
+    let per_file = collect_by_file_index_ordered(files.len(), workers, &|index| {
+        resolve_one_file_cross_file_references(files, &by_simple_name, &rust_files, index)
+    })?;
+    let mut edges = per_file.into_iter().flatten().collect::<Vec<_>>();
     hotpath::measure_block!("code_index.seal.edge_materialization", {
         edges.sort_by(edge_order);
         edges.dedup();
     });
+    Ok(edges)
+}
+
+/// One ordered, panic-contained fan-out over file indices on the indexing pool.
+///
+/// Results come back in index order whatever the completion order was, so a
+/// caller may concatenate them and keep the sequence a serial loop produced.
+fn collect_by_file_index_ordered<R>(
+    count: usize,
+    workers: usize,
+    operation: &(dyn Fn(usize) -> R + Send + Sync),
+) -> Result<Vec<R>, CodeIndexProductionErrorV1>
+where
+    R: Send,
+{
+    if count < 2 || workers < 2 {
+        return Ok((0..count).map(operation).collect());
+    }
+    crate::parallelism::install(|| {
+        (0..count)
+            .into_par_iter()
+            .map(|index| {
+                crate::parallelism::with_background_cpu_permit(|| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(index)))
+                        .map_err(|payload| {
+                            crate::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
+                                index, &*payload,
+                            )
+                        })
+                })
+            })
+            // Collecting every unit before short-circuiting keeps the reported
+            // failure the lowest-index one, as the serial loop's would be.
+            .collect::<Vec<_>>()
+    })
+    .map_err(CodeIndexProductionErrorV1::from)?
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(CodeIndexProductionErrorV1::from)
+}
+
+/// Resolve one file's retained unresolved references against the whole staged
+/// file set.
+///
+/// Both memos are file-local on purpose. `ResolvedReferenceCacheV1` is keyed by
+/// source-file index, so a shared map could never serve another file's entry;
+/// `RustReexportCacheV1` memoizes a pure predicate over the immutable file set,
+/// so sharing it changes lookup cost and nothing else. A per-file resolution
+/// therefore decides exactly what the whole-repository serial loop decided.
+fn resolve_one_file_cross_file_references<T>(
+    files: &[T],
+    by_simple_name: &BTreeMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
+    rust_files: &RustFileIndexV1,
+    index: usize,
+) -> Vec<CanonicalRelationEdgeV1>
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let mut resolved_references = ResolvedReferenceCacheV1::new();
+    let mut reexport_cache = RustReexportCacheV1::new();
+    let mut edges = Vec::new();
+    for reference in &files[index].as_ref().artifacts.unresolved_references {
+        let cache_key = (index, reference.reference_name.as_str(), reference.kind);
+        let resolved = if let Some(resolved) = resolved_references.get(&cache_key) {
+            resolved.clone()
+        } else {
+            let resolved = hotpath::measure_block!(
+                "code_index.seal.reference_candidate_lookup",
+                resolve_cross_file_reference(
+                    files,
+                    by_simple_name,
+                    rust_files,
+                    &mut reexport_cache,
+                    index,
+                    reference,
+                )
+            );
+            resolved_references.insert(cache_key, resolved.clone());
+            resolved
+        };
+        let Some((target_index, target)) = resolved else {
+            continue;
+        };
+        if target_index == index {
+            continue;
+        }
+        edges.push(CanonicalRelationEdgeV1 {
+            from_occurrence: reference.from_occurrence.clone(),
+            to_occurrence: target,
+            kind: reference.kind,
+            authority: EdgeAuthorityV1::NameResolved,
+            evidence_span: reference.evidence_span,
+        });
+    }
     edges
 }
 
