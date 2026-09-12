@@ -1352,7 +1352,7 @@ impl CodeIndexPublishedGenerationV1 {
             // candidate owns the exact edge vector just derived from these
             // same immutable files in `build_and_publish`, so repeating the
             // 1.7M-reference resolution here proves no additional boundary.
-            let edges_match = !rederive_edges || collect_edge_evidence(&files).0 == self.edges;
+            let edges_match = !rederive_edges || collect_edge_evidence(&files)?.0 == self.edges;
             let mut edge_abstentions = files
                 .iter()
                 .flat_map(|file| file.artifacts.edge_abstentions.iter())
@@ -1776,7 +1776,7 @@ where
             let (edges, edge_abstentions) = hotpath::measure_block!(
                 "code_index.build.assemble.edge_evidence",
                 collect_edge_evidence(&staged.files)
-            );
+            )?;
             let statistics = CodeIndexGenerationStatisticsV1::from_generation_parts(
                 &staged.files,
                 staged.symbols.symbols.len(),
