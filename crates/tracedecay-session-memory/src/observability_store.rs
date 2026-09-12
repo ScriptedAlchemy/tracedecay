@@ -66,28 +66,7 @@ impl<'a> RegisteredObservabilityPortV1<'a> {
 impl ObservabilityRecordPort for RegisteredObservabilityPortV1<'_> {
     fn record(&self, envelope: ObservabilityEnvelopeV1) -> ObservabilityFuture<'_, String> {
         Box::pin(async move {
-            envelope
-                .validate()
-                .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
-            let metadata_json = serde_json::to_string(&envelope)
-                .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
-            let insert = AnalyticsEventInsert {
-                provider: OBSERVABILITY_PROVIDER.to_string(),
-                project_id: envelope.scope_ref.clone(),
-                session_id: None,
-                timestamp: envelope.event_time_micros.div_euclid(1_000_000),
-                event_kind: envelope.event_kind.clone(),
-                hook_name: None,
-                tool_name: None,
-                tool_category: None,
-                skill_name: None,
-                hint_category: None,
-                hint_id: Some(envelope.idempotency_key.clone()),
-                outcome: envelope
-                    .terminal_result
-                    .map(|result| format!("{result:?}").to_ascii_lowercase()),
-                metadata_json: Some(metadata_json),
-            };
+            let insert = observability_insert(envelope)?;
             self.db
                 .append_observability_event(&insert)
                 .await
@@ -95,6 +74,51 @@ impl ObservabilityRecordPort for RegisteredObservabilityPortV1<'_> {
                 .map_err(ApplicationContractError::Domain)
         })
     }
+}
+
+pub async fn record_observability_batch(
+    db: &RegisteredGlobalDb,
+    envelopes: Vec<ObservabilityEnvelopeV1>,
+) -> Result<Vec<String>, ApplicationContractError> {
+    let inserts = envelopes
+        .into_iter()
+        .map(observability_insert)
+        .collect::<Result<Vec<_>, _>>()?;
+    db.append_observability_events(&inserts)
+        .await
+        .map(|ids| {
+            ids.into_iter()
+                .map(|id| format!("analytics:{id}"))
+                .collect()
+        })
+        .map_err(ApplicationContractError::Domain)
+}
+
+fn observability_insert(
+    envelope: ObservabilityEnvelopeV1,
+) -> Result<AnalyticsEventInsert, ApplicationContractError> {
+    envelope
+        .validate()
+        .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
+    let metadata_json = serde_json::to_string(&envelope)
+        .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
+    Ok(AnalyticsEventInsert {
+        provider: OBSERVABILITY_PROVIDER.to_owned(),
+        project_id: envelope.scope_ref,
+        session_id: None,
+        timestamp: envelope.event_time_micros.div_euclid(1_000_000),
+        event_kind: envelope.event_kind,
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: Some(envelope.idempotency_key),
+        outcome: envelope
+            .terminal_result
+            .map(|result| format!("{result:?}").to_ascii_lowercase()),
+        metadata_json: Some(metadata_json),
+    })
 }
 
 impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
