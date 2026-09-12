@@ -198,15 +198,17 @@ mod tests {
             global_db_path: Some(profile_root.join("global.db")),
         };
         let writable =
-            crate::project::TraceDecay::init_with_options(&project_root, options.clone())
+            crate::project::TraceDecay::init_with_options_for_test(&project_root, options.clone())
                 .await
                 .expect("initialize retained curator project");
         let dashboard_root = writable.store_layout().dashboard_root.clone();
         writable.close();
-        let read_only =
-            crate::project::TraceDecay::open_read_only_with_options(&project_root, options)
-                .await
-                .expect("open read-only retained curator project");
+        let read_only = crate::project::TraceDecay::open_read_only_with_options_for_test(
+            &project_root,
+            options,
+        )
+        .await
+        .expect("open read-only retained curator project");
         let operation =
             retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
                 .expect("retained operation");

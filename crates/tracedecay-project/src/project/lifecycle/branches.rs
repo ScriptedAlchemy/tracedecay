@@ -26,7 +26,7 @@ impl TraceDecay {
     /// tracked branch's provenance the open is scoped to and whether the
     /// caller must be warned about a fallback.
     #[hotpath::measure(label = "lifecycle.resolve_db_for_branch")]
-    pub(crate) fn resolve_db_for_branch(
+    pub fn resolve_db_for_branch(
         project_root: &Path,
         tracedecay_dir: &Path,
         branch: Option<&str>,
@@ -56,13 +56,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         #[cfg(any(test, feature = "test-transport"))]
         {
-            let open_options = Self::standalone_test_open_options(project_root, open_options);
-            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
-            let mut graph = runtime
-                .open_project_branch_for_test(project_root, branch_name, open_options)
-                .await?;
-            graph.test_runtime_guard = Some(runtime);
-            Ok(graph)
+            Self::open_branch_with_options_for_test(project_root, branch_name, open_options).await
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
@@ -78,6 +72,24 @@ impl TraceDecay {
             graph._standalone_maintenance_scope = Some(maintenance);
             Ok(graph)
         }
+    }
+
+    /// [`Self::open_branch_with_options`] through the shared registered test
+    /// runtime; see [`Self::init_with_options_for_test`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[hotpath::skip]
+    pub async fn open_branch_with_options_for_test(
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
+    ) -> Result<Self> {
+        let open_options = Self::standalone_test_open_options(project_root, open_options);
+        let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+        let mut graph = runtime
+            .open_project_branch_for_test(project_root, branch_name, open_options)
+            .await?;
+        graph.test_runtime_guard = Some(runtime);
+        Ok(graph)
     }
 
     /// Opens a tracked branch through the canonical registered runtime while
@@ -131,7 +143,7 @@ impl TraceDecay {
     }
 
     #[hotpath::measure(label = "lifecycle.open_branch.registered", future = true)]
-    pub(crate) async fn open_branch_with_registered_configuration(
+    pub async fn open_branch_with_registered_configuration(
         project_root: &Path,
         branch_name: &str,
         open_options: TraceDecayOpenOptions,
@@ -238,7 +250,7 @@ impl TraceDecay {
             fallback_warning: None,
             read_only,
             db_path_cache: OnceLock::new(),
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
         };

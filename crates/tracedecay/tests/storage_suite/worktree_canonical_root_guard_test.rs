@@ -78,6 +78,7 @@ struct Fixture {
 }
 
 fn build_fixture() -> Fixture {
+    crate::common::register_process_runtime_ports();
     let tmp = TempDir::new().unwrap();
     let root = canonical_temp_path(tmp.path());
     let profile_root = root.join("profile");

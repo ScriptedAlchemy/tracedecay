@@ -45,7 +45,7 @@ async fn project_pair() -> (
     let profile_root = fixture_root.join("profile");
     let active_root = fixture_root.join("active");
     std::fs::create_dir_all(&active_root).unwrap();
-    let active = TraceDecay::init_with_options(&active_root, open_options(&profile_root))
+    let active = TraceDecay::init_with_options_for_test(&active_root, open_options(&profile_root))
         .await
         .unwrap();
     let runtime = active.test_runtime_for_test().unwrap();

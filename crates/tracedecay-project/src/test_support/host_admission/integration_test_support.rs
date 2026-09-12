@@ -22,40 +22,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
-    pub async fn call_mcp_tool_for_test(
-        &self,
-        cg: &crate::project::TraceDecay,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        server_stats: Option<serde_json::Value>,
-        scope_prefix: Option<&str>,
-    ) -> Result<tracedecay_mcp::ToolResult> {
-        let project_registry_reads =
-            tracedecay_daemon_service::DaemonProjectRegistryReadService::new(
-                self.profile_database.clone(),
-            );
-        crate::mcp::tools::handle_tool_call_with_registry_options(
-            cg,
-            tool_name,
-            arguments,
-            server_stats,
-            scope_prefix,
-            crate::mcp::tools::ToolCallRegistryOptions {
-                global_db: Some(&self.profile_database),
-                project_registry_reads: Some(&project_registry_reads),
-                accounting_db: Some(self.profile_database.as_ref()),
-                registered_project_session_db: self.project_registered.clone(),
-                registered_savings_db: Some(self.profile_database.clone()),
-                profile_root: Some(&self.profile_root),
-                session_authorities: self.mcp_session_authorities(),
-                ..Default::default()
-            }
-            .admit_opened_project(cg)?,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
     pub fn session_temporal_store(
         &self,
         scope: HostAdmissionScope,

@@ -28,7 +28,8 @@ async fn projectless_hermes_receipt_uses_user_profile_without_local_writer() {
         }),
         &profile_root,
         None,
-        required_user_db(fixture.mcp_session_authorities()).unwrap(),
+        required_user_db(crate::test_support::host_admission::mcp_session_authorities(&fixture))
+            .unwrap(),
         &broker,
     )
     .await
@@ -81,7 +82,8 @@ async fn projectless_hermes_receipt_is_durable_before_apply_and_replays_after_re
         }),
         &profile_root,
         None,
-        required_user_db(fixture.mcp_session_authorities()).unwrap(),
+        required_user_db(crate::test_support::host_admission::mcp_session_authorities(&fixture))
+            .unwrap(),
         &broker,
     )
     .await

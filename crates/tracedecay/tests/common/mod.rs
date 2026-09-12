@@ -73,6 +73,19 @@ pub fn register_process_product_runtime() {
     tracedecay::product_runtime::register_fixture_product_runtime();
 }
 
+/// Registers the composition root's runtime ports for this test process.
+///
+/// A standalone `TraceDecay::init` / `open` in a `test-helpers` build takes
+/// the production path, which refuses until the composition root registered
+/// its runtime ports (the daemon client the published hook bindings carry).
+/// `tracedecay-cli`'s `main` does that in production; a suite binary is its
+/// own composition root, so its fixtures register here. First registration
+/// wins, so every fixture entry point may call this.
+pub fn register_process_runtime_ports() {
+    tracedecay::register_runtime_ports()
+        .unwrap_or_else(|error| panic!("failed to register the process runtime ports: {error}"));
+}
+
 /// Installs the canonical registered global/session schema installer into the
 /// kernel's fail-closed port before any integration fixture opens a `Database`.
 ///
@@ -217,8 +230,11 @@ impl IsolatedEnv {
         // Every fixture built on top of this guard eventually asks the shipped
         // daemon for a handshake, which reads the registered product runtime.
         // Registering here — the single choke point both `acquire` paths share
-        // — keeps that out of every individual suite fixture.
+        // — keeps that out of every individual suite fixture. The runtime
+        // ports follow for the same reason: a standalone project open in this
+        // environment needs them registered first.
         register_process_product_runtime();
+        register_process_runtime_ports();
         let dir = tempdir_or_panic();
         let original_home =
             std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
