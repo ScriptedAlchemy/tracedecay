@@ -746,7 +746,7 @@ def _api_migration(
     return PreparedJourney(apply, cleanup)
 
 
-def _profile_refresh_selectors(fixture: dict[str, str]) -> dict[str, Any]:
+def profile_refresh_selectors(fixture: dict[str, str]) -> dict[str, Any]:
     """Select the mounted disposable profile without copying its internal identity."""
     return {
         "scope": {"kind": "profile"},
@@ -1067,7 +1067,7 @@ def prepare(
             cleanup,
         )
     if name == "tracedecay_session_refresh_begin":
-        selectors = _profile_refresh_selectors(fixture)
+        selectors = profile_refresh_selectors(fixture)
 
         def cleanup(response: dict[str, Any]) -> str:
             handle, operation_id = _begun_refresh(response)
@@ -1082,7 +1082,7 @@ def prepare(
 
         return PreparedJourney(dict(selectors), cleanup)
     if name == "tracedecay_session_refresh_cancel":
-        selectors = _profile_refresh_selectors(fixture)
+        selectors = profile_refresh_selectors(fixture)
         handle, operation_id = _begun_refresh(
             call("tracedecay_session_refresh_begin", dict(selectors), deadline("tracedecay_session_refresh_begin"))
         )

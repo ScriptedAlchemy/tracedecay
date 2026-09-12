@@ -22,7 +22,12 @@ if str(SUITE_DIR) not in sys.path:
     sys.path.insert(0, str(SUITE_DIR))
 
 from dispatch_policy import READ_EFFECTS, ToolPolicy, decode_tool_policy
-from journeys import JourneyError, api_migration_plan_arguments, prepare as prepare_journey
+from journeys import (
+    JourneyError,
+    api_migration_plan_arguments,
+    prepare as prepare_journey,
+    profile_refresh_selectors,
+)
 from outcomes import (
     duration_us,
     expected_state,
@@ -749,6 +754,30 @@ def prime_fixture_values(
         raise SweepError("LCM session producer omitted the captured prompt message")
     fixture["lcm_store_id"] = raw_message["store_id"]
 
+    refresh_selectors = profile_refresh_selectors(fixture)
+    begun_refresh = _producer_call(
+        client,
+        "tracedecay_session_refresh_begin",
+        refresh_selectors,
+        deadline("tracedecay_session_refresh_begin"),
+    )
+    refresh_handle = response_handle(begun_refresh)
+    refresh_operation_id = first_value(begun_refresh, {"operation_id"})
+    if (
+        first_value(begun_refresh, {"outcome"}) not in {"started", "joined"}
+        or not isinstance(refresh_handle, str)
+        or not refresh_handle
+        or not isinstance(refresh_operation_id, str)
+        or not refresh_operation_id
+    ):
+        raise SweepError("session refresh begin producer omitted its public status identity")
+    fixture.update(
+        {
+            "session_refresh_handle": refresh_handle,
+            "session_refresh_operation_id": refresh_operation_id,
+        }
+    )
+
     # The callable code-query surface serves only complete immutable index
     # generations, and a cold fixture publishes its first generation
     # asynchronously after admission. Resolve the fixture symbol through the
@@ -1013,6 +1042,11 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
             "session_id": fixture["session_id"],
             "limit": 10,
             "format": "json",
+        }
+    if name == "tracedecay_session_refresh_status":
+        return {
+            "handle": fixture["session_refresh_handle"],
+            **profile_refresh_selectors(fixture),
         }
     if name == "tracedecay_work_topology_metrics":
         return {
