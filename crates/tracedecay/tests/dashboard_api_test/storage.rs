@@ -95,8 +95,9 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
                 "incident_debris_present",
                 "retention_backlog",
                 "table_growth",
+                "pending_schema_migration",
             ],
-            "every canonical Plan 38 producer must appear exactly once"
+            "every canonical storage producer must appear exactly once"
         );
 
         let status_for = |kind: &str| {
@@ -111,6 +112,7 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
             "incident_debris_present",
             "retention_backlog",
             "table_growth",
+            "pending_schema_migration",
         ] {
             let producer = status_for(kind);
             assert_eq!(
