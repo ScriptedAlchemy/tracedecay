@@ -224,7 +224,8 @@ pub use wgsl_extractor::WgslExtractor;
 pub use zig_extractor::ZigExtractor;
 
 use crate::types::ExtractionResult;
-use parsed_extraction::{ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionScope};
+use parsed_extraction::{ParsedExtractionArtifactV1, ParsedExtractionScope};
+use std::time::Instant;
 use tree_sitter::Tree;
 
 /// Trait for language-specific source code extractors.
@@ -266,62 +267,65 @@ pub trait LanguageExtractor: Send + Sync {
         Cow::Borrowed(source)
     }
 
-    /// Extract nodes, edges, and unresolved refs from source code.
-    ///
-    /// `file_path` is the relative path used for qualified names and node IDs.
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult;
-
-    /// Extract the legacy graph and any structured evidence supported by this
-    /// language. The default preserves existing extractors without another
-    /// parse or a parallel evidence authority.
-    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-        crate::hotpath_observe::measure_extract_file(
-            self.language_name(),
-            source.len(),
-            || ExtractionArtifactV1::from_result(self.extract(file_path, source)),
-            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
-        )
-    }
-
-    /// Extract from the shared retained tree. Implementations traverse only
-    /// the requested complete top-level regions and never acquire a parser.
-    ///
-    fn extract_parsed(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: ParsedExtractionScope<'_>,
-    ) -> ParsedExtraction;
-
-    /// Extract an artifact from an already parser-owned tree. The default
-    /// delegates exactly once to the legacy parsed-tree method.
-    fn extract_parsed_artifact(
-        &self,
-        file_path: &str,
-        source: &str,
-        tree: &Tree,
-        scope: ParsedExtractionScope<'_>,
-    ) -> ParsedExtractionArtifactV1 {
-        ParsedExtractionArtifactV1::from_parsed(self.extract_parsed(file_path, source, tree, scope))
-    }
-
     /// Extract from a retained tree together with the exact text the parser
     /// consumed (the [`LanguageExtractor::prepare_parse_source`] output the
-    /// retained document already holds).
+    /// retained document already holds). This is the one required entry
+    /// point: implementations traverse only the requested complete top-level
+    /// regions and never acquire a parser.
     ///
     /// `parsed_source` is byte-identical to `source` for plain grammars;
     /// composite adapters receive their own mask back and must not re-mask.
-    /// The default ignores it and preserves each extractor's existing path.
     fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
-        _parsed_source: &str,
+        parsed_source: &str,
         tree: &Tree,
         scope: ParsedExtractionScope<'_>,
-    ) -> ParsedExtractionArtifactV1 {
-        self.extract_parsed_artifact(file_path, source, tree, scope)
+    ) -> ParsedExtractionArtifactV1;
+
+    /// Parse `source` with this extractor's own grammar and extract the whole
+    /// document. A grammar that fails to load or parse yields an artifact
+    /// carrying only that error.
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        crate::hotpath_observe::measure_extract_file(
+            self.language_name(),
+            source.len(),
+            || {
+                let started = Instant::now();
+                let parsed_source = self.prepare_parse_source(source);
+                match ts_provider::parse_extractor_source(
+                    &self.retained_grammar_key(file_path),
+                    self.language_name(),
+                    &parsed_source,
+                ) {
+                    Ok(tree) => {
+                        self.extract_parsed_artifact_prepared(
+                            file_path,
+                            source,
+                            &parsed_source,
+                            &tree,
+                            ParsedExtractionScope::FullDocument,
+                        )
+                        .artifact
+                    }
+                    Err(error) => ExtractionArtifactV1::from_result(ExtractionResult {
+                        nodes: Vec::new(),
+                        edges: Vec::new(),
+                        unresolved_refs: Vec::new(),
+                        errors: vec![error],
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    }),
+                }
+            },
+            crate::hotpath_observe::ExtractOutputCounts::from_artifact,
+        )
+    }
+
+    /// Nodes, edges, and unresolved refs of the whole document, parsed with
+    /// this extractor's own grammar.
+    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
+        self.extract_artifact(file_path, source).result
     }
 }
 

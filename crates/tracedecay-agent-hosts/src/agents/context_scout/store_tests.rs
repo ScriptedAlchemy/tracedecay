@@ -9,7 +9,7 @@ use tracedecay_contracts::request_identity::{
 };
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
-async fn database() -> (TempDir, Database) {
+pub(super) async fn database() -> (TempDir, Database) {
     crate::register_test_schema_installer();
     let temporary = tempfile::tempdir().expect("temporary project database");
     let path = temporary.path().join("graph.db");

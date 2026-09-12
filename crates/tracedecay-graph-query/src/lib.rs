@@ -25,13 +25,6 @@ mod source_authority;
 pub mod test_risk;
 mod verified_query;
 
-pub use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
-pub use tracedecay_code_index::graph_projection::{
-    CodeGraphImpactBatchV1, CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1,
-    CodeGraphSymbolSummaryV1,
-};
-pub use tracedecay_code_index::lineage::LineageSymbolRecordV1;
-
 pub use projection::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFreshnessV1,
@@ -41,9 +34,6 @@ pub use projection::{
 };
 pub use queries::{
     FileAdjacencyScan, GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1,
-};
-pub use source_authority::{
-    CodeGraphSourceAuthorityPort, CodeGraphSourceBindFuture, CodeGraphSourceBindRequest,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use verified_query::admitted_verified_graph_query_port;

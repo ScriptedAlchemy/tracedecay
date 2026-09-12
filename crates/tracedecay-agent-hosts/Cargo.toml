@@ -36,11 +36,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 shell-words = "1.1"
-tempfile = "3"
 thiserror = "2"
 tiktoken-rs = { version = "0.12", optional = true }
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7.19", default-features = false }
 gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"
 toml_edit = "0.25"
@@ -51,7 +49,6 @@ yaml-edit = { version = "0.2.3", default-features = false }
 tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }

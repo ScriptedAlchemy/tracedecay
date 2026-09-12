@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceCursorV1, ClaudeSourceIdentityV1, DomainError, ObservationContractError,
-    ObservationId, ObservationScopeV1, RetentionClass, SanitizationReceiptV1, SessionId,
+    DomainError, ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, RetentionClass, SanitizationReceiptV1,
+    SessionId,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, NonDurableFrameReason, ObservationCursorAdvance,
@@ -133,7 +134,7 @@ impl ClaudeObservationIngestStats {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedClaudeFrame {
-    pub committed_cursor: ClaudeSourceCursorV1,
+    pub committed_cursor: ObservationSourceCursorV1,
     pub exact_duplicate: bool,
 }
 
@@ -226,16 +227,16 @@ enum FrameCaptureOutcome {
 }
 
 struct FrameCaptureContext {
-    source: ClaudeSourceIdentityV1,
+    source: ObservationSourceIdentityV1,
     scope: ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
+    generation: ObservationSourceGenerationV1,
     file_identity: u64,
     retention_class: RetentionClass,
     cancellation: ObservationCancellation,
 }
 
 struct NonDurableSegment {
-    covered: ClaudeByteRangeV1,
+    covered: ObservationSourceRangeV1,
     reason: NonDurableFrameReason,
     sanitization_receipt: Option<SanitizationReceiptV1>,
     resume_fingerprint: u64,
@@ -270,7 +271,7 @@ impl ScannedSegment {
 }
 
 /// Converts a durable observation cursor into a provider scanner cursor.
-pub fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
+pub fn scanner_cursor(cursor: Option<&ObservationSourceCursorV1>) -> StoredCursor {
     cursor.map_or_else(StoredCursor::default, |cursor| StoredCursor {
         position: cursor.byte_offset(),
         mtime: 0,
@@ -279,13 +280,13 @@ pub fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
 }
 
 fn cursor_at(
-    source: &ClaudeSourceIdentityV1,
+    source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
+    generation: ObservationSourceGenerationV1,
     offset: u64,
     resume_checkpoint: Option<(u64, u64)>,
-) -> Result<ClaudeSourceCursorV1, ObservationContractError> {
-    let cursor = ClaudeSourceCursorV1::new(source.clone(), scope.clone(), generation, offset)?;
+) -> Result<ObservationSourceCursorV1, ObservationContractError> {
+    let cursor = ObservationSourceCursorV1::new(source.clone(), scope.clone(), generation, offset)?;
     Ok(
         resume_checkpoint.map_or(cursor.clone(), |(file_identity, resume_fingerprint)| {
             cursor.with_resume_checkpoint(file_identity, resume_fingerprint)
@@ -294,12 +295,12 @@ fn cursor_at(
 }
 
 fn expected_cursor_for_frame(
-    actual: Option<&ClaudeSourceCursorV1>,
-    source: &ClaudeSourceIdentityV1,
+    actual: Option<&ObservationSourceCursorV1>,
+    source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
-    generation: ClaudeFileGenerationV1,
+    generation: ObservationSourceGenerationV1,
     frame_start: u64,
-) -> Result<Option<ClaudeSourceCursorV1>, ObservationContractError> {
+) -> Result<Option<ObservationSourceCursorV1>, ObservationContractError> {
     if actual.is_some_and(|cursor| {
         cursor.generation() == generation && cursor.byte_offset() > frame_start
     }) {
@@ -312,9 +313,9 @@ fn expected_cursor_for_frame(
 }
 
 fn cursor_after_receipt(
-    actual: Option<ClaudeSourceCursorV1>,
-    committed: &ClaudeSourceCursorV1,
-) -> ClaudeSourceCursorV1 {
+    actual: Option<ObservationSourceCursorV1>,
+    committed: &ObservationSourceCursorV1,
+) -> ObservationSourceCursorV1 {
     match actual {
         Some(actual)
             if actual.generation() == committed.generation()
@@ -330,7 +331,7 @@ fn cursor_after_receipt(
 /// parsed payload.
 fn build_claude_capture_request(
     frame: &mut ClaudeSourceFrame,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
     context: &FrameCaptureContext,
 ) -> Result<CaptureClaudeObservationRequest, ClaudeObservationIngestError> {
     let parsed_record = frame
@@ -344,7 +345,7 @@ fn build_claude_capture_request(
         .and_then(|record_id| {
             ObservationId::new(record_id.to_owned()).map_err(ClaudeObservationIngestError::from)
         })?;
-    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         context.source.clone(),
         context.scope.clone(),
         context.generation,
@@ -366,7 +367,7 @@ fn build_claude_capture_request(
 async fn capture_frame<A: HostAdmission + ?Sized>(
     admission: &A,
     frame: &mut ClaudeSourceFrame,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
     context: &FrameCaptureContext,
 ) -> Result<FrameCaptureOutcome, ClaudeObservationIngestError> {
     let request = build_claude_capture_request(frame, expected_cursor, context)?;
@@ -410,7 +411,7 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
 async fn advance_non_durable_covered_range<A: HostAdmission + ?Sized>(
     admission: &A,
     context: &FrameCaptureContext,
-    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
+    observation_cursor: &mut Option<ObservationSourceCursorV1>,
     segment: NonDurableSegment,
     stats: &mut ClaudeObservationIngestStats,
 ) -> Result<(), ClaudeObservationIngestError> {
@@ -472,7 +473,7 @@ async fn advance_non_durable_covered_range<A: HostAdmission + ?Sized>(
 
 struct PreparedSource {
     capture_context: FrameCaptureContext,
-    observation_cursor: Option<ClaudeSourceCursorV1>,
+    observation_cursor: Option<ObservationSourceCursorV1>,
     segments: Vec<ScannedSegment>,
     stats: ClaudeObservationIngestStats,
 }
@@ -546,7 +547,7 @@ where
         provider: "claude",
         path: path.to_path_buf(),
     })?;
-    let source = ClaudeSourceIdentityV1::for_source(
+    let source = ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id.clone())?,
         SessionId::new(identity.source_id.clone())?,
     )?;
@@ -622,7 +623,7 @@ where
         )));
     }
 
-    let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
+    let generation = ObservationSourceGenerationV1::new(scan.file_generation)?;
     let retention_class = RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS)?;
     let capture_context = FrameCaptureContext {
         source,
@@ -647,14 +648,14 @@ where
 async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
     admission: &A,
     capture_context: &FrameCaptureContext,
-    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
+    observation_cursor: &mut Option<ObservationSourceCursorV1>,
     segment: ScannedSegment,
     stats: &mut ClaudeObservationIngestStats,
 ) -> Result<bool, ClaudeObservationIngestError> {
     let resume_fingerprint = segment.resume_fingerprint();
     match segment {
         ScannedSegment::Skipped(skipped) => {
-            let covered = ClaudeByteRangeV1::new(skipped.offset, skipped.end_offset)?;
+            let covered = ObservationSourceRangeV1::new(skipped.offset, skipped.end_offset)?;
             let reason = match skipped.reason {
                 ClaudeSkippedFrameReason::Whitespace => NonDurableFrameReason::BlankFrame,
                 ClaudeSkippedFrameReason::OutOfScope => NonDurableFrameReason::OutOfScope,
@@ -685,7 +686,7 @@ async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
                 capture_context.generation,
                 frame.offset,
             )?;
-            let range = ClaudeByteRangeV1::new(frame.offset, frame.end_offset)?;
+            let range = ObservationSourceRangeV1::new(frame.offset, frame.end_offset)?;
             match capture_frame(admission, &mut frame, expected, capture_context).await? {
                 FrameCaptureOutcome::Persisted(captured) => {
                     *observation_cursor = Some(cursor_after_receipt(
@@ -790,7 +791,7 @@ enum ClaudeWindowedCaptureFailure {
 async fn capture_frame_window<A: HostAdmission + ?Sized>(
     admission: &A,
     context: &FrameCaptureContext,
-    observation_cursor: &mut Option<ClaudeSourceCursorV1>,
+    observation_cursor: &mut Option<ObservationSourceCursorV1>,
     window: &mut Vec<ClaudeSourceFrame>,
     stats: &mut ClaudeObservationIngestStats,
 ) -> Result<(), ClaudeWindowedCaptureFailure> {

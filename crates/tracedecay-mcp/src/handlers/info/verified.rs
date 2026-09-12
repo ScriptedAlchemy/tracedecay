@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, LineageSymbolRecordV1, VerifiedGraphQuery};
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 pub(super) const INFO_SYMBOL_CENSUS_LIMIT: usize = 500_000;
 pub(super) const INFO_RELATION_LIMIT: usize = 2_000_000;

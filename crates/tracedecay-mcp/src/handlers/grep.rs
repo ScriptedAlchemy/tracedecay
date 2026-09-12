@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::grep_search::{
     GrepScanOmissionsV1, GrepSearchHit, GrepSearchQuery, MAX_INTERACTIVE_SOURCE_BYTES,
     MAX_LINE_BYTES, search_tree_with_cancel,
@@ -19,7 +20,7 @@ use tracedecay_contracts::{
     OmissionReason,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_graph_query::{CodeGraphSymbolSummaryV1, VerifiedGraphQuery};
+use tracedecay_graph_query::VerifiedGraphQuery;
 
 use crate::ToolResult;
 use crate::handlers::run_bounded_search;

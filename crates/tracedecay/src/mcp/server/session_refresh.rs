@@ -25,7 +25,7 @@ use tracedecay_session_memory::session::{
     SessionRefreshServicePort, SessionRequestBinding, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, utc_micros_value,
 };
-use tracedecay_session_temporal_store::GlobalDbSessionTemporalStore;
+use tracedecay_session_temporal_store::SessionTemporalStore;
 
 const SESSION_REFRESH_PROJECTOR_VERSION: &str = "session-temporal-projector.v1";
 const SESSION_REFRESH_CONFIG_VERSION: &str = "session-refresh-config.v1";
@@ -131,7 +131,7 @@ impl DaemonSessionRefreshService {
             DaemonSessionRefreshAuthorizer {
                 expected_project_id: self.expected_project_id.as_deref(),
             },
-            GlobalDbSessionTemporalStore::new(self.database.as_ref()),
+            SessionTemporalStore::new(self.database.as_ref()),
             || wake_session_refresh_scheduler(self.wake.as_ref()),
             configuration,
         );

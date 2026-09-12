@@ -3,7 +3,6 @@ mod artifact_feedback;
 mod artifact_generated_evals;
 mod artifact_optimizer;
 mod artifact_payloads;
-mod artifact_policy;
 mod artifact_refs;
 pub mod artifacts;
 pub mod automatic_facts;
@@ -21,8 +20,6 @@ mod job_webhook;
 pub mod jobs;
 mod lifecycle;
 pub mod maintenance_termination;
-mod managed_skill_model;
-mod managed_skill_validation;
 pub mod managed_skills;
 pub mod memory_curator;
 pub mod observation;
@@ -33,12 +30,10 @@ pub mod scheduler;
 mod scheduler_metrics;
 pub mod scheduler_stop;
 pub mod session_reflector;
-pub mod skill_frontmatter;
 pub mod skill_materialization;
 pub mod skill_targets;
 pub mod skill_usage;
 pub mod skill_writer;
-pub mod text;
 
 pub use jobs::effect_receipt::{
     ExternalAutomationEffectDisposition, ExternalAutomationEffectReceipt,

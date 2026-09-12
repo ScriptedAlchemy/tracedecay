@@ -895,13 +895,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_domain::errors::Result<
-        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
-            '_,
-            crate::RegisteredGlobalDb,
-        >,
+        tracedecay_session_temporal_store::SessionTemporalStore<'_, crate::RegisteredGlobalDb>,
     > {
         Ok(
-            tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(
+            tracedecay_session_temporal_store::SessionTemporalStore::new(
                 self.session_database_for_test(scope)?,
             ),
         )

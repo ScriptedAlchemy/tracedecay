@@ -11,6 +11,7 @@ use tracedecay_domain::{
     GenerationDiagnosticV1, ManifestDigest, ObservationSourceIdentityV1, ProviderId,
     RetrievalFailure, RetrievalGrainV1, RetrieverBatch, RetrieverContinuation, RetrieverCoverage,
     RetrieverKind, RetrieverOutcome, RunId, SessionId, SourceSpan, SourceStoreId, TaskId,
+    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalLaneEvidenceV1,
     TemporalModeV1, UtcMicros, WorkAttemptIdentityV1, WorkGraphVersionV1,
     WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
 };
@@ -26,8 +27,7 @@ use crate::retrieval::evidence_lanes::{
     DiagnosticCandidateReadPortV1, DiagnosticLaneEvidenceV1, DiagnosticLaneRequestV1,
     DiagnosticLaneRetrieverV1, DiagnosticMatchReasonV1, EvidenceLaneExecutionControlV1,
     TaskSessionBindingErrorV1, TaskSessionBindingV1, TaskSessionPlan23BindingV1,
-    TemporalCandidateChannelV1, TemporalCandidateContributionV1, TemporalCandidateExportPortV1,
-    TemporalLaneEvidenceV1, TemporalLaneRequestV1, TemporalLaneRetrieverV1,
+    TemporalCandidateExportPortV1, TemporalLaneRequestV1, TemporalLaneRetrieverV1,
 };
 use crate::retrieval::ports::RetrievalPortError;
 use crate::retrieval::request::RawRetrievalRequestV1;

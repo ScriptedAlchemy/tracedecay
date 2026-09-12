@@ -16,7 +16,8 @@ mod connection;
 pub mod profile_identity;
 
 pub use connection::{
-    DaemonConnection, client_connection, current_daemon_connection, invocation_client_for_current,
+    ResolvedDaemonConnection, client_connection, current_daemon_connection,
+    invocation_client_for_current,
 };
 
 #[cfg(unix)]

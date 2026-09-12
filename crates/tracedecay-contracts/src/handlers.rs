@@ -161,8 +161,7 @@ pub struct ApplicationHandlerDescriptor {
     surface_operation: Option<ApplicationSurfaceOperation>,
     service_id: Option<ServiceId>,
     operation: ApplicationOperation,
-    request_schema: SchemaRef,
-    result_schema: SchemaRef,
+    catalog_descriptor: CatalogHandlerDescriptor,
 }
 
 impl ApplicationHandlerDescriptor {
@@ -176,12 +175,17 @@ impl ApplicationHandlerDescriptor {
                 field: "application handler result schema",
             });
         }
+        let catalog_descriptor = CatalogHandlerDescriptor::new(
+            operation.capability_id().clone(),
+            operation.use_case_id().clone(),
+            request_schema,
+            result_schema,
+        );
         Ok(Self {
             surface_operation: None,
             service_id: None,
             operation,
-            request_schema,
-            result_schema,
+            catalog_descriptor,
         })
     }
 
@@ -214,11 +218,11 @@ impl ApplicationHandlerDescriptor {
     }
 
     pub fn request_schema(&self) -> &SchemaRef {
-        &self.request_schema
+        self.catalog_descriptor.request_schema()
     }
 
     pub fn result_schema(&self) -> &SchemaRef {
-        &self.result_schema
+        self.catalog_descriptor.result_schema()
     }
 
     pub fn bind<'a, Dispatcher>(
@@ -229,12 +233,7 @@ impl ApplicationHandlerDescriptor {
     }
 
     pub fn catalog_descriptor(&self) -> Result<CatalogHandlerDescriptor, ApplicationContractError> {
-        Ok(CatalogHandlerDescriptor::new(
-            self.operation.capability_id().clone(),
-            self.operation.use_case_id().clone(),
-            self.request_schema.clone(),
-            self.result_schema.clone(),
-        ))
+        Ok(self.catalog_descriptor.clone())
     }
 }
 

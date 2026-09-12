@@ -1325,147 +1325,6 @@ pub enum ContextScoutDurableStartupOutcomeV1 {
     Unavailable,
 }
 
-pub type ContextScoutStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// The daemon owns the physical queue, receipt, feedback, lease,
-/// retry, and transaction boundaries behind this contract. The methods are
-/// intentionally exact-addressed and contain no query, model, host payload,
-/// filesystem path, or generic storage operation.
-pub trait ContextScoutDurableStoreV1: Send + Sync {
-    /// Requeues expired claims and returns at most `limit` unclaimed entries.
-    fn startup(
-        &self,
-        now: UtcMicros,
-        limit: usize,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStartupOutcomeV1>;
-
-    /// Atomically commits one queue entry. The envelope already carries its
-    /// durable evidence anchors; no duplicate checkpoint record is written.
-    fn enqueue(
-        &self,
-        entry: ContextScoutDurableQueueEntryV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1>;
-
-    /// Claims one exact address with a caller-owned lease.
-    fn claim(
-        &self,
-        address: ContextScoutAddressV1,
-        now: UtcMicros,
-        lease: ContextScoutLeaseV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableClaimOutcomeV1>;
-
-    /// Clears only the exact claim represented by `claimed`.
-    fn requeue(
-        &self,
-        claimed: ContextScoutDurableClaimV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1>;
-
-    /// Cancels exactly one currently queued work generation.
-    fn cancel_work(
-        &self,
-        work: ContextScoutWorkV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1>;
-
-    /// Atomically records the delivery receipt for this exact claimed queue
-    /// entry. The lease is part of the write authority; an entry alone can
-    /// never complete delivery after requeue or takeover.
-    fn record_delivery<'a>(
-        &'a self,
-        claim: &'a ContextScoutDurableClaimV1,
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1>;
-
-    /// Atomically resolves one public opaque claim proof and records its
-    /// delivery. Resolution and mutation share the store transaction so lease
-    /// takeover or supersession cannot race a transport round trip.
-    fn record_delivery_by_lease<'a>(
-        &'a self,
-        work: ContextScoutWorkV1,
-        envelope_id: [u8; 16],
-        lease: ContextScoutLeaseV1,
-        configuration_revision: [u8; 32],
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1>;
-
-    /// Records explicit feedback only after the receipt binding has survived
-    /// the caller-side validation below.
-    fn record_feedback<'a>(
-        &'a self,
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-        feedback: ContextScoutFeedbackV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1>;
-}
-
-impl<T> ContextScoutDurableStoreV1 for Arc<T>
-where
-    T: ContextScoutDurableStoreV1 + ?Sized,
-{
-    fn startup(
-        &self,
-        now: UtcMicros,
-        limit: usize,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStartupOutcomeV1> {
-        (**self).startup(now, limit)
-    }
-
-    fn enqueue(
-        &self,
-        entry: ContextScoutDurableQueueEntryV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-        (**self).enqueue(entry)
-    }
-
-    fn claim(
-        &self,
-        address: ContextScoutAddressV1,
-        now: UtcMicros,
-        lease: ContextScoutLeaseV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableClaimOutcomeV1> {
-        (**self).claim(address, now, lease)
-    }
-
-    fn requeue(
-        &self,
-        claimed: ContextScoutDurableClaimV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-        (**self).requeue(claimed)
-    }
-
-    fn cancel_work(
-        &self,
-        work: ContextScoutWorkV1,
-    ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-        (**self).cancel_work(work)
-    }
-
-    fn record_delivery<'a>(
-        &'a self,
-        claim: &'a ContextScoutDurableClaimV1,
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-        (**self).record_delivery(claim, receipt)
-    }
-
-    fn record_delivery_by_lease<'a>(
-        &'a self,
-        work: ContextScoutWorkV1,
-        envelope_id: [u8; 16],
-        lease: ContextScoutLeaseV1,
-        configuration_revision: [u8; 32],
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-        (**self).record_delivery_by_lease(work, envelope_id, lease, configuration_revision, receipt)
-    }
-
-    fn record_feedback<'a>(
-        &'a self,
-        receipt: &'a ContextScoutDeliveryReceiptV1,
-        feedback: ContextScoutFeedbackV1,
-    ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-        (**self).record_feedback(receipt, feedback)
-    }
-}
-
 /// Selected only by the daemon's typed configuration. There is no built-in
 /// model name, route, retry, or timing default in this host-facing runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1571,11 +1430,11 @@ pub enum ContextScoutRuntimeOutcomeV1 {
     Unavailable,
 }
 
-/// Concrete deterministic/model-assisted runtime over injected daemon queue
-/// authority. It owns only process-local supersession tokens; every durable
+/// Concrete deterministic/model-assisted runtime over the project's durable
+/// queue. It owns only process-local supersession tokens; every durable
 /// mutation is delegated to `store` and can therefore survive a restart.
-pub struct ContextScoutDurableRuntimeV1<S, M> {
-    store: S,
+pub struct ContextScoutDurableRuntimeV1<M> {
+    store: Arc<ProjectContextScoutDurableStoreV1>,
     model: M,
     coalescer: ContextScoutCoalescerV1,
     last_route: Option<ContextScoutRouteV1>,
@@ -1586,8 +1445,8 @@ pub struct ContextScoutDurableRuntimeV1<S, M> {
     last_feedback: Option<ContextScoutFeedbackKindV1>,
 }
 
-impl<S, M> ContextScoutDurableRuntimeV1<S, M> {
-    pub fn new(store: S, model: M) -> Self {
+impl<M> ContextScoutDurableRuntimeV1<M> {
+    pub fn new(store: Arc<ProjectContextScoutDurableStoreV1>, model: M) -> Self {
         Self {
             store,
             model,
@@ -1648,9 +1507,8 @@ impl<S, M> ContextScoutDurableRuntimeV1<S, M> {
     }
 }
 
-impl<S, M> ContextScoutDurableRuntimeV1<S, M>
+impl<M> ContextScoutDurableRuntimeV1<M>
 where
-    S: ContextScoutDurableStoreV1,
     M: ContextScoutModelAssistantV1,
 {
     /// Obey daemon-owned enable/pause/model configuration before creating
@@ -1812,9 +1670,9 @@ where
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tempfile::TempDir;
     use tracedecay_contracts::context_scout::ContextScoutEvidenceEnvelopeV1;
 
     fn address() -> ContextScoutAddressV1 {
@@ -2538,119 +2396,29 @@ mod tests {
         channel.cancel(second).unwrap();
     }
 
-    #[derive(Default)]
-    struct DurableStoreState {
-        entries: BTreeMap<[u8; 16], ContextScoutDurableQueueEntryV1>,
-        cancellations: Vec<ContextScoutWorkV1>,
-        receipts: Vec<ContextScoutDeliveryReceiptV1>,
-        feedback: Vec<ContextScoutFeedbackV1>,
+    /// A real project store over a fresh test database; the runtime tests
+    /// drive the same SQLite-backed authority production uses.
+    async fn durable_store() -> (TempDir, Arc<ProjectContextScoutDurableStoreV1>) {
+        let (temporary, database) = super::store_tests::database().await;
+        let store = ProjectContextScoutDurableStoreV1::from_project_database(
+            database,
+            address().project_id,
+        )
+        .expect("project-scoped durable store");
+        (temporary, store)
     }
 
-    #[derive(Clone, Default)]
-    struct DurableStore(Arc<Mutex<DurableStoreState>>);
-
-    impl ContextScoutDurableStoreV1 for DurableStore {
-        fn startup(
-            &self,
-            _now: UtcMicros,
-            _limit: usize,
-        ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStartupOutcomeV1> {
-            let entries = self.0.lock().unwrap().entries.values().cloned().collect();
-            Box::pin(async move {
-                ContextScoutDurableStartupOutcomeV1::Ready {
-                    entries,
-                    truncated: false,
-                }
-            })
-        }
-
-        fn enqueue(
-            &self,
-            entry: ContextScoutDurableQueueEntryV1,
-        ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-            if entry.validate().is_err() {
-                return Box::pin(async { ContextScoutDurableStoreOutcomeV1::Unavailable });
+    async fn queued_entries(
+        store: &ProjectContextScoutDurableStoreV1,
+    ) -> Vec<ContextScoutDurableQueueEntryV1> {
+        match store
+            .startup(UtcMicros(10), MAX_SCOUT_ACTIVE_ADDRESSES)
+            .await
+        {
+            ContextScoutDurableStartupOutcomeV1::Ready { entries, .. } => entries,
+            ContextScoutDurableStartupOutcomeV1::Unavailable => {
+                panic!("durable store should be readable")
             }
-            let mut state = self.0.lock().unwrap();
-            let outcome = match state.entries.get(&entry.envelope.envelope_id) {
-                Some(existing) if existing == &entry => {
-                    ContextScoutDurableStoreOutcomeV1::Duplicate
-                }
-                Some(_) => ContextScoutDurableStoreOutcomeV1::Superseded,
-                None => {
-                    state.entries.insert(entry.envelope.envelope_id, entry);
-                    ContextScoutDurableStoreOutcomeV1::Stored
-                }
-            };
-            Box::pin(async move { outcome })
-        }
-
-        fn claim(
-            &self,
-            _address: ContextScoutAddressV1,
-            _now: UtcMicros,
-            _lease: ContextScoutLeaseV1,
-        ) -> ContextScoutStoreFuture<'_, ContextScoutDurableClaimOutcomeV1> {
-            Box::pin(async { ContextScoutDurableClaimOutcomeV1::Empty })
-        }
-
-        fn requeue(
-            &self,
-            _claimed: ContextScoutDurableClaimV1,
-        ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-            Box::pin(async { ContextScoutDurableStoreOutcomeV1::Duplicate })
-        }
-
-        fn cancel_work(
-            &self,
-            work: ContextScoutWorkV1,
-        ) -> ContextScoutStoreFuture<'_, ContextScoutDurableStoreOutcomeV1> {
-            let mut state = self.0.lock().unwrap();
-            state.entries.retain(|_, entry| entry.work != work);
-            state.cancellations.push(work);
-            Box::pin(async { ContextScoutDurableStoreOutcomeV1::Stored })
-        }
-
-        fn record_delivery<'a>(
-            &'a self,
-            claim: &'a ContextScoutDurableClaimV1,
-            receipt: &'a ContextScoutDeliveryReceiptV1,
-        ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-            let mut state = self.0.lock().unwrap();
-            if state.receipts.iter().any(|existing| existing == receipt) {
-                return Box::pin(async { ContextScoutDurableStoreOutcomeV1::Duplicate });
-            }
-            if state.entries.get(&claim.entry.envelope.envelope_id) != Some(&claim.entry) {
-                return Box::pin(async { ContextScoutDurableStoreOutcomeV1::Unavailable });
-            }
-            state.receipts.push(receipt.clone());
-            Box::pin(async { ContextScoutDurableStoreOutcomeV1::Stored })
-        }
-
-        fn record_delivery_by_lease<'a>(
-            &'a self,
-            _work: ContextScoutWorkV1,
-            _envelope_id: [u8; 16],
-            _lease: ContextScoutLeaseV1,
-            _configuration_revision: [u8; 32],
-            _receipt: &'a ContextScoutDeliveryReceiptV1,
-        ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-            Box::pin(async { ContextScoutDurableStoreOutcomeV1::Unavailable })
-        }
-
-        fn record_feedback<'a>(
-            &'a self,
-            _receipt: &'a ContextScoutDeliveryReceiptV1,
-            feedback: ContextScoutFeedbackV1,
-        ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
-            let mut state = self.0.lock().unwrap();
-            let outcome = if state.feedback.contains(&feedback) {
-                ContextScoutDurableStoreOutcomeV1::Duplicate
-            } else {
-                state.feedback.push(feedback);
-                ContextScoutDurableStoreOutcomeV1::Stored
-            };
-            Box::pin(async move { outcome })
         }
     }
 
@@ -2691,12 +2459,12 @@ mod tests {
     #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn durable_runtime_replays_exact_entry_and_cancellation_is_generation_bound() {
-        let store = DurableStore::default();
+        let (_temporary, store) = durable_store().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let model = RecordingModel {
             calls: Arc::clone(&calls),
         };
-        let mut runtime = ContextScoutDurableRuntimeV1::new(store.clone(), model.clone());
+        let mut runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), model.clone());
         let outcome = runtime
             .prepare(
                 &input(vec![candidate(1, 10)]),
@@ -2738,7 +2506,7 @@ mod tests {
             forged_cancelled_entry.validate(),
             Err(ContextScoutErrorV1::InvalidCandidate)
         );
-        let mut restarted = ContextScoutDurableRuntimeV1::new(store.clone(), model);
+        let mut restarted = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), model);
         let replay = restarted
             .prepare(
                 &input(vec![candidate(1, 10)]),
@@ -2755,7 +2523,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(store.0.lock().unwrap().entries.len(), 1);
+        assert_eq!(queued_entries(&store).await, vec![(*entry).clone()]);
 
         assert_eq!(
             runtime.cancel(entry.work).await.unwrap(),
@@ -2765,13 +2533,19 @@ mod tests {
             runtime.cancel(entry.work).await,
             Err(ContextScoutErrorV1::StaleWork)
         );
-        assert_eq!(store.0.lock().unwrap().cancellations, vec![entry.work]);
+        assert!(queued_entries(&store).await.is_empty());
+        // The cancellation tombstone is durable: the same generation can never
+        // be re-enqueued, only superseded by newer work.
+        assert_eq!(
+            store.enqueue((*entry).clone()).await,
+            ContextScoutDurableStoreOutcomeV1::Superseded
+        );
     }
 
     #[tokio::test]
     async fn restart_restores_the_latest_durable_work_generation() {
-        let store = DurableStore::default();
-        let mut runtime = ContextScoutDurableRuntimeV1::new(store.clone(), BadModel);
+        let (_temporary, store) = durable_store().await;
+        let mut runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), BadModel);
         let first = input(vec![candidate(1, 10)]);
         runtime
             .prepare(
@@ -2822,10 +2596,10 @@ mod tests {
 
     #[tokio::test]
     async fn controlled_model_execution_cannot_widen_daemon_limits() {
-        let store = DurableStore::default();
+        let (_temporary, store) = durable_store().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let mut runtime = ContextScoutDurableRuntimeV1::new(
-            store.clone(),
+            Arc::clone(&store),
             RecordingModel {
                 calls: Arc::clone(&calls),
             },
@@ -2852,15 +2626,15 @@ mod tests {
             Err(ContextScoutErrorV1::InvalidLimits)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(store.0.lock().unwrap().entries.is_empty());
+        assert!(queued_entries(&store).await.is_empty());
     }
 
     #[cfg(feature = "token-counting")]
     #[tokio::test]
     async fn cancelled_model_run_never_reaches_the_durable_queue() {
-        let store = DurableStore::default();
+        let (_temporary, store) = durable_store().await;
         let mut runtime = ContextScoutDurableRuntimeV1::new(
-            store.clone(),
+            Arc::clone(&store),
             FailingModel(ContextScoutModelErrorV1::Cancelled),
         );
         let outcome = runtime
@@ -2879,7 +2653,7 @@ mod tests {
                 reason: ContextScoutSuppressionV1::Cancelled,
             }
         );
-        assert!(store.0.lock().unwrap().entries.is_empty());
+        assert!(queued_entries(&store).await.is_empty());
         let status = runtime
             .status(ContextScoutControlV1 {
                 configuration_revision: [16; 32],
@@ -2906,8 +2680,8 @@ mod tests {
 
     #[tokio::test]
     async fn delivery_and_explicit_feedback_are_visible_in_status() {
-        let store = DurableStore::default();
-        let mut runtime = ContextScoutDurableRuntimeV1::new(store, BadModel);
+        let (_temporary, store) = durable_store().await;
+        let mut runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), BadModel);
         let ContextScoutRuntimeOutcomeV1::Enqueued { entry, .. } = runtime
             .prepare(
                 &input(vec![candidate(1, 10)]),
@@ -2926,14 +2700,29 @@ mod tests {
             delivered_at: UtcMicros(20),
             outcome: ContextScoutDeliveryOutcomeV1::Displayed,
         };
-        let claim = ContextScoutDurableClaimV1 {
-            entry: (*entry).clone(),
-            lease: ContextScoutLeaseV1 {
-                lease_id: [30; 16],
-                expires_at: UtcMicros(40),
-            },
+        let lease = ContextScoutLeaseV1 {
+            lease_id: [30; 16],
+            expires_at: UtcMicros(40),
         };
-        runtime.complete_delivery(&claim, &receipt).await.unwrap();
+        // Delivery authority is the store-issued claim, never a hand-built one.
+        let forged = ContextScoutDurableClaimV1 {
+            entry: (*entry).clone(),
+            lease,
+        };
+        assert_eq!(
+            runtime.complete_delivery(&forged, &receipt).await.unwrap(),
+            ContextScoutDurableStoreOutcomeV1::Superseded
+        );
+        let ContextScoutDurableClaimOutcomeV1::Claimed(claim) =
+            store.claim(address(), UtcMicros(10), lease).await
+        else {
+            panic!("queued entry should be claimable");
+        };
+        assert_eq!(claim.entry, *entry);
+        assert_eq!(
+            runtime.complete_delivery(&claim, &receipt).await.unwrap(),
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
         runtime
             .record_feedback(
                 &receipt,
@@ -2968,10 +2757,10 @@ mod tests {
 
     #[tokio::test]
     async fn dirty_overlay_never_invokes_model_or_durable_queue() {
-        let store = DurableStore::default();
+        let (_temporary, store) = durable_store().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let mut runtime = ContextScoutDurableRuntimeV1::new(
-            store.clone(),
+            Arc::clone(&store),
             RecordingModel {
                 calls: Arc::clone(&calls),
             },
@@ -3001,7 +2790,6 @@ mod tests {
             Err(ContextScoutErrorV1::InvalidEvidence)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let state = store.0.lock().unwrap();
-        assert!(state.entries.is_empty());
+        assert!(queued_entries(&store).await.is_empty());
     }
 }

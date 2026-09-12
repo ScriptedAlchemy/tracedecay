@@ -12,15 +12,13 @@ use tracedecay_domain::{
     ComponentRevision, CursorPayloadDigest, EphemeralSanitizedQueryViewV1, ManifestDigest,
     ObservationSourceIdentityV1, RankedCandidate, RetrievalAnchorId, RetrievalBudgetUsage,
     RetrievalCursor, RetrievalRequest, RetrieverBatch, RetrieverContinuation, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, TaskId, WorkAttemptIdentityV1,
-    canonical_sha256,
+    RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, TaskId, TemporalLaneEvidenceV1,
+    WorkAttemptIdentityV1, canonical_sha256,
 };
 use tracedecay_temporal_query::TemporalCandidateExport;
 use tracedecay_temporal_query::ports::{TemporalExecutionSnapshot, TemporalRetrievalScope};
 
-use super::evidence_lanes::{
-    EvidenceLaneExecutionControlV1, LaneEvidenceBinding, TemporalLaneEvidenceV1, execute_lane,
-};
+use super::evidence_lanes::{EvidenceLaneExecutionControlV1, LaneEvidenceBinding, execute_lane};
 use super::ports::{RetrievalPortError, contract_error};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

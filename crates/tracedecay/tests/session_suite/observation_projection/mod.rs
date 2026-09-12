@@ -5,15 +5,13 @@ use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
-    CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, ClaudeByteRangeV1,
-    ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1,
-    ClaudeSourceIdentityV1, ComponentVersion, DurableClaudeObservationV1, DurableObservationV1,
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId,
-    ProviderId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
-    derive_exact_observation_anchor_id,
+    CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, ComponentVersion,
+    DurableClaudeObservationV1, DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -35,11 +33,11 @@ async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
         .unwrap()
 }
 
-fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
-    ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
+fn source(session_id: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
 }
 
-fn cursor(session_id: &str, byte_offset: u64) -> ClaudeSourceCursorV1 {
+fn cursor(session_id: &str, byte_offset: u64) -> ObservationSourceCursorV1 {
     cursor_in_generation(session_id, GENERATION, byte_offset)
 }
 
@@ -47,11 +45,11 @@ fn cursor_in_generation(
     session_id: &str,
     generation: u64,
     byte_offset: u64,
-) -> ClaudeSourceCursorV1 {
-    ClaudeSourceCursorV1::new(
+) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::new(
         source(session_id),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(generation).unwrap(),
+        ObservationSourceGenerationV1::new(generation).unwrap(),
         byte_offset,
     )
     .unwrap()
@@ -90,11 +88,11 @@ fn observation_in_generation(
     payload: Value,
 ) -> DurableClaudeObservationV1 {
     DurableClaudeObservationV1::new(
-        ClaudeObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::new(
             source(session_id),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(generation).unwrap(),
-            ClaudeByteRangeV1::new(start, end).unwrap(),
+            ObservationSourceGenerationV1::new(generation).unwrap(),
+            ObservationSourceRangeV1::new(start, end).unwrap(),
         )
         .unwrap(),
         receipt(receipt_id, &payload),
@@ -265,7 +263,7 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
 
 fn write(
     observation: DurableClaudeObservationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
     let next_cursor = cursor_in_generation(
         observation.source().session_id().as_str(),
@@ -278,7 +276,7 @@ fn write(
 async fn persist(
     store: &GlobalDbObservationStore,
     observation: DurableClaudeObservationV1,
-    expected_cursor: Option<ClaudeSourceCursorV1>,
+    expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> u64 {
     match store
         .persist_observation(write(observation, expected_cursor))

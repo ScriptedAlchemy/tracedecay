@@ -44,7 +44,7 @@ const QUERY_FALLBACK_WORKLOAD_JSON: &str = include_str!(
 /// Immutable evidence that a configured authority accepted one exact query
 /// profile for one exact admitted scope.
 pub struct AcceptedQueryEvaluationV1 {
-    pub status: crate::search_eval::DirectEvaluationStatusV1,
+    pub status: crate::query::search_quality::DirectEvaluationStatusV1,
     pub scope_digest: tracedecay_domain::ManifestDigest,
     pub profile_id: FusionProfileId,
     pub evaluation_result_anchor: RetrievalAnchorId,
@@ -117,7 +117,7 @@ pub async fn mount_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
     let authority =
         prepare_core_query_authority_on_project_open(registry, project_root, scope, cursor_keys)
@@ -136,7 +136,7 @@ pub async fn mount_core_query_authority_for_committed_fallback_on_project_open(
     project_root: &Path,
     scope: &ResolvedScope,
     expected_revision: &ConfigurationRevisionId,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<(), QueryRuntimeMountErrorV1> {
     let authority =
         prepare_core_query_authority_on_project_open(registry, project_root, scope, cursor_keys)
@@ -255,7 +255,7 @@ async fn prepare_core_query_authority_on_project_open(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    cursor_keys: &tracedecay_session_temporal_store::GlobalDbCursorKeyProvider,
+    cursor_keys: &tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider,
 ) -> Result<Arc<QueryAuthorityV1>, QueryRuntimeMountErrorV1> {
     let root_text = registry.latest_text_serving_for_root(project_root).await;
     let privacy_domain = if let Some(text) = registry
@@ -315,18 +315,20 @@ pub fn canonical_query_policy(
 }
 
 fn core_query_policy() -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeMountErrorV1> {
-    let workload: crate::search_eval::CandidateWorkloadV1 =
+    let workload: crate::query::search_quality::CandidateWorkloadV1 =
         serde_json::from_str(QUERY_FALLBACK_WORKLOAD_JSON)
             .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
-    let material =
-        crate::search_eval::direct_evaluated_profile_material(&workload, QUERY_FALLBACK_PROFILE_ID)
-            .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
+    let material = crate::query::search_quality::direct_evaluated_profile_material(
+        &workload,
+        QUERY_FALLBACK_PROFILE_ID,
+    )
+    .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
     if material.rerank.is_some() {
         return Err(QueryRuntimeMountErrorV1::InvalidFallbackPolicy(
             "query fallback unexpectedly enables reranking".to_owned(),
         ));
     }
-    let workload_digest = crate::search_eval::compute_workload_digest(&workload)
+    let workload_digest = crate::query::search_quality::compute_workload_digest(&workload)
         .map_err(|error| QueryRuntimeMountErrorV1::InvalidFallbackPolicy(error.to_string()))?;
     let policy_anchor = RetrievalAnchorId::new(format!(
         "policy.query-fallback.workload.v1.{workload_digest}"
@@ -378,7 +380,7 @@ pub fn prepare_query_authority(
     if material.evaluation.scope_digest != scope.scope_digest {
         return Err(QueryRuntimeMountErrorV1::EvaluationStale);
     }
-    if material.evaluation.status != crate::search_eval::DirectEvaluationStatusV1::Pass {
+    if material.evaluation.status != crate::query::search_quality::DirectEvaluationStatusV1::Pass {
         return Err(QueryRuntimeMountErrorV1::EvaluationNotPassed);
     }
     if material.evaluation.profile_id != material.profile.profile_id
@@ -1222,7 +1224,7 @@ mod tests {
     fn material(scope: ResolvedScope) -> QueryAuthorityMaterialV1 {
         let profile = profile();
         let evaluation = AcceptedQueryEvaluationV1 {
-            status: crate::search_eval::DirectEvaluationStatusV1::Pass,
+            status: crate::query::search_quality::DirectEvaluationStatusV1::Pass,
             scope_digest: scope.scope_digest.clone(),
             profile_id: profile.profile_id.clone(),
             evaluation_result_anchor: profile.evaluation_result_anchor.clone(),
@@ -1281,7 +1283,7 @@ mod tests {
         let active_scope = scope("main");
 
         let mut pending = material(active_scope.clone());
-        pending.evaluation.status = crate::search_eval::DirectEvaluationStatusV1::Pending;
+        pending.evaluation.status = crate::query::search_quality::DirectEvaluationStatusV1::Pending;
         let provider = OneShotProvider {
             candidates: Mutex::new(Some(vec![pending])),
         };

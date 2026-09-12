@@ -4,13 +4,11 @@ use tracedecay_contracts::{CancellationSignal, Deadline, RequestId, ResolvedScop
 use tracedecay_domain::UtcMicros;
 
 use super::verified_query_test_support::{
-    ImmediateAdmission, ImmediateProjection, admit_context, assert_route, fixture_scope,
-    fixture_store, graph_operation,
+    ImmediateProjection, admit_context, assert_route, fixture_scope, fixture_store, graph_operation,
 };
 use super::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
-    CodeGraphSourceAuthorityPort, CodeGraphSourceBindRequest, VerifiedGraphQueryRequest,
-    open_verified_graph_query,
+    VerifiedGraphQueryRequest, open_verified_graph_query,
 };
 
 const SCOPE_TAG: &str = "verified-query-deadline";
@@ -51,17 +49,6 @@ impl CodeGraphReadAdmissionPort for CancelWaitingAdmission {
     }
 }
 
-struct PendingSourceBind;
-
-impl CodeGraphSourceAuthorityPort for PendingSourceBind {
-    fn bind<'a>(
-        &'a self,
-        _request: CodeGraphSourceBindRequest<'a>,
-    ) -> super::CodeGraphSourceBindFuture<'a> {
-        Box::pin(std::future::pending())
-    }
-}
-
 fn short_deadline() -> Deadline {
     Deadline::new(UtcMicros(now_micros().0.saturating_add(20_000))).expect("deadline")
 }
@@ -69,7 +56,6 @@ fn short_deadline() -> Deadline {
 async fn expect_open_error(
     admission: &dyn CodeGraphReadAdmissionPort,
     projection: &dyn CodeGraphProjectionReadPort,
-    source: Option<&dyn CodeGraphSourceAuthorityPort>,
     deadline: Deadline,
     cancellation: &CancellationSignal,
     request_tag: &str,
@@ -84,7 +70,7 @@ async fn expect_open_error(
             deadline,
             cancellation,
         ),
-        source,
+        None,
     )
     .await
     {
@@ -108,7 +94,6 @@ async fn delayed_admission_returns_exact_timed_out() {
     let error = expect_open_error(
         &admission,
         &projection,
-        None,
         short_deadline(),
         &cancellation,
         "request.verified-query-deadline.admit-timeout",
@@ -133,66 +118,9 @@ async fn cancellation_during_admission_wait_returns_exact_cancelled() {
     let open = expect_open_error(
         &admission,
         &projection,
-        None,
         deadline,
         &cancellation,
         "request.verified-query-deadline.admit-cancel",
-    );
-    let cancel_task = async move {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        cancel.cancel(now_micros());
-    };
-    let (error, _) = tokio::join!(open, cancel_task);
-    assert_route(error, "code-graph-cancelled");
-}
-
-#[tokio::test]
-async fn pending_source_bind_returns_exact_timed_out() {
-    let admission = ImmediateAdmission {
-        scope: fixture_scope(SCOPE_TAG),
-    };
-    let projection = ImmediateProjection {
-        scope: fixture_scope(SCOPE_TAG),
-        store: fixture_store(SCOPE_TAG),
-    };
-    let bind = PendingSourceBind;
-    let cancellation =
-        CancellationSignal::active("cancel.verified-query-deadline.pending-bind-timeout")
-            .expect("signal");
-    let error = expect_open_error(
-        &admission,
-        &projection,
-        Some(&bind),
-        short_deadline(),
-        &cancellation,
-        "request.verified-query-deadline.pending-bind-timeout",
-    )
-    .await;
-    assert_route(error, "code-graph-timed-out");
-}
-
-#[tokio::test]
-async fn pending_source_bind_returns_exact_cancelled() {
-    let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("deadline");
-    let cancellation =
-        CancellationSignal::active("cancel.verified-query-deadline.pending-bind-cancel")
-            .expect("signal");
-    let cancel = cancellation.clone();
-    let admission = ImmediateAdmission {
-        scope: fixture_scope(SCOPE_TAG),
-    };
-    let projection = ImmediateProjection {
-        scope: fixture_scope(SCOPE_TAG),
-        store: fixture_store(SCOPE_TAG),
-    };
-    let bind = PendingSourceBind;
-    let open = expect_open_error(
-        &admission,
-        &projection,
-        Some(&bind),
-        deadline,
-        &cancellation,
-        "request.verified-query-deadline.pending-bind-cancel",
     );
     let cancel_task = async move {
         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -1,7 +1,7 @@
 /// Tree-sitter based Swift source code extractor.
 ///
 /// Parses Swift source files and emits nodes and edges for the code graph.
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
@@ -33,10 +33,7 @@ struct ExtractionState<'s> {
 
 impl<'s> ExtractionState<'s> {
     fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = crate::common::unix_timestamp_secs();
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -76,28 +73,6 @@ impl<'s> ExtractionState<'s> {
 }
 
 impl SwiftExtractor {
-    /// `file_path` is used for qualified names and node IDs (not for I/O).
-    pub fn extract_swift(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let tree = match Self::parse_source(source) {
-            Ok(tree) => tree,
-            Err(msg) => {
-                let mut state = ExtractionState::new(file_path, source);
-                state.errors.push(msg);
-                return Self::build_result(state, start);
-            }
-        };
-
-        Self::extract_tree(
-            file_path,
-            source,
-            &tree,
-            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
-            start,
-        )
-        .result
-    }
-
     fn extract_tree(
         file_path: &str,
         source: &str,
@@ -148,11 +123,6 @@ impl SwiftExtractor {
             scope,
             metrics,
         )
-    }
-
-    /// Parse source code into a tree-sitter AST.
-    fn parse_source(source: &str) -> Result<Tree, String> {
-        crate::ts_provider::parse_extractor_source("swift", "Swift", source)
     }
 
     fn visit_children(state: &mut ExtractionState, node: TsNode<'_>) {
@@ -1437,18 +1407,21 @@ impl crate::LanguageExtractor for SwiftExtractor {
         "Swift"
     }
 
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        Self::extract_swift(file_path, source)
-    }
-
-    fn extract_parsed(
+    fn extract_parsed_artifact_prepared(
         &self,
         file_path: &str,
         source: &str,
+        _parsed_source: &str,
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
-    ) -> crate::parsed_extraction::ParsedExtraction {
-        Self::extract_tree(file_path, source, tree, scope, Instant::now())
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        crate::parsed_extraction::ParsedExtractionArtifactV1::from_parsed(Self::extract_tree(
+            file_path,
+            source,
+            tree,
+            scope,
+            Instant::now(),
+        ))
     }
 }
 
@@ -1463,7 +1436,8 @@ mod tests {
     #[test]
     fn parsed_extraction_limits_swift_to_changed_top_level_declaration() {
         let source = "func untouched() {}\n\nfunc changed() {}\n";
-        let tree = SwiftExtractor::parse_source(source).expect("parse Swift source");
+        let tree = crate::ts_provider::parse_extractor_source("swift", "Swift", source)
+            .expect("parse Swift source");
         let root = tree.root_node();
         let mut cursor = root.walk();
         let changed = root
@@ -1480,9 +1454,10 @@ mod tests {
             end_position: changed.end_position().into(),
         };
 
-        let extracted = crate::LanguageExtractor::extract_parsed(
+        let extracted = crate::LanguageExtractor::extract_parsed_artifact_prepared(
             &SwiftExtractor,
             "sample.swift",
+            source,
             source,
             &tree,
             ParsedExtractionScope::ChangedRegions(&[range]),
@@ -1498,6 +1473,7 @@ mod tests {
             changed.end_byte() - changed.start_byte()
         );
         let functions = extracted
+            .artifact
             .result
             .nodes
             .iter()

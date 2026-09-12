@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
 
 use super::artifact_feedback::validation_feedback_entries;
-use super::artifact_policy::TaskArtifactPolicy;
 use super::backend::{AgentTaskKind, task_key};
 use super::run_ledger::AutomationRunLedgerRecord;
+use tracedecay_automation::artifact_policy::TaskArtifactPolicy;
 
 pub(super) fn generated_eval_definitions(
     record: &AutomationRunLedgerRecord,
@@ -11,7 +11,7 @@ pub(super) fn generated_eval_definitions(
     policy: TaskArtifactPolicy,
 ) -> Vec<Value> {
     let task_key = task_key(task);
-    let replay_commands = policy.handoff_tests();
+    let replay_command = policy.handoff_test();
     validation_feedback_entries(record)
         .into_iter()
         .filter_map(|entry| {
@@ -30,7 +30,7 @@ pub(super) fn generated_eval_definitions(
                 "expected_outcome": outcome,
                 "harness": {
                     "type": "cargo_test_filter",
-                    "commands": replay_commands.clone(),
+                    "commands": [replay_command],
                     "status": "not_run",
                 },
                 "input": {

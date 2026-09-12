@@ -9,7 +9,10 @@ use std::time::Instant;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
-use super::fence::{capture_store_content_fence_controlled, open_store_directory_nofollow};
+use super::fence::{
+    capture_store_content_fence_controlled, capture_store_directory_fence,
+    open_store_directory_nofollow,
+};
 use super::quarantine::{
     QuarantineRecoveryOutcome, quarantine_recovery_entry, recover_named_store_quarantine,
 };
@@ -17,9 +20,8 @@ use super::{
     CollectionCompletionV1, CollectionControl, CollectionFailure, CollectionFailureKind,
     CollectionOutcome, CollectionRecoveryAction, CollectionRecoveryReceipt, StoreContentFence,
     StoreDirectoryFence, UnregisteredCollectionPlan, UnregisteredStoreFinding,
-    capture_store_directory_fence, dir_size_bytes_controlled,
-    execute_unregistered_collection_controlled, manifest_names_abandoned_root,
-    newest_mtime_secs_controlled, plan_unregistered_collection,
+    dir_size_bytes_controlled, execute_unregistered_collection_controlled,
+    manifest_names_abandoned_root, newest_mtime_secs_controlled, plan_unregistered_collection,
 };
 
 pub const DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT: usize = 8;

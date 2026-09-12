@@ -357,7 +357,7 @@ async fn currently_watch_limited(repo: &Path) -> bool {
     else {
         return false;
     };
-    let daemon_cancellation = tracedecay_session_memory::context::CancellationToken::new();
+    let daemon_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
     let cancellation = state.cancellation(&daemon_cancellation);
     matches!(
         install_watches(&mut probe, state, cancellation).await,

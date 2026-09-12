@@ -9,7 +9,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use serde::Serialize;
 use tracedecay_contracts::{
     GitIndexApplyRequestV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt, OperationTermination,
@@ -28,7 +27,7 @@ use tracedecay_store::GitIndexTransactionRecordV1;
 
 use crate::git_index_transactions::{
     FixedGitIndexRunner, GIT_INDEX_ADAPTER_REVISION, NativeGitIndexError, NativeIndexLock,
-    ValidatedIndexPatch,
+    PatchDigestMaterial, ValidatedIndexPatch,
 };
 use tracedecay_application::git_intelligence::NativeGitIntelligence;
 
@@ -971,12 +970,6 @@ fn check_attr_filter_paths(
         return Err(());
     }
     Ok(filtered)
-}
-
-#[derive(Serialize)]
-struct PatchDigestMaterial<'a> {
-    header: &'a str,
-    body: &'a [String],
 }
 
 fn read_scope_diff(

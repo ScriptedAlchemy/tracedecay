@@ -31,7 +31,7 @@ use tracedecay_contracts::{
     ApplicationProblemKind, CancellationContext, CancellationSignal, CancellationStage, Deadline,
     LegalAction, Omission, OmissionReason, OperationTermination, PageRequest, ProblemOwningLayer,
     RequestContext, RequestId, ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic,
-    StreamEvent, StreamEventKind,
+    StreamEvent, StreamEventKind, configuration_surface_catalog_contribution,
 };
 pub use tracedecay_daemon_protocol::GitReadSurfaceRequest;
 use tracedecay_domain::{
@@ -84,7 +84,7 @@ mod work;
 mod workflow;
 
 use configuration_wire::{
-    CONFIGURATION_WIRE_OPERATIONS, build_configuration_wire_schema_registry,
+    CONFIGURATION_WIRE_OPERATIONS, configuration_binding_has_schema,
     configuration_invocation_payload, is_configuration_operation, validate_application_outcome,
 };
 use handoff::router_with_executor as handoff_application_router_with_executor;
@@ -161,7 +161,7 @@ fn application_invoker_for_surface(
             .iter()
             .copied()
             .any(is_configuration_operation))
-    .then(|| build_configuration_wire_schema_registry(composition.snapshot()))
+    .then(configuration_surface_catalog_contribution)
     .transpose()?;
     // The HTTP mount is the whole canonical operation family by definition, so
     // it validates the authority's own list and ignores the caller's; every
@@ -181,10 +181,13 @@ fn application_invoker_for_surface(
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         };
         if is_configuration_operation(operation)
-            && configuration_schemas
-                .as_ref()
-                .and_then(|schemas| schemas.get(&binding.binding_id))
-                .is_none()
+            && configuration_schemas.as_ref().is_none_or(|schemas| {
+                !configuration_binding_has_schema(
+                    composition.snapshot(),
+                    schemas,
+                    &binding.binding_id,
+                )
+            })
         {
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         }

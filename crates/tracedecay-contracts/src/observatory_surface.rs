@@ -7,16 +7,18 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, PaginationContract,
-    PrivacyClass, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    TerminalState, TerminalStateContract, UseCaseId,
+    ApplicationSurfaceOperation, AvailabilityContract, BindingSurface, CancellationContract,
+    CancellationPoint, CapabilityId, CatalogContributionInputV1, CatalogContributionV1,
+    ContributionId, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableSchemaAuthority, LifecycleClass, PaginationContract, PrivacyClass,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation, CostsReadModelV1,
     ObservatoryReadModelV1, ResultContractRef, current_application_bindings,
@@ -72,7 +74,7 @@ pub fn observatory_read_catalog_contribution()
         ApplicationSurfaceOperation::ObservatoryRead,
         [BindingSurface::Cli, BindingSurface::Mcp],
     )?;
-    let manifest = CapabilityManifestV1::new(CapabilityManifestInputV1 {
+    let manifest = application_capability_manifest(ApplicationCapabilityManifestInput {
         capability_id,
         use_case_id: UseCaseId::new(USE_CASE_ID)?,
         routing: RoutingContractV1::new(
@@ -86,7 +88,6 @@ pub fn observatory_read_catalog_contribution()
         result_schema: observatory_read_result_schema()?,
         effect: EffectClass::Read,
         scope: ScopeRequirement::new(vec![ScopeDimension::Project])?,
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Stateless,
@@ -98,15 +99,12 @@ pub fn observatory_read_catalog_contribution()
         ])?,
         deadline: DeadlineContract::new(15_000, DeadlineBehavior::ReturnOperationReceipt)?,
         pagination: None::<PaginationContract>,
-        idempotency: IdempotencyContract::NotRequired,
-        inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
+        inverse: None,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
             RevalidationPoint::Policy,
         ])?,
-        reconciliation: ReconciliationContract::NotRequired,
-        receipt: ReceiptContract::Operation,
         terminal_states: TerminalStateContract::new(vec![
             TerminalState::Completed,
             TerminalState::Cancelled,
@@ -123,13 +121,12 @@ pub fn observatory_read_catalog_contribution()
         ])?,
         required_features: Vec::new(),
     })?;
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
-        contribution_id: ContributionId::new(CONTRIBUTION_ID)?,
-        depends_on: Vec::new(),
-        capabilities: vec![manifest],
-        retrieval_primitives: Vec::new(),
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1::new(
+        ContributionId::new(CONTRIBUTION_ID)?,
+        Vec::new(),
+        vec![manifest],
         bindings,
-    })?;
+    ))?;
     let executable_schema = observatory_read_executable_schema(&contribution)?;
     Ok(contribution.with_executable_schemas(vec![executable_schema])?)
 }

@@ -448,7 +448,7 @@ async fn retained_begin_retry_prevents_discovery_queue_growth_and_cursor_advance
     let authority =
         registered_test_database(&temp, "retained-begin-retry", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let state = SessionTemporalRefreshWakeState::default();
     let cursor = SessionId::new("session.refresh.cursor-before-retry").unwrap();
     state.update_projection_discovery_cursor(Some(cursor.clone()));
@@ -555,7 +555,7 @@ async fn restart_after_materialization_resumes_from_durable_receipts() {
     let db = authority.database();
     let session_id = SessionId::new("session.refresh.materialized-crash").unwrap();
     admit_canonical_effect(db, &session_id, 2, "materialized crash canary").await;
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let mut requests = db
         .pending_session_temporal_refresh_page_result(1, 0, None)
         .await
@@ -691,7 +691,7 @@ async fn restart_finalizes_ready_progress_without_replaying_projection() {
     let authority =
         registered_test_database(&temp, "ready-progress", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let session_id = SessionId::new("session.restart.ready").unwrap();
     let started = store
         .begin_or_join_session_refresh(request(session_id.as_str(), 0))
@@ -745,7 +745,7 @@ async fn restart_finalizes_ready_progress_without_replaying_projection() {
     assert_eq!(report.completed, 1, "{report:?}");
     assert_eq!(report.projected_batches, 0);
 
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let receipt = store
         .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
             started.operation_id().clone(),
@@ -779,7 +779,7 @@ async fn restart_resumes_each_committed_boundary_without_writer_fallback() {
     let authority =
         registered_test_database(&temp, "committed-boundary", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db)
+    tracedecay_session_temporal_store::SessionTemporalStore::new(db)
         .begin_or_join_session_refresh(request("session.restart.boundaries", 0))
         .await
         .unwrap();
@@ -811,7 +811,7 @@ async fn restart_resumes_each_committed_boundary_without_writer_fallback() {
     assert_eq!(second.completed, 1, "{second:?}");
     assert_eq!(second.projected_batches, 0);
     assert!(
-        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db)
+        tracedecay_session_temporal_store::SessionTemporalStore::new(db)
             .running_session_refreshes()
             .await
             .unwrap()
@@ -855,7 +855,7 @@ async fn failed_terminal_operation_is_not_retried_in_one_owner_generation() {
     let authority =
         registered_test_database(&temp, "terminal-operation", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     store
         .begin_or_join_session_refresh(request("session.terminal.once", 0))
         .await
@@ -905,7 +905,7 @@ impl SessionTemporalRefreshProjector for TerminalProjector {
 }
 
 async fn begin_with_incomplete_progress(db: &RegisteredGlobalDb, session_id: &SessionId) {
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     store
         .begin_or_join_session_refresh(request(session_id.as_str(), 1))
         .await
@@ -958,7 +958,7 @@ async fn failure_effects_use_typed_terminal_store_operations() {
         .await;
     assert_eq!(failed.failed, 1);
 
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     assert!(
         store
             .session_refresh_recovery(&failed_session)
@@ -994,8 +994,7 @@ async fn stale_owner_cannot_persist_after_cancellation() {
     let temp = TempDir::new().unwrap();
     let authority =
         Arc::new(registered_test_database(&temp, "stale-owner", HostAdmissionScope::Profile).await);
-    let store =
-        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(authority.database());
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(authority.database());
     store
         .begin_or_join_session_refresh(request("session.stale.owner", 0))
         .await
@@ -1082,7 +1081,7 @@ async fn saturated_recovery_passes_visit_every_operation_before_idling() {
             ..SessionTemporalRefreshPolicy::default()
         },
     );
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     for index in 0..3 {
         store
             .begin_or_join_session_refresh(request(&format!("session.saturated.{index}"), 0))
@@ -1124,7 +1123,7 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
         SessionTemporalRefreshPolicy::default(),
     );
     let wake = authority.ensure_project(&registry, owner.clone()).await;
-    tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(authority.database())
+    tracedecay_session_temporal_store::SessionTemporalStore::new(authority.database())
         .begin_or_join_session_refresh(request("session.retire.inflight", 0))
         .await
         .unwrap();
@@ -1174,7 +1173,7 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         SessionTemporalRefreshPolicy::default(),
     );
     let wake = authority.ensure_profile(&registry).await;
-    tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db)
+    tracedecay_session_temporal_store::SessionTemporalStore::new(db)
         .begin_or_join_session_refresh(request("session.worker.restart", 0))
         .await
         .unwrap();
@@ -1204,7 +1203,7 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
             .wait_profile_idle(db.db_path(), Duration::from_secs(2))
             .await
     );
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     assert!(store.running_session_refreshes().await.unwrap().is_empty());
     let recovered = registry.profile_worker_status(db.db_path()).await;
     assert!(recovered.is_available());
@@ -1249,7 +1248,7 @@ async fn terminal_projector_error_persists_a_failure_receipt() {
     let authority =
         registered_test_database(&temp, "terminal-error", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let started = store
         .begin_or_join_session_refresh(request("session.terminal.error", 0))
         .await
@@ -1298,7 +1297,7 @@ async fn noncanonical_terminal_projector_errors_persist_projector_failed() {
     let authority =
         registered_test_database(&temp, "noncanonical-terminal", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let started = store
         .begin_or_join_session_refresh(request("session.terminal.noncanonical", 0))
         .await
@@ -1332,7 +1331,7 @@ async fn canonical_noop_materialize_terminalizes_with_complete_receipt() {
     let authority =
         registered_test_database(&temp, "canonical-noop", HostAdmissionScope::Profile).await;
     let db = authority.database();
-    let store = tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(db);
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     let started = store
         .begin_or_join_session_refresh(request("session.canonical.noop", 0))
         .await
@@ -1389,7 +1388,7 @@ async fn operation_deadline_is_bounded_and_retryable_by_class() {
     let temp = TempDir::new().unwrap();
     let authority =
         registered_test_database(&temp, "operation-deadline", HostAdmissionScope::Profile).await;
-    tracedecay_session_temporal_store::GlobalDbSessionTemporalStore::new(authority.database())
+    tracedecay_session_temporal_store::SessionTemporalStore::new(authority.database())
         .begin_or_join_session_refresh(request("session.deadline", 0))
         .await
         .unwrap();

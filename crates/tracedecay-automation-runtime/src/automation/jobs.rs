@@ -24,7 +24,7 @@ use super::run_ledger::{
     latest_record_by_canonical_completion, load_run_ledger_task_summary,
 };
 use super::scheduler::{AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule};
-use super::text::truncate_chars_for_prompt;
+use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 

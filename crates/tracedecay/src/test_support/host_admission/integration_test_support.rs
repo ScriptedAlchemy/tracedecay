@@ -60,7 +60,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> std::result::Result<
-        tracedecay_session_temporal_store::GlobalDbSessionTemporalStore<
+        tracedecay_session_temporal_store::SessionTemporalStore<
             '_,
             tracedecay_global_db::RegisteredGlobalDb,
         >,

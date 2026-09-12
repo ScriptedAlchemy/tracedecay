@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
-use super::artifact_policy::TaskArtifactPolicy;
 use super::run_ledger::AutomationRunLedgerRecord;
+use tracedecay_automation::artifact_policy::TaskArtifactPolicy;
 
 pub(super) fn optimizer_ranked_changes(
     policy: TaskArtifactPolicy,

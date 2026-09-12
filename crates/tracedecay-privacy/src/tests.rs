@@ -2,12 +2,11 @@ use serde_json::{Value, json};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowSemanticKindV1,
-    ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceIdentityV1, ComponentVersion, ObservationContractError, ObservationId,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
-    PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId,
+    ComponentVersion, ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
+    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId,
 };
 
 use super::detect::{
@@ -27,20 +26,21 @@ use super::{
     verify_sanitized_json_payload,
 };
 
-fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
+fn identity_for(record: &[u8]) -> ObservationIdentityMaterialV1 {
     identity_for_session(record, "session.privacy-test")
 }
 
-fn identity_for_session(record: &[u8], session_id: &str) -> ClaudeObservationIdentityMaterialV1 {
-    let source =
-        ClaudeSourceIdentityV1::new(SessionId::new(session_id).expect("valid test session ID"))
-            .expect("valid Claude source identity");
+fn identity_for_session(record: &[u8], session_id: &str) -> ObservationIdentityMaterialV1 {
+    let source = ObservationSourceIdentityV1::new(
+        SessionId::new(session_id).expect("valid test session ID"),
+    )
+    .expect("valid Claude source identity");
     let end = u64::try_from(record.len().max(1)).expect("test record length fits in u64");
-    ClaudeObservationIdentityMaterialV1::new(
+    ObservationIdentityMaterialV1::new(
         source,
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).expect("non-zero test generation"),
-        ClaudeByteRangeV1::new(0, end).expect("non-empty test byte range"),
+        ObservationSourceGenerationV1::new(1).expect("non-zero test generation"),
+        ObservationSourceRangeV1::new(0, end).expect("non-empty test byte range"),
     )
     .expect("valid observation identity")
 }
@@ -56,7 +56,7 @@ fn sanitize(sanitizer: &ClaudeRecordSanitizerV1, record: &[u8]) -> ClaudeSanitiz
 fn sanitize_with_identity(
     sanitizer: &ClaudeRecordSanitizerV1,
     record: &[u8],
-    identity: ClaudeObservationIdentityMaterialV1,
+    identity: ObservationIdentityMaterialV1,
 ) -> ClaudeSanitizationOutcomeV1 {
     let parsed = parse_claude_record_v1(record, identity.position())
         .expect("parse bounded sanitizer fixture");
@@ -235,7 +235,7 @@ fn parsed_record_token_preserves_verified_source_evidence() {
     }))
     .expect("serialize parsed-token fixture");
     let start = 41;
-    let range = ClaudeByteRangeV1::new(start, start + record.len() as u64)
+    let range = ObservationSourceRangeV1::new(start, start + record.len() as u64)
         .expect("valid parsed-token range");
 
     let parsed = parse_claude_record_v1(&record, range).expect("parse bounded Claude record");
@@ -248,7 +248,7 @@ fn parsed_record_token_preserves_verified_source_evidence() {
 #[test]
 fn generic_parser_preserves_native_ordering_domain() {
     let record = br#"{"type":"message"}"#;
-    let range = ClaudeByteRangeV1::new(7, 7 + record.len() as u64).unwrap();
+    let range = ObservationSourceRangeV1::new(7, 7 + record.len() as u64).unwrap();
 
     let parsed =
         parse_observation_record_v1(record, range, ObservationOrderingDomainV1::SqliteRowId)
@@ -264,16 +264,16 @@ fn generic_parser_preserves_native_ordering_domain() {
 #[test]
 fn parsed_record_rejects_mismatched_range_and_canonical_oversize() {
     let record = br#"{"type":"assistant"}"#;
-    let mismatched =
-        ClaudeByteRangeV1::new(0, record.len() as u64 + 1).expect("non-empty mismatched range");
+    let mismatched = ObservationSourceRangeV1::new(0, record.len() as u64 + 1)
+        .expect("non-empty mismatched range");
     assert_eq!(
         parse_claude_record_v1(record, mismatched).err(),
         Some(ClaudeRecordParseErrorV1::RangeLengthMismatch)
     );
 
     let oversized = vec![b' '; MAX_OBSERVATION_RECORD_BYTES + 1];
-    let oversized_range =
-        ClaudeByteRangeV1::new(0, oversized.len() as u64).expect("non-empty oversized range");
+    let oversized_range = ObservationSourceRangeV1::new(0, oversized.len() as u64)
+        .expect("non-empty oversized range");
     assert_eq!(
         parse_claude_record_v1(&oversized, oversized_range).err(),
         Some(ClaudeRecordParseErrorV1::TooLarge)
@@ -308,7 +308,7 @@ fn sanitize_parsed_rejects_identity_range_mismatch() {
     let record = serde_json::to_vec(&json!({"message": "ordinary range fixture"}))
         .expect("serialize range fixture");
     let shifted_range =
-        ClaudeByteRangeV1::new(1, record.len() as u64 + 1).expect("valid shifted range");
+        ObservationSourceRangeV1::new(1, record.len() as u64 + 1).expect("valid shifted range");
     let parsed = parse_claude_record_v1(&record, shifted_range).expect("parse shifted fixture");
 
     let error = ClaudeRecordSanitizerV1::claude_v1()
@@ -346,7 +346,7 @@ fn sanitize_parsed_rejects_ordering_domain_mismatch() {
 fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
     let record = serde_json::to_vec(&json!({"message": "ordinary provider fixture"}))
         .expect("serialize provider fixture");
-    let range = ClaudeByteRangeV1::new(10, 11).expect("valid row range");
+    let range = ObservationSourceRangeV1::new(10, 11).expect("valid row range");
     let parsed = parse_normalized_observation_record_v1(
         &record,
         range,
@@ -380,10 +380,10 @@ fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
         SessionId::new("session.provider-fixture").unwrap(),
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         source,
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(3).unwrap(),
+        ObservationSourceGenerationV1::new(3).unwrap(),
         range,
         ObservationOrderingDomainV1::SqliteRowId,
         ObservationId::new("message.provider-fixture").unwrap(),
@@ -413,7 +413,7 @@ fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
 #[test]
 fn provider_sanitizer_allows_only_legacy_claude_to_omit_native_record_identity() {
     let record = serde_json::to_vec(&json!({"message": "legacy identity fixture"})).unwrap();
-    let range = ClaudeByteRangeV1::new(0, u64::try_from(record.len()).unwrap()).unwrap();
+    let range = ObservationSourceRangeV1::new(0, u64::try_from(record.len()).unwrap()).unwrap();
     let fixture = |provider: &str| {
         let provider_id = ProviderId::new(provider).unwrap();
         let session_id = SessionId::new("session.legacy-identity").unwrap();
@@ -445,10 +445,10 @@ fn provider_sanitizer_allows_only_legacy_claude_to_omit_native_record_identity()
         )
         .unwrap();
         let source = ObservationSourceIdentityV1::for_provider(provider_id, session_id).unwrap();
-        let identity = ClaudeObservationIdentityMaterialV1::new(
+        let identity = ObservationIdentityMaterialV1::new(
             source,
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(1).unwrap(),
+            ObservationSourceGenerationV1::new(1).unwrap(),
             range,
         )
         .unwrap();
@@ -483,7 +483,7 @@ fn provider_sanitizer_allows_only_legacy_claude_to_omit_native_record_identity()
 #[test]
 fn provider_sanitizer_preserves_stable_public_structural_ids() {
     let record = serde_json::to_vec(&json!({"message": "public identity fixture"})).unwrap();
-    let range = ClaudeByteRangeV1::new(40, 41).unwrap();
+    let range = ObservationSourceRangeV1::new(40, 41).unwrap();
     let parsed = parse_normalized_observation_record_v1(
         &record,
         range,
@@ -510,14 +510,14 @@ fn provider_sanitizer_preserves_stable_public_structural_ids() {
         },
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         ObservationSourceIdentityV1::for_provider(
             ProviderId::new("provider-neutral-fixture").unwrap(),
             SessionId::new("session.public-123").unwrap(),
         )
         .unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
+        ObservationSourceGenerationV1::new(1).unwrap(),
         range,
         ObservationOrderingDomainV1::DaemonSequence,
         ObservationId::new("message.public-123").unwrap(),
@@ -551,7 +551,7 @@ fn provider_sanitizer_preserves_stable_public_structural_ids() {
 fn provider_sanitizer_protects_credential_shaped_structural_ids_consistently() {
     let raw = ["AKIA", "STRUCTURAL", "234567"].concat();
     let record = serde_json::to_vec(&json!({"message": "protected identity fixture"})).unwrap();
-    let range = ClaudeByteRangeV1::new(50, 51).unwrap();
+    let range = ObservationSourceRangeV1::new(50, 51).unwrap();
     let provider = ProviderId::new("provider-neutral-fixture").unwrap();
     let parsed = parse_normalized_observation_record_v1(
         &record,
@@ -579,11 +579,11 @@ fn provider_sanitizer_protects_credential_shaped_structural_ids_consistently() {
         },
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         ObservationSourceIdentityV1::for_provider(provider, SessionId::new(raw.clone()).unwrap())
             .unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
+        ObservationSourceGenerationV1::new(1).unwrap(),
         range,
         ObservationOrderingDomainV1::DaemonSequence,
         ObservationId::new(raw.clone()).unwrap(),
@@ -633,7 +633,7 @@ fn provider_neutral_workflow_fact_redaction_leaks_no_raw_secret() {
         "api_key": SECRET
     }))
     .unwrap();
-    let range = ClaudeByteRangeV1::new(20, 21).unwrap();
+    let range = ObservationSourceRangeV1::new(20, 21).unwrap();
     let parsed = parse_normalized_observation_record_v1(
         &record,
         range,
@@ -668,14 +668,14 @@ fn provider_neutral_workflow_fact_redaction_leaks_no_raw_secret() {
         },
     )
     .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         ObservationSourceIdentityV1::for_provider(
             ProviderId::new("provider-neutral-fixture").unwrap(),
             SessionId::new("session.workflow-privacy-fixture").unwrap(),
         )
         .unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
+        ObservationSourceGenerationV1::new(1).unwrap(),
         range,
         ObservationOrderingDomainV1::DaemonSequence,
         ObservationId::new("workflow.privacy-fixture").unwrap(),
@@ -703,18 +703,18 @@ fn provider_neutral_workflow_fact_redaction_leaks_no_raw_secret() {
 #[test]
 fn provider_sanitizer_rejects_raw_provider_json_without_normalization() {
     let record = br#"{"message":"must normalize"}"#;
-    let range = ClaudeByteRangeV1::new(1, 2).unwrap();
+    let range = ObservationSourceRangeV1::new(1, 2).unwrap();
     let parsed =
         parse_observation_record_v1(record, range, ObservationOrderingDomainV1::SqliteRowId)
             .unwrap();
-    let identity = ClaudeObservationIdentityMaterialV1::for_native_record(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         ObservationSourceIdentityV1::for_provider(
             ProviderId::new("hermes").unwrap(),
             SessionId::new("session.raw-provider").unwrap(),
         )
         .unwrap(),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(1).unwrap(),
+        ObservationSourceGenerationV1::new(1).unwrap(),
         range,
         ObservationOrderingDomainV1::SqliteRowId,
         ObservationId::new("message.raw-provider").unwrap(),
@@ -1261,7 +1261,7 @@ fn invalid_records_stop_at_the_parser_and_policy_limited_records_have_no_payload
         (scalar, ClaudeRecordParseErrorV1::NonObject),
     ] {
         let end = u64::try_from(record.len().max(1)).expect("test record length fits");
-        let range = ClaudeByteRangeV1::new(0, end).expect("non-empty parser range");
+        let range = ObservationSourceRangeV1::new(0, end).expect("non-empty parser range");
         assert_eq!(parse_claude_record_v1(&record, range).err(), Some(expected));
     }
 

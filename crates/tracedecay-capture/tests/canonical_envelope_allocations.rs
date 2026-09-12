@@ -20,8 +20,8 @@ use tracedecay_capture::{
 };
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ClaudeByteRangeV1, ObservationId,
-    ObservationOrderingDomainV1, ProviderId, SessionId,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
+    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId, SessionId,
 };
 
 struct CountingAllocator;
@@ -79,7 +79,7 @@ fn measure<T>(work: impl FnOnce() -> T) -> (T, usize, usize) {
 
 fn message_envelope(
     content: Value,
-    range: ClaudeByteRangeV1,
+    range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     CanonicalObservationEnvelopeV1::new(
         ProviderId::new("codex").unwrap(),
@@ -99,9 +99,9 @@ fn message_envelope(
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
-fn native_record(content: &Value) -> (Vec<u8>, ClaudeByteRangeV1) {
+fn native_record(content: &Value) -> (Vec<u8>, ObservationSourceRangeV1) {
     let record = serde_json::to_vec(&json!({ "content": content })).unwrap();
-    let range = ClaudeByteRangeV1::new(0, record.len() as u64).unwrap();
+    let range = ObservationSourceRangeV1::new(0, record.len() as u64).unwrap();
     (record, range)
 }
 

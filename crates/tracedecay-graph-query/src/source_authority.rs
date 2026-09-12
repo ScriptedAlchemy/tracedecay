@@ -1,77 +1,25 @@
 //! Admission-bound capture of the exact project source authority.
 //!
-//! The source runtime enters a verified graph query exactly once, at admitted
-//! open, through [`CodeGraphSourceAuthorityPort`]. The bind wait is raced
-//! against the canonical deadline/cancellation pair by the opener, and the
-//! returned runtime is immediately frozen into [`AdmittedSourceAuthority`]:
-//! root, database authority, read-only posture, and project identity are
-//! copied once and used exclusively thereafter, so a runtime facade cannot
-//! change its answers after admission and no later API accepts a substitute.
+//! The [`SourceReadContext`] wired at composition enters a verified graph
+//! query exactly once, at admitted open, where it is frozen into
+//! [`AdmittedSourceAuthority`]: root, database authority, read-only posture,
+//! and project identity are copied once and used exclusively thereafter, so
+//! no later API accepts a substitute.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::Arc;
 
 use tracedecay_contracts::RequestContext;
+use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_runtime_core::db::Database;
 
-use super::CodeGraphReadError;
 use crate::SourceReadContext;
-
-/// Inputs handed to the source authority when one admitted graph query binds
-/// its exact project source. The context is the admitted context returned by
-/// the canonical admission port, so implementations resolve the source for
-/// exactly that scope and never for a caller-chosen root or database.
-pub struct CodeGraphSourceBindRequest<'a> {
-    pub context: &'a RequestContext,
-    pub observed_at: UtcMicros,
-}
-
-pub type CodeGraphSourceBindFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = std::result::Result<SourceReadContext, CodeGraphReadError>> + Send + 'a,
-    >,
->;
-
-/// Lower open-time port supplying the exact project source runtime for an
-/// admitted graph query. It is wired once at composition; handlers never hold
-/// it, and the opener validates the returned runtime against the admitted
-/// scope before freezing it.
-pub trait CodeGraphSourceAuthorityPort: Send + Sync {
-    fn bind<'a>(&'a self, request: CodeGraphSourceBindRequest<'a>)
-    -> CodeGraphSourceBindFuture<'a>;
-}
-
-impl<T> CodeGraphSourceAuthorityPort for Arc<T>
-where
-    T: CodeGraphSourceAuthorityPort + ?Sized,
-{
-    fn bind<'a>(
-        &'a self,
-        request: CodeGraphSourceBindRequest<'a>,
-    ) -> CodeGraphSourceBindFuture<'a> {
-        (**self).bind(request)
-    }
-}
-
-impl CodeGraphSourceAuthorityPort for SourceReadContext {
-    fn bind<'a>(
-        &'a self,
-        _request: CodeGraphSourceBindRequest<'a>,
-    ) -> CodeGraphSourceBindFuture<'a> {
-        let source = self.clone();
-        Box::pin(async move { Ok(source) })
-    }
-}
 
 /// Exact source authority frozen at admitted open.
 ///
 /// Construction is crate-private: nothing outside this crate can build or
 /// inject one, so the only way a source reaches a [`super::VerifiedGraphQuery`]
-/// is the admission-raced bind inside [`super::open_verified_graph_query`].
+/// is the admission-validated capture inside [`super::open_verified_graph_query`].
 pub(crate) struct AdmittedSourceAuthority {
     project_root: PathBuf,
     db: Database,

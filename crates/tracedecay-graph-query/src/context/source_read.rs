@@ -4,8 +4,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::read_modes::{
-    self, LineRange, ReadMode, render_full, render_lines, render_map, render_signatures,
-    render_symbol_context,
+    self, LineRange, ReadMode, render_lines, render_map, render_signatures, render_symbol_context,
 };
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -101,13 +100,10 @@ pub async fn read_source(
     let body = hotpath::measure_block!(
         "usecases.context.source_read.render",
         match mode {
-            ReadMode::Full => render_full(
-                &tracedecay_runtime_core::sync::read_source_file(&absolute_path).map_err(
-                    |error| TraceDecayError::Config {
-                        message: format!("cannot read '{file}': {error}"),
-                    },
-                )?,
-            ),
+            ReadMode::Full => tracedecay_runtime_core::sync::read_source_file(&absolute_path)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("cannot read '{file}': {error}"),
+                })?,
             ReadMode::Lines => render_lines(
                 &tracedecay_runtime_core::sync::read_source_file(&absolute_path).map_err(
                     |error| TraceDecayError::Config {

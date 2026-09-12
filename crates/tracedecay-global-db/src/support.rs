@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::config::brand_env;
 use tracedecay_runtime_core::db::engine::Value as EngineValue;
 
 use crate::{AnalyticsEventRecord, project_path_alias_key};
@@ -76,16 +77,6 @@ pub fn env_value_truthy(value: &str) -> bool {
 /// True when the named env var is set to a truthy value.
 pub fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| env_value_truthy(&value))
-}
-
-/// Reads the `TRACEDECAY_<suffix>` environment variable.
-///
-/// Byte-for-byte the root `config::brand_env`, kept local because the branded
-/// prefix is a naming rule with no dependencies — reaching up to root
-/// `src/config.rs` for one `std::env::var` call would be the only reason this
-/// crate needed the composition root.
-pub(crate) fn brand_env(suffix: &str) -> Option<String> {
-    std::env::var(format!("TRACEDECAY_{suffix}")).ok()
 }
 
 /// Whether user-level global accounting (the cross-project `savings_ledger`

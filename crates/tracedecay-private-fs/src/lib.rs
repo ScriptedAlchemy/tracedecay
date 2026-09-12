@@ -7,6 +7,7 @@ use std::io;
 
 pub mod capability_dir;
 pub mod framed_log;
+mod rename_noreplace;
 #[cfg(windows)]
 pub mod windows_file;
 

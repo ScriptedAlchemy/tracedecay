@@ -2,7 +2,7 @@
 //! calls against the daemon. Connection discovery — resolving the profile's
 //! authority record into an endpoint plus credential — lives in
 //! `tracedecay-daemon-identity`; this module only consumes the
-//! [`DaemonConnection`] it resolves.
+//! [`ResolvedDaemonConnection`] it resolves.
 
 use std::path::{Path, PathBuf};
 
@@ -12,10 +12,8 @@ use tokio::time::{Duration, Instant, timeout};
 use tracedecay_daemon_control::default_socket_path;
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::current_daemon_connection;
-use tracedecay_daemon_identity::{DaemonConnection, client_connection};
-use tracedecay_framing::{
-    WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error, read_bounded_mcp_line,
-};
+use tracedecay_daemon_identity::{ResolvedDaemonConnection, client_connection};
+use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, tool_request_deadline};
@@ -100,7 +98,7 @@ const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// and never competes with a pooled connection budget.
 #[hotpath::measure(label = "daemon.core.ensure_connection_live", future = true)]
 pub(crate) async fn ensure_daemon_connection_live(
-    connection: &DaemonConnection,
+    connection: &ResolvedDaemonConnection,
     request_label: &str,
 ) -> Result<()> {
     connection.ensure_authority_current(request_label)?;
@@ -128,21 +126,19 @@ pub(crate) async fn ensure_daemon_connection_live(
 #[hotpath::measure(label = "daemon.core.next_response", future = true)]
 pub(crate) async fn next_daemon_response_line<R>(
     reader: &mut R,
-    connection: &DaemonConnection,
+    connection: &ResolvedDaemonConnection,
     request_label: &str,
     liveness_poll_interval: Duration,
 ) -> Result<Option<String>>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    // Pin one frame-read future for the whole wait. Liveness polls must not
-    // recreate `read_bounded_mcp_line`: that future owns the partial-frame
-    // accumulator after bytes have already been consumed from `reader`.
-    let read = read_bounded_mcp_line(reader);
-    tokio::pin!(read);
+    // Hold the reader across liveness polls. `read_mcp_line` is dropped when
+    // the poll wins `select!`; the accumulator lives on `line_reader`.
+    let mut line_reader = BoundedLineReader::new(reader);
     loop {
         tokio::select! {
-            result = &mut read => {
+            result = line_reader.read_mcp_line() => {
                 return match result {
                     Ok(line) => Ok(line),
                     Err(error) if is_wire_oversized_io_error(&error) => {
@@ -164,7 +160,7 @@ where
 
 pub(crate) async fn write_daemon_preamble(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    connection: &DaemonConnection,
+    connection: &ResolvedDaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
     if let Some(token) = connection.auth_token.as_deref() {
@@ -219,7 +215,7 @@ pub(crate) fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'stati
 pub(crate) async fn connect_to_current_daemon_within(
     socket_path: &Path,
     client_deadline: Option<DaemonClientDeadline>,
-) -> Result<(DaemonConnection, BrokerStream)> {
+) -> Result<(ResolvedDaemonConnection, BrokerStream)> {
     let grace = match client_deadline {
         Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
         None => DAEMON_RESTART_GRACE,
@@ -238,7 +234,7 @@ pub(crate) async fn connect_to_current_daemon_within(
 /// duplicated. Non-transient errors (e.g. permission denied) fail immediately.
 #[cfg(unix)]
 pub(crate) async fn connect_with_restart_grace(
-    connection: &DaemonConnection,
+    connection: &ResolvedDaemonConnection,
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<BrokerStream> {
@@ -252,10 +248,10 @@ pub(crate) async fn connect_with_restart_grace(
 /// both its authority epoch and authentication token.
 #[hotpath::measure(label = "daemon.core.connect_restart_grace", future = true)]
 async fn connect_with_restart_grace_resolving(
-    mut resolve: impl FnMut() -> Result<DaemonConnection>,
+    mut resolve: impl FnMut() -> Result<ResolvedDaemonConnection>,
     grace: Duration,
     poll_interval: Duration,
-) -> Result<(DaemonConnection, BrokerStream)> {
+) -> Result<(ResolvedDaemonConnection, BrokerStream)> {
     let deadline = Instant::now() + grace;
     loop {
         let connection = resolve()?;
