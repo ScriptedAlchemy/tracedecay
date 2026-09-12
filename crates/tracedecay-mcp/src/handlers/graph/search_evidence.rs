@@ -16,7 +16,7 @@ pub(super) async fn race_primary_search_with_graph<S, G>(
     graph: G,
     require_graph_for_empty_result: bool,
     sparse_result_limit: Option<usize>,
-    scoped_search: bool,
+    require_graph_for_complete_result: bool,
 ) -> (
     tracedecay_query::code_search::CodeIndexSearchOutcomeV1,
     Result<VerifiedGraphQuery>,
@@ -34,7 +34,7 @@ where
             let wait_for_graph = matches!(
                 &outcome,
                 tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete)
-                    if scoped_search
+                    if require_graph_for_complete_result
                         || sparse_result_limit.is_some_and(|limit| {
                             dependency_hints::should_check_external_import_hint(
                                 complete.ordered_candidates.len(),
