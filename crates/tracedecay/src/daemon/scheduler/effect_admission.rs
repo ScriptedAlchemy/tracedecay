@@ -78,6 +78,7 @@ fn log_scheduler_schedule_skip(project_path: &Path, task: AgentTaskKind, reason:
     );
 }
 
+#[hotpath::measure(label = "daemon.scheduler.fixed_task_decision", future = true)]
 async fn fixed_task_schedule_decision(
     dashboard_root: &Path,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
