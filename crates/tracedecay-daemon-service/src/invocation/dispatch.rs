@@ -1018,7 +1018,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_source_edit(
+                let response = execute_source_edit(
                     request_id,
                     source_edit_owner,
                     request,
@@ -1026,7 +1026,22 @@ impl DaemonInvocationService {
                     deadline,
                     cancellation,
                 )
-                .await
+                .await;
+                if let (
+                    Some(project_root),
+                    DaemonInvocationOutcome::SourceEdit { result, .. },
+                ) = (registered_project_root.as_deref(), &response.outcome)
+                    && !result.replayed
+                    && result.outcome.success()
+                {
+                    let touched = result.outcome.touched_files();
+                    if !touched.is_empty() {
+                        self.code_index_schedulers
+                            .notify_hook_paths(project_root, &touched)
+                            .await;
+                    }
+                }
+                response
             }
             DaemonInvocationPayload::SourceEditReconcile {
                 request,
@@ -1050,7 +1065,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_source_edit_rollback(
+                let response = execute_source_edit_rollback(
                     request_id,
                     source_edit_owner,
                     request,
@@ -1058,7 +1073,19 @@ impl DaemonInvocationService {
                     deadline,
                     cancellation,
                 )
-                .await
+                .await;
+                if let (
+                    Some(project_root),
+                    DaemonInvocationOutcome::SourceEdit { result, .. },
+                ) = (registered_project_root.as_deref(), &response.outcome)
+                    && !result.replayed
+                    && result.outcome.success()
+                {
+                    self.code_index_schedulers
+                        .notify_hook_overflow(project_root)
+                        .await;
+                }
+                response
             }
         };
         if is_observable_operation(operation) {
