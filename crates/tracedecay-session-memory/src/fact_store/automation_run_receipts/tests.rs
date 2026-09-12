@@ -36,7 +36,7 @@ async fn database_at(label: &str) -> (TempDir, PathBuf, Database) {
     let path = directory.path().join(format!("{label}.db"));
     let authority = DatabaseAuthority::acquire_test(&path, "automation receipt recovery authority")
         .expect("acquire automation receipt recovery authority");
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let (database, _) =
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await
@@ -47,7 +47,7 @@ async fn database_at(label: &str) -> (TempDir, PathBuf, Database) {
 async fn reopen_database(path: &Path) -> Database {
     let authority = DatabaseAuthority::acquire_test(path, "automation receipt recovery reopen")
         .expect("reacquire automation receipt recovery authority");
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing)
         .await
         .expect("reopen existing automation receipt recovery runtime")

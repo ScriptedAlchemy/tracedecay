@@ -19,7 +19,7 @@ use tracedecay_domain::{
     RetrieverKind, SemanticSearchIndexKeyV1, UtcMicros, VectorGenerationIdV1, canonical_sha256,
 };
 
-use tracedecay_configuration::{
+use tracedecay_global_db::configuration::contracts::{
     ConfigurationMutationAuthority, CurrentConfigurationMutationAuthorizationV1,
 };
 use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;

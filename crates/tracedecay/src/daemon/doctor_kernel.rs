@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::PinnedRuntimeConfiguration;
+use crate::config::DaemonRuntimeConfiguration;
 use tracedecay_application::semantic_runtime::ProjectSemanticActivationExt;
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
@@ -56,7 +56,7 @@ const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 /// a fabricated healthy result.
 #[must_use]
 pub fn configuration_read_from_pin<E>(
-    resolved: &Result<PinnedRuntimeConfiguration, E>,
+    resolved: &Result<DaemonRuntimeConfiguration, E>,
 ) -> ConfigurationAuthorityReadV1 {
     match resolved {
         Ok(_) => ConfigurationAuthorityReadV1::Resolved {
@@ -104,9 +104,9 @@ async fn observation_authority_audit_ok(
 // === Host/agent integration conformance (Advisory family) ====================
 
 fn host_integration_read_from_report(
-    report: &tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleDoctorReportV1,
+    report: &tracedecay_agent_hosts::agents::host_bundle::HostBundleDoctorReportV1,
 ) -> HostIntegrationReadV1 {
-    use tracedecay_agent_hosts::agents::host_bundle_v2::HostBundleComponentDoctorStateV1;
+    use tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentDoctorStateV1;
 
     if report.native_edit_stop_conformance.is_empty() {
         return HostIntegrationReadV1::Unsupported;

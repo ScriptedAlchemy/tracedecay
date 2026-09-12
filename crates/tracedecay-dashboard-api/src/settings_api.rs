@@ -34,15 +34,15 @@ use crate::application::settings_control::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
-use tracedecay_configuration::config::TraceDecayConfig;
 use tracedecay_configuration::{
-    DirectConfigurationMutation, UserSettingsMutationV1, UserSettingsSnapshotV1,
-    parse_duration_millis, plan_user_settings_mutation,
+    UserSettingsMutationV1, UserSettingsSnapshotV1, parse_duration_millis,
+    plan_user_settings_mutation,
 };
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, CodeIndexWorkerStatusV1, ConfigurationIdempotencyKey,
     ConfigurationRevisionId,
 };
+use tracedecay_global_db::configuration::contracts::DirectConfigurationMutation;
 
 use crate::application_surface::{DashboardConfigurationApplyError, configuration_apply_error};
 
@@ -177,7 +177,7 @@ struct ProjectEditableSettingsV1 {
 fn project_editable_settings(
     configuration: &crate::config::PinnedRuntimeConfiguration,
 ) -> ProjectEditableSettingsV1 {
-    let config: &TraceDecayConfig = configuration.config();
+    let config = configuration.config();
     ProjectEditableSettingsV1 {
         include: config.include.clone(),
         exclude: config.exclude.clone(),

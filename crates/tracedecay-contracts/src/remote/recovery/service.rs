@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BrainNodeId, CurrentRemoteAuthorityStateV1, ManifestDigest, RemoteRepositoryScopeV1, UtcMicros,
-    canonical_sha256,
+    canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_tool_catalog::{EffectClass, SchemaId, UseCaseId};
 
@@ -287,9 +287,7 @@ impl RemoteRecoveryProtocolOwnerV1 {
             &committed.receipt.input_digest,
         ))
         .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-        let identity = operation_digest
-            .as_str()
-            .strip_prefix("sha256:")
+        let identity = sha256_hex_suffix(operation_digest.as_str())
             .ok_or(RemoteProtocolFailureV1::AuthorityUnavailable)?;
         let idempotency_key = IdempotencyKey::new(format!("remote.recovery.{identity}"))
             .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;

@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, RequestId, SafeDiagnostic,
 };
@@ -22,6 +21,7 @@ use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::tracedecay::TraceDecay;

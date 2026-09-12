@@ -34,7 +34,7 @@ async fn database() -> (TempDir, Database) {
     let path = directory.path().join("canonical-search.db");
     let authority = DatabaseAuthority::acquire_test(&path, "canonical search test authority")
         .expect("acquire search fixture authority");
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let (database, _) =
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await

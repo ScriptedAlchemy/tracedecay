@@ -26,7 +26,7 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::host_bundle_v2::{HostBundleComponentV1, HostBundleRegistrationStateV1};
+use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, TextFileMutation, config_backup_path, report_mcp_registration,

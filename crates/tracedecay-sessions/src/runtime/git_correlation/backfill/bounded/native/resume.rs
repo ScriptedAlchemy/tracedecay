@@ -5,6 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_domain::sha256_hex_suffix;
 
 use crate::runtime::git_correlation::backfill::history_progress::initial_reflog_content_chain;
 
@@ -807,9 +808,8 @@ fn extend_content_chain(
     absolute_line_start: u64,
     line: &[u8],
 ) -> Result<String, BoundedBackfillInterruption> {
-    let previous = previous
-        .strip_prefix("sha256:")
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    let previous =
+        sha256_hex_suffix(previous).ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
     let previous =
         hex::decode(previous).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     if previous.len() != 32 {

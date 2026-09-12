@@ -511,8 +511,7 @@ fn prepare_fence_request(
     let command_digest = canonical_sha256(&command)
         .map_err(|error| format!("derive remote fence command digest: {error}"))?;
     let digest_suffix = command_digest
-        .as_str()
-        .strip_prefix("sha256:")
+        .hex_suffix()
         .ok_or_else(|| "remote fence command digest prefix is invalid".to_owned())?;
     let admitted_at = install.installed_at;
     let admission_bytes = u64::try_from(
@@ -696,7 +695,9 @@ fn prepare_request(
     )
     .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?
     .max(1);
-    let digest_suffix = digest_suffix(&command_digest)?;
+    let digest_suffix = command_digest
+        .hex_suffix()
+        .ok_or(RemoteReplayTransactionErrorV1::CanonicalEffect)?;
     let payload = RepositoryWritePayloadV1::RemoteObservationReplay(Box::new(
         RemoteObservationReplayWriteV1 {
             event_id: frame.event_id.clone(),
@@ -770,13 +771,6 @@ fn prepare_request(
         request,
         admission_bytes,
     })
-}
-
-fn digest_suffix(digest: &ManifestDigest) -> Result<&str, RemoteReplayTransactionErrorV1> {
-    digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(RemoteReplayTransactionErrorV1::CanonicalEffect)
 }
 
 fn map_submit_outcome(

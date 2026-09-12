@@ -2,7 +2,7 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     ManifestDigest, RetrievalGrainV1, SessionId, SymbolOccurrenceId, TemporalModeV1,
-    canonical_sha256,
+    canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_session_temporal_store::GlobalDbCursorKeyProvider;
@@ -288,9 +288,7 @@ fn pr_context_cursor_snapshot(
     .map_err(|error| TraceDecayError::Config {
         message: format!("failed to bind PR context graph generation: {error}"),
     })?;
-    let graph_generation_hex = graph_digest
-        .as_str()
-        .strip_prefix("sha256:")
+    let graph_generation_hex = sha256_hex_suffix(graph_digest.as_str())
         .and_then(|hex| hex.get(..16))
         .ok_or_else(|| TraceDecayError::Config {
             message: "invalid PR context graph generation digest".to_owned(),

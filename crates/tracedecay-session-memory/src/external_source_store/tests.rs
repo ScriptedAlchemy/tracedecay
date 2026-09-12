@@ -33,7 +33,7 @@ impl Fixture {
         mode: TestDatabaseRuntimeMode,
         directory: TempDir,
     ) -> Self {
-        tracedecay_global_db::register_test_schema_installer();
+        tracedecay_global_db::register_registered_schema_installer();
         let authority =
             DatabaseAuthority::acquire_test(&path, "cline retained source cutover").unwrap();
         let (database, _) = Database::publish_registered_test_runtime(

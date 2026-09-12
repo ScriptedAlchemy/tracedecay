@@ -236,7 +236,8 @@ pub(super) async fn register_project_open_production_owners(
         elapsed_ms = owner_registration_started.elapsed().as_millis(),
     );
     owner_phase_started = Instant::now();
-    let scout_configuration = tracedecay_configuration::ConfigurationCurrentStateV1 {
+    let scout_configuration =
+        tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1 {
         revision_id: configuration.revision_id().clone(),
         snapshot: configuration.snapshot().clone(),
     };
@@ -807,7 +808,7 @@ async fn register_semantic_configuration_owners(
     graph: &Arc<crate::tracedecay::TraceDecay>,
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
-    configuration: &tracedecay_configuration::ConfigurationCurrentStateV1,
+    configuration: &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1,
 ) -> Result<()> {
     // Registration joins configuration and activation state; callers retain only its pending handle.
     Box::pin(async move {

@@ -23,6 +23,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 use tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_maintenance::store_maintenance::{
     CodeGenerationRetentionOutcomeV1, VectorRetentionInventoryV1, apply_code_generation_retention,
     classify_vector_readable_sources, resolve_vector_retention_inventory,
@@ -107,7 +108,7 @@ fn seed_sealed_generation_store(store_root: &Path, count: usize) {
         let state_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
         let file = format!(
             "generation-{}.json",
-            state_digest.strip_prefix("sha256:").expect("digest prefix")
+            sha256_hex_suffix(&state_digest).expect("digest prefix")
         );
         let size_bytes = u64::try_from(bytes.len()).expect("size fits u64");
         std::fs::write(generations_root.join(&file), bytes).expect("write sealed generation");

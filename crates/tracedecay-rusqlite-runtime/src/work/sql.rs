@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub(crate) use crate::exact_sql::{
+    integer_column as exact_sql_integer, text_column as exact_sql_text,
+};
+
 /// A nonterminal attempt is actionable only until a committed retry receipt
 /// replaces its capacity and recovery authority with the named new attempt.
 /// Queries using this predicate must alias `work_attempts_v1` as `attempt`.
@@ -73,20 +77,6 @@ pub(crate) fn registered_work_query(
     params: Vec<ExactSqlValue>,
 ) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError> {
     source.work_query(exact_sql_statement(sql, params)?)
-}
-
-pub(crate) fn exact_sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
-    match values.get(index)? {
-        ExactSqlValue::Text(value) => Some(value),
-        _ => None,
-    }
-}
-
-pub(crate) fn exact_sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
-    match values.get(index)? {
-        ExactSqlValue::Integer(value) => Some(*value),
-        _ => None,
-    }
 }
 
 pub(crate) fn invalid_storage(message: &str) -> rusqlite::Error {

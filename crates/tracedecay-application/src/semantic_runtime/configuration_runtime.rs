@@ -6,10 +6,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_configuration::{
-    ConfigurationCurrentStateV1, ConfigurationError, ConfigurationMutationAuthority,
-    DirectConfigurationMutation, ProjectConfigurationRuntime,
-};
+use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_contracts::{
     SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
 };
@@ -19,6 +16,10 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
+use tracedecay_global_db::configuration::contracts::{
+    ConfigurationCurrentStateV1, ConfigurationError, ConfigurationMutationAuthority,
+    DirectConfigurationMutation,
+};
 use tracedecay_global_db::configuration::store::ConfigurationDirectCommitOutcomeV1;
 
 use super::{

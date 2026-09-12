@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId, sha256_hex_suffix};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_graph_db::GraphDbError;
 use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
@@ -513,9 +513,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     "code generation {generation_id} is not retained in the publication index"
                 ))
             })?;
-        let digest = entry
-            .state_digest
-            .strip_prefix("sha256:")
+        let digest = sha256_hex_suffix(&entry.state_digest)
             .ok_or_else(|| Self::unavailable("code-generation replay digest is not sha256"))?;
         if entry.generation_file != format!("generation-{digest}.json") {
             return Err(Self::unavailable(

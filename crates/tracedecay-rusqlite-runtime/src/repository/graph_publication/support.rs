@@ -12,9 +12,11 @@ use tracedecay_store::{
 };
 
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlRow, ExactSqlStatement,
-    ExactSqlTransaction, ExactSqlValue,
+    ExactSqlColumnError, ExactSqlError, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlRow,
+    ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
 };
+
+pub(super) use crate::exact_sql::{optional_text, text};
 
 use super::super::{
     EncodedProjection, RawReplay, RawReplayMetadata, RawReplayTombstone, RawVerifiedHead,
@@ -1229,12 +1231,13 @@ pub(super) fn value_at(
 }
 
 pub(super) fn integer_at(row: &ExactSqlRow, index: usize) -> GraphPublicationStoreResultV1<i64> {
-    match value_at(row, index)? {
-        ExactSqlValue::Integer(value) => Ok(*value),
-        _ => Err(GraphPublicationStoreErrorV1::Corrupt(
-            "graph publication integer column has the wrong type".to_owned(),
-        )),
-    }
+    crate::exact_sql::integer_at(&row.values, index).map_err(|error| {
+        graph_column_corrupt(
+            error,
+            &row.values,
+            "graph publication integer column has the wrong type",
+        )
+    })
 }
 
 pub(super) fn optional_integer_at(
@@ -1254,31 +1257,26 @@ pub(super) fn text_at(
     row: &mut ExactSqlRow,
     index: usize,
 ) -> GraphPublicationStoreResultV1<String> {
-    match row.values.get_mut(index) {
-        Some(ExactSqlValue::Text(value)) => Ok(std::mem::take(value)),
-        Some(_) => Err(GraphPublicationStoreErrorV1::Corrupt(
-            "graph publication text column has the wrong type".to_owned(),
-        )),
-        None => Err(GraphPublicationStoreErrorV1::Corrupt(
-            "graph publication row is truncated".to_owned(),
-        )),
-    }
+    crate::exact_sql::take_text(&mut row.values, index).map_err(|error| {
+        graph_column_corrupt(
+            error,
+            &row.values,
+            "graph publication text column has the wrong type",
+        )
+    })
 }
 
 pub(super) fn optional_text_at(
     row: &mut ExactSqlRow,
     index: usize,
 ) -> GraphPublicationStoreResultV1<Option<String>> {
-    match row.values.get_mut(index) {
-        Some(ExactSqlValue::Null) => Ok(None),
-        Some(ExactSqlValue::Text(value)) => Ok(Some(std::mem::take(value))),
-        Some(_) => Err(GraphPublicationStoreErrorV1::Corrupt(
-            "graph publication optional text column has the wrong type".to_owned(),
-        )),
-        None => Err(GraphPublicationStoreErrorV1::Corrupt(
-            "graph publication row is truncated".to_owned(),
-        )),
-    }
+    crate::exact_sql::take_optional_text(&mut row.values, index).map_err(|error| {
+        graph_column_corrupt(
+            error,
+            &row.values,
+            "graph publication optional text column has the wrong type",
+        )
+    })
 }
 
 pub(super) fn blob_at(
@@ -1296,12 +1294,16 @@ pub(super) fn blob_at(
     }
 }
 
-pub(super) fn text(value: impl Into<String>) -> ExactSqlValue {
-    ExactSqlValue::Text(value.into())
-}
-
-pub(super) fn optional_text(value: Option<String>) -> ExactSqlValue {
-    value.map_or(ExactSqlValue::Null, ExactSqlValue::Text)
+fn graph_column_corrupt(
+    error: ExactSqlColumnError,
+    values: &[ExactSqlValue],
+    wrong_type: &str,
+) -> GraphPublicationStoreErrorV1 {
+    GraphPublicationStoreErrorV1::Corrupt(if error.missing(values) {
+        "graph publication row is truncated".to_owned()
+    } else {
+        wrong_type.to_owned()
+    })
 }
 
 /// Falsifiable RED/GREEN coverage for [`read_dependencies_batch`]: asserts

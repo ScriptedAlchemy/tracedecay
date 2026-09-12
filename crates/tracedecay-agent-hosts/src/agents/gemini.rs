@@ -172,13 +172,13 @@ impl AgentIntegration for GeminiIntegration {
     /// component and the core registration are the same fact here.
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleComponentV1 as Component;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::HostBundleComponentV1 as Component;
 
         if !matches!(component, Component::Core | Component::ContextMcp) {
-            return super::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
+            return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
         gemini_extension_registration_state(&ctx.home, None)
     }
@@ -188,11 +188,11 @@ impl AgentIntegration for GeminiIntegration {
     /// binary reports `Repairable` instead of a stale `Current`.
     fn host_component_registration_for_lifecycle(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
         install: &InstallContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
         match self.host_component_registration(component, ctx) {
             State::Current => gemini_extension_registration_state(
@@ -269,8 +269,8 @@ fn gemini_extension_install_state(
 fn gemini_extension_registration_state(
     home: &Path,
     tracedecay_bin: Option<&str>,
-) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-    use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+) -> super::host_bundle::HostBundleRegistrationStateV1 {
+    use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
     match read_installed_extension(home) {
         InstalledExtensionV1::Missing => State::Missing,
