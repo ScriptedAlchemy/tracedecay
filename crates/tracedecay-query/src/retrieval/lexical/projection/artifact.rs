@@ -218,7 +218,10 @@ fn open_builder_connection(
     let modeled_reservation_bytes = tracedecay_code_index::parallelism::worker_reservation_bytes(
         effective_sorter_workers.saturating_add(1),
     );
-    let temp_store_file = modeled_reservation_bytes > sorter_budget_bytes;
+    // SQLite disables sorter helpers when temporary b-trees are memory-only.
+    // FILE still uses the admitted page cache while allowing parallel PMA
+    // generation and merge for corpus-wide CREATE INDEX statements.
+    let temp_store_file = true;
     connection
         .pragma_update(
             None,
@@ -317,8 +320,8 @@ mod tests {
             .pragma_query_value(None, "temp_store", |row| row.get(0))
             .expect("temp-store pragma");
         assert_eq!(
-            temp_store, 2,
-            "an admitted SQLite sorter reservation may retain temporary b-trees in memory"
+            temp_store, 1,
+            "threaded SQLite sorters require file-backed temporary b-trees"
         );
     }
 
@@ -424,5 +427,71 @@ mod tests {
             code_lexical_artifact_build_memory_budget_for(256 * GIB),
             16 * GIB as usize
         );
+    }
+}
+
+#[cfg(test)]
+mod sorter_identity_tests {
+    use std::fs;
+    use std::path::Path;
+
+    use sha2::{Digest, Sha256};
+
+    use super::{CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1, open_builder_connection};
+
+    fn build_ngram_index(path: &Path, workers: i64) -> Vec<u8> {
+        let mut connection =
+            open_builder_connection(path, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1)
+                .expect("open ngram identity fixture");
+        connection
+            .pragma_update(None, "threads", workers)
+            .expect("set fixture sorter width");
+        connection
+            .execute_batch(
+                "CREATE TABLE ngram_postings (
+                    page_ordinal INTEGER NOT NULL, kind INTEGER NOT NULL,
+                    ngram INTEGER NOT NULL, documents BLOB NOT NULL,
+                    cardinality INTEGER NOT NULL,
+                    PRIMARY KEY(page_ordinal, kind, ngram)
+                ) WITHOUT ROWID;",
+            )
+            .expect("create ngram identity fixture");
+        let transaction = connection.transaction().expect("seed ngram fixture");
+        {
+            let mut insert = transaction
+                .prepare("INSERT INTO ngram_postings VALUES (?1, ?2, ?3, ?4, ?5)")
+                .expect("prepare ngram fixture insert");
+            for page in 0..64i64 {
+                for ngram in (0..512i64).rev() {
+                    insert
+                        .execute(rusqlite::params![
+                            page,
+                            ngram % 2,
+                            ngram,
+                            ngram.to_le_bytes(),
+                            1i64
+                        ])
+                        .expect("insert ngram fixture row");
+                }
+            }
+        }
+        transaction.commit().expect("commit ngram fixture");
+        connection
+            .execute_batch(
+                "CREATE UNIQUE INDEX ngram_postings_by_ngram
+                 ON ngram_postings(kind, ngram, page_ordinal, cardinality)",
+            )
+            .expect("build ngram fixture index");
+        drop(connection);
+        fs::read(path).expect("read ngram identity fixture")
+    }
+
+    #[test]
+    fn threaded_sorter_preserves_ngram_index_file_identity() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let serial = build_ngram_index(&directory.path().join("serial.sqlite"), 0);
+        let parallel = build_ngram_index(&directory.path().join("parallel.sqlite"), i64::MAX);
+        assert_eq!(Sha256::digest(&parallel), Sha256::digest(&serial));
+        assert_eq!(parallel, serial, "sorter width must preserve every byte");
     }
 }
