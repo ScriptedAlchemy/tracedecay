@@ -23,7 +23,7 @@ use crate::agents::context_scout::ContextScoutDeliveryReceiptHookV1;
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::analytics::HookTimingSpan;
-use super::dispatch::NativeContextScoutLifecycleV1;
+use tracedecay_hooks::NativeContextScoutLifecycleV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DaemonAdmissionRetentionUnavailable;

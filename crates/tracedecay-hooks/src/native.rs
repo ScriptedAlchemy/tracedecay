@@ -8,8 +8,9 @@
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_domain::{NativeHostIdentityV1, UtcMicros};
+use tracedecay_domain::{NativeHostIdentityV1, ObservationId, SessionId, UtcMicros};
 
 use crate::{
     HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1, HookContractError, HookEventEnvelopeV2,
@@ -34,6 +35,41 @@ pub enum NativeHookSignalV1 {
 pub enum OpenCodePluginSurfaceV1 {
     Event,
     ToolExecuteAfter,
+}
+
+/// Provider-native identity retained with a replayable lifecycle event.
+///
+/// The session and call identifiers come directly from the host callback, and
+/// `event_id` binds them to the exact content-free envelope stored beside it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeContextScoutLifecycleV1 {
+    pub session_id: SessionId,
+    pub call_id: ObservationId,
+    pub event_id: [u8; 16],
+}
+
+impl NativeContextScoutLifecycleV1 {
+    pub fn new(session_id: &str, call_id: &str, event_id: [u8; 16]) -> Option<Self> {
+        Some(Self {
+            session_id: SessionId::new(session_id.to_owned()).ok()?,
+            call_id: ObservationId::new(call_id.to_owned()).ok()?,
+            event_id,
+        })
+    }
+
+    pub fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        matches!(
+            envelope.producer,
+            crate::HookHostV1::KimiCode | crate::HookHostV1::OpenCode
+        ) && <[u8; 32]>::from(Sha256::digest(self.session_id.as_str().as_bytes()))
+            == envelope.protected_session_id
+            && self.event_id == envelope.event_id
+            && matches!(
+                envelope.event,
+                HookEventV2::SavedEdit { .. } | HookEventV2::ToolLifecycle { .. }
+            )
+    }
 }
 
 /// Content-free result of decoding OpenCode's native project-scoped LSP event.

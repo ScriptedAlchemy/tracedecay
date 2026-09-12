@@ -11,8 +11,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use tracedecay_domain::canonical_json_bytes;
 use tracedecay_domain::{
-    UtcMicros, canonical_json_bytes,
+    UtcMicros,
     framed_log::{self, checksum as frame_checksum},
 };
 use tracedecay_private_fs::framed_log::{
@@ -24,6 +26,7 @@ use tracedecay_private_fs::framed_log::{
 use crate::{
     HookContractError, HookEventEnvelopeV2, HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES,
     MAX_REPLAY_BATCH_BYTES, MAX_REPLAY_BATCH_RECORDS, MAX_SPOOL_AGE_MICROS,
+    NativeContextScoutLifecycleV1,
 };
 
 mod checkpoint;
@@ -48,8 +51,8 @@ pub use types::{
 };
 
 use frame::{
-    append_frame, decode_complete_frame, encode_frame, scan_records, scan_records_from,
-    truncate_records,
+    append_frame, decode_complete_frame, encode_frame, encode_spool_payload, scan_records,
+    scan_records_from, truncate_records,
 };
 use lease::{acquire_lease, acquire_lease_bounded};
 use meta::{
@@ -470,6 +473,17 @@ impl HookSpoolV1 {
         binding: &HookScopeBindingV1,
         now: UtcMicros,
     ) -> Result<HookSpoolRecordV1, HookSpoolError> {
+        self.append_with_native_lifecycle(envelope, None, binding, now)
+    }
+
+    #[hotpath::measure(label = "hooks.spool.append_with_lifecycle")]
+    pub fn append_with_native_lifecycle(
+        &mut self,
+        envelope: HookEventEnvelopeV2,
+        native_lifecycle: Option<NativeContextScoutLifecycleV1>,
+        binding: &HookScopeBindingV1,
+        now: UtcMicros,
+    ) -> Result<HookSpoolRecordV1, HookSpoolError> {
         self.ensure_writable(now)?;
         envelope
             .validate(binding)
@@ -479,8 +493,7 @@ impl HookSpoolV1 {
                 HookContractError::BindingMismatch,
             ));
         }
-        let encoded =
-            canonical_json_bytes(&envelope).map_err(|_| HookSpoolError::RecordTooLarge)?;
+        let encoded = encode_spool_payload(&envelope, native_lifecycle.as_ref())?;
         if encoded.is_empty() || encoded.len() > MAX_HOOK_PAYLOAD_BYTES {
             return Err(HookSpoolError::RecordTooLarge);
         }
@@ -490,7 +503,8 @@ impl HookSpoolV1 {
             .position(|record| record.event_id == envelope.event_id)
         {
             let existing = self.hydrate(index)?;
-            return if existing.envelope == envelope {
+            return if existing.envelope == envelope && existing.native_lifecycle == native_lifecycle
+            {
                 Ok(existing)
             } else {
                 Err(HookSpoolError::EventIdConflict)
