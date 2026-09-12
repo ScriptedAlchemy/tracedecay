@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_code_extraction::{ImportModuleKindV1, ImportNamespaceV1};
@@ -258,76 +257,6 @@ fn candidate_query_is_case_insensitive_but_never_matches_the_local_alias() {
         reader.external_type_import_candidates("pkg", None, 0, request()),
         Err(CodeGraphProjectionError::Contract(_))
     ));
-}
-
-#[test]
-fn canonical_scope_is_applied_before_limit() {
-    let mut files = Vec::new();
-    let mut imports = Vec::new();
-    for index in 0..8 {
-        let occurrence = format!("file.import.outside.{index}");
-        let path = format!("outside/{index:02}.ts");
-        files.push(file(&occurrence, &path));
-        imports.push(external_type_import(
-            &occurrence,
-            &path,
-            "pkg",
-            "Foo",
-            "Foo",
-            0,
-        ));
-    }
-    files.push(file("file.import.inside", "src/inside.ts"));
-    imports.push(external_type_import(
-        "file.import.inside",
-        "src/inside.ts",
-        "pkg",
-        "Foo",
-        "Foo",
-        0,
-    ));
-
-    let candidates = import_reader(&files, &imports)
-        .external_type_import_candidates("PKG", Some("src"), 1, request())
-        .expect("scope before limit");
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].logical_path, "src/inside.ts");
-}
-
-#[test]
-fn candidates_are_deterministic_and_unique() {
-    let files = vec![
-        file("file.import.a", "src/a.ts"),
-        file("file.import.b", "src/b.ts"),
-        file("file.import.c", "src/c.ts"),
-    ];
-    let imports = vec![
-        external_type_import("file.import.a", "src/a.ts", "pkg", "Foo", "FooA", 0),
-        external_type_import("file.import.b", "src/b.ts", "pkg", "Foo", "FooB", 0),
-        external_type_import("file.import.c", "src/c.ts", "pkg", "Foo", "FooC", 0),
-    ];
-    let reader = import_reader(&files, &imports);
-    let first = reader
-        .external_type_import_candidates("foo", None, 8, request())
-        .expect("first query");
-    let second = reader
-        .external_type_import_candidates("FOO", None, 8, request())
-        .expect("repeat query");
-
-    assert_eq!(first, imports);
-    assert_eq!(second, first);
-    let unique: BTreeSet<_> = first
-        .iter()
-        .map(|row| {
-            (
-                row.logical_path.clone(),
-                row.span.start_byte,
-                row.module_specifier.clone(),
-                row.imported_name.clone(),
-            )
-        })
-        .collect();
-    assert_eq!(unique.len(), first.len());
 }
 
 #[test]

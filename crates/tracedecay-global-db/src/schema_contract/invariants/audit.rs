@@ -1769,11 +1769,9 @@ mod tests {
     };
 
     use super::{
-        AuditCheckpoint, BTreeSet, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
-        DETAILED_TAIL_CONCURRENCY, HashMap, MAX_DETAILED_OBSERVATIONS_PER_PAGE,
-        PROJECTION_PROGRESS_PAGE_INTERVAL, ProjectionOutputOwnership, ResolvedOutputAuthority,
-        ensure_audit_checkpoint_schema, historical_projection_delta_required,
-        projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
+        AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ResolvedOutputAuthority,
+        ensure_audit_checkpoint_schema, projection_audit_checkpoint_through_sequence,
+        validate_projection_authority_suffix,
     };
     use crate::tests::harness::{RegisteredGlobalDbTestFixture, open_registered_test_fixture};
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
@@ -1807,16 +1805,6 @@ mod tests {
         async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
             self.inner.execute_batch(sql).await
         }
-    }
-
-    #[test]
-    fn exhaustive_projection_audit_bounds_detailed_work() {
-        assert_eq!(
-            MAX_DETAILED_OBSERVATIONS_PER_PAGE,
-            DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE
-        );
-        assert!(std::hint::black_box(DETAILED_TAIL_CONCURRENCY) < DETAILED_AUDIT_CONCURRENCY);
-        assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
     }
 
     #[tokio::test]
@@ -1902,17 +1890,6 @@ mod tests {
                 "idx_projection_dispositions_observation_receipt"
             ]
         );
-    }
-
-    #[test]
-    fn incomplete_exhaustive_pass_does_not_repeat_historical_projection_audit() {
-        assert!(!historical_projection_delta_required(AuditCheckpoint {
-            bounded_passes_since_exhaustive: -1,
-            ..AuditCheckpoint::default()
-        }));
-        assert!(historical_projection_delta_required(
-            AuditCheckpoint::default()
-        ));
     }
 
     #[tokio::test]

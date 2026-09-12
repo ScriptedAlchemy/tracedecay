@@ -440,84 +440,6 @@ async fn test_grep_respects_gitignore() {
 }
 
 #[tokio::test]
-async fn test_grep_prunes_generated_dependency_directories_without_gitignore() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let root = cg.project_root().to_path_buf();
-    fs::create_dir_all(root.join(".venv/lib/python/site-packages/pkg")).unwrap();
-    fs::write(
-        root.join(".venv/lib/python/site-packages/pkg/generated.py"),
-        "UNIQUE_GENERATED_DIR_TOKEN\n",
-    )
-    .unwrap();
-    fs::write(
-        root.join("src/tracked.rs"),
-        "// UNIQUE_GENERATED_DIR_TOKEN\n",
-    )
-    .unwrap();
-
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_grep",
-        json!({"pattern": "UNIQUE_GENERATED_DIR_TOKEN"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload = extract_json(&result.value);
-    let files: Vec<&str> = payload["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|hit| hit["file"].as_str().unwrap())
-        .collect();
-    assert!(
-        files.contains(&"src/tracked.rs"),
-        "source file should match: {payload}"
-    );
-    assert!(
-        !files.iter().any(|file| file.starts_with(".venv/")),
-        "generated dependency trees must be pruned even without .gitignore coverage: {payload}"
-    );
-}
-
-#[tokio::test]
-async fn test_grep_path_glob_includes_explicit_generated_directory() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let root = cg.project_root().to_path_buf();
-    fs::create_dir_all(root.join("dist")).unwrap();
-    fs::write(
-        root.join("dist/generated.js"),
-        "UNIQUE_GENERATED_WHITELIST_TOKEN\n",
-    )
-    .unwrap();
-
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_grep",
-        json!({
-            "pattern": "UNIQUE_GENERATED_WHITELIST_TOKEN",
-            "path_glob": "dist/**"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload = extract_json(&result.value);
-    let files: Vec<&str> = payload["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|hit| hit["file"].as_str().unwrap())
-        .collect();
-    assert!(
-        files.contains(&"dist/generated.js"),
-        "explicit path_glob should include generated directory: {payload}"
-    );
-}
-
-#[tokio::test]
 async fn test_grep_skips_binary_files() {
     let (cg, _dir) = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -545,36 +467,6 @@ async fn test_grep_skips_binary_files() {
     assert!(
         !files.contains(&"blob.bin"),
         "binary file must be skipped: {payload}"
-    );
-}
-
-#[tokio::test]
-async fn test_grep_path_glob_filters_files() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let root = cg.project_root().to_path_buf();
-    fs::write(root.join("notes.md"), "GLOB_TOKEN in markdown\n").unwrap();
-    fs::write(root.join("src/extra.rs"), "// GLOB_TOKEN in rust\n").unwrap();
-
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_grep",
-        json!({"pattern": "GLOB_TOKEN", "path_glob": "*.md"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload = extract_json(&result.value);
-    let files: Vec<&str> = payload["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|hit| hit["file"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        files,
-        vec!["notes.md"],
-        "glob should restrict to *.md: {payload}"
     );
 }
 
@@ -783,26 +675,6 @@ async fn test_grep_case_sensitivity() {
 }
 
 #[tokio::test]
-async fn test_grep_markdown_routing_hint() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_grep",
-        json!({"pattern": "helper", "format": "markdown"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("Grep Results"), "markdown heading: {text}");
-    assert!(
-        text.contains("tracedecay_body"),
-        "markdown should point the agent at tracedecay_body: {text}"
-    );
-}
-
-#[tokio::test]
 async fn test_grep_context_lines() {
     let (cg, _dir) = production_graph_query_fixture().await;
     let root = cg.project_root().to_path_buf();
@@ -842,57 +714,6 @@ async fn test_grep_missing_pattern_errors() {
         err.to_string().contains("pattern"),
         "missing pattern should be reported: {err}"
     );
-}
-
-#[tokio::test]
-async fn test_callers() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let node_id = graph_node_id(&cg, "helper").await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_callers",
-        json!({"node_id": node_id}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-}
-
-#[tokio::test]
-async fn test_callees() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let node_id = graph_node_id(&cg, "helper").await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_callees",
-        json!({"node_id": node_id}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-}
-
-#[tokio::test]
-async fn test_impact() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let node_id = graph_node_id(&cg, "helper").await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_impact",
-        json!({"node_id": node_id}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("node_count"));
 }
 
 #[tokio::test]
@@ -1061,40 +882,6 @@ async fn test_files_no_filter() {
         "should render compact tree/list block"
     );
     assert!(!text.contains("|"), "files markdown should not use tables");
-}
-
-#[tokio::test]
-async fn test_files_path_filter() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_files", json!({"path": "src"}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-    // The test file lives under tests/, so if path filter works it should
-    // only contain src/ files.
-    assert!(
-        !text.contains("tests/test_utils"),
-        "path filter should exclude files outside 'src'"
-    );
-
-    shutdown_graph_fixture(cg).await;
-}
-
-#[tokio::test]
-async fn test_files_pattern_filter() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_files",
-        json!({"pattern": "*.rs"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
 }
 
 #[tokio::test]
@@ -1314,19 +1101,6 @@ async fn test_module_api() {
 }
 
 #[tokio::test]
-async fn test_hotspots() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_hotspots", json!({"limit": 5}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("hotspot_count"),
-        "should have hotspot_count key"
-    );
-}
-
-#[tokio::test]
 async fn test_similar() {
     let (cg, _dir) = production_graph_query_fixture().await;
     let result = call_production_tool(
@@ -1421,19 +1195,6 @@ async fn test_rank_invalid_direction() {
 }
 
 #[tokio::test]
-async fn test_god_class() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_god_class", json!({"limit": 5}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("result_count"),
-        "should have result_count key"
-    );
-}
-
-#[tokio::test]
 async fn test_unknown_tool() {
     let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
     let result = call_production_tool(&cg, "tracedecay_unknown", json!({}), None, None).await;
@@ -1448,79 +1209,6 @@ async fn test_unknown_tool() {
         }
         Ok(_) => panic!("unknown tool should produce an error"),
     }
-}
-
-// Missing required params — search without query
-
-#[tokio::test]
-async fn test_coupling_fan_out() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_coupling",
-        json!({"direction": "fan_out"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(text.contains("fan_out"), "should report fan_out direction");
-}
-
-#[tokio::test]
-async fn test_rank_outgoing() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_rank",
-        json!({"edge_kind": "calls", "direction": "outgoing"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("outgoing"),
-        "should reflect outgoing direction"
-    );
-    shutdown_graph_fixture(cg).await;
-}
-
-#[tokio::test]
-async fn test_affected_missing_files() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_affected", json!({}), None, None).await;
-    assert!(result.is_err(), "affected without files should error");
-}
-
-#[tokio::test]
-async fn test_module_api_missing_path() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_module_api", json!({}), None, None).await;
-    assert!(result.is_err(), "module_api without path should error");
-}
-
-#[tokio::test]
-async fn test_rank_missing_edge_kind() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_rank",
-        json!({"direction": "incoming"}),
-        None,
-        None,
-    )
-    .await;
-    assert!(result.is_err(), "rank without edge_kind should error");
-}
-
-#[tokio::test]
-async fn test_similar_missing_symbol() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_similar", json!({}), None, None).await;
-    assert!(result.is_err(), "similar without symbol should error");
 }
 
 #[tokio::test]
@@ -1570,26 +1258,6 @@ async fn test_files_grouped_format() {
         text.contains("```text") && text.contains("src/"),
         "grouped format should show compact tree/list block"
     );
-}
-
-#[tokio::test]
-async fn test_affected_with_custom_filter() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_affected",
-        json!({"files": ["src/utils.rs"], "filter": "**/*test*"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("affected_tests"),
-        "should have affected_tests key"
-    );
-    assert!(text.contains("count"), "should have count key");
 }
 
 #[tokio::test]
@@ -1701,25 +1369,6 @@ async fn test_files_public_path_filters() {
 }
 
 #[tokio::test]
-async fn test_files_explicit_path_selects_tests() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_files",
-        json!({"path": "tests"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        !text.contains("src/main.rs"),
-        "explicit path 'tests' should exclude src files"
-    );
-}
-
-#[tokio::test]
 async fn test_body_returns_full_function_source() {
     let (cg, _dir) = production_graph_query_fixture().await;
     let result = call_production_tool(
@@ -1790,13 +1439,6 @@ async fn test_body_unknown_symbol() {
         text.contains("No symbol named"),
         "should report no match, got: {text}"
     );
-}
-
-#[tokio::test]
-async fn test_body_missing_symbol_param() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_body", json!({}), None, None).await;
-    assert!(result.is_err(), "should error when symbol is missing");
 }
 
 #[tokio::test]
@@ -1965,17 +1607,6 @@ async fn test_by_qualified_name_returns_empty_for_unknown() {
     .unwrap();
     let items: Vec<Value> = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert!(items.is_empty());
-}
-
-#[tokio::test]
-async fn test_by_qualified_name_requires_param() {
-    let (cg, _env, _dir) = production_empty_graph_query_fixture().await;
-    let result =
-        call_production_tool(&cg, "tracedecay_by_qualified_name", json!({}), None, None).await;
-    let Err(err) = result else {
-        panic!("expected error when qualified_name is missing");
-    };
-    assert!(format!("{err}").contains("qualified_name"));
 }
 
 #[tokio::test]

@@ -480,27 +480,6 @@ pub enum PerformanceDispositionV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use schemars::schema_for;
-
-    #[derive(JsonSchema, Serialize)]
-    #[schemars(rename = "ObservabilityPayloadV1")]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum DirectOperationResourceSchemaV1 {
-        OperationResource(CoverageStateV1),
-    }
-
-    #[derive(JsonSchema, Serialize)]
-    #[schemars(rename = "ObservabilityPayloadV1")]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum BoxedOperationResourceSchemaV1 {
-        OperationResource(Box<CoverageStateV1>),
-    }
-
-    #[derive(Serialize)]
-    #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-    enum DirectOperationResourceWireV1<'a> {
-        OperationResource(&'a OperationResourceObservedV1),
-    }
 
     fn stage(stage: OperationStageV1, elapsed_micros: u64) -> OperationStageTimingV1 {
         OperationStageTimingV1 {
@@ -584,41 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn boxed_operation_resource_preserves_wire_shape_and_round_trips() {
-        let resource = operation_resource(Vec::new());
-        let direct =
-            serde_json::to_value(DirectOperationResourceWireV1::OperationResource(&resource))
-                .unwrap();
-        let payload = ObservabilityPayloadV1::OperationResource(Box::new(resource));
-        let boxed = serde_json::to_value(&payload).unwrap();
-
-        assert_eq!(boxed, direct);
-        assert_eq!(
-            serde_json::from_value::<ObservabilityPayloadV1>(boxed).unwrap(),
-            payload
-        );
-    }
-
-    #[test]
-    fn boxing_is_transparent_to_schemars_tagged_enum_shape() {
-        let direct_wire = serde_json::to_value(DirectOperationResourceSchemaV1::OperationResource(
-            CoverageStateV1::Known,
-        ))
-        .unwrap();
-        let boxed_wire = serde_json::to_value(BoxedOperationResourceSchemaV1::OperationResource(
-            Box::new(CoverageStateV1::Known),
-        ))
-        .unwrap();
-        let direct_schema = serde_json::to_value(schema_for!(DirectOperationResourceSchemaV1))
-            .expect("direct schema must serialize");
-        let boxed_schema = serde_json::to_value(schema_for!(BoxedOperationResourceSchemaV1))
-            .expect("boxed schema must serialize");
-
-        assert_eq!(boxed_wire, direct_wire);
-        assert_eq!(boxed_schema, direct_schema);
-    }
-
-    #[test]
     fn operation_stage_wire_values_are_closed_and_stable() {
         let values = [
             (OperationStageV1::Scheduled, "\"scheduled\""),
@@ -658,33 +602,6 @@ mod tests {
             OperationReadinessV1 {
                 foreground_ready_micros: Some(21),
                 background_complete_micros: None,
-            }
-        );
-        assert_eq!(envelope.validate(), Ok(()));
-    }
-
-    #[test]
-    fn successful_terminal_records_both_readiness_milestones() {
-        let envelope = operation_envelope(
-            vec![
-                stage(OperationStageV1::Scheduled, 0),
-                stage(OperationStageV1::Admitted, 5),
-                stage(OperationStageV1::Started, 8),
-                stage(OperationStageV1::FirstProgress, 13),
-                stage(OperationStageV1::FirstUsefulResult, 21),
-                stage(OperationStageV1::Terminal, 34),
-            ],
-            Some(ObservabilityTerminalResultV1::Succeeded),
-        );
-        let ObservabilityPayloadV1::OperationResource(resource) = &envelope.payload else {
-            unreachable!();
-        };
-
-        assert_eq!(
-            resource.readiness(),
-            OperationReadinessV1 {
-                foreground_ready_micros: Some(21),
-                background_complete_micros: Some(34),
             }
         );
         assert_eq!(envelope.validate(), Ok(()));

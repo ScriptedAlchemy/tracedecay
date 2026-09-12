@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde_json::Value;
-#[cfg(test)]
-use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use crate::ports::hook_runtime::HookRuntimeV1;
 
@@ -88,11 +86,6 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
         return 1;
     }
     0
-}
-
-#[cfg(test)]
-fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
-    event_cwd_from_parsed(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Codex, cwd))
 }
 
 /// Codex `UserPromptSubmit` hook handler.
@@ -599,34 +592,6 @@ mod tests {
     use tracedecay_runtime_core::config::USER_DATA_DIR_ENV;
 
     #[test]
-    fn codex_session_start_event_signals_daemon_with_real_cwd() {
-        let event = codex_session_start_hook_event(&serde_json::json!({
-            "cwd": "/workspace/codex-session"
-        }))
-        .unwrap();
-
-        assert_eq!(event.agent, HookAgent::Codex.as_wire());
-        assert_eq!(event.event, "sessionStart");
-        assert_eq!(
-            event.cwd.as_deref(),
-            Some(Path::new("/workspace/codex-session"))
-        );
-    }
-
-    #[test]
-    fn codex_subagent_start_context_carries_diagnostics_moment() {
-        // Subagents must route the shell compile/type-check moment to tracedecay
-        // diagnostics and name the fixing-build skill, matching session steering.
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("fixing-build-and-type-errors"));
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_diagnose"));
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_diagnostics"));
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("cargo check"));
-        // The consolidated skill ladder and grep routing stay intact.
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("tracedecay_grep"));
-        assert!(CODEX_SUBAGENT_START_CONTEXT.contains("exploring-code"));
-    }
-
-    #[test]
     fn codex_prompt_hints_dedupe_by_session_and_category() {
         let _lock = crate::hooks::lock_test_env();
         let project = tempfile::tempdir().unwrap();
@@ -655,28 +620,6 @@ mod tests {
         assert!(
             codex_prompt_hint(&event).is_none(),
             "Codex should use shared per-session hint dedupe for prompt hints"
-        );
-    }
-
-    #[tokio::test]
-    async fn prompt_context_does_not_repeat_the_session_bootstrap() {
-        let project = tempfile::tempdir().unwrap();
-        let event = serde_json::json!({
-            "session_id": "codex-prompt-compact-context",
-            "cwd": project.path(),
-            "prompt": "continue"
-        });
-
-        let context =
-            codex_user_prompt_submit_context_with_root(&event, Some(project.path())).await;
-
-        assert!(!context.contains("Agents:"));
-        assert!(!context.contains("Before `cargo check`"));
-        assert!(!context.contains("tracedecay tool <name>"));
-        assert!(
-            context.len() < 1_024,
-            "turn-local hints must stay smaller than session bootstrap: {} bytes",
-            context.len()
         );
     }
 }

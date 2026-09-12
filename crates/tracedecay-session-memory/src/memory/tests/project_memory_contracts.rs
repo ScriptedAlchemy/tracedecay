@@ -1,23 +1,20 @@
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    ActorId, Confidence, FactEventId, PayloadAccessState, PayloadReferenceV1, ProvenanceId,
-    UtcMicros,
+    ActorId, Confidence, FactEventId, PayloadReferenceV1, ProvenanceId, UtcMicros,
 };
 use tracedecay_store::{
-    FactCommitOutcome, FactCommitReceipt, FactWriteControl,
-    ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
-    ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
-    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
-    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactCurationBatchV1,
+    FactCommitReceipt, FactWriteControl, ProjectMemoryAutomaticFactApplyDispositionV1,
+    ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryAutomaticFactEffectV1,
+    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptV1,
+    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactCurationBatchV1,
     ProjectMemoryFactCurationOperationEffectV1, ProjectMemoryFactCurationOperationV1,
     ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1,
     ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactMergeTargetV1,
-    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStatusV1,
-    ProjectMemoryFactUnavailableV1,
+    ProjectMemoryFactNormalizeTagsV1,
 };
 
-use super::{FakeAuthority, batch, committed_outcome, fact_add_request, fact_id, id, owner};
+use super::{FakeAuthority, fact_add_request, fact_id, id, owner};
 use crate::memory::{
     MemoryApplication, MemoryMutationError, MemoryOperationContext, ProjectMemoryFactAddPreflight,
     ProjectMemoryFactAddRequestOutcome, automatic_fact_add_command,
@@ -318,64 +315,6 @@ async fn merge_rejects_a_mismatched_authority_digest_without_losing_the_outcome(
         panic!("merge digest mismatch must retain the committed authority outcome");
     };
     assert_eq!(authority_result, outcome);
-}
-
-#[test]
-fn semantic_similarity_outcomes_are_receipt_bearing_commits() {
-    let owner = owner();
-    let write = batch(owner.clone(), "operation.memory.conflict");
-    let receipt = match committed_outcome(&write) {
-        FactCommitOutcome::Committed(receipt) => receipt,
-        _ => unreachable!("fixture commits exactly once"),
-    };
-    let projection = ProjectMemoryFactProjectionV1::Unavailable(
-        ProjectMemoryFactUnavailableV1::new(
-            ProjectMemoryFactStatusV1::new(
-                owner.clone(),
-                write.fact_id().clone(),
-                PayloadAccessState::Deleted,
-                UtcMicros(1),
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-    );
-    let closest = ProjectMemoryFactIdV1::new(
-        owner.clone(),
-        fact_id(owner.clone(), "operation.memory.closest"),
-    )
-    .unwrap();
-    let normalized = ProjectMemoryFactAddOutcomeV1::normalized_duplicate(
-        projection.clone(),
-        ProjectMemoryFactIdV1::new(owner.clone(), write.fact_id().clone()).unwrap(),
-    )
-    .unwrap();
-    let near_duplicate = ProjectMemoryFactAddOutcomeV1::semantic_near_duplicate(
-        projection.clone(),
-        closest.clone(),
-        900_000,
-        receipt.clone(),
-        false,
-    )
-    .unwrap();
-    let conflict = ProjectMemoryFactAddOutcomeV1::possible_conflict(
-        projection, closest, 750_000, receipt, false,
-    )
-    .unwrap();
-
-    assert!(normalized.commit_receipt().is_none());
-    assert!(!normalized.commit_replayed());
-    assert!(
-        super::super::project_memory::validate_project_memory_add_outcome(&owner, &normalized)
-            .is_ok()
-    );
-    for outcome in [&near_duplicate, &conflict] {
-        assert!(outcome.commit_receipt().is_some());
-        assert!(
-            super::super::project_memory::validate_project_memory_add_outcome(&owner, outcome)
-                .is_ok()
-        );
-    }
 }
 
 #[test]

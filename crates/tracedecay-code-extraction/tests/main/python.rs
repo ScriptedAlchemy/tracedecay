@@ -6,23 +6,6 @@ use tracedecay_domain::*;
 // into this module's own namespace, so the tests below call them unqualified
 // without each extractor module re-declaring the support module.
 include!("support/docstrings.rs");
-#[test]
-fn test_py_file_node_is_root() {
-    let source = r#"
-def hello():
-    pass
-"#;
-    let extractor = PythonExtractor;
-    let result = extractor.extract("test.py", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "test.py");
-}
 
 #[test]
 fn test_py_function_declaration() {

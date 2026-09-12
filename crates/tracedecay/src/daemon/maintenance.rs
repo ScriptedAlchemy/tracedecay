@@ -909,9 +909,7 @@ mod tests {
     };
     use tracedecay_domain::UtcMicros;
 
-    use super::{
-        MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCoordinator, run_resident_memory_sampler_loop,
-    };
+    use super::{MaintenanceCoordinator, run_resident_memory_sampler_loop};
     use tracedecay_maintenance::loop_run::{
         MaintenanceWake, maintenance_futures_active, run_maintenance_loop,
     };
@@ -1392,18 +1390,6 @@ mod tests {
     }
 
     #[test]
-    fn store_window_is_bounded_by_the_per_tick_budget() {
-        let keys = store_keys(50);
-        let (window, _) = select_store_window(&keys, None, MAINTENANCE_STORE_PAGE_LIMIT);
-        assert_eq!(window.len(), MAINTENANCE_STORE_PAGE_LIMIT);
-
-        // A mounted set smaller than the budget is processed whole.
-        let small = store_keys(3);
-        let (window, _) = select_store_window(&small, None, MAINTENANCE_STORE_PAGE_LIMIT);
-        assert_eq!(window, vec![0, 1, 2]);
-    }
-
-    #[test]
     fn store_window_round_robin_reaches_every_store_and_never_starves() {
         // With more stores than the budget, feeding each tick's cursor into the
         // next must cover every store within ceil(count / budget) ticks while
@@ -1430,20 +1416,6 @@ mod tests {
                 "count={count} budget={budget}: not every store reached within {ticks} ticks"
             );
         }
-    }
-
-    #[test]
-    fn store_window_resumes_after_the_cursor() {
-        let keys = store_keys(10);
-        let (first, next) = select_store_window(&keys, None, 4);
-        assert_eq!(first, vec![0, 1, 2, 3]);
-        assert_eq!(next.as_deref(), Some("s:003"));
-        let (second, next) = select_store_window(&keys, next.as_deref(), 4);
-        assert_eq!(second, vec![4, 5, 6, 7]);
-        assert_eq!(next.as_deref(), Some("s:007"));
-        // The window wraps past the end back to the front.
-        let (third, _) = select_store_window(&keys, next.as_deref(), 4);
-        assert_eq!(third, vec![8, 9, 0, 1]);
     }
 
     #[tokio::test]

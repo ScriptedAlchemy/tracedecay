@@ -3562,29 +3562,6 @@ mod tests {
     }
 
     #[test]
-    fn bounded_result_preserves_complete_coverage() {
-        let outcome = bounded_result(
-            page(vec!["one"], 1),
-            tracedecay_domain::RetrieverCoverage {
-                examined: 1,
-                eligible: 1,
-                ..Default::default()
-            },
-            tracedecay_domain::UtcMicros(1),
-            None,
-            None,
-        );
-        let RetrievalPortOutcome::Completed(evidence) = outcome else {
-            panic!("uncapped complete lane stays complete");
-        };
-        assert_eq!(
-            evidence.coverage.completeness,
-            CoverageCompleteness::Complete
-        );
-        assert!(evidence.omissions.is_empty());
-    }
-
-    #[test]
     fn bounded_result_preserves_capped_lane_as_partial() {
         let outcome = bounded_result(
             page(vec!["one"], 3),

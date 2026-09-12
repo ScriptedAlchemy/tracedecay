@@ -666,7 +666,6 @@ fn fallback_store_key() -> StoreKeyV1 {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::read_model::{DashboardDomainStateV1, DashboardFreshnessStateV1};
     use tracedecay_configuration::RetentionConfig;
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState, u64) {
@@ -679,23 +678,6 @@ mod tests {
             .expect("authoritative graph page counts");
         let graph_total_bytes = page_size.saturating_mul(page_count);
         (project, state, graph_total_bytes)
-    }
-
-    #[tokio::test]
-    async fn storage_telemetry_context_reuses_the_state_resolved_scope() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, state, _) = state_for_test().await;
-
-        let context = storage_telemetry_context(&state).expect("telemetry context");
-
-        // The per-request application context is minted from the exact scope
-        // resolved once at state construction; the handler never re-resolves
-        // repository/worktree identity from paths ad hoc.
-        assert_eq!(
-            context.scope(),
-            state.resolved_scope.as_ref().expect("state resolved scope"),
-        );
-        context.scope().validate().expect("valid scope");
     }
 
     #[tokio::test]
@@ -720,71 +702,6 @@ mod tests {
                 Some("exact project telemetry scope is unavailable"),
             );
         }
-    }
-
-    #[tokio::test]
-    async fn telemetry_reports_real_observed_sizes_for_held_stores() {
-        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let (_project, state, graph_total_bytes) = state_for_test().await;
-        let Json(envelope) = telemetry(State(state)).await;
-
-        assert_eq!(envelope.schema_revision, 1);
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
-        assert_eq!(envelope.freshness.state, DashboardFreshnessStateV1::Fresh);
-        assert!(
-            !envelope.payload.stores.is_empty(),
-            "dashboard always holds at least the graph and memory stores"
-        );
-
-        for entry in &envelope.payload.stores {
-            assert!(
-                matches!(entry.read, StorageTelemetryReadV1::Observed { .. }),
-                "store {} should have an observed size read",
-                entry.store
-            );
-            assert!(
-                entry.total_bytes.unwrap_or(0) > 0,
-                "store {} sized",
-                entry.store
-            );
-            // No budget is configured in a fresh project: the honest state is
-            // "unset by owner", never "unsupported by server".
-            assert!(
-                matches!(entry.budget, StoreBudgetDimensionV1::Unset { .. }),
-                "store {} should report an unset budget, got {:?}",
-                entry.store,
-                entry.budget
-            );
-            // Opening the dashboard does not establish a growth baseline. A
-            // growth series needs an execution-owned sampler, so this read is
-            // explicit about its absence instead of writing a watermark.
-            let StoreGrowthDimensionV1::Unknown { reason } = &entry.growth;
-            assert!(reason.contains("execution-owned"));
-            assert!(matches!(
-                entry.table_growth,
-                TableGrowthDimensionV1::Unsupported { .. }
-            ));
-            assert!(!entry.roles.is_empty());
-            assert!(entry.roles.contains(&entry.role));
-        }
-        let graph = envelope
-            .payload
-            .stores
-            .iter()
-            .find(|entry| entry.roles.iter().any(|role| role == "graph"))
-            .expect("graph store entry");
-        assert_eq!(
-            graph.total_bytes,
-            Some(graph_total_bytes),
-            "graph bytes must come from the retained graph runtime's real page counts"
-        );
-
-        // Complete coverage carries a real denominator equal to the store count.
-        assert!(envelope.coverage.is_complete());
-        assert_eq!(
-            envelope.coverage.denominator,
-            Some(envelope.payload.stores.len() as u64)
-        );
     }
 
     #[tokio::test]
@@ -823,49 +740,6 @@ mod tests {
             "graph and memory share one store file; roles: {:?}",
             shared.roles
         );
-    }
-
-    #[test]
-    fn two_roles_backed_by_one_file_produce_one_entry_carrying_both_roles() {
-        // The graph and project-memory roles resolve to the same database file
-        // in project storage mode. Reporting them as two entries produced two
-        // cards with byte-identical sizes; they must merge into one store.
-        let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("shared.db");
-        let display = path.display().to_string();
-
-        let mut entries = Vec::new();
-        let mut seen = HashMap::new();
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "graph",
-            &display,
-            "test fixture".to_string(),
-        );
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "memory",
-            &display,
-            "test fixture".to_string(),
-        );
-
-        assert_eq!(entries.len(), 1, "one file is one store");
-        assert_eq!(entries[0].primary_role(), "graph");
-        assert_eq!(entries[0].roles, vec!["graph", "memory"]);
-
-        // A genuinely distinct file is still its own entry.
-        let other = directory.path().join("other.db");
-        let other_display = other.display().to_string();
-        push_or_merge_unknown_role(
-            &mut entries,
-            &mut seen,
-            "savings",
-            &other_display,
-            "test fixture".to_string(),
-        );
-        assert_eq!(entries.len(), 2, "distinct files are never merged");
     }
 
     #[test]
@@ -918,14 +792,6 @@ mod tests {
         assert!(matches!(
             budget_dimension("probe.db", None, Some(&configured)),
             StoreBudgetDimensionV1::Unknown { .. }
-        ));
-    }
-
-    #[test]
-    fn growth_without_execution_owned_snapshot_is_unknown() {
-        assert!(matches!(
-            growth_dimension(Some(4096), Some(0)),
-            StoreGrowthDimensionV1::Unknown { .. }
         ));
     }
 

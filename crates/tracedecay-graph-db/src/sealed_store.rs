@@ -326,6 +326,94 @@ fn sealed_generation_directory(root: &Path, physical_namespace: &GraphNamespace)
     root.join(name)
 }
 
+/// Byte census of a store's sealed root, split by what serves and what does
+/// not. The Doctor storage finding reports the two dead classes; a count in
+/// either means bytes nothing reads are sitting next to the live store.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SealedStoreCensusV1 {
+    /// Sealed generations whose `generation` is a verified head.
+    pub head_count: u64,
+    pub head_bytes: u64,
+    /// Sealed generations no verified head names: superseded artifacts whose
+    /// retirement has not run since the last publication.
+    pub superseded_count: u64,
+    pub superseded_bytes: u64,
+    /// `.staging-*` directories left by seals that never installed.
+    pub abandoned_staging_count: u64,
+    pub abandoned_staging_bytes: u64,
+    /// Entries that are neither a readable sealed receipt nor staging: an
+    /// unrecognized layout is reported, never silently classed as dead.
+    pub unrecognized_count: u64,
+}
+
+/// Measure the sealed root beside `database_path` against the generation ids
+/// of the store's current verified heads (as journaled: `<projection>:<digest>`).
+///
+/// Metadata only: every entry is one receipt read plus a directory size walk,
+/// never a container open. An unreadable receipt counts as unrecognized so the
+/// census stays truthful when a receipt is mid-write or corrupt.
+pub fn census_sealed_store(
+    database_path: &Path,
+    head_generations: &std::collections::BTreeSet<String>,
+) -> std::io::Result<SealedStoreCensusV1> {
+    let root = sealed_store_root(database_path);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SealedStoreCensusV1::default());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut census = SealedStoreCensusV1::default();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            census.unrecognized_count += 1;
+            continue;
+        }
+        let path = entry.path();
+        let bytes = directory_bytes(&path)?;
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| name.starts_with(".staging-")) {
+            census.abandoned_staging_count += 1;
+            census.abandoned_staging_bytes += bytes;
+            continue;
+        }
+        let receipt = std::fs::read(path.join(SEALED_STORE_RECEIPT_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(&bytes).ok());
+        let Some(receipt) = receipt else {
+            census.unrecognized_count += 1;
+            continue;
+        };
+        if head_generations.contains(&receipt.generation) {
+            census.head_count += 1;
+            census.head_bytes += bytes;
+        } else {
+            census.superseded_count += 1;
+            census.superseded_bytes += bytes;
+        }
+    }
+    Ok(census)
+}
+
+fn directory_bytes(directory: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
 /// Removes every `.staging-*` directory a seal left behind under the store's
 /// sealed root.
 ///

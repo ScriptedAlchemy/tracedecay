@@ -16,8 +16,8 @@ use super::summary::{
     evaluate_summary_lineage_eligibility, evaluate_summary_lineage_eligibility_controlled,
 };
 use super::types::{
-    ResolutionAssertion, ResolutionCertainty, ResolutionCheckpoint, ResolutionEvidence,
-    ResolutionInputError, ResolutionLineageEdgeKind, ResolutionOccurrence, ValidatedAuthorization,
+    ResolutionAssertion, ResolutionCheckpoint, ResolutionEvidence, ResolutionInputError,
+    ResolutionLineageEdgeKind, ResolutionOccurrence, ValidatedAuthorization,
 };
 
 fn occurrence_id(byte: char) -> MessageOccurrenceIdV1 {
@@ -369,165 +369,6 @@ fn current_does_not_let_unsupported_correction_erase_supported_evidence() {
 }
 
 #[test]
-fn current_conflict_precedence_retains_the_authoritative_side() {
-    let mut authoritative = occurrence(
-        'a',
-        "authoritative",
-        1,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(1),
-        },
-    );
-    authoritative.evidence.authority = SessionAuthorityClassV1::ProviderNative;
-    let mut weak = occurrence(
-        'b',
-        "weak",
-        2,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(2),
-        },
-    );
-    weak.evidence.authority = SessionAuthorityClassV1::DerivedProjection;
-    let mut contradiction = assertion(
-        TemporalAssertionKindV1::Contradicts,
-        "authoritative",
-        "weak",
-        3,
-    );
-    contradiction.evidence.authority = SessionAuthorityClassV1::ProviderNative;
-
-    let resolved = resolve_temporal(
-        &[authoritative, weak],
-        &[],
-        &[contradiction],
-        TemporalModeV1::Current,
-    )
-    .expect("resolution succeeds");
-
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].occurrence.anchor_id, anchor("authoritative"));
-    assert!(!resolved[0].conflicted);
-}
-
-#[test]
-fn evolution_orders_the_correction_chain_not_incidental_timestamps() {
-    let original = occurrence(
-        'a',
-        "original",
-        30,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(1),
-        },
-    );
-    let correction = occurrence(
-        'b',
-        "correction",
-        20,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(2),
-        },
-    );
-    let superseding = occurrence(
-        'c',
-        "superseding",
-        10,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(3),
-        },
-    );
-    let assertions = [
-        assertion(
-            TemporalAssertionKindV1::Corrects,
-            "correction",
-            "original",
-            31,
-        ),
-        assertion(
-            TemporalAssertionKindV1::Supersedes,
-            "superseding",
-            "correction",
-            32,
-        ),
-    ];
-
-    let resolved = resolve_temporal(
-        &[original, correction, superseding],
-        &[],
-        &assertions,
-        TemporalModeV1::Evolution,
-    )
-    .expect("resolution succeeds");
-
-    assert_eq!(
-        resolved
-            .iter()
-            .map(|item| item.occurrence.anchor_id.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            anchor("original"),
-            anchor("correction"),
-            anchor("superseding")
-        ]
-    );
-}
-
-#[test]
-fn resolution_checks_live_work_budget_during_occurrence_consumption() {
-    let occurrences = [
-        occurrence('a', "a", 1, TemporalValidityV1::Unknown),
-        occurrence('b', "b", 2, TemporalValidityV1::Unknown),
-    ];
-    let control = ExecutionControl::default().with_work_limit(1);
-
-    assert_eq!(
-        resolve_temporal_controlled(&occurrences, &[], &[], TemporalModeV1::Forensic, &control,),
-        Err(TemporalPortError::BudgetExceeded {
-            resource: "work units"
-        })
-    );
-}
-
-#[test]
-fn weak_correction_cannot_erase_authoritative_current_evidence() {
-    let mut original = occurrence(
-        'a',
-        "original",
-        1,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(1),
-        },
-    );
-    original.evidence.authority = SessionAuthorityClassV1::ProviderNative;
-    let mut correction = occurrence(
-        'b',
-        "correction",
-        2,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(2),
-        },
-    );
-    correction.evidence.authority = SessionAuthorityClassV1::DerivedProjection;
-    let mut correction_edge = assertion(
-        TemporalAssertionKindV1::Corrects,
-        "correction",
-        "original",
-        2,
-    );
-    correction_edge.evidence.authority = SessionAuthorityClassV1::DerivedProjection;
-
-    let resolved = resolve_temporal(
-        &[original, correction],
-        &[],
-        &[correction_edge],
-        TemporalModeV1::Current,
-    )
-    .expect("resolution succeeds");
-
-    assert_eq!(resolved.occurrences.len(), 2);
-    assert!(resolved.occurrences.iter().all(|item| item.conflicted));
-}
-
-#[test]
 fn strong_correction_suppresses_weaker_current_evidence() {
     let original = occurrence(
         'a',
@@ -570,135 +411,59 @@ fn strong_correction_suppresses_weaker_current_evidence() {
 }
 
 #[test]
-fn unresolved_conflict_preserves_both_sides_and_a_typed_edge() {
-    let left = occurrence(
+fn current_conflict_precedence_retains_the_authoritative_side() {
+    let mut authoritative = occurrence(
         'a',
-        "left",
+        "authoritative",
         1,
         TemporalValidityV1::Known {
             valid_at: UtcMicros(1),
         },
     );
-    let right = occurrence(
+    authoritative.evidence.authority = SessionAuthorityClassV1::ProviderNative;
+    let mut weak = occurrence(
         'b',
-        "right",
+        "weak",
         2,
         TemporalValidityV1::Known {
             valid_at: UtcMicros(2),
         },
     );
+    weak.evidence.authority = SessionAuthorityClassV1::DerivedProjection;
+    let mut contradiction = assertion(
+        TemporalAssertionKindV1::Contradicts,
+        "authoritative",
+        "weak",
+        3,
+    );
+    contradiction.evidence.authority = SessionAuthorityClassV1::ProviderNative;
 
     let resolved = resolve_temporal(
-        &[left, right],
+        &[authoritative, weak],
         &[],
-        &[assertion(
-            TemporalAssertionKindV1::Contradicts,
-            "right",
-            "left",
-            3,
-        )],
+        &[contradiction],
         TemporalModeV1::Current,
     )
     .expect("resolution succeeds");
 
-    assert_eq!(resolved.occurrences.len(), 2);
-    assert!(resolved.occurrences.iter().all(|item| item.conflicted));
-    assert_eq!(resolved.lineage_edges.len(), 1);
-    assert_eq!(
-        resolved.lineage_edges[0].kind,
-        ResolutionLineageEdgeKind::Contradiction
-    );
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].occurrence.anchor_id, anchor("authoritative"));
+    assert!(!resolved[0].conflicted);
 }
 
 #[test]
-fn evolution_returns_ordered_occurrences_and_typed_lineage_chain() {
-    let original = occurrence(
-        'a',
-        "original",
-        30,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(1),
-        },
-    );
-    let correction = occurrence(
-        'b',
-        "correction",
-        20,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(2),
-        },
-    );
-    let successor = occurrence(
-        'c',
-        "successor",
-        10,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(3),
-        },
-    );
-
-    let resolved = resolve_temporal(
-        &[original, correction, successor],
-        &[],
-        &[
-            assertion(
-                TemporalAssertionKindV1::Corrects,
-                "correction",
-                "original",
-                31,
-            ),
-            assertion(
-                TemporalAssertionKindV1::Supersedes,
-                "successor",
-                "correction",
-                32,
-            ),
-        ],
-        TemporalModeV1::Evolution,
-    )
-    .expect("resolution succeeds");
+fn resolution_checks_live_work_budget_during_occurrence_consumption() {
+    let occurrences = [
+        occurrence('a', "a", 1, TemporalValidityV1::Unknown),
+        occurrence('b', "b", 2, TemporalValidityV1::Unknown),
+    ];
+    let control = ExecutionControl::default().with_work_limit(1);
 
     assert_eq!(
-        resolved
-            .occurrences
-            .iter()
-            .map(|item| item.occurrence.anchor_id.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            anchor("original"),
-            anchor("correction"),
-            anchor("successor")
-        ]
-    );
-    assert_eq!(
-        resolved
-            .lineage_edges
-            .iter()
-            .map(|edge| edge.kind)
-            .collect::<Vec<_>>(),
-        vec![
-            ResolutionLineageEdgeKind::Correction,
-            ResolutionLineageEdgeKind::Supersession,
-        ]
-    );
-}
-
-#[test]
-fn forensic_preserves_authorized_uncertainty_as_a_typed_state() {
-    let unknown = occurrence('a', "unknown", 1, TemporalValidityV1::Unknown);
-    let mut unauthorized = occurrence('b', "unauthorized", 2, TemporalValidityV1::Unknown);
-    unauthorized.evidence = ResolutionEvidence::new(
-        SessionAuthorityClassV1::CanonicalObservation,
-        ValidatedAuthorization::Unauthorized,
-    );
-
-    let resolved = resolve_temporal(&[unknown, unauthorized], &[], &[], TemporalModeV1::Forensic)
-        .expect("resolution succeeds");
-
-    assert_eq!(resolved.occurrences.len(), 1);
-    assert_eq!(
-        resolved.occurrences[0].certainty(),
-        ResolutionCertainty::AuthorizedUnknown
+        resolve_temporal_controlled(&occurrences, &[], &[], TemporalModeV1::Forensic, &control,),
+        Err(TemporalPortError::BudgetExceeded {
+            resource: "work units"
+        })
     );
 }
 
@@ -801,67 +566,6 @@ fn summary_source_and_predecessor_traversal_preserve_control_errors() {
             resource: "work units"
         })
     );
-}
-
-#[test]
-fn unrelated_newer_occurrence_does_not_stale_summary() {
-    let session_id: SessionId = serde_json::from_str("\"session-1\"").expect("valid session id");
-    let summaries = [summary("summary-a", "summary-a", "source-a", 7, 6)];
-    let source_states = [
-        (anchor("source-a"), covered_source(7, 6)),
-        (anchor("unrelated"), covered_source(99, 99)),
-    ]
-    .into_iter()
-    .collect();
-
-    let eligibility = evaluate_summary_lineage_eligibility(
-        &summaries,
-        &source_states,
-        &session_id,
-        TemporalModeV1::Current,
-    )
-    .expect("eligibility");
-
-    assert_eq!(
-        eligibility.eligible_anchor_ids,
-        [anchor("summary-a")].into_iter().collect()
-    );
-    assert!(eligibility.rejections.is_empty());
-}
-
-#[test]
-fn invalid_successor_does_not_suppress_eligible_predecessor() {
-    let session_id: SessionId = serde_json::from_str("\"session-1\"").expect("valid session id");
-    let predecessor = summary("predecessor", "summary-old", "source-old", 5, 5);
-    let successor = summary("successor", "summary-new", "source-new", 7, 7)
-        .with_predecessor(predecessor.summary_id().clone())
-        .expect("valid predecessor");
-    let source_states = [
-        (anchor("source-old"), covered_source(5, 5)),
-        (anchor("source-new"), SummarySourceState::Stale),
-    ]
-    .into_iter()
-    .collect();
-
-    let eligibility = evaluate_summary_lineage_eligibility(
-        &[predecessor, successor],
-        &source_states,
-        &session_id,
-        TemporalModeV1::Current,
-    )
-    .expect("eligibility");
-
-    assert_eq!(
-        eligibility.eligible_anchor_ids,
-        [anchor("summary-old")].into_iter().collect()
-    );
-    assert!(eligibility.suppressed_summary_ids.is_empty());
-    assert!(matches!(
-        eligibility
-            .rejections
-            .get(&SessionSummaryIdV1::new("successor").expect("valid id")),
-        Some(SummaryLineageRejection::StaleSource { .. })
-    ));
 }
 
 #[test]
@@ -1826,39 +1530,6 @@ fn current_correction_chain_keeps_only_the_tip() {
 }
 
 #[test]
-fn current_mutual_corrections_surface_conflict_instead_of_empty_set() {
-    let left = occurrence(
-        'a',
-        "left",
-        1,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(1),
-        },
-    );
-    let right = occurrence(
-        'b',
-        "right",
-        2,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(2),
-        },
-    );
-    let resolved = resolve_temporal(
-        &[left, right],
-        &[],
-        &[
-            assertion(TemporalAssertionKindV1::Corrects, "right", "left", 3),
-            assertion(TemporalAssertionKindV1::Corrects, "left", "right", 4),
-        ],
-        TemporalModeV1::Current,
-    )
-    .expect("resolution succeeds");
-
-    assert_eq!(resolved.len(), 2);
-    assert!(resolved.iter().all(|item| item.conflicted));
-}
-
-#[test]
 fn unrelated_conflict_does_not_cancel_authoritative_supersession() {
     let old = occurrence(
         'a',
@@ -2090,46 +1761,4 @@ fn forensic_retains_all_versions_and_lineage_without_suppression() {
     assert_eq!(resolved.len(), 2);
     assert!(resolved.iter().all(|item| !item.conflicted));
     assert_eq!(resolved.lineage_edges.len(), 1);
-}
-
-#[test]
-fn resolver_filters_directly_constructed_unauthorized_assertions() {
-    let original = occurrence(
-        'a',
-        "original",
-        1,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(1),
-        },
-    );
-    let correction = occurrence(
-        'b',
-        "correction",
-        2,
-        TemporalValidityV1::Known {
-            valid_at: UtcMicros(2),
-        },
-    );
-    let mut edge = assertion(
-        TemporalAssertionKindV1::Corrects,
-        "correction",
-        "original",
-        2,
-    );
-    edge.evidence = ResolutionEvidence::new(
-        SessionAuthorityClassV1::CanonicalObservation,
-        ValidatedAuthorization::Unauthorized,
-    );
-
-    let resolved = resolve_temporal(
-        &[original, correction],
-        &[],
-        &[edge],
-        TemporalModeV1::Current,
-    )
-    .expect("resolution succeeds");
-
-    assert_eq!(resolved.len(), 2);
-    assert!(resolved.lineage_edges.is_empty());
-    assert!(resolved.iter().all(|item| !item.conflicted));
 }

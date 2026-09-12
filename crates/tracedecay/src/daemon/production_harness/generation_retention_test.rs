@@ -961,6 +961,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
                 .as_ref(),
             &code_store_root,
             &canonical_root,
+            graph.db(),
         )
         .await,
         DoctorStorageFamilyReadV1::ObservedIncomplete { .. }
@@ -1135,6 +1136,7 @@ async fn mounted_daemon_maintenance_retains_activation_lease_and_converges_after
             .as_ref(),
         &code_store_root,
         &canonical_root,
+        restarted_graph.db(),
     )
     .await;
     let DoctorStorageFamilyReadV1::ObservedIncomplete { findings, reason } = doctor else {

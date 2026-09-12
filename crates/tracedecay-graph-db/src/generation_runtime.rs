@@ -2850,7 +2850,6 @@ mod tests {
 
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::hint::black_box;
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -2872,11 +2871,10 @@ mod tests {
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
         GraphEntity, GraphEntityId, GraphFormatVersion, GraphGenerationDependency,
-        GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphLabel,
-        GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProperty,
-        GraphPropertyName, GraphVector, GraphVectorIndexRequest, GraphVectorIndexStatus,
-        GraphWatermark, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration,
-        VectorMetric,
+        GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
+        GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName, GraphVector,
+        GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark,
+        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration, VectorMetric,
     };
 
     use super::{
@@ -3703,85 +3701,6 @@ mod tests {
             "one native data page and one metadata bind must be committed"
         );
         owner.close().unwrap();
-    }
-
-    #[test]
-    #[ignore = "large synthetic staging timing/RSS harness; run explicitly in a fresh process"]
-    fn generation_stage_ownership_sandbox_probe() {
-        let rows = std::env::var("TRACEDECAY_STAGE_BENCH_ROWS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(250_000usize);
-        let mode =
-            std::env::var("TRACEDECAY_STAGE_BENCH_MODE").unwrap_or_else(|_| "owned".to_owned());
-        let payload = "staging-payload-".repeat(16);
-        let manifest = Arc::new(
-            GraphGenerationManifest::new(
-                GraphProjectionIdentity::new(
-                    GraphNamespace::new("stage-ownership-sandbox").unwrap(),
-                    GraphProjectionId::new("entities").unwrap(),
-                ),
-                GraphGenerationId::new("stage-ownership-sandbox-generation").unwrap(),
-                SourceGeneration::new("stage-ownership-sandbox-source").unwrap(),
-                GraphWatermark::new("stage-ownership-sandbox-watermark").unwrap(),
-                vec![],
-                (0..rows)
-                    .map(|index| {
-                        GraphEntity::new(
-                            GraphEntityId::new(format!("entity:{index:08}")).unwrap(),
-                            BTreeSet::from([GraphLabel::new("symbol").unwrap()]),
-                            BTreeMap::from([(
-                                GraphPropertyName::new("payload").unwrap(),
-                                GraphProperty::String(payload.clone()),
-                            )]),
-                        )
-                        .unwrap()
-                    })
-                    .collect(),
-                vec![],
-            )
-            .unwrap(),
-        );
-        let retained = match mode.as_str() {
-            "owned" => None,
-            "shared" => Some(Arc::clone(&manifest)),
-            other => panic!("unknown TRACEDECAY_STAGE_BENCH_MODE `{other}`"),
-        };
-        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
-        let temp = TempDir::new().unwrap();
-        let (owner, database) = persistent_database(&temp);
-        let rss_before = proc_status_kib("VmRSS");
-        let hwm_before = proc_status_kib("VmHWM");
-        let started = Instant::now();
-        database
-            .apply_generation_unverified_with_digest(manifest, &expected, &|| Ok(()))
-            .unwrap();
-        let elapsed = started.elapsed();
-        black_box(&retained);
-        println!(
-            "generation_stage mode={mode} rows={rows} elapsed_ms={} rss_before_kib={} \
-             rss_after_kib={} hwm_before_kib={} hwm_after_kib={}",
-            elapsed.as_millis(),
-            rss_before,
-            proc_status_kib("VmRSS"),
-            hwm_before,
-            proc_status_kib("VmHWM"),
-        );
-        drop(retained);
-        owner.close().unwrap();
-    }
-
-    fn proc_status_kib(field: &str) -> u64 {
-        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-            return 0;
-        };
-        let prefix = format!("{field}:");
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix(&prefix))
-            .and_then(|value| value.split_whitespace().next())
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0)
     }
 
     #[test]

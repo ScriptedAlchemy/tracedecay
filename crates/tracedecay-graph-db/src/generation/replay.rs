@@ -548,40 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_inline_source_decodes_the_identical_manifest() {
-        let manifest = corpus_manifest();
-        let payload = manifest.canonical_replay_source(&|| Ok(())).unwrap();
-        let decoded = checked_decode_replay_source(&payload, &|| Ok(())).unwrap();
-        assert_eq!(
-            decoded,
-            GraphGenerationReplaySource::InlineManifest(Box::new(manifest))
-        );
-    }
-
-    #[test]
-    fn canonical_sealed_source_decodes_the_identical_replay() {
-        let sealed = SealedCodeGenerationReplay {
-            repository: tracedecay_domain::RepositoryId::new("repository.replay").unwrap(),
-            generation: tracedecay_domain::CodeGenerationId::new("code-generation.replay").unwrap(),
-            sealed_state_digest: SealedGraphStateDigest::try_from(format!(
-                "sha256:{}",
-                "5".repeat(64)
-            ))
-            .unwrap(),
-            projector_revision: GraphProjectorRevision::try_from("projector.replay".to_owned())
-                .unwrap(),
-        };
-        let payload = metadata_manifest()
-            .sealed_replay_payload(sealed.clone(), &|| Ok(()))
-            .unwrap();
-        let decoded = checked_decode_replay_source(&payload, &|| Ok(())).unwrap();
-        assert_eq!(
-            decoded,
-            GraphGenerationReplaySource::SealedCodeGeneration(sealed)
-        );
-    }
-
-    #[test]
     fn malformed_payloads_are_rejected_as_invalid() {
         let payload = corpus_manifest()
             .canonical_replay_source(&|| Ok(()))

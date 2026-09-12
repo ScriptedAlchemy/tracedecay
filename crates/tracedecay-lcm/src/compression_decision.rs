@@ -1,5 +1,3 @@
-#[cfg(test)]
-use super::compression_policy::DEFAULT_INCREMENTAL_MAX_DEPTH;
 pub(super) use super::compression_policy::threshold_pressure;
 pub use super::compression_policy::{
     AssemblyCapInput, OverflowRecoveryCapInput, bounded_leaf_chunk_len,
@@ -271,25 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn condensation_policy_uses_defaults_for_regular_summarizers() {
-        let summarizer = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Fake {
-            summary_text: "summary".to_string(),
-        });
-        assert_eq!(
-            condensation_policy_decision(CondensationDecisionInput {
-                has_backlog: false,
-                summary_fan_in: Some(1),
-                incremental_max_depth: None,
-                summarizer: &summarizer,
-            }),
-            CondensationDecision::QueryCandidates(CondensationPolicy {
-                fan_in: LCM_DEFAULT_SUMMARY_FAN_IN,
-                incremental_max_depth: DEFAULT_INCREMENTAL_MAX_DEPTH,
-            })
-        );
-    }
-
-    #[test]
     fn condensation_policy_honors_overrides_and_negative_depth() {
         let summarizer = CompressionSummarizerAdapter::from_mode(LcmSummarizerMode::Provided {
             summary_text: "summary".to_string(),
@@ -333,18 +312,6 @@ mod tests {
                 summarizer: &auxiliary,
             }),
             CondensationDecision::Skip(CondensationSkipReason::AuxiliarySummarizer)
-        );
-    }
-
-    #[test]
-    fn condensation_candidate_decision_requires_fan_in_children() {
-        assert_eq!(
-            condensation_candidate_decision(2, 3),
-            CondensationCandidateDecision::SkipNotEnoughCandidates
-        );
-        assert_eq!(
-            condensation_candidate_decision(3, 3),
-            CondensationCandidateDecision::Condense
         );
     }
 

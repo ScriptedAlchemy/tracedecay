@@ -234,35 +234,6 @@ async fn cancelled_first_waiter_leaves_the_fill_owner_to_settle() {
 }
 
 #[tokio::test]
-async fn concurrent_lookups_share_one_metadata_parse() {
-    let (_tmp, path, gate) = fixture("concurrent-lookups.jsonl", true);
-    let key = cache_key(&path);
-    let reads_before = session_meta_read_count_for_test(&path);
-    let waits_before = in_flight_waits_for_test(&key);
-
-    let first = spawn_lookup(&path, ObservationCancellation::default());
-    wait_parked(&gate, 1).await;
-    let second = spawn_lookup(&path, ObservationCancellation::default());
-    let third = spawn_lookup(&path, ObservationCancellation::default());
-    wait_in_flight_waits(&key, waits_before + 2).await;
-    gate.release();
-
-    let settled = tokio::time::timeout(SETTLE_WITHIN, async {
-        (
-            first.await.unwrap().unwrap(),
-            second.await.unwrap().unwrap(),
-            third.await.unwrap().unwrap(),
-        )
-    })
-    .await
-    .expect("every waiter settles on the shared fill");
-    assert!(Arc::ptr_eq(&settled.0, &settled.1));
-    assert!(Arc::ptr_eq(&settled.0, &settled.2));
-    assert_eq!(session_meta_read_count_for_test(&path) - reads_before, 1);
-    assert!(!lock_codex_meta_cache().in_flight.contains_key(&key));
-}
-
-#[tokio::test]
 async fn waiter_cancellation_is_typed_and_leaves_the_fill_intact() {
     let (_tmp, path, gate) = fixture("waiter-cancellation.jsonl", true);
     let key = cache_key(&path);

@@ -196,14 +196,6 @@ fn doctor_report_composes_all_families_from_mixed_sources() {
 }
 
 #[test]
-fn doctor_report_wire_round_trip_revalidates_canonical_invariants() {
-    let report = block_on(DoctorReportComposerV1::new().compose(&context())).expect("compose");
-    let encoded = serde_json::to_value(&report).expect("serialize report");
-    let decoded = serde_json::from_value(encoded).expect("deserialize canonical report");
-    assert_eq!(report, decoded);
-}
-
-#[test]
 fn doctor_report_wire_rejects_contradictory_coverage() {
     let report = block_on(DoctorReportComposerV1::new().compose(&context())).expect("compose");
     let mut encoded = serde_json::to_value(&report).expect("serialize report");

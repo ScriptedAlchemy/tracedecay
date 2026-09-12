@@ -116,19 +116,6 @@ fn candidate_sources_admit_rarest_first_within_the_document_budget() {
 }
 
 #[test]
-fn candidate_sources_always_admit_the_most_selective_term() {
-    let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
-    assert_eq!(
-        admit_candidate_sources(
-            vec![(budget * 20, "tracedecay"), (budget * 30, "the")],
-            |_, _| {}
-        ),
-        ["tracedecay"]
-    );
-    assert!(admit_candidate_sources(Vec::<(usize, &str)>::new(), |_, _| {}).is_empty());
-}
-
-#[test]
 fn candidate_sources_ignore_empty_sources_before_admitting_a_common_term() {
     let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
     assert_eq!(

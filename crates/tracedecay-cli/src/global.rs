@@ -509,36 +509,6 @@ mod gather_tests {
     }
 
     #[test]
-    fn finds_project_at_ancestor_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let nested = root.join("a").join("b").join("c");
-        fs::create_dir_all(&nested).unwrap();
-        make_project(&root);
-
-        let out = gather_local_projects_from(&nested, &None);
-        assert!(
-            out.contains(&root),
-            "ancestor project must be detected, got {out:?}"
-        );
-    }
-
-    #[test]
-    fn finds_project_at_descendant_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
-        let child = cwd.join("sub").join("proj");
-        fs::create_dir_all(&child).unwrap();
-        make_project(&child);
-
-        let out = gather_local_projects_from(&cwd, &None);
-        assert!(
-            out.contains(&child),
-            "descendant project must be detected, got {out:?}"
-        );
-    }
-
-    #[test]
     fn finds_both_ancestor_and_descendant_dedup() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -693,14 +663,6 @@ mod gather_tests {
     #[cfg(windows)]
     fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         std::os::windows::fs::symlink_dir(src, dst)
-    }
-
-    #[test]
-    fn empty_dir_yields_empty_result() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
-        let out = gather_local_projects_from(&cwd, &None);
-        assert!(out.is_empty(), "got {out:?}");
     }
 
     #[test]

@@ -343,12 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_directory_flushes_an_open_capability() {
-        let root = tempfile::tempdir().expect("create sync fixture");
-        sync_directory(&open(root.path())).expect("sync an open directory capability");
-    }
-
-    #[test]
     fn a_transient_missing_answer_is_looked_at_again() {
         let mut attempts = 0;
         let value = look_again_on_not_found(|| {

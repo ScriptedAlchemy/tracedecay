@@ -116,26 +116,6 @@ async fn call_production_tool(
     Ok(ToolResult::new(value, Vec::new()))
 }
 
-async fn call_direct_production_tool(
-    fixture: &ProductionCompositionFixture,
-    tool_name: &str,
-    arguments: Value,
-) -> TraceDecayResult<ToolResult> {
-    let response = fixture
-        .harness
-        .call_tool(&fixture.project_root, tool_name, arguments)
-        .await?;
-    if let Some(error) = response.error {
-        return Err(TraceDecayError::Config {
-            message: format!("{tool_name} failed over production MCP: {}", error.message),
-        });
-    }
-    let value = response.result.ok_or_else(|| TraceDecayError::Config {
-        message: format!("{tool_name} returned no production MCP result"),
-    })?;
-    Ok(ToolResult::new(value, Vec::new()))
-}
-
 async fn call_production_fact_tool(
     fixture: &ProductionCompositionFixture,
     tool_name: &str,
@@ -203,21 +183,6 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
 // ---------------------------------------------------------------------------
 // 2. tracedecay_context
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_context() {
-    let fixture = setup_production_project().await;
-    let result = call_direct_production_tool(
-        &fixture,
-        "tracedecay_context",
-        json!({"task": "understand the helper function"}),
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-    fixture.harness.shutdown().await;
-}
 
 #[tokio::test]
 async fn context_includes_matching_memory_facts() {

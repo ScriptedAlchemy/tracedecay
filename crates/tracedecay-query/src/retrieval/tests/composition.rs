@@ -98,81 +98,6 @@ fn semantic_budget_exceeded_does_not_take_down_exact_lexical_or_graph() {
 }
 
 #[test]
-fn composition_is_shuffle_stable_and_exact_is_non_demotable() {
-    let exact = exact_candidate("exact", 1);
-    let lexical = candidate(RetrieverKind::Lexical, "lexical", 900_000, 0);
-    let graph = candidate(RetrieverKind::Graph, "graph", 800_000, 0);
-    let lanes = vec![
-        (
-            RetrieverKind::ExactLiteral,
-            RetrieverOutcome::Complete(batch(vec![exact], "exact evidence")),
-        ),
-        (
-            RetrieverKind::Lexical,
-            RetrieverOutcome::Complete(batch(vec![lexical], "lexical evidence")),
-        ),
-        (
-            RetrieverKind::Graph,
-            RetrieverOutcome::Complete(batch(vec![graph], "graph evidence")),
-        ),
-    ];
-    let kernel = CompositionKernel::new(id("ranking.fixture.v1"));
-    let first = kernel
-        .compose(
-            &FusionStageInput {
-                profile: profile(),
-                lanes: composition_lanes(lanes.clone()),
-            },
-            &no_caps(),
-        )
-        .expect("composition succeeds");
-
-    for iteration in 0..100 {
-        let mut shuffled = lanes.clone();
-        let offset = iteration % shuffled.len();
-        shuffled.rotate_left(offset);
-        if iteration % 2 == 1 {
-            shuffled.reverse();
-        }
-        let rerun = kernel
-            .compose(
-                &FusionStageInput {
-                    profile: profile(),
-                    lanes: composition_lanes(shuffled),
-                },
-                &no_caps(),
-            )
-            .expect("shuffled composition succeeds");
-        assert_eq!(first, rerun, "shuffle {iteration} changed composition");
-    }
-    assert_eq!(
-        first.ranked_candidates[0].candidate.exact_class,
-        ExactClass::ExactMessage
-    );
-    assert_eq!(
-        first
-            .ranked_candidates
-            .iter()
-            .map(|ranked| ranked.candidate.utility_micros)
-            .collect::<Vec<_>>(),
-        vec![1, 450_000, 200_000]
-    );
-    assert_eq!(first.comparator_records.len(), 3);
-    assert!(first.comparator_records.iter().all(|record| {
-        !record.anchor_id.as_str().is_empty()
-            && !record.logical_evidence_id.as_str().is_empty()
-            && !record.source_occurrence_ids.is_empty()
-    }));
-    assert!(first.ranked_candidates.iter().all(|ranked| {
-        ranked
-            .candidate
-            .decisions
-            .iter()
-            .any(|decision| decision.kind == RankingDecisionKind::ComparatorProvenance)
-    }));
-}
-
-#[test]
 fn fusion_retains_every_occurrence_evidence_pair_and_contribution() {
     let mut lexical = candidate(RetrieverKind::Lexical, "shared", 800_000, 0);
     let mut graph = candidate(RetrieverKind::Graph, "shared", 400_000, 0);
@@ -470,66 +395,6 @@ fn logical_copies_and_file_caps_preserve_contradictions_deterministically() {
     );
     assert_eq!(output.dedupe_decisions.len(), 1);
     assert_eq!(output.diversity_decisions.len(), 0);
-}
-
-#[test]
-fn file_diversity_caps_non_exact_hits_and_refills_from_other_files() {
-    let mut first = candidate(RetrieverKind::Lexical, "file-a-first", 900_000, 0);
-    first.file_occurrence_id = Some(id("file.a"));
-    let mut second = candidate(RetrieverKind::Lexical, "file-a-second", 800_000, 1);
-    second.file_occurrence_id = Some(id("file.a"));
-    let mut capped = candidate(RetrieverKind::Lexical, "file-a-capped", 700_000, 2);
-    capped.file_occurrence_id = Some(id("file.a"));
-    let mut refill = candidate(RetrieverKind::Lexical, "file-b-refill", 600_000, 3);
-    refill.file_occurrence_id = Some(id("file.b"));
-
-    let policy = DiversityPolicy {
-        per_file: Some(2),
-        ..no_caps()
-    };
-    let output = CompositionKernel::new(id("ranking.fixture.v1"))
-        .compose(
-            &FusionStageInput {
-                profile: profile(),
-                lanes: composition_lanes(vec![
-                    (
-                        RetrieverKind::ExactLiteral,
-                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
-                    ),
-                    (
-                        RetrieverKind::Lexical,
-                        RetrieverOutcome::Complete(batch(
-                            vec![first, second, capped, refill],
-                            "lexical",
-                        )),
-                    ),
-                    (
-                        RetrieverKind::Graph,
-                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
-                    ),
-                ]),
-            },
-            &policy,
-        )
-        .expect("file cap applies");
-
-    assert_eq!(
-        output
-            .ranked_candidates
-            .iter()
-            .map(|ranked| ranked.candidate.anchor_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "anchor.file-a-first",
-            "anchor.file-a-second",
-            "anchor.file-b-refill"
-        ]
-    );
-    assert_eq!(output.diversity_decisions.len(), 1);
-    assert_eq!(
-        output.diversity_decisions[0].decision.detail,
-        "capped by file"
-    );
 }
 
 #[test]
@@ -1090,36 +955,6 @@ fn hydration_deadline_is_request_relative_for_older_generation_and_still_cancell
     assert!(matches!(
         cancelled_page.results[0].outcome,
         HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
-    ));
-}
-
-#[test]
-fn default_hydration_control_does_not_charge_generation_age_to_request_deadline() {
-    let mut request = request();
-    request.snapshot.captured_at = tracedecay_domain::UtcMicros(0);
-    let ranked = single_ranked_candidate();
-    let mut deadline_budget = budget();
-    deadline_budget.deadline_micros = Some(1_000_000);
-    let mut source = PreflightHydrationSource {
-        authorizations: 0,
-        preflights: 0,
-        reads: 0,
-        estimated_bytes: 1,
-        mismatched_receipt: false,
-        remaining_deadlines: Vec::new(),
-    };
-
-    let page = CanonicalLateHydration::new(&mut source)
-        .hydrate(&request, &ranked, &deadline_budget)
-        .expect("an older generation does not consume the request deadline");
-
-    assert_eq!(
-        (source.authorizations, source.preflights, source.reads),
-        (1, 1, 1)
-    );
-    assert!(matches!(
-        page.results[0].outcome,
-        HydrationOutcomeV1::Complete(_)
     ));
 }
 

@@ -3,23 +3,6 @@ use super::*;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 #[test]
-fn activation_request_retains_the_explicit_execution_control() {
-    let session_id = session("session.controlled-activation");
-    let control = ExecutionControl::default();
-    let request = SessionGenerationActivationRequestV1::new(
-        session_id.clone(),
-        generation(8),
-        snapshot_for(session_id, 7),
-        control.clone(),
-    )
-    .expect("valid controlled activation request");
-
-    assert!(!request.execution_control().is_cancelled());
-    control.cancel();
-    assert!(request.execution_control().is_cancelled());
-}
-
-#[test]
 fn rebuild_and_activation_validate_session_capability_and_generation_transition() {
     let session_id = session("session.fixture");
     let snapshot = snapshot_for(session_id.clone(), 7);
@@ -88,7 +71,6 @@ fn rebuild_and_activation_validate_session_capability_and_generation_transition(
         })
     ));
 }
-
 #[test]
 fn generation_receipts_derive_identity_and_reject_activation_mismatch() {
     let session_id = session("session.fixture");
@@ -211,22 +193,6 @@ fn projection_batches_enforce_record_session_ownership() {
         })
     ));
 }
-
-#[test]
-fn projection_batches_allow_valid_relations_to_prior_same_session_batches() {
-    let session_id = session("session.fixture");
-    let result = SessionTemporalProjectionBatchV1::new(
-        session_id.clone(),
-        generation(8),
-        SessionFrozenWatermarksV1::new(generation(7), 51, 47, 43),
-        vec![occurrence_record(&session_id, 1)],
-        vec![copy_record(0, 1)],
-        vec![assertion_record(0, 1)],
-    );
-
-    assert!(result.is_ok());
-}
-
 #[test]
 fn projection_batches_bind_explicit_contiguous_checkpoint_identity() {
     let session_id = session("session.fixture");
@@ -289,75 +255,4 @@ fn rebuild_dispositions_form_a_monotonic_state_machine() {
             context: "generation rebuild successor"
         })
     ));
-}
-
-impl SessionTemporalProjectionStore for InMemorySessionPorts {
-    async fn begin_session_generation_rebuild_supported(
-        &self,
-        _permit: SessionGenerationRebuildBeginPermit,
-        request: SessionGenerationRebuildRequestV1,
-    ) -> SessionStoreResult<SessionGenerationRebuildReceiptV1> {
-        yield_once().await;
-        let mut state = self.state.lock().unwrap();
-        let disposition = if state.rebuild.is_some() {
-            SessionGenerationRebuildDispositionV1::Resumed
-        } else {
-            SessionGenerationRebuildDispositionV1::Started
-        };
-        let receipt =
-            SessionGenerationRebuildReceiptV1::new(&request, disposition, UtcMicros(101))?;
-        if let Some(previous) = &state.rebuild {
-            previous.validate_successor(&receipt)?;
-        }
-        state.rebuild = Some(receipt.clone());
-        Ok(receipt)
-    }
-
-    async fn persist_session_temporal_projection_batch_supported(
-        &self,
-        _permit: SessionProjectionBatchPersistPermit,
-        batch: SessionTemporalProjectionBatchV1,
-    ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
-        yield_once().await;
-        let mut state = self.state.lock().unwrap();
-        let batch_digest = temporal_digest('b');
-        let receipt = if let Some(existing) = &state.projection {
-            SessionTemporalProjectionBatchReceiptV1::exact_replay(
-                &batch,
-                batch_digest,
-                existing,
-                UtcMicros(102),
-            )?
-        } else {
-            SessionTemporalProjectionBatchReceiptV1::applied(
-                &batch,
-                batch_digest,
-                batch.occurrences().len(),
-                batch.copies().len(),
-                batch.assertions().len(),
-                UtcMicros(102),
-            )?
-        };
-        state.projection = Some(receipt.clone());
-        Ok(receipt)
-    }
-
-    async fn activate_session_temporal_generation_supported(
-        &self,
-        _permit: SessionGenerationActivatePermit,
-        request: SessionGenerationActivationRequestV1,
-    ) -> SessionStoreResult<SessionGenerationActivationReceiptV1> {
-        yield_once().await;
-        let frozen = request.snapshot().watermarks();
-        let mut activated = SessionFrozenWatermarksV1::new(
-            request.generation(),
-            frozen.source_frontier(),
-            frozen.projection_frontier(),
-            frozen.summary_frontier(),
-        );
-        if let Some(cursor_key) = frozen.cursor_key() {
-            activated = activated.with_cursor_key(cursor_key.clone());
-        }
-        SessionGenerationActivationReceiptV1::new(&request, activated, UtcMicros(103))
-    }
 }

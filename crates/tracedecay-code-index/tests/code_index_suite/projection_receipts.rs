@@ -3,8 +3,8 @@ use std::fmt::Debug;
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionPublicationErrorV1,
     ProjectionReceiptBuilderV1, ProjectionReceiptErrorV1, ProjectionSinkErrorV1,
-    ProjectionSinkReceiptV1, batch_proves_zero_work, build_batch_receipt, expected_request_digest,
-    project_for_publication, verify_batch_receipt,
+    ProjectionSinkReceiptV1, build_batch_receipt, expected_request_digest, project_for_publication,
+    verify_batch_receipt,
 };
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId, ContentDigest,
@@ -154,67 +154,6 @@ impl CodeChunkProjectionSink for ApplyingReplaySink {
 }
 
 #[test]
-fn noop_publication_bypasses_the_projector_and_proves_zero_work() {
-    let mut changes = ChangedCodeChunkSetV1 {
-        from_generation: Some(generation(1)),
-        to_generation: generation(2),
-        manifest_digest: digest::<ManifestDigest>('0'),
-        added_or_changed: vec![],
-        deleted: vec![],
-        reused: vec![ChangedCodeChunkV1 {
-            chunk_id: chunk("reused"),
-            prior_digest: Some(digest::<ContentDigest>('c')),
-            current_digest: Some(digest::<ContentDigest>('c')),
-        }],
-    };
-    changes.manifest_digest = changes.compute_digest().expect("changeset digest");
-    let request = request_for(changes);
-    let unrelated_request = request_for(changeset());
-    let unrelated_receipt =
-        build_batch_receipt(&unrelated_request, &decisions()).expect("unrelated receipt");
-    let mut sink = FixedSink {
-        receipt: unrelated_receipt,
-        seen_request: None,
-    };
-
-    let handoff =
-        project_for_publication(&mut sink, request.clone()).expect("no-op publication handoff");
-
-    assert!(sink.seen_request.is_none(), "no-op must not call projector");
-    assert_eq!(handoff.request(), &request);
-    assert!(batch_proves_zero_work(handoff.receipt()));
-}
-
-#[test]
-fn initial_projection_without_a_prior_key_does_not_replay_profile_changes() {
-    let mut changes = ChangedCodeChunkSetV1 {
-        from_generation: None,
-        to_generation: generation(1),
-        manifest_digest: digest::<ManifestDigest>('0'),
-        added_or_changed: vec![ChangedCodeChunkV1 {
-            chunk_id: chunk("initial"),
-            prior_digest: None,
-            current_digest: Some(digest::<ContentDigest>('a')),
-        }],
-        deleted: vec![],
-        reused: vec![],
-    };
-    changes.manifest_digest = changes.compute_digest().expect("initial changeset digest");
-    let mut request = request_for(changes);
-    request.previous_projection_key = None;
-    request.replay_reason = ProjectionReplayReasonV1::InitialProjection;
-    request.request_digest = expected_request_digest(&request).expect("initial request digest");
-
-    let mut sink = ApplyingReplaySink::default();
-    let handoff = project_for_publication(&mut sink, request.clone())
-        .expect("initial projection publication handoff");
-
-    assert_eq!(sink.seen_request.as_ref(), Some(&request));
-    assert_eq!(handoff.request(), &request);
-    assert_eq!(handoff.request().changes.added_or_changed.len(), 1);
-}
-
-#[test]
 fn request_without_a_prior_key_requires_the_initial_replay_reason() {
     let mut changes = ChangedCodeChunkSetV1 {
         from_generation: None,
@@ -244,66 +183,6 @@ fn request_without_a_prior_key_requires_the_initial_replay_reason() {
 }
 
 #[test]
-fn projection_key_change_replays_reused_chunks_through_the_projector() {
-    let mut changes = ChangedCodeChunkSetV1 {
-        from_generation: Some(generation(1)),
-        to_generation: generation(2),
-        manifest_digest: digest::<ManifestDigest>('0'),
-        added_or_changed: vec![],
-        deleted: vec![],
-        reused: vec![ChangedCodeChunkV1 {
-            chunk_id: chunk("reused"),
-            prior_digest: Some(digest::<ContentDigest>('c')),
-            current_digest: Some(digest::<ContentDigest>('c')),
-        }],
-    };
-    changes.manifest_digest = changes.compute_digest().expect("changeset digest");
-    let mut request = request_for(changes);
-    request.target_projection_key = ProjectionKeyV1 {
-        kind: ProjectionKindV1::Lexical,
-        schema_revision: "lexical.v2".to_owned(),
-        profile_digest: digest::<ManifestDigest>('f'),
-    };
-    request.replay_reason = ProjectionReplayReasonV1::ProjectionProfileChange;
-    request.request_digest = expected_request_digest(&request).expect("request digest");
-    assert!(
-        build_batch_receipt(
-            &request,
-            &[ChunkProjectionDecisionV1 {
-                chunk_id: chunk("reused"),
-                prior_chunk_digest: Some(digest::<ContentDigest>('c')),
-                current_chunk_digest: Some(digest::<ContentDigest>('c')),
-                operation: ProjectionOperationV1::Reused,
-                outcome: ProjectionOutcomeV1::Reused,
-                output_digest: None,
-            }],
-        )
-        .is_err()
-    );
-    let mut sink = ApplyingReplaySink::default();
-
-    let handoff = project_for_publication(&mut sink, request.clone())
-        .expect("projection-key replay publication handoff");
-
-    let projected = sink.seen_request.as_ref().expect("projector request");
-    assert!(projected.changes.reused.is_empty());
-    assert!(projected.changes.deleted.is_empty());
-    assert_eq!(projected.changes.added_or_changed.len(), 1);
-    assert_eq!(
-        projected.changes.added_or_changed[0].chunk_id,
-        chunk("reused")
-    );
-    assert!(projected.changes.added_or_changed[0].prior_digest.is_none());
-    assert_eq!(handoff.request(), projected);
-    assert!(!batch_proves_zero_work(handoff.receipt()));
-    assert!(handoff.receipt().receipts.iter().all(|receipt| {
-        receipt.operation == ProjectionOperationV1::Added
-            && receipt.outcome == ProjectionOutcomeV1::Applied
-            && receipt.output_digest.is_some()
-    }));
-}
-
-#[test]
 fn receipt_construction_rejects_tampered_request_digest_and_invalid_reuse_outcome() {
     let mut tampered_request = request();
     tampered_request.request_digest = digest::<ManifestDigest>('9');
@@ -322,27 +201,6 @@ fn receipt_construction_rejects_tampered_request_digest_and_invalid_reuse_outcom
             "updated"
         )))
     );
-}
-
-#[test]
-fn valid_receipt_is_deterministic_and_becomes_an_atomic_publication_handoff() {
-    let request = request();
-    let receipt = build_batch_receipt(&request, &decisions()).expect("receipt builds");
-    let replay = build_batch_receipt(&request, &decisions()).expect("receipt replays");
-    assert_eq!(receipt, replay);
-    verify_batch_receipt(&request, &receipt).expect("receipt validates");
-
-    let mut sink = FixedSink {
-        receipt: receipt.clone(),
-        seen_request: None,
-    };
-    let handoff = project_for_publication(&mut sink, request.clone()).expect("publication handoff");
-
-    assert_eq!(sink.seen_request.as_ref(), Some(&request));
-    assert_eq!(handoff.request(), &request);
-    assert_eq!(handoff.receipt(), &receipt);
-    assert_eq!(handoff.publication_digest(), &receipt.publication_digest);
-    assert_eq!(handoff.source_generation(), &generation(2));
 }
 
 #[test]

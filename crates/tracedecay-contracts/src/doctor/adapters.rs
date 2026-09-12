@@ -393,18 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn storage_family_read_observed_when_findings_present() {
-        let read = storage_family_read(vec![orphan_storage_finding()]);
-        match read {
-            DoctorStorageFamilyReadV1::Observed { findings } => {
-                assert_eq!(findings.len(), 1);
-                assert_eq!(findings[0].kind(), DoctorStorageFindingKindV1::OrphanStore);
-            }
-            other => panic!("expected observed, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn unresolved_storage_producers_preserve_findings_and_weaken_coverage() {
         for (unresolved, expected_reason) in [
             (

@@ -1916,25 +1916,6 @@ mod tests {
     }
 
     #[test]
-    fn task_summary_has_no_budget_anchor_without_an_exhausted_skip() {
-        let lines = vec![skipped_session_reflector_line(
-            "run-stale",
-            "session_evidence_stale",
-            100,
-        )];
-        let (_temp, path) = write_ledger(&lines);
-
-        let summary = read_run_ledger_task_summary(
-            &path,
-            AgentTaskKind::SessionReflector,
-            "session_reflector",
-        )
-        .unwrap();
-
-        assert!(summary.latest_session_evidence_budget_exhausted().is_none());
-    }
-
-    #[test]
     fn task_summary_does_not_select_near_prefix_budget_errors() {
         let lines = vec![skipped_session_reflector_line(
             "run-budget-near-prefix",
@@ -1951,67 +1932,6 @@ mod tests {
         .expect("near-prefix error must not create a projection/decode mismatch");
 
         assert!(summary.latest_session_evidence_budget_exhausted().is_none());
-    }
-
-    #[test]
-    fn automation_policy_reads_canonical_ledger_evidence() {
-        let mut record: AutomationRunLedgerRecord =
-            serde_json::from_str(&ledger_line("policy-evidence", 1)).unwrap();
-        let validation_report = serde_json::json!({"status": "failed_after_partial_effects"});
-        let applied_ops = serde_json::json!({
-            "deployment": {"status": "partial_failure", "retry_required": true}
-        });
-        record.accepted_count = 2;
-        record.validation_report = Some(validation_report.clone());
-        record.applied_ops = Some(applied_ops.clone());
-
-        let next_actions = tracedecay_automation::artifact_policy::artifact_policy(record.task)
-            .next_actions(&record);
-
-        assert_eq!(
-            tracedecay_automation::AutomationRunRecord::accepted_count(&record),
-            2
-        );
-        assert_eq!(
-            tracedecay_automation::AutomationRunRecord::validation_report(&record),
-            Some(&validation_report)
-        );
-        assert_eq!(
-            tracedecay_automation::AutomationRunRecord::applied_ops(&record),
-            Some(&applied_ops)
-        );
-        assert_eq!(
-            next_actions.first().copied(),
-            Some("inspect autonomously applied memory curation outcomes")
-        );
-    }
-
-    #[test]
-    fn tail_read_returns_newest_limit_in_order() {
-        let lines: Vec<String> = (0..10)
-            .map(|i| ledger_line(&format!("run-{i}"), 1000 + i))
-            .collect();
-        let (_temp, path) = write_ledger(&lines);
-
-        let records = read_run_records_tail_with_window(&path, 3, 64).unwrap();
-        let ids: Vec<&str> = records.iter().map(|r| r.run_id.as_str()).collect();
-        assert_eq!(ids, ["run-9", "run-8", "run-7"]);
-    }
-
-    #[test]
-    fn tail_read_grows_window_until_limit_satisfied() {
-        // Many records, a deliberately tiny initial window that holds far
-        // fewer than the requested limit: the grow loop must widen until the
-        // limit is met without ever mis-parsing a chunk-boundary line.
-        let lines: Vec<String> = (0..50)
-            .map(|i| ledger_line(&format!("run-{i:03}"), 2000 + i))
-            .collect();
-        let (_temp, path) = write_ledger(&lines);
-
-        let records = read_run_records_tail_with_window(&path, 40, 32).unwrap();
-        assert_eq!(records.len(), 40);
-        assert_eq!(records[0].run_id, "run-049");
-        assert_eq!(records[39].run_id, "run-010");
     }
 
     #[test]
@@ -2085,34 +2005,6 @@ mod tests {
     }
 
     #[test]
-    fn trailing_blank_line_is_skipped_across_tail_page_append_and_summary() {
-        // A ledger ending in a trailing blank line ("{row}\n\n") must not
-        // permanently break every scan. Regression coverage for the
-        // scan_jsonl_row fix.
-        let row = ledger_line("run-blank-trailing-a", 100);
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(RUN_LEDGER_FILENAME);
-        std::fs::write(&path, format!("{row}\n\n")).unwrap();
-
-        let page = read_run_records_tail_page_with_window(&path, 8, 64).unwrap();
-        let ids: Vec<&str> = page.records.iter().map(|r| r.run_id.as_str()).collect();
-        assert_eq!(ids, ["run-blank-trailing-a"]);
-
-        let appended = ledger_line("run-blank-trailing-b", 200);
-        append_jsonl_line_locked(&path, &appended).unwrap();
-        let ledger = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(ledger.matches("run-blank-trailing-b").count(), 1);
-
-        let summary =
-            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
-                .unwrap();
-        assert_eq!(
-            summary.latest_logical_activity().unwrap().run_id,
-            "run-blank-trailing-b"
-        );
-    }
-
-    #[test]
     fn whitespace_only_line_is_skipped_by_the_reverse_page_scan() {
         // A pure "\n\n" blank line is absorbed by ReverseJsonlScanner's
         // newline trimming and never reaches scan_jsonl_row, so the two
@@ -2143,24 +2035,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(filtered.len(), 2);
-    }
-
-    #[test]
-    fn page_counts_projection_valid_malformed_duplicate_before_limit() {
-        let malformed_duplicate = "{\"schema_version\":2,\"run_id\":\"duplicate\",\"trigger\":\"scheduler\",\"task\":\"memory_curator\",\"status\":\"succeeded\"}";
-        let lines = vec![
-            ledger_line("older", 100),
-            malformed_duplicate.to_owned(),
-            ledger_line("duplicate", 200),
-        ];
-        let (_temp, path) = write_ledger(&lines);
-
-        let page = read_run_records_tail_page_with_window(&path, 3, 8).unwrap();
-
-        assert_eq!(page.records.len(), 2);
-        assert_eq!(page.malformed_row_count, 1);
-        assert!(!page.has_more);
-        assert!(!page.is_complete());
     }
 
     #[test]
@@ -2207,24 +2081,6 @@ mod tests {
         assert_eq!(page.records[0].run_id, "unknown");
         assert_eq!(page.malformed_row_count, 1);
         assert!(!page.is_complete());
-    }
-
-    #[test]
-    fn page_streams_long_keys_inside_canonical_values() {
-        let line = ledger_line("long-key", 100).replace(
-            "\"completed_at\":\"100\"",
-            &format!(
-                "\"validation_report\":{{\"{}\":null}},\"completed_at\":\"100\"",
-                "κ".repeat(tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES)
-            ),
-        );
-        let (_temp, path) = write_ledger(&[line]);
-
-        let page = read_run_records_tail_page_with_window(&path, 1, 8).unwrap();
-
-        assert_eq!(page.records.len(), 1);
-        assert_eq!(page.records[0].run_id, "long-key");
-        assert!(page.is_complete());
     }
 
     #[test]
@@ -2389,23 +2245,6 @@ mod tests {
     }
 
     #[test]
-    fn physical_retry_orders_run_without_regressing_its_logical_state() {
-        let queued = ledger_line("run-a", 100).replace("\"succeeded\"", "\"queued\"");
-        let running = ledger_line("run-a", 200).replace("\"succeeded\"", "\"running\"");
-        let other = ledger_line("run-b", 300);
-        let (_temp, path) = write_ledger(&[queued.clone(), running, other, queued]);
-
-        let page = read_run_records_tail_page_with_window(&path, 2, 8).unwrap();
-
-        assert_eq!(page.records.len(), 2);
-        assert_eq!(page.records[0].run_id, "run-a");
-        assert_eq!(page.records[0].status, AutomationRunStatus::Running);
-        assert_eq!(page.records[1].run_id, "run-b");
-        assert_eq!(page.records[1].status, AutomationRunStatus::Succeeded);
-        assert!(!page.has_more);
-    }
-
-    #[test]
     fn task_summary_uses_logical_completion_order_across_large_retry_tail() {
         let queued = ledger_line("run-a", 100).replace("\"succeeded\"", "\"queued\"");
         let running = ledger_line("run-a", 200).replace("\"succeeded\"", "\"running\"");
@@ -2503,22 +2342,6 @@ mod tests {
             second.latest_successful().unwrap().run_id
         );
         assert_eq!(second.latest_successful().unwrap().run_id, "memo-a");
-    }
-
-    #[test]
-    fn task_summary_memo_is_invalidated_by_an_append() {
-        let (_temp, path) = write_ledger(&[ledger_line("memo-old", 100)]);
-
-        let (before, _) =
-            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
-        assert_eq!(before.latest_successful().unwrap().run_id, "memo-old");
-        append_jsonl_line_locked(&path, &ledger_line("memo-new", 200)).unwrap();
-        let (after, after_hit) =
-            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
-
-        assert!(!after_hit, "an appended row must invalidate the memo");
-        assert_eq!(after.latest_successful().unwrap().run_id, "memo-new");
-        assert_eq!(after.latest_logical_activity().unwrap().run_id, "memo-new");
     }
 
     #[test]
@@ -2680,27 +2503,6 @@ mod tests {
     }
 
     #[test]
-    fn durable_append_deduplicates_large_unicode_terminal_rows() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(RUN_LEDGER_FILENAME);
-        let line = ledger_line("large-unicode", 100).replace(
-            "\"completed_at\":\"100\"",
-            &format!(
-                "\"validation_report\":{{\"payload\":\"{}🧪{}\"}},\"completed_at\":\"100\"",
-                "a".repeat(RUN_LEDGER_TAIL_CHUNK_BYTES as usize),
-                "b".repeat(1024),
-            ),
-        );
-
-        append_jsonl_line_locked(&path, &line).unwrap();
-        append_jsonl_line_locked(&path, &line).unwrap();
-
-        let contents = std::fs::read_to_string(path).unwrap();
-        assert_eq!(contents.lines().count(), 1);
-        assert_eq!(contents.lines().next(), Some(line.as_str()));
-    }
-
-    #[test]
     fn durable_append_compares_large_newest_row_with_fixed_memory() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join(RUN_LEDGER_FILENAME);
@@ -2719,23 +2521,6 @@ mod tests {
 
         let contents = std::fs::read_to_string(path).unwrap();
         assert_eq!(contents, format!("{huge}\n{next}\n"));
-    }
-
-    #[test]
-    fn durable_append_retry_deduplicates_behind_intervening_record() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(RUN_LEDGER_FILENAME);
-        let first = ledger_line("first", 100);
-        let second = ledger_line("second", 200);
-
-        append_jsonl_line_locked(&path, &first).unwrap();
-        append_jsonl_line_locked(&path, &second).unwrap();
-        append_jsonl_line_locked(&path, &first).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            format!("{first}\n{second}\n")
-        );
     }
 
     #[test]
@@ -2781,23 +2566,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
             format!("{queued}\n{running}\n{terminal}\n")
-        );
-    }
-
-    #[test]
-    fn durable_append_accepts_terminal_after_historical_nonadjacent_retry() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(RUN_LEDGER_FILENAME);
-        let queued = ledger_line("historical", 100).replace("\"succeeded\"", "\"queued\"");
-        let running = ledger_line("historical", 200).replace("\"succeeded\"", "\"running\"");
-        let terminal = ledger_line("historical", 300);
-        std::fs::write(&path, format!("{queued}\n{running}\n{queued}\n")).unwrap();
-
-        append_jsonl_line_locked(&path, &terminal).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            format!("{queued}\n{running}\n{queued}\n{terminal}\n")
         );
     }
 

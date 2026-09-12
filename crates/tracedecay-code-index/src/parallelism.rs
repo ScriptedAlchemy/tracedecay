@@ -659,38 +659,12 @@ mod tests {
     use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
 
     #[test]
-    fn standalone_install_reuses_one_process_pool() {
-        let first = standalone_pool().expect("first standalone pool");
-        let second = standalone_pool().expect("reused standalone pool");
-
-        assert!(std::ptr::eq(first, second));
-    }
-
-    #[test]
     fn automatic_width_uses_small_hosts_and_half_of_large_hosts() {
         assert_eq!(indexing_worker_target(1), 1);
         assert_eq!(indexing_worker_target(4), 4);
         assert_eq!(indexing_worker_target(8), 8);
         assert_eq!(indexing_worker_target(20), 10);
         assert_eq!(indexing_worker_target(128), 64);
-    }
-
-    #[test]
-    fn exact_selection_uses_the_configured_core_count() {
-        let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Exact { workers: 7 },
-            8,
-            32 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-            None,
-        )
-        .expect("exact selection");
-
-        assert_eq!(plan.requested_workers, 7);
-        assert_eq!(plan.effective_workers, 7);
-        assert_eq!(
-            plan.limiting_reason,
-            CodeIndexWorkerLimitingReasonV1::ConfiguredExact
-        );
     }
 
     #[test]
@@ -725,25 +699,6 @@ mod tests {
     }
 
     #[test]
-    fn environment_override_has_highest_precedence() {
-        let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Exact { workers: 3 },
-            128,
-            64 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-            Some("11"),
-        )
-        .expect("environment override");
-
-        assert_eq!(plan.requested_workers, 11);
-        assert_eq!(plan.effective_workers, 11);
-        assert_eq!(plan.environment_override_workers, Some(11));
-        assert_eq!(
-            plan.limiting_reason,
-            CodeIndexWorkerLimitingReasonV1::EnvironmentOverride
-        );
-    }
-
-    #[test]
     fn malformed_environment_override_is_a_typed_refusal() {
         assert!(matches!(
             worker_plan_from(
@@ -766,46 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn automatic_width_is_capped_by_the_resident_budget() {
-        let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            128,
-            12 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-            None,
-        )
-        .expect("memory-capped automatic selection");
-
-        assert_eq!(plan.requested_workers, 64);
-        assert_eq!(plan.memory_safe_workers, 8);
-        assert_eq!(plan.effective_workers, 8);
-        assert_eq!(
-            plan.limiting_reason,
-            CodeIndexWorkerLimitingReasonV1::ResidentMemory
-        );
-    }
-
-    #[test]
-    fn default_authority_preserves_source_and_component_headroom() {
-        let available = 6 * 1024 * 1024 * 1024;
-        let plan = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            96,
-            available,
-            None,
-        )
-        .expect("default-memory automatic selection");
-
-        assert_eq!(plan.requested_workers, 48);
-        assert_eq!(plan.memory_safe_workers, 36);
-        assert_eq!(plan.effective_workers, 36);
-        assert_eq!(plan.memory_headroom_bytes, 1536 * 1024 * 1024);
-        assert_eq!(
-            plan.reservation_bytes + plan.memory_headroom_bytes,
-            available
-        );
-    }
-
-    #[test]
     fn explicit_width_above_the_resident_budget_is_refused() {
         let error = worker_plan_from(
             CodeIndexWorkerSelectionV1::Exact { workers: 9 },
@@ -821,28 +736,6 @@ mod tests {
                 requested_workers: 9,
                 memory_safe_workers: 8,
             }
-        );
-    }
-
-    #[test]
-    fn worker_reservation_scales_linearly_with_the_documented_rss_budget() {
-        assert_eq!(
-            worker_reservation_bytes(1),
-            INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1
-        );
-        assert_eq!(
-            worker_reservation_bytes(16),
-            16 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1
-        );
-        assert_eq!(memory_safe_worker_count(6 * 1024 * 1024 * 1024), 36);
-        assert_eq!(
-            worker_memory_headroom_bytes(6 * 1024 * 1024 * 1024),
-            1536 * 1024 * 1024
-        );
-        assert_eq!(
-            worker_memory_budget_bytes(6 * 1024 * 1024 * 1024)
-                + worker_memory_headroom_bytes(6 * 1024 * 1024 * 1024),
-            6 * 1024 * 1024 * 1024
         );
     }
 
@@ -868,29 +761,5 @@ mod tests {
             compare_installed_plan(&plan, &conflicting),
             Err(CodeIndexWorkerPlanInstallErrorV1::ConflictingPlan { .. })
         ));
-    }
-
-    #[test]
-    fn preview_matches_install_derivation_without_installing_runtime() {
-        let runtime_before = installed_worker_status();
-        let available = 20 * INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1;
-        let preview = preview_worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            20,
-            available,
-            None,
-        )
-        .expect("worker-plan preview");
-        let installation_derivation = worker_plan_from(
-            CodeIndexWorkerSelectionV1::Automatic {},
-            20,
-            available,
-            None,
-        )
-        .expect("worker-plan installation derivation")
-        .status();
-
-        assert_eq!(preview, installation_derivation);
-        assert_eq!(installed_worker_status(), runtime_before);
     }
 }

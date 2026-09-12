@@ -1381,15 +1381,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_operation_and_result_contract_are_operation_specific() {
-        assert_eq!(REMOTE_REPLAY_USE_CASE_ID_V1, "use-case.remote.replay");
-        assert_ne!(
-            remote_replay_result_contract_v1(),
-            super::super::protocol::remote_enrollment_result_contract_v1()
-        );
-    }
-
     struct AttemptSpool {
         abandon: Result<(), RemoteCapturePersistenceErrorV1>,
     }

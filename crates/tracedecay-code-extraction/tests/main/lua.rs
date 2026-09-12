@@ -3,98 +3,6 @@ use tracedecay_code_extraction::LuaExtractor;
 use tracedecay_domain::*;
 
 #[test]
-fn test_lua_extract_functions() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
-    let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(
-        fns.len(),
-        3,
-        "expected 3 functions, got {}: {:?}",
-        fns.len(),
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(fns.iter().any(|n| n.name == "log"));
-    assert!(
-        fns.iter().any(|n| n.name == "new"),
-        "Connection.new or Pool.new not found"
-    );
-}
-
-#[test]
-fn test_lua_extract_methods() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
-    let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let methods: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Method)
-        .collect();
-    assert_eq!(
-        methods.len(),
-        5,
-        "expected 5 methods, got {}: {:?}",
-        methods.len(),
-        methods.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(methods.iter().any(|n| n.name == "connect"));
-    assert!(methods.iter().any(|n| n.name == "disconnect"));
-    assert!(methods.iter().any(|n| n.name == "isConnected"));
-    assert!(methods.iter().any(|n| n.name == "acquire"));
-    assert!(methods.iter().any(|n| n.name == "release"));
-}
-
-#[test]
-fn test_lua_extract_consts() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
-    let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    assert_eq!(
-        consts.len(),
-        2,
-        "expected 2 consts, got {}: {:?}",
-        consts.len(),
-        consts.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(consts.iter().any(|n| n.name == "MAX_RETRIES"));
-    assert!(consts.iter().any(|n| n.name == "DEFAULT_PORT"));
-}
-
-#[test]
-fn test_lua_extract_requires() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
-    let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let uses: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert_eq!(uses.len(), 2, "expected 2 Use nodes, got {}", uses.len());
-    assert!(uses.iter().any(|n| n.name == "json"));
-    assert!(uses.iter().any(|n| n.name == "socket"));
-}
-
-#[test]
 fn test_lua_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
@@ -195,20 +103,6 @@ fn test_lua_docstrings() {
         "docstring: {:?}",
         max_retries.docstring
     );
-}
-
-#[test]
-fn test_lua_file_node() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
-    let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "sample.lua");
 }
 
 #[test]

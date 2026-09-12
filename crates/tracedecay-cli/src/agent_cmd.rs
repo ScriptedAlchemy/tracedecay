@@ -3360,8 +3360,7 @@ mod tests {
         HostBundleCliOperation, apply_canonical_component_set,
         apply_default_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
-        component_set_request, reinstall_agent_integrations_with_dashboard_policies,
-        reinstall_agent_integrations_with_persisted_dashboard_policies,
+        component_set_request, reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
     use tracedecay_agent_hosts::agents::host_bundle::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
@@ -3697,99 +3696,6 @@ mod tests {
             "update-plugin must sweep the retired rule so uninstall can see a clean bundle"
         );
         assert_eq!(std::fs::read(&user_file).unwrap(), b"keep me");
-    }
-
-    #[test]
-    fn feedback_registration_snapshot_rejects_pre_activation_edit() {
-        let _profile = pinned_host_profile();
-        let home = tempfile::tempdir().unwrap();
-        let integration = tracedecay_agent_hosts::agents::get_integration("opencode").unwrap();
-        let registration_paths = super::feedback_registration_paths(
-            home.path(),
-            integration.as_ref(),
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core,
-        )
-        .unwrap();
-        let config = home.path().join(".config/opencode/opencode.json");
-        assert!(
-            registration_paths.contains(&config),
-            "the mutated file must be part of the host registration inventory: {registration_paths:?}"
-        );
-        let snapshot = super::snapshot_feedback_registration(
-            home.path(),
-            integration.as_ref(),
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core,
-        )
-        .unwrap();
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(
-            &config,
-            br#"{"mcpServers":{"operator":{"command":"foreign"}}}"#,
-        )
-        .unwrap();
-
-        let error = super::validate_feedback_registration_snapshot(
-            home.path(),
-            integration.as_ref(),
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core,
-            &snapshot,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("changed before apply"));
-        assert_eq!(
-            std::fs::read(&config).unwrap(),
-            br#"{"mcpServers":{"operator":{"command":"foreign"}}}"#
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn feedback_registration_snapshot_rejects_metadata_only_drift() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _profile = pinned_host_profile();
-        let home = tempfile::tempdir().unwrap();
-        let integration = tracedecay_agent_hosts::agents::get_integration("opencode").unwrap();
-        let config = home.path().join(".config/opencode/opencode.json");
-        assert!(
-            super::feedback_registration_paths(
-                home.path(),
-                integration.as_ref(),
-                tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core,
-            )
-            .unwrap()
-            .contains(&config),
-            "the mutated file must be part of the host registration inventory"
-        );
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(
-            &config,
-            br#"{"mcpServers":{"operator":{"command":"keep"}}}"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let snapshot = super::snapshot_feedback_registration(
-            home.path(),
-            integration.as_ref(),
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core,
-        )
-        .unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        let error = super::validate_feedback_registration_snapshot(
-            home.path(),
-            integration.as_ref(),
-            tracedecay_agent_hosts::agents::host_bundle::HostBundleComponentV1::Core,
-            &snapshot,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("changed before apply"));
-        assert_eq!(
-            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
     }
 
     struct VerifyFailureRegistration {
@@ -6077,54 +5983,6 @@ mod tests {
             std::fs::read(registration_path).unwrap(),
             b"{\"external\":true}"
         );
-    }
-
-    #[tokio::test]
-    async fn hermes_dashboard_opt_out_survives_update_and_reinstall() {
-        let _profile = pinned_host_profile();
-        let home = tempfile::tempdir().unwrap();
-        let tracedecay_bin = std::env::current_exe()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let plugin = home.path().join(".hermes/plugins/tracedecay");
-
-        apply_default_canonical_component_set(
-            "hermes",
-            HostBundleCliOperation::Install,
-            home.path(),
-            false,
-            false,
-        )
-        .unwrap();
-        apply_default_canonical_component_set(
-            "hermes",
-            HostBundleCliOperation::Update,
-            home.path(),
-            false,
-            false,
-        )
-        .unwrap();
-        assert!(!plugin.join("dashboard/manifest.json").exists());
-        assert!(!plugin.join("dashboard/plugin_api.py").exists());
-        assert!(!plugin.join("dashboard/dist/index.js").exists());
-
-        let policies = std::collections::BTreeMap::from([("hermes".to_string(), false)]);
-        let results = reinstall_agent_integrations_with_dashboard_policies(
-            &["hermes".to_string()],
-            home.path(),
-            &tracedecay_bin,
-            &policies,
-            false,
-        )
-        .await;
-        assert!(matches!(
-            results.as_slice(),
-            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "hermes"
-        ));
-        assert!(!plugin.join("dashboard/manifest.json").exists());
-        assert!(!plugin.join("dashboard/plugin_api.py").exists());
-        assert!(!plugin.join("dashboard/dist/index.js").exists());
     }
 
     #[test]

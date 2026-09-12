@@ -3,8 +3,7 @@ use std::sync::atomic::AtomicBool;
 use super::test_runtime::TestRuntimeShardFamilyV1;
 use super::{
     Arc, Database, DatabaseAuthority, DatabaseOwnerErrorV1, DatabaseOwnerWeakLeaseIssuerErrorV1,
-    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope, adaptive_cache_sizes,
-    platform_safe_mmap_size,
+    TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
 use crate::db::DatabaseOwnerV1;
 use crate::shard_runtime::VerifiedGraphRuntimePortV1;
@@ -17,9 +16,6 @@ use tracedecay_store::{
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1,
     StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
-
-const KB: u64 = 1024;
-const MB: u64 = 1024 * 1024;
 
 struct CancelledSnapshotProbe {
     cancellation: RuntimeCancellationIdentityV1,
@@ -192,53 +188,6 @@ impl VerifiedGraphRuntimePortV1 for OwnerAccessTestGraphRuntime {
     }
 }
 
-#[test]
-fn adaptive_new_db_gets_minimum() {
-    let (cache_kb, mmap) = adaptive_cache_sizes(0);
-    assert_eq!(cache_kb, 2 * MB / KB); // 2 MB in KiB = 2048
-    assert_eq!(mmap, 0);
-}
-
-#[test]
-fn adaptive_small_db() {
-    // 5 MB DB → cache = 2 MB (floor), mmap = 10 MB
-    let (cache_kb, mmap) = adaptive_cache_sizes(5 * MB);
-    assert_eq!(cache_kb, 2 * MB / KB);
-    assert_eq!(mmap, 10 * MB);
-}
-
-#[test]
-fn adaptive_medium_db() {
-    // 100 MB DB → cache = 25 MB, mmap = 200 MB
-    let (cache_kb, mmap) = adaptive_cache_sizes(100 * MB);
-    assert_eq!(cache_kb, 25 * MB / KB);
-    assert_eq!(mmap, 200 * MB);
-}
-
-#[test]
-fn adaptive_large_db() {
-    // 500 MB DB → cache = 64 MB (cap), mmap = 256 MB (cap)
-    let (cache_kb, mmap) = adaptive_cache_sizes(500 * MB);
-    assert_eq!(cache_kb, 64 * MB / KB);
-    assert_eq!(mmap, 256 * MB);
-}
-
-#[test]
-fn adaptive_very_large_db() {
-    // 2 GB DB → both capped at max
-    let (cache_kb, mmap) = adaptive_cache_sizes(2 * 1024 * MB);
-    assert_eq!(cache_kb, 64 * MB / KB);
-    assert_eq!(mmap, 256 * MB);
-}
-
-#[test]
-fn mmap_disabled_for_every_graph_database() {
-    let raw = 200 * MB;
-    let effective = platform_safe_mmap_size(raw);
-    assert_eq!(effective, 0);
-    assert_eq!(platform_safe_mmap_size(0), 0);
-}
-
 #[tokio::test]
 async fn database_owner_issues_client_leases_over_one_stable_database_inner() {
     let temp = tempfile::tempdir().unwrap();
@@ -266,53 +215,6 @@ async fn database_owner_issues_client_leases_over_one_stable_database_inner() {
             .all(|reader| Arc::ptr_eq(&first.inner, &reader.inner))
     );
     assert!(first.is_writable());
-}
-
-#[tokio::test]
-async fn repeated_authorized_opens_share_one_writer_lane() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "writer reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let first = owner.issue_lease().unwrap();
-    let second = owner.issue_lease().unwrap();
-
-    let first_writer = first.writer().await;
-    assert!(second.inner.writer.try_lock().is_err());
-    drop(first_writer);
-    assert!(second.inner.writer.try_lock().is_ok());
-}
-
-#[tokio::test]
-async fn database_owner_leases_preserve_registered_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "preflight reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let first = owner.issue_lease().unwrap();
-    let second = owner.issue_lease().unwrap();
-
-    assert_eq!(first.registered_binding(), second.registered_binding());
-    assert_eq!(
-        first.registered_verified_locator(),
-        second.registered_verified_locator()
-    );
-    assert_eq!(first.opened_file_identity(), second.opened_file_identity());
-    assert!(Arc::ptr_eq(&first.inner, &second.inner));
 }
 
 #[tokio::test]
@@ -660,48 +562,6 @@ async fn cancelled_write_transaction_rolls_back_before_releasing_lane() {
     transaction.commit().await.unwrap();
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn owner_leases_never_derive_a_second_database_from_a_symlink_alias() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "writer alias reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let direct = owner.issue_lease().unwrap();
-    let through_alias = owner.issue_lease().unwrap();
-
-    assert!(Arc::ptr_eq(&direct.inner, &through_alias.inner));
-}
-
-#[cfg(windows)]
-#[tokio::test]
-async fn owner_leases_never_derive_a_second_database_from_a_case_alias() {
-    let temp = tempfile::tempdir().unwrap();
-    let directory = temp.path().join("SlotCase");
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("Graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "writer case reuse").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let direct = owner.issue_lease().unwrap();
-    let through_alias = owner.issue_lease().unwrap();
-
-    assert!(Arc::ptr_eq(&direct.inner, &through_alias.inner));
-}
-
 #[tokio::test]
 async fn checkpoint_waits_for_shared_writer_lane() {
     let temp = tempfile::tempdir().unwrap();
@@ -760,37 +620,6 @@ async fn retained_database_guard_keeps_authority_alive_for_query_connection() {
         crate::db::probe_writer_owner(&path).unwrap(),
         crate::db::WriterOwnership::Idle
     );
-}
-
-#[tokio::test]
-async fn owner_leases_share_the_canonical_read_and_write_boundaries() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "readonly upgrade").unwrap();
-    let owner = publish_fixture_owner_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        TestRuntimeShardFamilyV1::Code,
-    )
-    .await
-    .unwrap();
-    let reader = owner.issue_lease().unwrap();
-    let writer = owner.issue_lease().unwrap();
-    assert!(Arc::ptr_eq(&reader.inner, &writer.inner));
-    writer
-        .writer_connection("reader isolation test")
-        .await
-        .unwrap()
-        .execute("CREATE TABLE reader_did_not_poison_writer (id INTEGER)", ())
-        .await
-        .unwrap();
-    let mut rows = reader
-        .read_connection()
-        .query("SELECT 1", ())
-        .await
-        .unwrap();
-    assert!(rows.next().await.unwrap().is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

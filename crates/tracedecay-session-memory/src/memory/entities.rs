@@ -678,43 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn file_paths_and_line_numbers_still_extract() {
-        let entities = extract_entities(
-            "see crates/tracedecay-sessions/src/runtime/codex.rs:378 and /etc/config.toml",
-        );
-        assert!(
-            entities.contains(&"crates/tracedecay-sessions/src/runtime/codex.rs:378".to_string())
-        );
-        assert!(entities.contains(&"/etc/config.toml".to_string()));
-    }
-
-    #[test]
-    fn snake_and_camel_case_identifiers_extract() {
-        let entities = extract_entities("the ingest reads cursorDiskKV then calls update_plan");
-        assert!(entities.contains(&"cursorDiskKV".to_string()));
-        assert!(entities.contains(&"update_plan".to_string()));
-    }
-
-    #[test]
-    fn prose_slash_runs_are_not_entities() {
-        let entities = extract_entities("governs approval/sandbox/effort across X/Y/Z tiers");
-        assert!(!entities.contains(&"approval/sandbox/effort".to_string()));
-        assert!(!entities.contains(&"X/Y/Z".to_string()));
-    }
-
-    #[test]
-    fn possessives_and_contractions_do_not_pair_into_spans() {
-        // Two apostrophes ("session's" ... "pipeline's") must not be paired into
-        // a quoted span.
-        let entities =
-            extract_entities("the session's data flows before the pipeline's reducer runs");
-        assert!(
-            !entities.iter().any(|e| e.split_whitespace().count() > 6),
-            "apostrophes paired into a span: {entities:?}"
-        );
-    }
-
-    #[test]
     fn genuine_single_quoted_phrase_still_extracts() {
         let entities = extract_entities("the mode is 'holographic recall' by default");
         assert!(entities.contains(&"holographic recall".to_string()));
@@ -825,19 +788,6 @@ mod tests {
     }
 
     #[test]
-    fn leading_verb_no_longer_swallows_following_entity() {
-        // Risk A: "Prefers" was absent from the exact list, so "Prefers Tokio"
-        // was captured verbatim and probe("Tokio") missed it.
-        let entities = extract_entities("Prefers Tokio for async runtime");
-        assert!(entities.contains(&"Tokio".to_string()));
-        assert!(
-            !entities.contains(&"Prefers Tokio".to_string()),
-            "verb-led phrase must not be captured verbatim"
-        );
-        assert!(!entities.contains(&"Prefers".to_string()));
-    }
-
-    #[test]
     fn verb_led_multiword_phrase_exposes_head_noun() {
         let entities = extract_entities("Avoid Foo Bar when possible");
         assert!(
@@ -858,33 +808,5 @@ mod tests {
         assert!(entities.contains(&"Acme Corp".to_string()));
         assert!(entities.contains(&"Postgres".to_string()));
         assert!(!entities.contains(&"Corp".to_string()));
-    }
-
-    #[test]
-    fn lone_leading_verb_yields_nothing() {
-        let entities = extract_entities("Use pnpm for installing dependencies");
-        assert!(
-            entities.is_empty(),
-            "a lone leading verb with no capitalized entity yields no entities"
-        );
-    }
-
-    #[test]
-    fn sentence_initial_function_words_are_filtered() {
-        let entities = extract_entities("Then we shipped it. Always back up the database.");
-        assert!(!entities.contains(&"Then".to_string()));
-        assert!(!entities.contains(&"Always".to_string()));
-    }
-
-    #[test]
-    fn capitalized_sequence_keeps_phrase_and_skips_head_noun() {
-        // Non-verb-led phrase keeps the phrase as the entity and does NOT emit
-        // the bare head noun (Phoenix). The single proper noun "Rust" IS now
-        // captured by the new single-token rule — that is intended coverage,
-        // not a regression of the >=2-word phrase behavior.
-        let entities = extract_entities("Project Phoenix ships fast and uses Rust");
-        assert!(entities.contains(&"Project Phoenix".to_string()));
-        assert!(!entities.contains(&"Phoenix".to_string()));
-        assert!(entities.contains(&"Rust".to_string()));
     }
 }

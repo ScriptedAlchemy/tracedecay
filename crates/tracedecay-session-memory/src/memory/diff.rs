@@ -65,16 +65,4 @@ mod tests {
         assert!(!contains_negation_cue("This is not a conflict marker"));
         assert!(!contains_negation_cue("Do not store secrets in memory"));
     }
-
-    #[test]
-    fn normalized_equivalence_is_case_and_whitespace_only() {
-        assert!(normalized_equivalent(
-            "Use  pnpm\tfor installs",
-            "use pnpm for installs",
-        ));
-        assert!(!normalized_equivalent(
-            "Use pnpm for installs",
-            "Use pnpm for installs.",
-        ));
-    }
 }

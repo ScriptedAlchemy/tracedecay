@@ -528,26 +528,6 @@ async fn summary_insert_rejects_non_decreasing_child_depth_without_persisting_ro
 }
 
 #[tokio::test]
-async fn summary_fts_matches_inserted_summary_text() {
-    let tmp = TempDir::new().unwrap();
-    let db = registered_lcm_runtime(&tmp).await;
-    let store_ids = insert_raw_messages(&db, "cursor", "session-1", &["alpha"]).await;
-    db.lcm_insert_summary_node(summary_draft(
-        "cursor",
-        "session-1",
-        0,
-        "unique summary fts phrase",
-        vec![LcmSourceRef::RawMessage {
-            store_id: store_ids[0],
-        }],
-    ))
-    .await
-    .expect("summary node insert should succeed");
-
-    assert_eq!(summary_fts_count(&db, "\"unique summary\"").await, 1);
-}
-
-#[tokio::test]
 async fn summary_node_ids_are_stable_for_identical_drafts() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;

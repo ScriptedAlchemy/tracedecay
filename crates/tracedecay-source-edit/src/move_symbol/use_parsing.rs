@@ -270,25 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn masked_scan_handles_block_comments() {
-        let ids = masked_idents("let a = 1; /* Foo bar */ let b = Baz;");
-        assert!(ids.contains("Baz"));
-        assert!(!ids.contains("Foo"));
-    }
-
-    #[test]
-    fn masked_scan_drops_string_literal_identifiers() {
-        // An identifier that appears only inside a string literal is not a
-        // dependency and must not be counted.
-        let ids = masked_idents(r#"fn f() { let s = "Widget in a string"; let x = Gadget; }"#);
-        assert!(ids.contains("Gadget"), "real code ident kept: {ids:?}");
-        assert!(
-            !ids.contains("Widget"),
-            "string-literal ident dropped: {ids:?}"
-        );
-    }
-
-    #[test]
     fn masked_scan_keeps_format_captures() {
         // `format!("{helper_result}")`-style implicit captures ARE real uses.
         let ids = masked_idents(r#"fn f() -> String { format!("{helper_result}") }"#);

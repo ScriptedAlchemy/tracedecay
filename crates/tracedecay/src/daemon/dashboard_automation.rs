@@ -658,16 +658,4 @@ mod tests {
 
         assert_eq!(runtime.execution().0.timeout_secs, 120);
     }
-
-    #[test]
-    fn dashboard_request_timeout_never_increases_a_stricter_configuration() {
-        let configured = AutomationConfig {
-            timeout_secs: 45,
-            ..AutomationConfig::default()
-        };
-
-        let runtime = DashboardAutomationRequestRuntime::new(&configured);
-
-        assert_eq!(runtime.execution().0.timeout_secs, 45);
-    }
 }

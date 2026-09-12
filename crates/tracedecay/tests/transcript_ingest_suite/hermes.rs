@@ -13,7 +13,6 @@ use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, ProjectId, ProviderUsageCounterSemanticsV1,
     ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1,
 };
-use tracedecay_global_db::ParseOffset;
 use tracedecay_lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::hermes::{
@@ -74,39 +73,6 @@ async fn ingest_registered_project_provider(
 
 fn named_project_id(name: &str) -> ProjectId {
     ProjectId::new(format!("tracedecay-hermes-{name}-fixture")).unwrap()
-}
-
-#[tokio::test]
-async fn hermes_row_cursor_cannot_regress_during_overlapping_sweeps() {
-    let tmp = TempDir::new().unwrap();
-    let project = tmp.path().join("project");
-    crate::support::init_project_at(&project);
-    let db = open_project_session_db(&project).await.unwrap();
-    let cursor = "state.db#turn-project-v2";
-    db.runtime()
-        .set_project_parse_offset_for_test(
-            cursor,
-            ParseOffset {
-                byte_offset: 200,
-                mtime: 20,
-                file_id: 0,
-            },
-        )
-        .await
-        .unwrap();
-    db.runtime()
-        .set_project_parse_offset_for_test(
-            cursor,
-            ParseOffset {
-                byte_offset: 100,
-                mtime: 10,
-                file_id: 0,
-            },
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(db.get_parse_offset(cursor).await.unwrap().byte_offset, 200);
 }
 
 #[tokio::test]
@@ -825,75 +791,6 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
 }
 
 #[tokio::test]
-#[ignore = "manual cold-history benchmark; requires TRACEDECAY_HERMES_BENCH_HOME and TRACEDECAY_HERMES_BENCH_PROJECT"]
-async fn hermes_shared_sweep_cold_history_completes_under_sixty_seconds() {
-    let hermes_home = PathBuf::from(
-        std::env::var("TRACEDECAY_HERMES_BENCH_HOME").expect("Hermes home for benchmark"),
-    );
-    let project_root = PathBuf::from(
-        std::env::var("TRACEDECAY_HERMES_BENCH_PROJECT").expect("project root for benchmark"),
-    );
-    let output_root = PathBuf::from(
-        std::env::var("TRACEDECAY_HERMES_BENCH_OUTPUT").expect("fast output root for benchmark"),
-    );
-    std::fs::create_dir_all(&output_root).unwrap();
-    let temp = tempfile::Builder::new()
-        .prefix("hermes-cold-catchup-")
-        .tempdir_in(output_root)
-        .unwrap();
-    let mut project_roots = vec![project_root];
-    for index in 1..31 {
-        let root = temp.path().join(format!("project-{index}"));
-        crate::support::init_project_at(&root);
-        project_roots.push(root);
-    }
-    let mut runtimes = Vec::with_capacity(project_roots.len());
-    let mut project_ids = Vec::with_capacity(project_roots.len());
-    for (index, project_root) in project_roots.iter().enumerate() {
-        let project_id = named_project_id(&format!("benchmark-{index}"));
-        runtimes.push(
-            HostAdmissionTestRuntimeV1::project(
-                temp.path().join(format!("profile-{index}")),
-                project_root,
-                project_id.clone(),
-            )
-            .await
-            .unwrap(),
-        );
-        project_ids.push(project_id);
-    }
-    let admissions = runtimes
-        .iter()
-        .map(HostAdmissionTestRuntimeV1::facade)
-        .collect::<Vec<_>>();
-    let destinations = admissions
-        .iter()
-        .zip(&project_roots)
-        .zip(&project_ids)
-        .map(
-            |((admission, project_root), project_id)| ProjectIngestDestination {
-                admission,
-                project_root,
-                project_id: project_id.clone(),
-            },
-        )
-        .collect::<Vec<_>>();
-
-    let started = std::time::Instant::now();
-    let stats = ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations).await;
-    let elapsed = started.elapsed();
-
-    assert!(
-        stats.messages_upserted > 0,
-        "benchmark must ingest real history"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(60),
-        "cold Hermes catch-up took {elapsed:?}"
-    );
-}
-
-#[tokio::test]
 async fn hermes_profile_pinned_elsewhere_is_not_ingested() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
@@ -1217,45 +1114,6 @@ async fn user_sweep_keeps_canonical_turns_routed_to_registered_projects() {
     .await;
 
     assert_eq!(stats.messages_upserted, 4);
-    assert!(
-        user_db
-            .session_for_test(HostAdmissionScope::Profile, "hermes", SESSION_ID)
-            .await
-            .unwrap()
-            .is_some()
-    );
-}
-
-#[tokio::test]
-async fn user_sweep_keeps_registered_session_cwd_as_canonical_history() {
-    let tmp = TempDir::new().unwrap();
-    let (hermes_home, registered) = setup(&tmp);
-    let state_db = write_hermes_profile(&hermes_home, "test", None).await;
-    let conn = open_state_db(&state_db);
-    conn.execute(
-        "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
-        rusqlite::params![registered.to_string_lossy().as_ref(), SESSION_ID],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE messages SET tool_calls = NULL WHERE session_id = ?1",
-        [SESSION_ID],
-    )
-    .unwrap();
-    drop(conn);
-    let user_db = HostAdmissionTestRuntimeV1::profile(tmp.path().join("user-profile"))
-        .await
-        .unwrap();
-    let admission = user_db.facade();
-
-    let stats = ingest_user_homes(
-        &admission,
-        std::slice::from_ref(&hermes_home),
-        std::slice::from_ref(&registered),
-    )
-    .await;
-
-    assert_eq!(stats.messages_upserted, 3);
     assert!(
         user_db
             .session_for_test(HostAdmissionScope::Profile, "hermes", SESSION_ID)

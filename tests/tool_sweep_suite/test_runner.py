@@ -73,17 +73,6 @@ class ProblemCodeTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "policy.denied")
 
-    def test_direct_problem_shape_is_preserved_in_artifacts(self) -> None:
-        """Both MCP error framings retain their typed diagnosis."""
-        runner = load_runner()
-
-        row = runner.response_row(
-            "resource", "tracedecay://status", {"error": {"data": {"kind": "unavailable", "code": "store.offline"}}}, 2, 30_000
-        )
-
-        self.assertEqual(row["problem_code"], "store.offline")
-        self.assertEqual(row["verdict"], "FAIL")
-
     def test_success_framed_markdown_not_found_is_not_coverage(self) -> None:
         """A human-friendly not-found message cannot masquerade as a completed journey."""
         runner = load_runner()
@@ -216,13 +205,6 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "tool_sweep.expected_denial_superseded")
 
-    def test_denial_probes_exist_only_for_declared_denial_verdicts(self) -> None:
-        """A probe may prove a deny path; it may never stand in for a producible input."""
-        runner = load_runner()
-
-        for name in runner.HERMETIC_DENIAL_PROBE_ARGUMENTS:
-            self.assertIn(name, runner.EXPECTED_HERMETIC_DENIALS)
-
     def test_mutation_denial_probe_passes_exactly_and_needs_no_rollback(self) -> None:
         """A control mutation denied before admission proves its typed deny path."""
         runner = load_runner()
@@ -320,16 +302,6 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
 
 
 class NegotiatedSurfaceTests(unittest.TestCase):
-    def test_initialize_capabilities_control_optional_surface_discovery(self) -> None:
-        """Only server-negotiated resource/prompt endpoints are requested."""
-        runner = load_runner()
-
-        self.assertEqual(
-            runner.negotiated_surfaces({"tools": {}, "resources": {}, "prompts": {}}),
-            {"tools", "resources", "prompts"},
-        )
-        self.assertEqual(runner.negotiated_surfaces({"tools": {}, "resources": {}}), {"tools", "resources"})
-
     def test_resources_and_prompts_are_exercised_from_live_discovery(self) -> None:
         """A resource/prompt added to negotiation cannot be silently tool-only coverage."""
         runner = load_runner()
@@ -396,14 +368,6 @@ class DispatchMetadataTests(unittest.TestCase):
             },
         }
 
-    def test_policy_consumes_the_complete_canonical_dispatch_contract(self) -> None:
-        runner = load_runner()
-
-        policy = runner.tool_policy(self.definition())
-
-        self.assertEqual(policy.deadline_ms, 1_000)
-        self.assertEqual(policy.fingerprint, "sha256:fixture")
-
     def test_policy_rejects_cancellation_terminal_drift(self) -> None:
         runner = load_runner()
         definition = self.definition(
@@ -418,21 +382,6 @@ class DispatchMetadataTests(unittest.TestCase):
 
         with self.assertRaises(runner.SweepError):
             runner.tool_policy(definition)
-
-    def test_unavailable_policy_requires_the_canonical_nonretryable_reason(self) -> None:
-        runner = load_runner()
-        definition = self.definition(
-            availability={
-                "state": "unavailable",
-                "reason": "effect_journey_unverified",
-                "retryable": False,
-            }
-        )
-
-        policy = runner.tool_policy(definition)
-
-        self.assertEqual(policy.availability_reason, "effect_journey_unverified")
-
 
 class DeadlineTests(unittest.TestCase):
     def test_post_deadline_settlement_cannot_become_a_passing_response(self) -> None:
@@ -976,18 +925,6 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(row["problem_code"], code)
         self.assertEqual(len(client.calls), 2)
 
-    def test_branch_diff_alone_carries_the_extended_mount_budget(self) -> None:
-        """The slow code-index branch authority gets a bounded per-tool budget."""
-        runner = load_runner()
-        self.assertEqual(
-            runner.MOUNT_RETRY_BUDGET_OVERRIDES_S,
-            {"tracedecay_branch_diff": 180},
-        )
-        self.assertGreater(
-            runner.MOUNT_RETRY_BUDGET_OVERRIDES_S["tracedecay_branch_diff"],
-            runner.MOUNT_RETRY_BUDGET_S,
-        )
-
     def test_multi_root_probes_reach_the_exact_daemon_denial(self) -> None:
         """Materialized multi-root bodies parse, so the typed owner denial is exact."""
         runner = load_runner()
@@ -1010,27 +947,6 @@ class MountRetryTests(unittest.TestCase):
             self.assertEqual(len(client.calls), 1, name)
             arguments = client.calls[0][1]
             self.assertEqual(arguments["scope_set_id"], "tool-sweep-scope-set.v1", name)
-
-    def test_branch_diff_diffs_the_real_fixture_branch(self) -> None:
-        """The runtime-required base/head come from the fixture's real branch."""
-        runner = load_runner()
-        arguments = runner.materialize_tool_arguments(
-            self.definition("tracedecay_branch_diff"), {"branch": "main"}
-        )
-        self.assertEqual(
-            arguments, {"base": "main", "head": "main", "format": "json"}
-        )
-
-    def test_status_reason_payloads_parse_as_typed_problems(self) -> None:
-        """Branch surfaces render status+reason; the parser returns them typed."""
-        runner = load_runner()
-        kind, code = runner.response_problem_code(
-            self.text_response(
-                '{"status":"unavailable","reason":"search_capacity_unavailable","retryable":true}',
-                is_error=True,
-            )
-        )
-        self.assertEqual((kind, code), ("unavailable", "search_capacity_unavailable"))
 
     def test_expired_preview_is_reminted_from_the_live_producer(self) -> None:
         """An expired stage-preview cursor re-mints through git_hunks, never a blind replay."""

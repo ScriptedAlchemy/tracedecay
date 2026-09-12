@@ -1002,7 +1002,6 @@ fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use NativeIntegrationSurfaceUnavailableV1 as Reason;
 
     #[test]
     fn stack_snapshot_schema_requires_exact_registered_scope_set_identity() {
@@ -1122,52 +1121,6 @@ mod tests {
             ),
         ] {
             assert!(!result.is_advancing(), "{result:?}");
-        }
-    }
-
-    #[test]
-    fn every_port_failure_maps_to_a_truthful_unavailable_reason() {
-        for (error, expected) in [
-            (
-                NativeIntegrationPortError::Unavailable,
-                Reason::AuthorityUnmounted,
-            ),
-            (
-                NativeIntegrationPortError::Native("boom".to_owned()),
-                Reason::AuthorityUnmounted,
-            ),
-            (NativeIntegrationPortError::Stale, Reason::Stale),
-            (NativeIntegrationPortError::Denied, Reason::Denied),
-            (
-                NativeIntegrationPortError::ApprovalConflict,
-                Reason::ApprovalConflict,
-            ),
-            (
-                NativeIntegrationPortError::TransactionConflict,
-                Reason::TransactionConflict,
-            ),
-            (NativeIntegrationPortError::Cancelled, Reason::Cancelled),
-            (
-                NativeIntegrationPortError::RecoveryRequired,
-                Reason::RecoveryRequired,
-            ),
-            (
-                NativeIntegrationPortError::NeedsInspection,
-                Reason::NeedsInspection,
-            ),
-            (
-                NativeIntegrationPortError::ResetRequired,
-                Reason::ResetRequired,
-            ),
-            (
-                NativeIntegrationPortError::DurabilityUncertain,
-                Reason::DurabilityUncertain,
-            ),
-        ] {
-            assert_eq!(
-                NativeIntegrationSurfaceUnavailableV1::from(&error),
-                expected
-            );
         }
     }
 

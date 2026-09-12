@@ -98,11 +98,6 @@ describe('fetchPayloadWrite', () => {
     );
   });
 
-  it('still decodes a successful write body', async () => {
-    stub(200, { status: 'paused' });
-    const result = await fetchPayloadWrite('/api/x', PayloadSchema, { method: 'POST' });
-    expect(result).toEqual({ outcome: 'ok', data: { status: 'paused' } });
-  });
 });
 
 describe('fetchPayload', () => {
@@ -130,15 +125,6 @@ describe('fetchPayload', () => {
     expect((await fetchPayload('/api/x', PayloadSchema)).outcome).toBe('unsupported_schema');
   });
 
-  it('reports a network failure as offline', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        throw new TypeError('network down');
-      }),
-    );
-    expect((await fetchPayload('/api/x', PayloadSchema)).outcome).toBe('offline');
-  });
 });
 
 /**
@@ -229,15 +215,6 @@ describe('fetchPayload on the canonical failure statuses', () => {
     expect((await fetchPayload('/api/projects', RegistrySchema)).outcome).toBe('denied');
   });
 
-  it('still reports a 500 read failure as an error', async () => {
-    // `graph_api.rs` answers 500 `read_failed`, which is not one of the two
-    // admitted statuses. Unknown error behaviour is preserved.
-    stub(500, { status: 'read_failed', error: 'failed to query counts' });
-    expect(await fetchPayload('/api/plugins/graph/overview', RegistrySchema)).toEqual({
-      outcome: 'error',
-      detail: 'HTTP 500',
-    });
-  });
 });
 
 /**

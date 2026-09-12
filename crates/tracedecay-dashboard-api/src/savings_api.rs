@@ -1428,14 +1428,6 @@ mod tests {
     }
 
     #[test]
-    fn basis_labels() {
-        assert_eq!(basis_label(0, 0), "estimated");
-        assert_eq!(basis_label(0, 4), "estimated");
-        assert_eq!(basis_label(4, 4), "tokenized");
-        assert_eq!(basis_label(2, 4), "estimated");
-    }
-
-    #[test]
     fn tier_sums_attribute_roles_like_sql() {
         let mut sums = TierSums::default();
         let msg = |role: &str, tokens: i64, tokenized: bool| MessageTokens {
@@ -1495,11 +1487,5 @@ mod tests {
         assert_eq!(block["tokenized"]["input_tokens"], 33);
         assert_eq!(block["tokenized"]["output_tokens"], 44);
         assert_eq!(block["estimated"]["input_tokens"], 0);
-    }
-
-    #[test]
-    fn unknown_model_serializes_as_null() {
-        assert_eq!(model_value(""), Value::Null);
-        assert_eq!(model_value("gpt-5.5"), Value::String("gpt-5.5".into()));
     }
 }

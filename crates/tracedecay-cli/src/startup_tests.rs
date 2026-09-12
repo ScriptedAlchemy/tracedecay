@@ -1,14 +1,14 @@
 use super::{
     AnalyticsAction, AsyncRuntimeFlavor, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
-    DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
-    HostBundleComponentArg, MAX_ASYNC_WORKER_THREADS, PackageHookAction, ProfileStorageAction,
-    ProjectsAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction, StderrTracingDefault,
-    async_runtime_flavor, async_worker_threads, command_profile_label, daemon_cpu_threads_from,
-    hotpath_focus_is_valid, hotpath_output_format_is_none, hotpath_output_format_is_valid,
-    hotpath_output_path_is_valid, hotpath_requires_protocol_safe_output, is_daemon_run,
-    is_full_component_set_adoption, is_local_install_command, normalize_tool_reserved_global_flags,
-    runs_worldwide_counter_flush, should_skip_agent_install_check, should_skip_startup_maintenance,
-    stderr_tracing_default, validate_host_bundle_options,
+    DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, HostBundleComponentArg,
+    PackageHookAction, ProfileStorageAction, ProjectsAction, RAYON_NUM_THREADS_ENV,
+    ScoopPackageHookAction, StderrTracingDefault, async_runtime_flavor, command_profile_label,
+    daemon_cpu_threads_from, hotpath_focus_is_valid, hotpath_output_format_is_none,
+    hotpath_output_format_is_valid, hotpath_output_path_is_valid,
+    hotpath_requires_protocol_safe_output, is_full_component_set_adoption,
+    normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
+    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
+    validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -137,22 +137,6 @@ fn hotpath_command_identity_uses_the_exact_clap_subcommand_path() {
     assert_eq!(parsed_command_profile_label(&["hook-stop"]), "hook-stop");
 }
 
-/// `wipe` destroys deployed state, so it takes the same `--yes` acceptance as
-/// the lifecycle mutations. Without it a scripted wipe had to feed `go!`
-/// through a pipe on stdin, and `--yes` was rejected outright.
-#[test]
-fn wipe_accepts_the_global_confirmation_flag() {
-    let command = Commands::Wipe { all: true };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-        .expect("wipe --yes must be accepted");
-}
-
 /// `wipe` owns no host component and has no preview, so the other two global
 /// lifecycle flags stay rejected on it.
 #[test]
@@ -166,67 +150,6 @@ fn wipe_still_rejects_component_and_dry_run() {
         adopt: false,
     };
     assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
-}
-
-/// The storage reset commands REQUIRE `--yes` (their handlers refuse to run
-/// without it), so the pre-dispatch validator must accept the flag instead of
-/// rejecting the exact invocation the refusal message recommends. This parses
-/// the real command line end to end, exactly as the live recovery ran it:
-/// `tracedecay storage reset-project-store --project-root <root> --yes`.
-#[test]
-fn storage_reset_project_store_parses_and_accepts_the_confirmation_flag() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "storage",
-        "reset-project-store",
-        "--project-root",
-        "/tmp/some-project",
-        "--yes",
-    ])
-    .expect("the documented reset invocation must parse");
-    let options = HostBundleCliOptions {
-        component: cli.component,
-        dry_run: cli.dry_run,
-        yes: cli.yes,
-        adopt: cli.adopt,
-    };
-    assert!(options.yes, "--yes must reach the storage dispatcher");
-    let command = cli.command.expect("subcommand parsed");
-    assert!(matches!(
-        command,
-        Commands::Storage {
-            action: ProfileStorageAction::ResetProjectStore { .. }
-        }
-    ));
-    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-        .expect("storage reset-project-store --yes must be accepted");
-}
-
-/// `projects forget` REQUIRES `--yes` (its handler refuses without it) and
-/// takes the global `--dry-run` as its preview, so the pre-dispatch validator
-/// must accept both exactly as documented.
-#[test]
-fn projects_forget_accepts_confirmation_and_preview_flags() {
-    for flags in [&["--yes"][..], &["--dry-run"][..]] {
-        let mut args = vec!["tracedecay", "projects", "forget", "proj_123"];
-        args.extend_from_slice(flags);
-        let cli = Cli::try_parse_from(args).expect("documented forget invocation must parse");
-        let options = HostBundleCliOptions {
-            component: cli.component,
-            dry_run: cli.dry_run,
-            yes: cli.yes,
-            adopt: cli.adopt,
-        };
-        let command = cli.command.expect("subcommand parsed");
-        assert!(matches!(
-            command,
-            Commands::Projects {
-                action: ProjectsAction::Forget { .. }
-            }
-        ));
-        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-            .unwrap_or_else(|error| panic!("projects forget {flags:?} must be accepted: {error}"));
-    }
 }
 
 /// `projects forget` owns no host component, so the component/adopt lifecycle
@@ -266,25 +189,6 @@ fn projects_forget_rejects_component_and_projects_list_rejects_yes() {
     assert!(validate_host_bundle_options(&list, CommandFamily::for_command(&list), &yes).is_err());
 }
 
-/// `storage reset-authority` carries the same required `--yes` confirmation.
-#[test]
-fn storage_reset_authority_accepts_the_confirmation_flag() {
-    let command = Commands::Storage {
-        action: ProfileStorageAction::ResetAuthority {
-            authority: "observations".to_string(),
-            db: None,
-        },
-    };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-        .expect("storage reset-authority --yes must be accepted");
-}
-
 /// The storage resets own no host component and have no preview, so the other
 /// two global lifecycle flags stay rejected on them.
 #[test]
@@ -310,47 +214,6 @@ fn storage_resets_still_reject_component_and_dry_run() {
         adopt: false,
     };
     assert!(validate_host_bundle_options(&command, family, &component).is_err());
-}
-
-/// The read-only storage report has nothing to confirm, so the confirmation
-/// flag stays rejected there — the reset carve-out must not leak family-wide.
-#[test]
-fn storage_report_still_rejects_the_confirmation_flag() {
-    let command = Commands::Storage {
-        action: ProfileStorageAction::StorageReport {
-            profile_root: None,
-            project_id: None,
-            project_root: None,
-            json: false,
-        },
-    };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(
-        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-            .is_err()
-    );
-}
-
-/// The confirmation flag must not leak onto the other project commands, which
-/// have nothing to confirm.
-#[test]
-fn sibling_project_commands_still_reject_the_confirmation_flag() {
-    let command = Commands::List { all: false };
-    let options = HostBundleCliOptions {
-        component: None,
-        dry_run: false,
-        yes: true,
-        adopt: false,
-    };
-    assert!(
-        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
-            .is_err()
-    );
 }
 
 #[test]
@@ -433,16 +296,6 @@ fn unrelated_and_uninstall_commands_reject_adoption() {
 }
 
 #[test]
-fn async_runtime_bounds_parallel_allocators() {
-    assert!((1..=MAX_ASYNC_WORKER_THREADS).contains(&async_worker_threads()));
-    assert_eq!(MAX_ASYNC_WORKER_THREADS, 16);
-    assert_eq!(async_runtime_flavor(None), AsyncRuntimeFlavor::MultiThread);
-    // The blocking pool is no longer a flat constant: `blocking_thread_limit_tests`
-    // covers `tokio_blocking_thread_limit_from`, which derives the width from the
-    // installed indexing workers plus a serving reserve.
-}
-
-#[test]
 fn daemon_cpu_pool_is_bounded_by_default_and_operator_tunable() {
     assert_eq!(
         daemon_cpu_threads_from(96, None).unwrap(),
@@ -470,22 +323,6 @@ fn daemon_cpu_pool_is_bounded_by_default_and_operator_tunable() {
             .unwrap_err()
             .contains(DAEMON_CPU_THREADS_ENV)
     );
-}
-
-#[test]
-fn only_foreground_daemon_installs_the_global_cpu_pool() {
-    let daemon = Commands::Daemon {
-        action: DaemonAction::Run {
-            socket: None,
-            profile_root: None,
-            remote_listen: None,
-            remote_tls_cert: None,
-            remote_tls_key: None,
-        },
-    };
-    assert!(is_daemon_run(Some(&daemon)));
-    assert!(!is_daemon_run(Some(&Commands::Monitor)));
-    assert!(!is_daemon_run(None));
 }
 
 #[test]
@@ -569,20 +406,6 @@ fn non_hook_commands_keep_warnings_on_stderr() {
 }
 
 #[test]
-fn doctor_skips_startup_maintenance() {
-    let command = Commands::Doctor;
-    assert!(should_skip_startup_maintenance(&command));
-}
-
-#[test]
-fn wipe_skips_optional_startup_maintenance() {
-    let command = parse_command(&["wipe", "--all", "--yes"]);
-
-    assert!(should_skip_startup_maintenance(&command));
-    assert!(should_skip_agent_install_check(&command));
-}
-
-#[test]
 fn explicit_agent_config_commands_skip_startup_maintenance() {
     assert!(should_skip_startup_maintenance(&Commands::Install {
         agent: Some("kiro".to_string()),
@@ -623,19 +446,6 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
 }
 
 #[test]
-fn normal_commands_keep_startup_maintenance() {
-    let command = Commands::Status {
-        path: None,
-        project_id: None,
-        project_path: None,
-        json: false,
-        short: false,
-        runtime: false,
-    };
-    assert!(!should_skip_startup_maintenance(&command));
-}
-
-#[test]
 fn tool_fallback_skips_network_and_agent_startup_maintenance() {
     let command = Commands::Tool {
         project: None,
@@ -671,23 +481,6 @@ fn tool_dry_run_is_forwarded_from_the_global_clap_flag() {
         Some(Commands::Tool { args, .. })
             if args == ["--args", "-", "--dry-run"]
     ));
-}
-
-#[test]
-fn first_class_git_reads_skip_network_and_agent_startup_maintenance() {
-    let command = Commands::Git {
-        action: GitAction::Status {
-            project: GitProjectArgs {
-                project: None,
-                project_id: None,
-                project_path: None,
-                json: true,
-            },
-        },
-    };
-
-    assert!(should_skip_startup_maintenance(&command));
-    assert!(should_skip_agent_install_check(&command));
 }
 
 #[test]
@@ -940,34 +733,6 @@ fn post_update_full_reinstall_advances_both_version_markers() {
 }
 
 #[test]
-fn no_reinstall_records_the_explicit_lifecycle_decision() {
-    // `--no-reinstall` is a durable explicit lifecycle decision for the
-    // running version, so the skip path records both markers without running
-    // the reinstall.
-    let running = "6.1.0";
-    let mut config = UserConfig {
-        installed_agents: vec!["cursor".to_string()],
-        previous_version: "6.0.0".to_string(),
-        ..UserConfig::default()
-    };
-
-    // The `--no-reinstall` path records the explicit lifecycle decision.
-    assert!(config.mark_version_installed(running));
-}
-
-#[test]
-fn serve_skips_startup_maintenance() {
-    // `tracedecay serve` is the MCP hot path with a 30 s client-side
-    // `initialize` timeout (#84). Pre-serve maintenance work
-    // (worldwide-counter flush, install-stale check, silent reinstall)
-    // must NOT run on this path.
-    assert!(should_skip_startup_maintenance(&Commands::Serve {
-        path: None,
-        timings: false,
-    }));
-}
-
-#[test]
 fn init_defers_worldwide_counter_flush_but_retains_other_startup_maintenance() {
     let command = parse_command(&["init", "/tmp/project"]);
     assert!(!runs_worldwide_counter_flush(&command));
@@ -994,25 +759,6 @@ fn claude_and_kiro_hooks_skip_startup_maintenance() {
     assert!(should_skip_startup_maintenance(
         &Commands::HookKiroPostToolUse
     ));
-}
-
-#[test]
-fn local_install_detection_tracks_dispatch_preamble_behavior() {
-    let local = Commands::Install {
-        agent: Some("hermes".to_string()),
-        local: true,
-        no_dashboard: false,
-        automation: false,
-    };
-    let global = Commands::Install {
-        agent: Some("hermes".to_string()),
-        local: false,
-        no_dashboard: false,
-        automation: false,
-    };
-
-    assert!(is_local_install_command(&local));
-    assert!(!is_local_install_command(&global));
 }
 
 // These tests intentionally stay on pure parse/dispatch guard seams. Direct

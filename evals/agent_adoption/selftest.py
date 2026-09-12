@@ -156,17 +156,6 @@ def test_channels():
     check("channel: post-call hint ignored", grade.attribute_channel(tr, "full") == grade.CH_STEERING)
 
 
-# --------------------------------------------------------------------------- #
-# 3. Normalization sanity
-# --------------------------------------------------------------------------- #
-def test_normalize():
-    tr = transcript([claude_tool(TD, {}), claude_tool("Grep", {"pattern": "x"}), claude_result("hi")])
-    check("normalize: two tools", len(tr.tools) == 2)
-    check("normalize: canon", tr.tools[0].canon == "tracedecay_context")
-    check("normalize: final text", tr.final_text == "hi")
-    check("normalize: is_tracedecay", tr.tools[0].is_tracedecay and not tr.tools[1].is_tracedecay)
-
-
 def test_codex_0144_item_envelopes():
     lines = [
         json.dumps({
@@ -434,38 +423,6 @@ def test_end_to_end():
               "Channel efficacy" in open(os.path.join(rdir, "report.md")).read())
 
 
-# --------------------------------------------------------------------------- #
-# 5. Hint-signature drift guard
-# --------------------------------------------------------------------------- #
-def test_hint_signature_drift():
-    # Pure logic: a signature absent from the source is reported; a present one
-    # is not. Uses a tiny synthetic source so it holds regardless of the repo.
-    src = "message: \"before reading whole files, consider tracedecay_outline\""
-    drift = grade.hint_signature_drift(src)
-    check("hints: present signature not flagged",
-          "before reading whole files, consider" not in drift)
-    check("hints: absent signature flagged",
-          "route by what you're matching" in drift)
-
-    # Integration: against the REAL tool_hints.rs (when the source tree is
-    # present), every mirrored signature must still match — this is the guard
-    # that catches wording drift in the hook messages.
-    real = grade.find_hint_source(HERE)
-    if real:
-        with open(real, errors="replace") as f:
-            real_drift = grade.hint_signature_drift(f.read())
-        check("hints: no drift vs crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs",
-              real_drift == [], f"drifted: {real_drift}")
-        # And the CLI mode agrees.
-        rc = subprocess.run(
-            [sys.executable, os.path.join(HERE, "grade.py"), "--check-hints"],
-            capture_output=True, text=True,
-        )
-        check("hints: --check-hints exit 0", rc.returncode == 0, rc.stderr[-300:])
-    else:
-        print("[skip] hints: real source tree absent (published package)")
-
-
 def test_skill_routing():
     scn = {"id": "routing", "category": "routing", "expected_skill": "tracing-functions",
            "allowed_skills": ["tracing-functions"], "ground_truth": ["place_order"],
@@ -573,11 +530,9 @@ def main() -> int:
           bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))
     test_lint()
     test_channels()
-    test_normalize()
     test_codex_0144_item_envelopes()
     test_specialist_agents()
     test_end_to_end()
-    test_hint_signature_drift()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURE(S):")

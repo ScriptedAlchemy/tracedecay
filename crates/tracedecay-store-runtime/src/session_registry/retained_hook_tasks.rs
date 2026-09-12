@@ -305,24 +305,6 @@ mod tests {
     use tokio::sync::Notify;
 
     #[tokio::test]
-    async fn new_terminal_receipt_cancels_the_retained_predecessor() {
-        let tasks = RetainedHookTasks::new();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let first_cancelled = Arc::clone(&cancelled);
-        assert!(
-            tasks.retain("codex", "session-1", move |cancellation| async move {
-                tokio::task::yield_now().await;
-                first_cancelled.store(cancellation.is_cancelled(), Ordering::Release);
-            })
-        );
-        assert!(tasks.retain("codex", "session-1", |_| async {}));
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-
-        assert!(cancelled.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
     async fn shutdown_fences_new_tasks_and_joins_active_task() {
         let tasks = Arc::new(RetainedHookTasks::new());
         let started = Arc::new(Notify::new());

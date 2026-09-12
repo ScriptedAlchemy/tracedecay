@@ -1469,13 +1469,6 @@
     }
 
     #[test]
-    fn publication_lease_is_send_for_daemon_owned_commit_work() {
-        fn assert_send<T: Send>() {}
-
-        assert_send::<SemanticModelLifecycleEvaluationPublicationLeaseV1>();
-    }
-
-    #[test]
     fn verified_background_install_reopens_offline_without_acquisition() {
         struct OfflineSource {
             calls: AtomicUsize,

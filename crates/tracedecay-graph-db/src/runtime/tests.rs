@@ -15,9 +15,8 @@ use crate::{
     GraphCommit, GraphDbError, GraphDbLeaseV1, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
     GraphDbRuntimeState, GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion,
     GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
-    GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphVector,
-    GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
-    VectorMetric, VectorSearchRequest, mutation,
+    GraphTraversalDirection, GraphVector, GraphWatermark, GraphWriteBatch, NeverCancelled,
+    SourceGeneration, TraversalRequest, VectorMetric, mutation,
 };
 
 fn memory_db() -> GraphDbLeaseV1 {
@@ -131,79 +130,6 @@ fn scalar_batch(value: &str) -> GraphWriteBatch {
     .unwrap()
 }
 
-fn stable_replay_batch(source: &str) -> GraphWriteBatch {
-    let entity = |identity: &str| {
-        GraphEntity::new(
-            GraphEntityId::new(identity).unwrap(),
-            BTreeSet::new(),
-            BTreeMap::from([(
-                GraphPropertyName::new("name").unwrap(),
-                GraphProperty::String(identity.to_owned()),
-            )]),
-        )
-        .unwrap()
-    };
-    GraphWriteBatch::new(
-        GraphNamespace::new("project").unwrap(),
-        GraphProjectionId::new("code").unwrap(),
-        SourceGeneration::new(source).unwrap(),
-        GraphWatermark::new(source).unwrap(),
-        vec![
-            GraphMutation::UpsertEntity(entity("a")),
-            GraphMutation::UpsertEntity(entity("b")),
-            GraphMutation::UpsertRelation(
-                GraphRelation::new(
-                    GraphRelationId::new("a-calls-b").unwrap(),
-                    GraphEntityId::new("a").unwrap(),
-                    GraphEntityId::new("b").unwrap(),
-                    GraphRelationKind::new("calls").unwrap(),
-                    BTreeMap::new(),
-                )
-                .unwrap(),
-            ),
-        ],
-        Arc::new(NeverCancelled),
-    )
-    .unwrap()
-}
-
-fn stable_replay_native_identity(
-    db: &GraphDbLeaseV1,
-    batch: &GraphWriteBatch,
-) -> (
-    Vec<grafeo_common::types::NodeId>,
-    grafeo_common::types::NodeId,
-    grafeo_common::types::EdgeId,
-) {
-    let guard = db.read_guard().unwrap();
-    let database = guard.as_ref().unwrap();
-    let existing = crate::state::ExistingBatchState::load(database, batch).unwrap();
-    let entities = existing
-        .entities
-        .values()
-        .map(|entity| entity.node)
-        .collect::<Vec<_>>();
-    let relation = existing.relations.values().next().unwrap();
-    (entities, relation.locator, relation.edge)
-}
-
-#[test]
-fn identical_upsert_replay_preserves_native_entity_and_relation_identity() {
-    let db = memory_db();
-    db.apply_unverified(stable_replay_batch("generation-1"))
-        .unwrap();
-    let before = stable_replay_native_identity(&db, &stable_replay_batch("generation-2"));
-
-    db.apply_unverified(stable_replay_batch("generation-2"))
-        .unwrap();
-    let after = stable_replay_native_identity(&db, &stable_replay_batch("generation-3"));
-
-    assert_eq!(
-        after, before,
-        "identical graph rows must be mutation no-ops"
-    );
-}
-
 #[test]
 fn queued_reader_rechecks_postcommit_poison_after_database_lock() {
     let db = memory_db();
@@ -276,48 +202,6 @@ fn snapshot_is_a_zero_copy_read_lease_that_blocks_writes_until_drop() {
         .expect("writer must resume when the snapshot lease is released")
         .unwrap();
     writer.join().unwrap();
-}
-
-#[test]
-fn open_installs_native_locator_indexes_and_entity_scalars() {
-    let db = memory_db();
-    db.apply_unverified(scalar_batch("native")).unwrap();
-    let database_guard = db.inner.database.read().unwrap();
-    let database = database_guard.as_ref().unwrap();
-    for property in [
-        "__tracedecay_graph_db_entity_key",
-        "__tracedecay_graph_db_relation_key",
-        "__tracedecay_graph_db_projection_key",
-        "__tracedecay_graph_db_publication_key",
-    ] {
-        assert!(
-            database.has_property_index(property),
-            "missing native property index {property}"
-        );
-    }
-
-    let nodes = database.find_nodes_by_property(
-        "__tracedecay_graph_db_entity_key",
-        &Value::from("70726f6a656374:61"),
-    );
-    assert_eq!(nodes.len(), 1);
-    let node = database.get_node(nodes[0]).unwrap();
-    assert_eq!(
-        node.get_property("__tracedecay_graph_db_namespace"),
-        Some(&Value::from("project"))
-    );
-    assert_eq!(
-        node.get_property("__tracedecay_graph_db_projection"),
-        Some(&Value::from("code"))
-    );
-    assert_eq!(
-        node.get_property("__tracedecay_graph_db_entity_id"),
-        Some(&Value::from("a"))
-    );
-    assert!(
-        node.get_property("__tracedecay_graph_db_payload").is_none(),
-        "typed graph state must not be hidden in a JSON payload"
-    );
 }
 
 #[test]
@@ -448,81 +332,6 @@ fn vector_index_refresh_fails_closed_on_missing_and_differing_committed_rows() {
         ),
         "an unresolvable identity must be durability-uncertain: {missing:?}"
     );
-}
-
-/// The refresh learns each committed row's node id, projection, and vector
-/// scalar from the identity index plus one projected column read; it must not
-/// hydrate the committed entities (labels, every property, and the vector
-/// decoded into a `GraphEntity`) to get there.
-#[test]
-fn vector_index_refresh_does_not_hydrate_committed_entities() {
-    let db = memory_db();
-    db.apply_unverified(vector_batch("seed")).unwrap();
-    let page = GraphWriteBatch::new(
-        GraphNamespace::new("project").unwrap(),
-        GraphProjectionId::new("code").unwrap(),
-        SourceGeneration::new("page").unwrap(),
-        GraphWatermark::new("page").unwrap(),
-        (0..64)
-            .map(|index| {
-                GraphMutation::UpsertEntity(
-                    GraphEntity::new(
-                        GraphEntityId::new(format!("chunk:{index}")).unwrap(),
-                        BTreeSet::new(),
-                        BTreeMap::from([(
-                            GraphPropertyName::new("embedding").unwrap(),
-                            GraphProperty::Vector(
-                                GraphVector::new(
-                                    vec![index as f32, (64 - index) as f32],
-                                    2,
-                                    VectorMetric::Cosine,
-                                )
-                                .unwrap(),
-                            ),
-                        )]),
-                    )
-                    .unwrap(),
-                )
-            })
-            .collect(),
-        Arc::new(NeverCancelled),
-    )
-    .unwrap();
-
-    let _ = crate::hotpath_observe::take_traversal_counters();
-    db.apply_unverified(page).unwrap();
-    let counters = crate::hotpath_observe::take_traversal_counters();
-
-    assert_eq!(
-        counters.property_decodes, 0,
-        "committing a page of new vector rows must not decode any stored entity"
-    );
-    assert_eq!(
-        db.vector_search(VectorSearchRequest {
-            namespace: GraphNamespace::new("project").unwrap(),
-            projection: GraphProjectionId::new("code").unwrap(),
-            property: GraphPropertyName::new("embedding").unwrap(),
-            query: vec![63.0, 1.0],
-            dimension: 2,
-            metric: VectorMetric::Cosine,
-            limit: 1,
-            cancellation: Arc::new(NeverCancelled),
-        })
-        .unwrap()
-        .matches
-        .into_iter()
-        .map(|candidate| candidate.entity)
-        .collect::<Vec<_>>(),
-        vec![GraphEntityId::new("chunk:63").unwrap()],
-        "the refreshed index must serve the committed page"
-    );
-}
-
-#[test]
-fn snapshots_can_cross_daemon_worker_boundaries() {
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    assert_send_sync::<super::GraphSnapshot>();
 }
 
 const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";

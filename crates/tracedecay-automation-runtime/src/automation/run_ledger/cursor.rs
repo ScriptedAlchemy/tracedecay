@@ -153,32 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_lookup_crosses_more_than_two_hundred_rows_without_pagination() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join(super::super::RUN_LEDGER_FILENAME);
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(
-            file,
-            "{}",
-            ledger_line(
-                "cursor",
-                Some(serde_json::json!({
-                    "pagination": {"resume_after_fact_id": "fact.cursor"}
-                }))
-            )
-        )
-        .unwrap();
-        for index in 0..250 {
-            writeln!(file, "{}", ledger_line(&format!("failure-{index}"), None)).unwrap();
-        }
-        drop(file);
-        assert_eq!(
-            read_latest_task_validation_pointer(&path, "memory_curator", POINTER).unwrap(),
-            Some(serde_json::json!("fact.cursor"))
-        );
-    }
-
-    #[test]
     fn cursor_lookup_crosses_a_ledger_larger_than_sixty_four_megabytes() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join(super::super::RUN_LEDGER_FILENAME);

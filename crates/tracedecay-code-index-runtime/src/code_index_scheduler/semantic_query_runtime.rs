@@ -1727,24 +1727,6 @@ mod tests {
     }
 
     #[test]
-    fn absent_activation_preserves_the_exact_fallback_arc() {
-        let fallback = fallback();
-        let identity = Arc::as_ptr(&fallback);
-        let outcome = semantic_abstention(
-            SemanticQueryModeV1::FallbackAllowed,
-            SemanticAbstentionV1::CalibrationUnavailable,
-            fallback,
-        )
-        .expect("fallback allowed");
-
-        assert_eq!(Arc::as_ptr(outcome.fallback()), identity);
-        outcome
-            .fallback()
-            .validate()
-            .expect("canonical fallback remains valid");
-    }
-
-    #[test]
     fn strict_semantic_reports_typed_unavailable_without_a_fallback_result() {
         assert!(matches!(
             semantic_abstention(

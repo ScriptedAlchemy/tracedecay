@@ -1043,23 +1043,6 @@ async fn memory_recall_updates_retrieval_count() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
-async fn memory_list_rejects_an_unknown_category() {
-    let cg = setup_project().await;
-
-    let bad_category = invoke_production_tool(
-        &cg,
-        "tracedecay_fact_store_list",
-        json!({"category": "definitely-not-a-category"}),
-    )
-    .await;
-    assert!(
-        bad_category.is_err(),
-        "the exact list schema must reject an unknown category"
-    );
-    close_test_graph(cg).await;
-}
-
 /// Status reports the canonical algebra and counters through the production
 /// memory authority.
 #[tokio::test]

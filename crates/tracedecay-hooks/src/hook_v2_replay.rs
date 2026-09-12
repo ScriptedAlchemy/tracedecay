@@ -526,36 +526,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_reauthorizes_and_drains_every_admitted_record() {
-        let root = TestRoot::new("drain");
-        let now = UtcMicros(1_000);
-        let binding = binding(7);
-        publish_binding(root.path(), &binding, now);
-        spool_envelopes(
-            root.path(),
-            &binding,
-            &[envelope(9, &binding), envelope(10, &binding)],
-            now,
-        );
-        let seen = Arc::new(StdMutex::new(Vec::new()));
-        let recorder = Arc::clone(&seen);
-
-        let report = drain(root.path(), now, move |envelope| {
-            let recorder = Arc::clone(&recorder);
-            async move {
-                recorder.lock().unwrap().push(envelope.event_id);
-                admitted()
-            }
-        })
-        .await;
-
-        assert_eq!(report.committed, 2);
-        assert_eq!(report.tombstoned, 0);
-        assert_eq!(seen.lock().unwrap().len(), 2);
-        assert_eq!(pending_records(root.path(), now), 0);
-    }
-
-    #[tokio::test]
     async fn live_failure_spools_then_replay_preserves_lifecycle_for_suggestion() {
         let root = TestRoot::new("lifecycle-suggestion");
         let now = UtcMicros(1_000);

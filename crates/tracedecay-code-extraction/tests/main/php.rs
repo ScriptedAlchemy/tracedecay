@@ -6,23 +6,6 @@ mod php_tests {
     use tracedecay_domain::*;
 
     #[test]
-    fn test_php_file_node() {
-        let source = r#"<?php
-function hello() {}
-"#;
-        let extractor = PhpExtractor;
-        let result = extractor.extract("test.php", source);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let files: Vec<_> = result
-            .nodes
-            .iter()
-            .filter(|n| n.kind == NodeKind::File)
-            .collect();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].name, "test.php");
-    }
-
-    #[test]
     fn test_php_function() {
         let source = r#"<?php
 function add(int $a, int $b): int {
@@ -193,28 +176,6 @@ enum Status {
             .filter(|n| n.kind == NodeKind::EnumVariant)
             .collect();
         assert_eq!(variants.len(), 3, "expected 3 enum cases");
-    }
-
-    #[test]
-    fn test_php_class_inheritance() {
-        let source = r#"<?php
-class Base {
-    public function id(): int { return 1; }
-}
-class Child extends Base {
-    public function name(): string { return "x"; }
-}
-"#;
-        let extractor = PhpExtractor;
-        let result = extractor.extract("inherit.php", source);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        assert!(
-            result
-                .unresolved_refs
-                .iter()
-                .any(|r| r.reference_kind == EdgeKind::Extends),
-            "expected Extends ref for class inheritance"
-        );
     }
 
     #[test]

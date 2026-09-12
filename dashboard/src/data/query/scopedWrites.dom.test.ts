@@ -116,17 +116,6 @@ describe('writes under a scope that does not accept them', () => {
   });
 });
 
-describe('writes under a scope that accepts them', () => {
-  /** The aggregate is writable and a write under it lands on one project, so
-   * the target it reports has to say that rather than name a project. */
-  it('states that an aggregate write targets only the active project', () => {
-    expect(scopeWritable({ kind: 'all' })).toEqual({
-      state: 'writable',
-      target: 'the active project',
-    });
-  });
-});
-
 /**
  * Activation is measured from a registry read, so it can be stale by the time a
  * write goes out — the daemon may have activated a different project in

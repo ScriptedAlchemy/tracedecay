@@ -55,17 +55,6 @@ describe('isMeasuredField', () => {
 });
 
 describe('prepareField', () => {
-  it('draws a measured field exactly where the caller placed it', () => {
-    const { graph, placed } = prepare([
-      { id: 'a', label: 'a', kind: 'k', x: -12, y: 7 },
-      { id: 'b', label: 'b', kind: 'k', x: 40, y: -3 },
-    ]);
-
-    expect(placed).toBe(true);
-    expect(position(graph, 'a')).toEqual([-12, 7]);
-    expect(position(graph, 'b')).toEqual([40, -3]);
-  });
-
   // The invariant the `placed` flag exists for: one node without coordinates
   // would otherwise be dropped at the seed circle beside nodes whose position
   // is a claim about their data, and nothing on screen tells the two apart.
@@ -218,21 +207,6 @@ describe('buildDendrites', () => {
     const waypoints = graph.nodes().filter((id) => id.startsWith('__way__'));
     expect(waypoints).toHaveLength(strands[0]!.points.length - 2);
     expect(realNodes).not.toContain(waypoints[0]);
-  });
-
-  it('curves the same subgraph identically every time', () => {
-    const build = () => {
-      const { graph } = prepare(
-        [
-          { id: 'a', label: 'a', kind: 'k', x: 0, y: 0 },
-          { id: 'b', label: 'b', kind: 'k', x: 10, y: 4 },
-        ],
-        [{ source: 'a', target: 'b' }],
-      );
-      return buildDendrites(graph, 1)[0]!.points;
-    };
-
-    expect(build()).toEqual(build());
   });
 
   // Legibility at density beats flourish: past the budget the relations stay

@@ -4,12 +4,12 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_contracts::ResolvedScope;
-#[cfg(test)]
-use tracedecay_contracts::context_scout::ContextScoutFeedbackV1;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
+#[cfg(test)]
+use tracedecay_hooks::HookImmediateAdmissionStateV1;
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
@@ -20,21 +20,13 @@ use tracedecay_hooks::{
     SpoolAppendOutcomeV1, admit_async_exact_scope, deliver_hook_feedback, envelope_identity_hash16,
     finish_synchronous_hook,
 };
-#[cfg(test)]
-use tracedecay_hooks::{HookImmediateAdmissionStateV1, HookScopedFeedbackV1};
 
-#[cfg(test)]
-use crate::agents::context_scout::context_scout_delivery_receipt_matches_envelope;
 use crate::agents::context_scout::{
     ContextScoutDeliveryReceiptHookV1, context_scout_delivery_receipt_id,
 };
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::analytics::{HookTimingSpan, elapsed_us};
-#[cfg(test)]
-use super::daemon_ports::{
-    ContextScoutFeedbackCommitV1, DaemonContextScoutFeedbackPort, outcome_is_committed,
-};
 use super::daemon_ports::{
     DaemonAdmissionPort, DaemonDeliveryReceiptPort, DaemonFeedbackNoticeDeliveryPort,
     DaemonOpenCodeLspUpdatePort, now_utc,
@@ -793,47 +785,6 @@ async fn dispatch_decoded(
         }
         Err(_) => unavailable(),
     }
-}
-
-#[cfg(test)]
-impl HookScopedFeedbackV1 for ContextScoutFeedbackCommitV1 {
-    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
-        self.feedback.receipt_id == self.receipt.receipt_id
-            && context_scout_delivery_receipt_matches_envelope(&self.receipt, envelope)
-    }
-}
-
-#[cfg(test)]
-pub(crate) async fn record_context_scout_delivery(
-    runtime: &HookRuntimeV1,
-    project_root: &Path,
-    receipt: &ContextScoutDeliveryReceiptV1,
-) -> bool {
-    let Some(deadline) = HookSynchronousDeadlineV1::after_elapsed(0) else {
-        return false;
-    };
-    outcome_is_committed(
-        DaemonDeliveryReceiptPort::new(runtime, project_root)
-            .post_receipt(receipt, deadline)
-            .await,
-    )
-}
-
-#[cfg(test)]
-pub(crate) async fn commit_context_scout_feedback(
-    runtime: &HookRuntimeV1,
-    project_root: &Path,
-    receipt: &ContextScoutDeliveryReceiptV1,
-    feedback: ContextScoutFeedbackV1,
-) -> bool {
-    let Some(deadline) = HookSynchronousDeadlineV1::after_elapsed(0) else {
-        return false;
-    };
-    outcome_is_committed(
-        DaemonContextScoutFeedbackPort::new(runtime, project_root)
-            .post_feedback(receipt, &feedback, deadline)
-            .await,
-    )
 }
 
 fn render_host_delivery(

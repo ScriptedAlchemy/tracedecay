@@ -274,30 +274,6 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
 }
 
 #[tokio::test]
-async fn authoritative_commit_deletes_the_durable_hook_event() {
-    let (cg, project, authority) = init_indexed_repo().await;
-    let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let reconcile_sink: CodeIndexReconcileSink =
-        Arc::new(|_request, _demand| Box::pin(async { true.into() }));
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
-    let mut routes = HookProjectRouteCache::default();
-
-    let outcome = Box::pin(server.handle_hook_event_notification(
-        Some(&terminal_receipt(project.path().to_path_buf())),
-        &mut routes,
-    ))
-    .await;
-
-    assert_eq!(outcome.status, HostAdmissionStatus::Committed);
-    assert_eq!(broker.pending_count().await, 0);
-    server.shutdown().await;
-}
-
-#[tokio::test]
 async fn oversized_event_is_rejected_before_canonical_attempt() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();

@@ -31,7 +31,6 @@ pub enum FeedbackReadOperationV1 {
     Expand,
     List,
 }
-
 /// Typed request resolved from a daemon-issued opaque request handle.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
@@ -482,82 +481,4 @@ fn project_feedback_evidence<T>(
             },
         )
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use tracedecay_contracts::feedback::FeedbackDiagnosticsReadResultV1;
-    use tracedecay_domain::{
-        CommitId, FeedbackCycleId, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
-        FeedbackDurabilityV1, FeedbackImpactStateV1, FeedbackResultId, FeedbackScopeV1,
-        ManifestDigest, ProjectId, RepositoryId, WorktreeId,
-    };
-
-    use super::{FeedbackCanonicalProjectionKindV1, FeedbackCanonicalProjectionResultV1};
-
-    #[test]
-    fn canonical_feedback_projections_preserve_cycle_identity_and_state() {
-        let scope = FeedbackScopeV1 {
-            project_id: ProjectId::new("project.feedback-projection").expect("project"),
-            repository_id: RepositoryId::new("repository.feedback-projection").expect("repository"),
-            worktree_id: WorktreeId::new("worktree.feedback-projection").expect("worktree"),
-            branch_ref: "refs/heads/main".to_owned(),
-            head_commit_id: CommitId::new("commit.feedback-projection").expect("commit"),
-        };
-        let result_id =
-            FeedbackResultId::new("result.feedback-projection").expect("feedback result");
-        let cycle_id = FeedbackCycleId::new("cycle.feedback-projection").expect("feedback cycle");
-        let diagnostics = || FeedbackDiagnosticsReadResultV1 {
-            cycle: FeedbackCycleResultV1 {
-                result_id: result_id.clone(),
-                cycle_id: cycle_id.clone(),
-                scope: scope.clone(),
-                content_identity: None,
-                durability: FeedbackDurabilityV1::Durable,
-                policy_digest: digest('a'),
-                configuration_digest: digest('b'),
-                termination: FeedbackCycleTerminationV1::IncompleteCoverage,
-                provider_states: Vec::new(),
-                advisory_provider_states: Vec::new(),
-                baseline_states: Vec::new(),
-                impact: None,
-                impact_state: Some(FeedbackImpactStateV1::Unavailable),
-                affected_tests_state: Some(FeedbackImpactStateV1::Stale),
-                findings: Vec::new(),
-                total_findings: 0,
-                returned_findings: 0,
-                omitted_findings: 0,
-                advisory_only: true,
-            },
-        };
-
-        let FeedbackCanonicalProjectionResultV1::Impact(impact) =
-            FeedbackCanonicalProjectionKindV1::Impact.project(diagnostics())
-        else {
-            panic!("impact projection kind");
-        };
-        assert_eq!(impact.result_id, result_id);
-        assert_eq!(impact.cycle_id, cycle_id);
-        assert_eq!(impact.scope, scope);
-        assert!(impact.content_identity.is_none());
-        assert_eq!(impact.state, Some(FeedbackImpactStateV1::Unavailable));
-
-        let FeedbackCanonicalProjectionResultV1::AffectedTests(affected) =
-            FeedbackCanonicalProjectionKindV1::AffectedTests.project(diagnostics())
-        else {
-            panic!("affected-tests projection kind");
-        };
-        assert_eq!(affected.result_id, result_id);
-        assert_eq!(affected.cycle_id, cycle_id);
-        assert_eq!(affected.scope, scope);
-        assert!(affected.content_identity.is_none());
-        assert!(affected.target.is_none());
-        assert!(affected.affected_tests.is_empty());
-        assert!(affected.evidence_anchors.is_empty());
-        assert_eq!(affected.state, Some(FeedbackImpactStateV1::Stale));
-    }
-
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-    }
 }

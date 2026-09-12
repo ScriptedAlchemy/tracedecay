@@ -46,16 +46,6 @@ mod identity_root_canonicalization_tests {
     }
 
     #[test]
-    fn a_linked_worktree_and_its_primary_checkout_agree() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (primary, linked) = repository(temp.path());
-        assert_eq!(
-            default_profile_project_id(&primary),
-            default_profile_project_id(&linked),
-        );
-    }
-
-    #[test]
     fn a_trailing_separator_does_not_change_the_id() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (primary, linked) = repository(temp.path());

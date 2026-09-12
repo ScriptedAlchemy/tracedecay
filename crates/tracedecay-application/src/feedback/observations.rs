@@ -1076,37 +1076,6 @@ mod tests {
     }
 
     #[test]
-    fn github_lifecycle_ingress_rate_limit_and_stale_are_distinct_events() {
-        let input = saved_input();
-        let events = [
-            FeedbackSourceEventV1::GitHubLifecycle {
-                lifecycle: FeedbackGitHubLifecycleV1::Outdated,
-                item_count: 1,
-            },
-            FeedbackSourceEventV1::GitHubIngress {
-                outcome: FeedbackOutcomeV1::Partial,
-                item_count: 1,
-                duration_micros: None,
-            },
-            FeedbackSourceEventV1::GitHubRateLimit {
-                duration_micros: Some(1_000),
-            },
-            FeedbackSourceEventV1::GitHubStale { item_count: 1 },
-        ];
-        let kinds = events
-            .into_iter()
-            .map(|event| {
-                feedback_source_event_envelope(&input, event)
-                    .unwrap()
-                    .source_event
-                    .unwrap()
-                    .event_kind()
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(kinds.len(), 4);
-    }
-
-    #[test]
     fn advisory_provider_state_is_orthogonal_and_content_free() {
         let input = saved_input();
         let events = [

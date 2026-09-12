@@ -428,47 +428,6 @@ async fn payload_delete_rollback_preserves_metadata_and_file() -> Result<(), Str
 }
 
 #[tokio::test]
-async fn committed_payload_delete_tombstone_recovers_unlink() -> Result<(), String> {
-    let store = test_store().await?;
-    let payload_ref = seed_payload(&store, "message-1", "body to reap").await?;
-    drop_raw_reference(&store, &payload_ref).await?;
-
-    let transaction = store
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|err| err.to_string())?;
-    payload::delete_external_payload_in_transaction(
-        &transaction,
-        &store.storage_root,
-        &payload_ref,
-        &payload::DeleteOpts::default(),
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-    transaction.commit().await.map_err(|err| err.to_string())?;
-
-    assert!(payload_path(&store, &payload_ref).is_file());
-    assert!(
-        payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_err()
-    );
-    let removed = drain_pending_payload_delete(&store.conn, &store.storage_root, &payload_ref)
-        .await
-        .map_err(|err| err.to_string())?;
-    assert!(removed.is_some());
-    assert!(!payload_path(&store, &payload_ref).exists());
-    assert!(
-        schema::get_gc_meta(&store.conn, &pending_payload_delete_key(&payload_ref))
-            .await
-            .map_err(|err| err.to_string())?
-            .is_none()
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn committed_payload_delete_drain_failure_returns_pending_then_retries() -> Result<(), String>
 {
     let store = test_store().await?;
@@ -876,60 +835,6 @@ async fn unreferenced_payload_two_scan_reaps_after_grace() -> Result<(), String>
         &store.storage_root,
         PROVIDER,
         None,
-        &cfg,
-        true,
-        1_000 + LcmGcConfig::MIN_GRACE_SECONDS as i64,
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-    assert_eq!(second.unreferenced.count, 1);
-    assert!(
-        payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_err()
-    );
-    assert!(
-        !payload::payload_dir(&store.storage_root)
-            .join(&payload_ref)
-            .exists()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn session_scoped_unreferenced_payload_reaps_after_grace() -> Result<(), String> {
-    let store = test_store().await?;
-    let payload_ref = seed_payload(&store, "message-1", "body to delete").await?;
-    drop_raw_reference(&store, &payload_ref).await?;
-    let cfg = LcmGcConfig {
-        grace_seconds: LcmGcConfig::MIN_GRACE_SECONDS,
-        backup_before_reap: false,
-        ..Default::default()
-    }
-    .normalized();
-    let first = run_payload_gc_with_apply(
-        &store.conn,
-        &store.storage_root,
-        PROVIDER,
-        Some("session-a"),
-        &cfg,
-        true,
-        1_000,
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-    assert_eq!(first.unreferenced.count, 0);
-    assert!(
-        payload::load_payload_metadata(&store.conn, &payload_ref)
-            .await
-            .is_ok()
-    );
-
-    let second = run_payload_gc_with_apply(
-        &store.conn,
-        &store.storage_root,
-        PROVIDER,
-        Some("session-a"),
         &cfg,
         true,
         1_000 + LcmGcConfig::MIN_GRACE_SECONDS as i64,

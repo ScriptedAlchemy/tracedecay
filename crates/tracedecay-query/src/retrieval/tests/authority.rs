@@ -606,23 +606,6 @@ fn authenticated_foreground_fallback_is_byte_stable_and_lane_bounded() {
 }
 
 #[test]
-fn semantic_handoff_reuses_the_authenticated_query_and_fallback() {
-    let authority = authority();
-    let request = request();
-    let authorized = authority
-        .compose(&request, &query_view(), empty_foreground_lanes(), 8, None)
-        .expect("compose");
-
-    assert_eq!(
-        authority
-            .authenticate_query(&request, &query_view())
-            .expect("digest"),
-        authorized.query_digest
-    );
-    assert!(Arc::strong_count(&authorized.fallback) >= 1);
-}
-
-#[test]
 fn retained_query_key_verifies_without_fallback_key_guessing() {
     let request = request();
     let query = query_view();

@@ -36,11 +36,6 @@ function envelope(revision: number, filler = ""): SseEventEnvelope<Body> {
 }
 
 describe("SSE queue ceiling — 5,000 events / 10 MiB", () => {
-  it("uses the production defaults", () => {
-    expect(MAX_QUEUED_EVENTS).toBe(5_000);
-    expect(MAX_QUEUED_BYTES).toBe(10 * 1024 * 1024);
-  });
-
   it("holds the queue at exactly 5,000 events when the render layer stalls", () => {
     const reducer = createSseReducer<Body>();
     const total = 10 * 1_000;

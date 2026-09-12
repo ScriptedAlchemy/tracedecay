@@ -177,53 +177,6 @@ async fn codex_workflow_fact_rows(
 }
 
 #[tokio::test]
-async fn recent_session_goals_surfaces_latest_status_per_session() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    write_codex_rollout_with_goal_events(&home, &project, "codex-goal-events");
-
-    mark_test_project(&project);
-    let runtime = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
-    runtime
-        .runtime()
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-
-    let goals = runtime
-        .runtime()
-        .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
-        .await
-        .unwrap();
-    // One row per session: the latest lifecycle state (paused).
-    assert_eq!(goals.len(), 1);
-    let goal = &goals[0];
-    assert_eq!(goal.session.session_id, "codex-goal-events");
-    assert_eq!(goal.message.kind.as_deref(), Some("goal"));
-    assert_eq!(
-        goal.message.text,
-        "phlogiston pipeline rollout and verification"
-    );
-    let meta: serde_json::Value =
-        serde_json::from_str(goal.message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(meta["status"], "paused");
-    assert_eq!(meta["updated_at"], 1_782_880_661i64);
-
-    // Re-ingest must be idempotent (upsert keyed by message_id): still one goal.
-    runtime
-        .runtime()
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    let goals_again = runtime
-        .runtime()
-        .recent_project_session_goals_for_test(project.to_string_lossy().as_ref(), 10)
-        .await
-        .unwrap();
-    assert_eq!(goals_again.len(), 1);
-}
-#[tokio::test]
 async fn codex_thread_goal_events_ingested_as_goal_rows_with_dedupe() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);

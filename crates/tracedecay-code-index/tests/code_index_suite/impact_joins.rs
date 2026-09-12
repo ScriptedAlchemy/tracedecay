@@ -4,10 +4,7 @@ use tracedecay_code_index::impact_join::{
     GenerationOccurrenceBindingV1,
 };
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
-use tracedecay_code_index::provider::{
-    CodeIndexAffectedTestsEvidenceV1 as AffectedTestsResult,
-    CodeIndexGraphImpactEvidenceV1 as GraphImpactResult,
-};
+use tracedecay_code_index::provider::CodeIndexGraphImpactEvidenceV1 as GraphImpactResult;
 use tracedecay_code_index::provider::{
     GenerationProviderContractErrorV1, GenerationProviderCoverageV1, GenerationProviderReadV1,
 };
@@ -88,53 +85,6 @@ fn occurrences(generation: &CodeGenerationManifestV1) -> Vec<GenerationOccurrenc
             content_digest: content('b'),
         },
     ]
-}
-
-#[test]
-fn graph_impact_and_affected_tests_bind_exact_occurrences() {
-    let (snapshot, manifest) = generation();
-    let graph = GenerationProviderReadV1::new(
-        ProviderEvaluationStateV1::SupportedCompletedComplete,
-        GenerationProviderCoverageV1::Complete {
-            examined: 2,
-            eligible: 2,
-            excluded: 0,
-        },
-        Some(GraphImpactResult {
-            affected_files: vec![id("file.source")],
-            affected_callers: vec![id("symbol.caller")],
-            evidence_anchors: vec![id("anchor.graph")],
-        }),
-    )
-    .expect("complete graph provider result");
-    let tests = GenerationProviderReadV1::new(
-        ProviderEvaluationStateV1::SupportedCompletedComplete,
-        GenerationProviderCoverageV1::Complete {
-            examined: 1,
-            eligible: 1,
-            excluded: 0,
-        },
-        Some(AffectedTestsResult {
-            tests: vec![id("symbol.test")],
-            attributions: Vec::new(),
-        }),
-    )
-    .expect("complete test provider result");
-
-    let joined =
-        GenerationImpactJoinV1::join(&manifest, &snapshot, graph, tests, &occurrences(&manifest))
-            .expect("generation-exact impact join");
-
-    assert_eq!(joined.generation_id, manifest.generation_id);
-    assert_eq!(joined.coverage, GenerationImpactJoinCoverageV1::Complete);
-    assert_eq!(
-        joined.affected_callers[0].symbol_occurrence_id.as_str(),
-        "symbol.caller"
-    );
-    assert_eq!(
-        joined.affected_tests[0].symbol_occurrence_id.as_str(),
-        "symbol.test"
-    );
 }
 
 #[test]

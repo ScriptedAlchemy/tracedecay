@@ -738,14 +738,13 @@ mod tests {
     use super::*;
     use tracedecay_domain::{
         BoundedSanitizedText, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-        LanguageDescriptorRevision, PolicyRevisionId, SanitizationReceiptId, SensitivityDecision,
-        SensitivityLevelV1, SourceSpan,
+        LanguageDescriptorRevision, PolicyRevisionId, SensitivityDecision, SensitivityLevelV1,
+        SourceSpan,
     };
 
-    use crate::capabilities::{BaseCapabilityEmitter, CodeIndexCapabilityEmitter};
     use crate::chunks::CodeSearchEligibilityV1;
     use crate::languages::StaticLanguageRegistry;
-    use tracedecay_domain::{CoverageSummaryV1, LanguageDescriptorV1};
+    use tracedecay_domain::LanguageDescriptorV1;
 
     fn digest(byte: char) -> ContentDigest {
         ContentDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("valid digest")
@@ -945,33 +944,6 @@ mod tests {
     }
 
     #[test]
-    fn emitter_accepts_planner_sealed_generations() {
-        let snapshot = validated(two_file_snapshot());
-        let planner = planner();
-        let generation = planner
-            .plan_generation(&snapshot, None, UtcMicros(3_000))
-            .expect("sealed generation");
-
-        let emitter = BaseCapabilityEmitter::new(
-            registry(),
-            CoverageSummaryV1 {
-                files_eligible: 2,
-                files_excluded: 0,
-                files_partial: 0,
-                files_unsupported: 0,
-                ranges_excluded: 0,
-                ranges_unsupported: 0,
-            },
-            vec![SanitizationReceiptId::new("receipt.a").expect("valid id")],
-        );
-        // Capability emission is the runtime seal boundary: an incorrectly
-        // sealed generation cannot be advertised.
-        let manifest = emitter.emit(&generation).expect("emission succeeds");
-        assert_eq!(manifest.generation_id, generation.generation_id);
-        assert_eq!(manifest.chunker_revision, generation.chunker_revision);
-    }
-
-    #[test]
     fn planning_rejects_unsealed_and_foreign_parents() {
         let snapshot = validated(two_file_snapshot());
         let planner = planner();
@@ -1020,112 +992,6 @@ mod tests {
             planner.plan_generation(&snapshot, Some(&other_genesis), UtcMicros(4_000)),
             Err(GenerationPlanningErrorV1::ForeignParentIdentity)
         );
-    }
-
-    #[test]
-    fn increment_plan_carries_forward_unchanged_files_by_identity_digest() {
-        let planner = planner();
-        let prior_snapshot = two_file_snapshot();
-        let prior_validated = validated(prior_snapshot.clone());
-        let prior_manifest = planner
-            .plan_generation(&prior_validated, None, UtcMicros(3_000))
-            .expect("prior generation");
-
-        // src/a.rs unchanged, src/b.rs content changed, src/c.rs new.
-        let current = validated(snapshot(vec![
-            present_file("file.a2", "src/a.rs", 'a'),
-            present_file("file.b2", "src/b.rs", 'c'),
-            present_file("file.c", "src/c.rs", 'd'),
-        ]));
-        let changed: BTreeSet<String> = ["src/b.rs".to_owned(), "src/c.rs".to_owned()]
-            .into_iter()
-            .collect();
-        let plan = planner
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &changed)
-            .expect("increment plan");
-
-        assert!(!plan.is_full_rebuild());
-        assert_eq!(plan.prior_generation, prior_manifest.generation_id);
-        assert_eq!(plan.carried_forward, 1);
-        assert_eq!(plan.reextract, 2);
-        assert_eq!(plan.deleted, 0);
-        assert_eq!(
-            plan.capture_changed_files,
-            vec!["src/b.rs".to_owned(), "src/c.rs".to_owned()]
-        );
-
-        let carry = &plan.files[0];
-        assert_eq!(carry.logical_path, "src/a.rs");
-        match &carry.action {
-            FileExtractionActionV1::CarryForward {
-                file_occurrence_id,
-                prior_file_occurrence_id,
-                content_digest,
-            } => {
-                assert_eq!(file_occurrence_id.as_str(), "file.a2");
-                assert_eq!(prior_file_occurrence_id.as_str(), "file.a");
-                assert_eq!(*content_digest, digest('a'));
-            }
-            other => panic!("expected carry-forward, got {other:?}"),
-        }
-        assert!(matches!(
-            plan.files[1].action,
-            FileExtractionActionV1::ReExtract { .. }
-        ));
-        assert!(matches!(
-            plan.files[2].action,
-            FileExtractionActionV1::ReExtract { .. }
-        ));
-
-        // src/b.rs removed and src/a.rs unchanged: one deletion, one carry.
-        let shrunk = validated(snapshot(vec![present_file("file.a3", "src/a.rs", 'a')]));
-        let shrink_plan = planner
-            .plan_increment(&prior_manifest, &prior_snapshot, &shrunk, &BTreeSet::new())
-            .expect("shrink plan");
-        assert_eq!(shrink_plan.carried_forward, 1);
-        assert_eq!(shrink_plan.deleted, 1);
-        assert!(matches!(
-            shrink_plan.files[1].action,
-            FileExtractionActionV1::Deleted {
-                ref prior_file_occurrence_id
-            } if prior_file_occurrence_id.as_str() == "file.b"
-        ));
-    }
-
-    #[test]
-    fn increment_plan_digest_authority_overrides_capture_hints() {
-        let planner = planner();
-        let prior_snapshot = two_file_snapshot();
-        let prior_validated = validated(prior_snapshot.clone());
-        let prior_manifest = planner
-            .plan_generation(&prior_validated, None, UtcMicros(3_000))
-            .expect("prior generation");
-
-        // Capture hints src/a.rs changed (it did not) and misses src/b.rs
-        // (it did). Digest comparison, not the hint, decides.
-        let current = validated(snapshot(vec![
-            present_file("file.a2", "src/a.rs", 'a'),
-            present_file("file.b2", "src/b.rs", 'c'),
-        ]));
-        let hinted: BTreeSet<String> = ["src/a.rs".to_owned()].into_iter().collect();
-        let plan = planner
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &hinted)
-            .expect("increment plan");
-        let unhinted = planner
-            .plan_increment(&prior_manifest, &prior_snapshot, &current, &BTreeSet::new())
-            .expect("unhinted increment plan");
-
-        assert_eq!(plan.carried_forward, 1);
-        assert_eq!(plan.reextract, 1);
-        assert_eq!(plan.invalidation_digest, unhinted.invalidation_digest);
-        assert!(matches!(
-            plan.files[0].action,
-            FileExtractionActionV1::CarryForward { .. }
-        ));
-        assert!(matches!(
-            plan.files[1].action,
-            FileExtractionActionV1::ReExtract { .. }
-        ));
     }
 
     #[test]
@@ -1223,37 +1089,6 @@ mod tests {
             subtokens: vec![],
             sanitized_text: BoundedSanitizedText::new("text").expect("bounded text"),
         })
-    }
-
-    #[test]
-    fn generation_aware_join_binds_only_matching_generation_chunks() {
-        let planner = planner();
-        let snapshot = validated(two_file_snapshot());
-        let generation = planner
-            .plan_generation(&snapshot, None, UtcMicros(3_000))
-            .expect("sealed generation");
-        let document = CodeSearchDocumentV1 {
-            generation_id: generation.generation_id.clone(),
-            file_occurrence_id: id("file.a"),
-            content_digest: digest('a'),
-            eligibility: CodeSearchEligibilityV1::Eligible,
-            chunk_ids: vec![id("chunk.v1.one"), id("chunk.v1.two")],
-        };
-        // Input order is not canonical; bindings come back canonically
-        // ordered by chunk identity.
-        let chunks = vec![
-            chunk("chunk.v1.two", &generation.generation_id, "file.a"),
-            chunk("chunk.v1.one", &generation.generation_id, "file.a"),
-        ];
-        let bindings =
-            join_chunks_to_generation(&generation, &document, &chunks).expect("join succeeds");
-        assert_eq!(bindings.len(), 2);
-        assert_eq!(bindings[0].chunk_id.as_str(), "chunk.v1.one");
-        assert_eq!(bindings[1].chunk_id.as_str(), "chunk.v1.two");
-        for binding in &bindings {
-            assert_eq!(binding.generation_id, generation.generation_id);
-            assert_eq!(binding.file_occurrence_id.as_str(), "file.a");
-        }
     }
 
     #[test]

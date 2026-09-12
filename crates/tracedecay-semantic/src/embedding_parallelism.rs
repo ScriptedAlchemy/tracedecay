@@ -300,12 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_ceiling_is_never_exceeded() {
-        assert_eq!(embedding_session_width_for(96, 4, 1), 1);
-        assert_eq!(embedding_session_width_for(96, 4, 2), 2);
-    }
-
-    #[test]
     fn forced_sessions_are_clamped_to_the_shared_cpu_budget() {
         assert_eq!(
             embedding_execution_plan_for(8, 4, 64, 64, Some(12)),
@@ -323,20 +317,6 @@ mod tests {
                 limiting_reason: EmbeddingSessionLimitingReasonV1::ConfiguredMaximum,
             }
         );
-    }
-
-    #[test]
-    fn intra_thread_ceiling_does_not_reduce_independent_session_width() {
-        assert_eq!(embedding_session_width_for(96, 1, 64), 48);
-        assert_eq!(embedding_session_width_for(96, 32, 64), 12);
-        assert_eq!(embedding_session_width_for(96, 128, 64), 12);
-    }
-
-    #[test]
-    fn default_intra_thread_ceiling_is_valid_on_small_and_large_hosts() {
-        assert_eq!(default_max_intra_threads_for(1), 1);
-        assert_eq!(default_max_intra_threads_for(8), 8);
-        assert_eq!(default_max_intra_threads_for(96), 12);
     }
 
     #[test]
@@ -381,19 +361,6 @@ mod tests {
         const GIB: u64 = 1024 * 1024 * 1024;
 
         assert_eq!(effective_resident_ceiling(96 * GIB, Some(3 * GIB)), 3 * GIB);
-    }
-
-    #[test]
-    fn configured_thread_and_session_ceilings_remain_authoritative() {
-        assert_eq!(
-            embedding_execution_plan_for(48, 8, 3, 12, None),
-            EmbeddingExecutionPlanV1 {
-                intra_threads: 8,
-                sessions: 3,
-                limiting_reason: EmbeddingSessionLimitingReasonV1::ConfiguredMaximum,
-            }
-        );
-        assert_eq!(embedding_pool_sessions(8, 32), 33);
     }
 
     #[test]

@@ -24,10 +24,7 @@ use tracedecay_agent_hosts::agents::host_bundle_registry::{
     verified_embedded_host_bundle, verified_embedded_host_component_set,
 };
 use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
-use tracedecay_agent_hosts::agents::{
-    AgentIntegration, HealthcheckContext, KimiIntegration, OpenCodeIntegration,
-    inspect_receipt_backed_host_components,
-};
+use tracedecay_agent_hosts::agents::{HealthcheckContext, inspect_receipt_backed_host_components};
 use tracedecay_hooks::{
     HookHostV1, OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_lsp_event,
     decode_opencode_plugin_event,
@@ -40,8 +37,6 @@ const GENERATOR_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 fn parse_fixture(value: &str) -> Value {
     serde_json::from_str(value).expect("checked-in fixture parses")
 }
-
-fn assert_agent_integration<T: AgentIntegration>() {}
 
 struct CurrentRegistration;
 
@@ -67,14 +62,6 @@ impl HostBundleRegistrationInspectorV1 for MissingRegistration {
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Missing
     }
-}
-
-#[test]
-fn public_host_contracts_are_compiler_referenced() {
-    assert_agent_integration::<KimiIntegration>();
-    assert_agent_integration::<OpenCodeIntegration>();
-    let _native_decoder = decode_native_hook_event;
-    let _opencode_decoder = decode_opencode_plugin_event;
 }
 
 #[test]

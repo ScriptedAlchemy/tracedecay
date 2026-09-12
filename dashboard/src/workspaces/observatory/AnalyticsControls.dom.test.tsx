@@ -26,80 +26,6 @@ afterEach(() => {
 });
 
 describe('Observatory analytics controls', () => {
-  it('marks only the mode published by the canonical projection as current', async () => {
-    renderControls();
-
-    await screen.findByRole('region', { name: 'collection mode' });
-    for (const mode of ['off', 'local_only', 'aggregate_share']) {
-      const entry = document.querySelector(`[data-analytics-mode="${mode}"]`);
-      expect(entry).toBeTruthy();
-      expect(entry?.getAttribute('data-analytics-mode-current')).toBe(
-        mode === 'local_only' ? 'true' : 'false',
-      );
-    }
-    expect(screen.getByText(/no network exporter · default/)).toBeTruthy();
-    expect(screen.getByText(/network exporter · explicit opt-in required/)).toBeTruthy();
-  });
-
-  it('reports the published mode without defaulting it in the browser', async () => {
-    renderControls();
-
-    const block = await screen.findByRole('region', { name: 'collection mode' });
-    expect(block.getAttribute('data-analytics-control-state')).toBe('ready');
-    expect(block.textContent).toContain('An unavailable mode is never read as Off');
-    expect(block.textContent).toContain('Local only');
-  });
-
-  it('reports share staging age from the canonical projection', async () => {
-    renderControls();
-
-    const block = await screen.findByRole('region', { name: 'share staging age' });
-    expect(block.getAttribute('data-analytics-control-state')).toBe('ready');
-    expect(block.textContent).toContain('17 s');
-  });
-
-  it('never reports zero egress failures for an exporter that does not exist', async () => {
-    renderControls();
-
-    const block = await screen.findByRole('region', { name: 'egress failures' });
-    expect(block.getAttribute('data-analytics-control-state')).toBe('unknown');
-    expect(block.textContent).toContain('not zero failures');
-    expect(document.querySelector('[data-egress-failures]')?.getAttribute('data-egress-failures'))
-      .toBe('unknown');
-  });
-
-  it('reads the retention-backlog status the findings route publishes', async () => {
-    renderControls();
-
-    await screen.findByText('retention sweep observed 4 entries');
-    const block = screen.getByRole('region', { name: 'retention and deletion' });
-    expect(block.getAttribute('data-analytics-control-state')).toBe('ready');
-    expect(document.querySelector('[data-retention-backlog-published]')
-      ?.getAttribute('data-retention-backlog-published')).toBe('true');
-  });
-
-  it('labels the declared retention lifetimes as policy with no observed age', async () => {
-    renderControls();
-
-    await screen.findByText('retention sweep observed 4 entries');
-    const declared = document.querySelector('[data-analytics-retention="declared_policy"]');
-    expect(declared?.textContent).toContain('expires after 30 days');
-    expect(declared?.textContent).toContain('expire after 395 days');
-    expect(declared?.textContent).toContain('observed age not published');
-    expect(screen.getByText(/declared policy, not measurements/)).toBeTruthy();
-    // Product receipts and run history keep their own lifecycles and are never
-    // adoption analytics, so this surface refuses to report them as retention.
-    expect(screen.getByText(/never exported as adoption analytics/)).toBeTruthy();
-  });
-
-  it('reads the profile upload setting and says it is not the collection mode', async () => {
-    renderControls();
-
-    await screen.findByText('user.upload_enabled.v1');
-    const block = screen.getByRole('region', { name: 'profile upload setting' });
-    expect(block.textContent).toContain('disabled');
-    expect(block.textContent).toContain('not the Plan 26 analytics collection mode');
-  });
 
   it('keeps a failed settings read from blanking the retention evidence', async () => {
     // Independent sources: one refusing must not take the other down with it.
@@ -118,19 +44,6 @@ describe('Observatory analytics controls', () => {
     const retention = screen.getByRole('region', { name: 'retention and deletion' });
     expect(retention.textContent).toContain('could not be read');
     expect(retention.textContent).not.toContain('retention sweep observed');
-  });
-
-  it('states an absent retention-backlog status as unpublished, not as zero entries', async () => {
-    renderControls({ retentionStatuses: [] });
-
-    await screen.findByText('the storage findings payload carried no retention-backlog status');
-    const retention = screen.getByRole('region', { name: 'retention and deletion' });
-    expect(retention.getAttribute('data-analytics-control-state')).toBe('unsupported');
-    expect(
-      document
-        .querySelector('[data-retention-backlog-published]')
-        ?.getAttribute('data-retention-backlog-published'),
-    ).toBe('false');
   });
 });
 

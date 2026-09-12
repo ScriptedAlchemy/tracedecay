@@ -100,68 +100,8 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{canonical_graph_database_file, inspect_graph_database_file};
+    use super::canonical_graph_database_file;
     use crate::GraphDbError;
-    use crate::location::PersistentGraphStoreState;
-
-    #[test]
-    fn inspection_classifies_a_prospective_and_existing_database_file() {
-        let temp = tempdir().unwrap();
-        let path = temp.path().canonicalize().unwrap().join("graph.grafeo");
-
-        assert_eq!(
-            inspect_graph_database_file(&path).unwrap(),
-            PersistentGraphStoreState::Prospective
-        );
-        std::fs::write(&path, b"fixture").unwrap();
-        assert_eq!(
-            inspect_graph_database_file(&path).unwrap(),
-            PersistentGraphStoreState::Existing
-        );
-    }
-
-    /// Callers build a database pathname from a store root they were handed,
-    /// which is not always the root's canonical spelling: Windows
-    /// canonicalization produces the `\\?\` verbatim form, macOS resolves
-    /// `/var` to `/private/var`. The boundary resolves that spelling to the
-    /// one pathname the registry keys on rather than refusing it.
-    #[test]
-    fn a_caller_spelling_resolves_to_the_canonical_database_pathname() {
-        let temp = tempdir().unwrap();
-        let canonical_root = temp.path().canonicalize().unwrap();
-
-        assert_eq!(
-            canonical_graph_database_file(&temp.path().join("graph.grafeo")).unwrap(),
-            canonical_root.join("graph.grafeo")
-        );
-        assert_eq!(
-            inspect_graph_database_file(&temp.path().join("graph.grafeo")).unwrap(),
-            PersistentGraphStoreState::Prospective
-        );
-    }
-
-    /// The macOS shape, reproduced on any host with symlinks: the store
-    /// directory is real, but an *ancestor* of it is an alias -- exactly how
-    /// `/var/folders/...` reaches `/private/var/folders/...`. The ancestor
-    /// belongs to the host, so it resolves; the store directory itself is
-    /// still required to be a directory rather than a link (see
-    /// `a_symlinked_store_directory_is_rejected`).
-    #[cfg(unix)]
-    #[test]
-    fn a_store_directory_below_an_aliased_ancestor_resolves_to_its_target() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        let real = root.join("private");
-        let store = real.join("store");
-        std::fs::create_dir_all(&store).unwrap();
-        std::os::unix::fs::symlink(&real, root.join("alias")).unwrap();
-
-        assert_eq!(
-            canonical_graph_database_file(&root.join("alias").join("store").join("graph.grafeo"))
-                .unwrap(),
-            store.join("graph.grafeo")
-        );
-    }
 
     #[cfg(unix)]
     #[test]

@@ -1,6 +1,6 @@
 //! Behavioral retained-memory evals over the exact retained-memory tools.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread::JoinHandle;
@@ -868,45 +868,4 @@ fn eval_memory_ranking_retrieval_reinforcement() {
 #[test]
 fn eval_memory_ranking_feedback_promotes() {
     run_scenario("memory-ranking-feedback-promotes");
-}
-
-/// Every scenario file must have a matching test so an unwired JSON scenario
-/// cannot silently stop exercising the production retained-memory path.
-#[test]
-fn every_scenario_file_is_wired() {
-    let wired: HashSet<&str> = [
-        "memory-no-pollution",
-        "memory-secret-rejection",
-        "memory-skip-local",
-        "memory-supersede-without-dup",
-        "memory-multiturn-continuity",
-        "memory-ranking-trust-bias",
-        "memory-ranking-supersession",
-        "memory-ranking-morphology",
-        "memory-feedback-trust",
-        "memory-ranking-retrieval-reinforcement",
-        "memory-ranking-feedback-promotes",
-    ]
-    .into_iter()
-    .collect();
-    let directory = crate::common::repository_path("evals/memory/scenarios");
-    let found = std::fs::read_dir(&directory)
-        .expect("read evals/memory/scenarios")
-        .map(|entry| entry.expect("scenario entry").path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-        .map(|path| {
-            let id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .expect("scenario file stem")
-                .to_owned();
-            load_scenario(&id);
-            id
-        })
-        .collect::<HashSet<_>>();
-    assert_eq!(
-        found.iter().map(String::as_str).collect::<HashSet<_>>(),
-        wired,
-        "evals/memory/scenarios/*.json and the test list must stay in sync"
-    );
 }

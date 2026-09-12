@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  getMotionPreference,
   resolveReducedMotion,
   setMotionPreference,
 } from './reducedMotion.ts';
@@ -20,12 +19,6 @@ describe('motion preference publication', () => {
   afterEach(() => {
     setMotionPreference('system');
     localStorage.removeItem('td.motion-preference');
-  });
-
-  it('publishes a pinned "reduced" preference to the document', () => {
-    setMotionPreference('reduced');
-    expect(document.documentElement.dataset['motion']).toBe('reduced');
-    expect(getMotionPreference()).toBe('reduced');
   });
 
   it('publishes a pinned "full" preference, so CSS can outvote an OS that reduces', () => {

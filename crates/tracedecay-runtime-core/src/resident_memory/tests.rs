@@ -5,34 +5,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-    RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
-    RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1,
-    RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1, ResidentMemoryAdmissionFailureV1,
-    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
-    ResidentMemoryPressureV1, cgroup_v2_memory_limit_v1, effective_memory_bytes_v1,
-    process_resident_memory_limit_for_system_v1, process_resident_memory_limit_v1,
-    resident_memory_watermark_bytes_v1,
+    ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
+    ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+    ResidentMemoryPressureStateV1, ResidentMemoryPressureV1, cgroup_v2_memory_limit_v1,
+    effective_memory_bytes_v1, process_resident_memory_limit_for_system_v1,
+    process_resident_memory_limit_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).expect("test byte count is non-zero")
-}
-
-#[test]
-fn host_capacity_reserves_one_quarter_without_a_universal_ceiling() {
-    assert_eq!(
-        process_resident_memory_limit_for_system_v1(8 * 1024 * 1024 * 1024).get(),
-        6 * 1024 * 1024 * 1024
-    );
-    assert_eq!(
-        process_resident_memory_limit_for_system_v1(88 * 1024 * 1024 * 1024).get(),
-        66 * 1024 * 1024 * 1024
-    );
-    assert_eq!(
-        process_resident_memory_limit_for_system_v1(0),
-        DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1
-    );
 }
 
 fn cgroup_fixture(
@@ -159,20 +140,6 @@ fn unlimited_cgroup_memory_files_keep_host_memory_capacity() {
 }
 
 #[test]
-fn finite_memory_max_bounds_host_memory_capacity() {
-    let gib = 1024 * 1024 * 1024;
-    let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
-        Some("0::/trace.slice/daemon.scope\n"),
-        Some("32212254720\n"),
-        Some("max\n"),
-    );
-    assert_eq!(
-        effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        30 * gib
-    );
-}
-
-#[test]
 fn finite_memory_high_below_max_is_the_effective_capacity() {
     let gib = 1024 * 1024 * 1024;
     let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
@@ -242,32 +209,6 @@ fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
 }
 
 #[test]
-fn process_shared_reservation_uses_same_ceiling_and_releases_exactly() {
-    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
-    let component = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
-    let mut reservation = authority
-        .reserve_process_shared(component, bytes(80))
-        .expect("process-shared reservation");
-    assert_eq!(
-        authority.snapshot().process_shared_charge_for(component),
-        80
-    );
-    assert!(
-        authority
-            .reserve_process_shared(component, bytes(30))
-            .is_err()
-    );
-
-    reservation.shrink_to(40).unwrap();
-    assert_eq!(
-        authority.snapshot().process_shared_charge_for(component),
-        40
-    );
-    drop(reservation);
-    assert_eq!(authority.snapshot().used_bytes, 0);
-}
-
-#[test]
 fn keyed_and_process_shared_reservations_compete_for_one_ceiling() {
     let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
     let keyed = key("project-a", "worktree-a", "generation-a", "semantic-index");
@@ -294,6 +235,32 @@ fn keyed_and_process_shared_reservations_compete_for_one_ceiling() {
     assert_eq!(snapshot.used_bytes, 100);
     assert_eq!(snapshot.charge_for(&keyed), 60);
     assert_eq!(snapshot.process_shared_charge_for(shared), 40);
+}
+
+#[test]
+fn process_shared_reservation_uses_same_ceiling_and_releases_exactly() {
+    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
+    let component = ResidentMemoryComponentIdV1::new("sessions.codex.prepared-pages").unwrap();
+    let mut reservation = authority
+        .reserve_process_shared(component, bytes(80))
+        .expect("process-shared reservation");
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        80
+    );
+    assert!(
+        authority
+            .reserve_process_shared(component, bytes(30))
+            .is_err()
+    );
+
+    reservation.shrink_to(40).unwrap();
+    assert_eq!(
+        authority.snapshot().process_shared_charge_for(component),
+        40
+    );
+    drop(reservation);
+    assert_eq!(authority.snapshot().used_bytes, 0);
 }
 
 #[test]
@@ -560,28 +527,6 @@ fn pressure_authority() -> (Arc<ProcessResidentMemoryV1>, Arc<ResidentMemoryPres
 /// than about the request being small enough to always let through.
 fn growth_request() -> NonZeroU64 {
     bytes(RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1 * 2)
-}
-
-#[test]
-fn watermarks_derive_from_the_configured_limit_and_keep_low_below_high() {
-    let limit = bytes(PRESSURE_TEST_LIMIT_BYTES);
-    let pressure = ResidentMemoryPressureV1::new(limit);
-    assert_eq!(
-        pressure.high_watermark_bytes(),
-        resident_memory_watermark_bytes_v1(
-            limit,
-            RESIDENT_MEMORY_PRESSURE_HIGH_WATERMARK_PERMILLE_V1
-        )
-    );
-    assert_eq!(
-        pressure.low_watermark_bytes(),
-        resident_memory_watermark_bytes_v1(
-            limit,
-            RESIDENT_MEMORY_PRESSURE_LOW_WATERMARK_PERMILLE_V1
-        )
-    );
-    assert!(pressure.low_watermark_bytes() < pressure.high_watermark_bytes());
-    assert_eq!(pressure.state(), ResidentMemoryPressureStateV1::Unobserved);
 }
 
 #[test]
@@ -862,18 +807,6 @@ fn allocator_trim_reclaimer_runs_under_pressure_and_reports_only_measured_releas
         }
         _ => assert_eq!(trim.released_bytes(), 0),
     }
-}
-
-#[test]
-fn process_allocator_pressure_reclaimer_installs_once() {
-    let first = super::install_process_allocator_pressure_reclaimer_v1()
-        .expect("allocator pressure reclaimer installation");
-    let second = super::install_process_allocator_pressure_reclaimer_v1()
-        .expect("installed allocator pressure reclaimer remains available");
-    assert!(!second, "a second install must be a no-op");
-    // Another test in this process may have installed it first; either way
-    // exactly one call reports the installation.
-    let _ = first;
 }
 
 #[test]

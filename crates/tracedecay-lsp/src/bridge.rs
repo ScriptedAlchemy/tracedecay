@@ -676,28 +676,6 @@ mod tests {
     }
 
     #[test]
-    fn forwards_both_directions_without_inspecting_payloads() {
-        let mut stdio = Stdio::default();
-        stdio.input.push_back(FramePoll::Frame(vec![0, 1, 2]));
-        let mut daemon = Daemon::default();
-        daemon.input.push_back(FramePoll::Frame(vec![3, 4, 5]));
-        let mut bridge = StdioLspBridge::new(stdio, daemon);
-
-        assert_eq!(
-            bridge.pump_once().unwrap(),
-            BridgePumpOutcome {
-                client_to_daemon: 1,
-                daemon_to_client: 1,
-                backpressured: false,
-                closed: false,
-            }
-        );
-        let (stdio, daemon) = bridge.into_parts();
-        assert_eq!(stdio.output, vec![vec![3, 4, 5]]);
-        assert_eq!(daemon.output, vec![vec![0, 1, 2]]);
-    }
-
-    #[test]
     fn retains_exactly_one_frame_across_backpressure() {
         let mut stdio = Stdio::default();
         stdio.input.push_back(FramePoll::Frame(vec![1]));

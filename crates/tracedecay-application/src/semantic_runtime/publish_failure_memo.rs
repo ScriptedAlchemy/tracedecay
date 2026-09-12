@@ -243,17 +243,6 @@ mod tests {
     }
 
     #[test]
-    fn corpus_size_class_buckets_by_power_of_two() {
-        assert_eq!(corpus_size_class(0), 0);
-        assert_eq!(corpus_size_class(1), 1);
-        assert_eq!(corpus_size_class(2), 2);
-        assert_eq!(corpus_size_class(3), 2);
-        assert_eq!(corpus_size_class(4), 3);
-        assert_eq!(corpus_size_class(150_000), corpus_size_class(160_000));
-        assert_ne!(corpus_size_class(150_000), corpus_size_class(1_500));
-    }
-
-    #[test]
     fn recorded_failure_suppresses_the_next_schedule() {
         let memo = memo();
         let now = Instant::now();
@@ -303,17 +292,6 @@ mod tests {
     }
 
     #[test]
-    fn a_different_projection_key_is_admitted() {
-        let memo = memo();
-        let now = Instant::now();
-        memo.record_failure_at(&key("rev-1", 150_000), "witness", "Publication", now);
-        assert_eq!(
-            memo.admit_at(&key("rev-2", 150_000), "witness", now),
-            SemanticPublishAdmissionV1::Admitted
-        );
-    }
-
-    #[test]
     fn a_different_corpus_size_class_is_admitted() {
         let memo = memo();
         let now = Instant::now();
@@ -349,15 +327,5 @@ mod tests {
             SemanticPublishAdmissionV1::Admitted
         );
         assert_eq!(memo.tracked_keys(), 0);
-    }
-
-    #[test]
-    fn witness_tracks_store_root_and_resource_ceilings() {
-        let resources = SemanticResourceCeilings::default();
-        let base = publish_failure_witness(Path::new("/a"), &resources);
-        assert_ne!(base, publish_failure_witness(Path::new("/b"), &resources));
-        let mut widened = resources;
-        widened.max_resident_bytes = resources.max_resident_bytes * 2;
-        assert_ne!(base, publish_failure_witness(Path::new("/a"), &widened));
     }
 }

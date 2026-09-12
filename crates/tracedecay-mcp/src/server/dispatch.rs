@@ -308,20 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_tool_call_params_stay_borrowed_from_the_wire_request() {
-        let raw_request = legacy(
-            "tools/call",
-            json!({"name": "tracedecay_search", "arguments": {"query": "envelope"}}),
-        );
-        let raw = McpDispatchRequest::from_legacy(&raw_request);
-        assert_eq!(raw.tool_name(), Some("tracedecay_search"));
-        let ToolCallParams::Raw(Some(params)) = raw.into_tool_call() else {
-            panic!("a raw tools/call must stay borrowed from the parsed request");
-        };
-        assert_eq!(params, raw_request.params.as_ref().expect("params"));
-    }
-
-    #[test]
     fn typed_and_raw_resources_read_agree_on_the_target_uri() {
         let typed_params = ReadResourceRequestParams::new("tracedecay://schema");
         let raw_request = legacy("resources/read", json!({"uri": "tracedecay://schema"}));

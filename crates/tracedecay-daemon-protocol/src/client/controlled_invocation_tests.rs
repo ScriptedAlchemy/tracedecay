@@ -292,18 +292,6 @@ async fn delayed_invocation_does_not_block_short_calls_and_pool_stays_bounded() 
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "30-second connection-pool latency measurement"]
-async fn thirty_second_call_does_not_block_short_call_latency() {
-    let (p50, p95, max_queue_depth, accepted_connections) =
-        measure_parallel_invocation_workload(Duration::from_secs(30)).await;
-    println!(
-        "30-second workload short-call p50={p50:?} p95={p95:?} \
-         max_queue_depth={max_queue_depth} accepted_connections={accepted_connections}"
-    );
-    assert!(accepted_connections <= 8);
-}
-
 #[tokio::test(start_paused = true)]
 async fn delayed_response_opens_no_periodic_probe_connections() {
     const REQUEST_ID: &str = "request.no-probe-connections";

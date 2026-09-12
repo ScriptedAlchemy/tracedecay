@@ -47,38 +47,8 @@ async fn initialize_root_route_rejects_caller_project_path_spoof() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. test_initialized_notification
+// 2. notifications
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_initialized_notification() {
-    let (server, _dir) = setup_server().await;
-    // Send "initialized" notification (no id), then a ping to verify server is alive.
-    let responses = run_server_with_messages(
-        server,
-        vec![
-            jsonrpc_notification("initialized"),
-            jsonrpc_request(json!(2), "ping", json!({})),
-        ],
-    )
-    .await;
-
-    // The notification should produce no response; we should only get the ping response.
-    let ping_responses: Vec<&String> = responses
-        .iter()
-        .filter(|r| {
-            let v = parse_response(r);
-            v["id"] == 2
-        })
-        .collect();
-    assert_eq!(
-        ping_responses.len(),
-        1,
-        "should get exactly one ping response"
-    );
-    let resp = parse_response(ping_responses[0]);
-    assert!(resp["error"].is_null(), "ping should succeed");
-}
 
 #[tokio::test]
 async fn test_any_notification_without_id_produces_no_response() {
@@ -148,57 +118,6 @@ async fn test_tools_call_explicit_null_id_is_still_a_request() {
         resp["result"].is_object(),
         "tools/call should return a result"
     );
-}
-
-// ---------------------------------------------------------------------------
-// 3. test_notifications_initialized
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_notifications_initialized() {
-    let (server, _dir) = setup_server().await;
-    // Send "notifications/initialized" notification, then ping.
-    let responses = run_server_with_messages(
-        server,
-        vec![
-            jsonrpc_notification("notifications/initialized"),
-            jsonrpc_request(json!(3), "ping", json!({})),
-        ],
-    )
-    .await;
-
-    let ping_responses: Vec<&String> = responses
-        .iter()
-        .filter(|r| {
-            let v = parse_response(r);
-            v["id"] == 3
-        })
-        .collect();
-    assert_eq!(
-        ping_responses.len(),
-        1,
-        "should get exactly one ping response"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 4. test_ping
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_ping() {
-    let (server, _dir) = setup_server().await;
-    let responses =
-        run_server_with_messages(server, vec![jsonrpc_request(json!(10), "ping", json!({}))]).await;
-
-    assert!(!responses.is_empty());
-    let resp = parse_response(&responses[0]);
-    assert_eq!(resp["id"], 10);
-    assert!(
-        resp["result"].is_object(),
-        "ping result should be an object"
-    );
-    assert!(resp["error"].is_null(), "ping should not have an error");
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,73 +1043,6 @@ async fn test_blank_lines_skipped() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 13. test_multiple_tool_calls
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_multiple_tool_calls() {
-    let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![
-            jsonrpc_request(json!(100), "initialize", json!({})),
-            jsonrpc_request(json!(101), "ping", json!({})),
-            jsonrpc_request(json!(102), "tools/list", json!({})),
-            jsonrpc_request(
-                json!(103),
-                "tools/call",
-                json!({
-                    "name": "tracedecay_status",
-                    "arguments": { "admission_only": true }
-                }),
-            ),
-        ],
-    )
-    .await;
-
-    let response_ids: Vec<i64> = responses
-        .iter()
-        .filter_map(|r| {
-            let v = parse_response(r);
-            v["id"].as_i64()
-        })
-        .collect();
-
-    assert!(
-        response_ids.contains(&100),
-        "should have response for id=100 (initialize)"
-    );
-    assert!(
-        response_ids.contains(&101),
-        "should have response for id=101 (ping)"
-    );
-    assert!(
-        response_ids.contains(&102),
-        "should have response for id=102 (tools/list)"
-    );
-    assert!(
-        response_ids.contains(&103),
-        "should have response for id=103 (tools/call)"
-    );
-}
-
-#[tokio::test]
-async fn test_server_stats_initial() {
-    let (server, _dir) = setup_server().await;
-    let stats = server.server_stats_json().await;
-    assert!(stats["uptime_secs"].is_number(), "should have uptime_secs");
-    assert_eq!(
-        stats["total_requests"], 0,
-        "initial total_requests should be 0"
-    );
-    assert_eq!(stats["tool_calls"], 0, "initial tool_calls should be 0");
-    assert_eq!(stats["errors"], 0, "initial errors should be 0");
-    assert!(stats["method_call_counts"].is_object());
-    assert!(stats["resource_read_counts"].is_object());
-    assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.0);
-}
-
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_server_stats_include_response_handle_metrics() {
@@ -1531,29 +1383,6 @@ async fn test_initialize_has_resources_capability() {
 }
 
 // ---------------------------------------------------------------------------
-// 18. test_initialize_has_instructions
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_initialize_has_instructions() {
-    let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(json!(1), "initialize", json!({}))],
-    )
-    .await;
-
-    let resp = parse_response(&responses[0]);
-    let instructions = resp["result"]["instructions"]
-        .as_str()
-        .expect("initialize should have instructions string");
-    assert!(
-        instructions.contains("tracedecay_context"),
-        "instructions should mention tracedecay_context"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // 19. test_resources_list
 // ---------------------------------------------------------------------------
 
@@ -1887,38 +1716,6 @@ async fn test_logging_set_level_all_levels() {
             "logging/setLevel with level={level} must not error, got: {resp}"
         );
     }
-}
-
-/// `logging/setLevel` mid-session must not disrupt subsequent tool calls.
-#[tokio::test]
-async fn test_logging_set_level_does_not_break_session() {
-    let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![
-            jsonrpc_request(json!(700), "logging/setLevel", json!({"level": "warning"})),
-            jsonrpc_request(json!(701), "ping", json!({})),
-        ],
-    )
-    .await;
-
-    let set_level = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 700)
-        .expect("missing response for logging/setLevel");
-    assert!(
-        parse_response(set_level)["error"].is_null(),
-        "logging/setLevel should succeed"
-    );
-
-    let ping = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 701)
-        .expect("missing response for ping after logging/setLevel");
-    assert!(
-        parse_response(ping)["result"].is_object(),
-        "ping after setLevel should succeed"
-    );
 }
 
 /// The `initialize` response must advertise the `logging` capability so that

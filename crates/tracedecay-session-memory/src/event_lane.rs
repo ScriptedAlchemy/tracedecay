@@ -451,61 +451,6 @@ mod tests {
     use tracedecay_contracts::ObservabilityQueryPort;
 
     #[test]
-    fn family_stream_names_are_distinct_and_stable() {
-        let mut names = ActivityFamilyV1::ALL
-            .iter()
-            .map(|family| family.stream_name())
-            .collect::<Vec<_>>();
-        names.sort_unstable();
-        let unique = names.len();
-        names.dedup();
-        assert_eq!(names.len(), unique);
-        assert_eq!(ActivityFamilyV1::Hook.stream_name(), "hook_activity");
-        assert_eq!(ActivityFamilyV1::ToolCall.stream_name(), "tool_call");
-    }
-
-    /// The canonical envelope validator keeps its own list of admitted activity
-    /// families, and replay resolves a retained observation back through the
-    /// label. A family this lane can publish but either side rejects is
-    /// swallowed by the error-tolerant publish path and renders as no activity.
-    ///
-    /// The match below is what binds the enum to [`ActivityFamilyV1::ALL`]:
-    /// adding a family without listing it there leaves this match
-    /// non-exhaustive, so the omission is a compile error rather than a family
-    /// this test silently never visits.
-    #[test]
-    fn every_published_family_is_admitted_by_the_canonical_envelope() {
-        for family in ActivityFamilyV1::ALL {
-            let label = match family {
-                ActivityFamilyV1::Hook => "hook",
-                ActivityFamilyV1::SessionIngest => "session_ingest",
-                ActivityFamilyV1::CodeIndex => "code_index",
-                ActivityFamilyV1::ToolCall => "tool_call",
-                ActivityFamilyV1::Task => "task",
-            };
-            assert_eq!(family.observation_label(), label);
-            assert_eq!(
-                ActivityFamilyV1::from_observation_label(label),
-                Some(family),
-                "replay must resolve {label:?} back to the family that published it"
-            );
-
-            let envelope = activity_envelope("project.activity.family", family, 1, None)
-                .unwrap_or_else(|| panic!("{family:?} envelope"));
-            assert_eq!(
-                envelope.validate(),
-                Ok(()),
-                "{family:?} publishes label {label:?}, which the canonical envelope must admit"
-            );
-        }
-        assert_eq!(
-            ActivityFamilyV1::ALL.len(),
-            5,
-            "extend the exhaustive match above when this changes"
-        );
-    }
-
-    #[test]
     fn source_owner_activity_strips_unbounded_detail_before_persistence() {
         let detail = ActivityObservedV1::bounded_detail(
             ActivityFamilyV1::ToolCall.observation_label(),

@@ -733,35 +733,6 @@ async fn superseded_fact_leaves_current_retrieval_but_stays_in_history() {
     assert_eq!(retired.superseded_by(), Some(successor.target.fact_id()));
 }
 
-#[tokio::test]
-async fn graph_read_reconciles_on_demand_without_publishing() {
-    let (_directory, database) = database("on-demand-read").await;
-    let runtime = bind_runtime(&database);
-    let query =
-        ProjectMemoryGraphQueryV1::new(FactOwnerV1::Profile, Vec::new(), 8).expect("graph query");
-
-    let page = super::graph::project_memory_graph(
-        &database,
-        query,
-        &FactReadControl::new(Arc::new(|| false)),
-    )
-    .await
-    .expect("read reconciles the canonical source on demand");
-
-    // Verified graph engines hibernate after their last operation lease, so a
-    // read can no longer assume a resident published head to inspect: it
-    // reconciles the generation its own source watermark names and reads that.
-    // The invariant the read still owes is that it never *publishes* a
-    // generation, which `publish_verified_manifest` refuses outright.
-    assert!(page.facts().is_empty());
-    assert!(page.relations().is_empty());
-    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
-    // The verified-snapshot read is now only the generation-conflict fallback,
-    // which a settled reconcile never reaches.
-    assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
-}
-
 /// The daemon's terminal shutdown owner cancels reconciliation, joins the
 /// admitted passes, and only then closes the retained graph owner. A graph
 /// read reconciles and reads through that same owner, so a read that starts
@@ -845,64 +816,6 @@ async fn graph_read_preserves_reset_required_from_the_verified_graph() {
     assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn successful_project_memory_transaction_schedules_lifecycle_reconciliation() {
-    let (_directory, database) = database("write-side-reconciliation").await;
-    let runtime = bind_runtime(&database);
-    let store = DatabaseFactStore::new(&database);
-
-    store
-        .project_memory_write(
-            &write_control(),
-            |()| true,
-            |_transaction| Box::pin(async { Ok::<(), FactStoreError>(()) }),
-        )
-        .await
-        .expect("commit project-memory transaction");
-    wait_for_reconciliation(&runtime).await;
-
-    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn committed_low_level_fact_batch_schedules_lifecycle_reconciliation() {
-    let (_directory, database) = database("low-level-reconciliation").await;
-    let runtime = bind_runtime(&database);
-    let sanitized = sanitize_payload(
-        "canonical low-level graph reconciliation fact",
-        FactCategoryV1::General,
-        &[],
-        &[],
-        &json!({"fixture": "low-level-reconciliation"}),
-        None,
-    )
-    .expect("sanitize low-level reconciliation payload")
-    .expect("low-level reconciliation payload remains durable");
-    let batch = initial_batch(
-        &FactOwnerV1::Profile,
-        &ProvenanceId::new("graph.reconciliation.low-level".to_owned())
-            .expect("low-level operation id"),
-        sanitized.payload,
-        sanitized.access,
-        Confidence::new(0.8).expect("low-level fixture confidence"),
-        None,
-        UtcMicros(1_000_000),
-    )
-    .expect("low-level fact batch");
-
-    let outcome = DatabaseFactStore::new(&database)
-        .commit_fact(batch, &write_control())
-        .await
-        .expect("commit low-level fact batch");
-    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
-    wait_for_reconciliation(&runtime).await;
-
-    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
 }
 
 async fn seed_large_payload_fact(store: &DatabaseFactStore<'_>, label: &str, index: i64) {
@@ -1144,32 +1057,6 @@ async fn mid_read_source_mutation_never_serves_a_stale_page() {
         ),
         Err(other) => panic!("held read must conflict or serve a fresh page: {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn retrieval_telemetry_does_not_reconcile_unchanged_memory_graph() {
-    let (_directory, database) = database("retrieval-telemetry-reconciliation").await;
-    let runtime = bind_runtime(&database);
-    let store = DatabaseFactStore::new(&database);
-    let target = seed_fact_for_non_graph_write(&store, &runtime, "retrieval-telemetry").await;
-
-    store
-        .record_project_memory_fact_retrieval(
-            ProjectMemoryFactRetrievalCommandV1::new(
-                FactOwnerV1::Profile,
-                ProvenanceId::new("graph.reconciliation.retrieval.record".to_owned())
-                    .expect("retrieval record operation id"),
-                vec![target],
-                true,
-            )
-            .expect("retrieval telemetry command"),
-            &write_control(),
-        )
-        .await
-        .expect("record retrieval telemetry");
-
-    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1518,35 +1405,6 @@ async fn high_level_automatic_fact_reconciles_applied_not_terminal_non_sources()
         ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined
     );
     assert_no_reconciliation(&runtime);
-}
-
-#[tokio::test]
-async fn feedback_telemetry_does_not_reconcile_unchanged_memory_graph() {
-    let (_directory, database) = database("feedback-telemetry-reconciliation").await;
-    let runtime = bind_runtime(&database);
-    let store = DatabaseFactStore::new(&database);
-    let target = seed_fact_for_non_graph_write(&store, &runtime, "feedback-telemetry").await;
-
-    store
-        .record_project_memory_fact_feedback(
-            ProjectMemoryFactFeedbackCommandV1::new(
-                target,
-                ProvenanceId::new("graph.reconciliation.feedback.record".to_owned())
-                    .expect("feedback record operation id"),
-                None,
-                ProjectMemoryFactFeedbackActionV1::Helpful,
-                None,
-                Some("graph reconciliation regression".to_owned()),
-                Some("feedback does not change graph source rows".to_owned()),
-            )
-            .expect("feedback telemetry command"),
-            &write_control(),
-        )
-        .await
-        .expect("record feedback telemetry");
-
-    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

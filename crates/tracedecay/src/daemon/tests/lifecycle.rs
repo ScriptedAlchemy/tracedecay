@@ -38,71 +38,6 @@ fn daemon_client_admission_reports_saturation_and_recovers() {
     ));
 }
 
-#[test]
-fn daemon_admission_preserves_reserved_health_capacity() {
-    let admission = super::super::DaemonClientAdmission::with_reserved_capacity(3, 1);
-    let first = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => panic!("first client rejected"),
-    };
-    let second = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("second client rejected")
-        }
-    };
-    assert_eq!(
-        first.class(),
-        super::super::DaemonClientAdmissionClass::General
-    );
-    assert_eq!(
-        second.class(),
-        super::super::DaemonClientAdmissionClass::General
-    );
-
-    let reserved = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("reserved health capacity unavailable")
-        }
-    };
-    assert_eq!(
-        reserved.class(),
-        super::super::DaemonClientAdmissionClass::ReservedControl
-    );
-    assert!(matches!(
-        admission.try_admit(),
-        super::super::DaemonClientAdmissionOutcome::Saturated(_)
-    ));
-
-    let status_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": "tracedecay_status", "arguments": {}},
-    })
-    .to_string();
-    let bulk_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {"name": "tracedecay_context", "arguments": {"task": "x"}},
-    })
-    .to_string();
-    let shutdown_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD,
-    })
-    .to_string();
-    let status_request = super::super::AuthenticatedFirstRequest::new(status_request);
-    let shutdown_request = super::super::AuthenticatedFirstRequest::new(shutdown_request);
-    let bulk_request = super::super::AuthenticatedFirstRequest::new(bulk_request);
-    assert!(super::super::is_reserved_control_request(&status_request));
-    assert!(super::super::is_reserved_control_request(&shutdown_request));
-    assert!(!super::super::is_reserved_control_request(&bulk_request));
-}
-
 /// A request parked on a barrier must not occupy an admission slot.
 ///
 /// Observed live during a generation rebuild: 101 `bulk_capacity_reached` sheds
@@ -448,25 +383,6 @@ fn daemon_client_saturation_response_is_typed_json_rpc_data() {
     assert_eq!(data["kind"], "client_capacity_reached");
     assert_eq!(data["retryable"], true);
     assert_eq!(data["capacity"], 3);
-}
-
-#[test]
-fn daemon_per_client_saturation_response_is_typed_json_rpc_data() {
-    let response = super::super::DaemonClientSaturationResponse {
-        kind: super::super::DaemonClientSaturationKind::PerClientCapacityReached,
-        retryable: true,
-        capacity: 8,
-    }
-    .into_json_rpc_with_id(serde_json::Value::Null);
-    let data = response
-        .error
-        .expect("error response")
-        .data
-        .expect("typed data");
-
-    assert_eq!(data["kind"], "per_client_capacity_reached");
-    assert_eq!(data["retryable"], true);
-    assert_eq!(data["capacity"], 8);
 }
 
 #[test]

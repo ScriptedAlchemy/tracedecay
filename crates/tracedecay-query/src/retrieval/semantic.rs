@@ -563,8 +563,6 @@ where
         record: &SemanticVectorRecordV1,
         distance: CanonicalSemanticDistanceV1,
     ) -> SemanticRankedEntryV1 {
-        #[cfg(test)]
-        SEMANTIC_RETAINED_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let mut candidate = record.candidate.clone();
         candidate.raw_score = distance.as_descending_score();
         SemanticRankedEntryV1 {
@@ -1337,13 +1335,7 @@ fn elapsed_micros<C: RetrievalExecutionControl>(
 
 #[cfg(test)]
 thread_local! {
-    static SEMANTIC_RETAINED_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static SEMANTIC_SCORED_ROWS: Cell<usize> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn take_semantic_retained_materializations() -> usize {
-    SEMANTIC_RETAINED_MATERIALIZATIONS.with(|count| count.replace(0))
 }
 
 #[cfg(test)]

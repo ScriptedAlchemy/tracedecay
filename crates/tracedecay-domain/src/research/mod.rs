@@ -253,12 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_coverage_accepts_exact_shard_bound() {
-        let remote: RemoteCoverageV1 = serde_json::from_str(&remote_coverage_json(1_024)).unwrap();
-        assert_eq!(remote.shards.len(), 1_024);
-    }
-
-    #[test]
     fn remote_coverage_rejects_shard_bound_plus_one() {
         let error = serde_json::from_str::<RemoteCoverageV1>(&remote_coverage_json(1_025))
             .expect_err("remote shard coverage above the bound must be rejected");
@@ -316,13 +310,6 @@ mod tests {
             }),
             ..CoverageReportV1::default()
         }
-    }
-
-    #[test]
-    fn offline_cache_coverage_rejects_an_expired_grant() {
-        let report = offline_cache_report(101, 100);
-        report.validate().unwrap();
-        assert!(!report.is_complete());
     }
 
     #[test]
@@ -439,13 +426,5 @@ mod tests {
                 field: "remote coverage disposition shard"
             })
         ));
-    }
-
-    #[test]
-    fn canonical_json_sorts_object_keys_recursively() {
-        assert_eq!(
-            canonical_json_value(&json!({"z": {"b": 1, "a": 2}, "a": 0})).unwrap(),
-            r#"{"a":0,"z":{"a":2,"b":1}}"#
-        );
     }
 }

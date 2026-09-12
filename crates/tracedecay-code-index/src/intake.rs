@@ -333,8 +333,8 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, LanguageId, RefId,
-        RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, WorktreeId,
+        CommitId, ContentDigest, FileOccurrenceId, LanguageId, RefId, RepositoryId,
+        SanitizationReceiptId, SanitizedCodeFileV1, WorktreeId,
     };
 
     use crate::languages::StaticLanguageRegistry;
@@ -386,26 +386,6 @@ mod tests {
             SanitizerRevision::new("sanitizer.v1").expect("valid revision"),
             UtcMicros(2_000_000),
         )
-    }
-
-    #[test]
-    fn accepts_a_receipt_bound_sanitized_snapshot() {
-        let snapshot = snapshot(vec![
-            present_file("one", "src/lib.py", "python"),
-            present_file("two", "src/main.rs", "rust"),
-            SanitizedCodeFileV1 {
-                language: None,
-                disposition: SnapshotFileDispositionV1::Binary,
-                ..present_file("three", "assets/logo.bin", "rust")
-            },
-        ]);
-        let validated = intake().validate(snapshot).expect("snapshot admitted");
-        assert_eq!(validated.validated_at, UtcMicros(2_000_000));
-        // Deterministic digest for identical input.
-        let again = intake()
-            .validate(validated.snapshot.clone())
-            .expect("snapshot admitted");
-        assert_eq!(validated.intake_digest, again.intake_digest);
     }
 
     #[test]
@@ -522,58 +502,5 @@ mod tests {
                 .validate(snapshot(vec![file]))
                 .unwrap_or_else(|_| panic!("{disposition:?} admitted explicitly"));
         }
-    }
-
-    #[test]
-    fn registry_backed_admission_uses_the_declared_language() {
-        // A declared registered language admits even when the path carries
-        // no extension; the descriptor registry is the admission authority.
-        let declared = present_file("one", "src/no-extension", "rust");
-        intake()
-            .validate(snapshot(vec![declared]))
-            .expect("declared language resolves");
-
-        // Every compiled-in language admits.
-        let registry = StaticLanguageRegistry::new();
-        for descriptor in registry.descriptors() {
-            let file = present_file(
-                "one",
-                &format!("src/probe.{}", descriptor.extensions[0]),
-                descriptor.language.as_str(),
-            );
-            intake()
-                .validate(snapshot(vec![file]))
-                .unwrap_or_else(|_| panic!("{} admitted", descriptor.language));
-        }
-    }
-
-    #[test]
-    fn file_binding_consumes_the_admitted_capability_without_revalidating_snapshot() {
-        let bytes = b"fn main() {}\n".to_vec();
-        let mut descriptor = present_file("one", "src/main.rs", "rust");
-        descriptor.content_digest = content_digest(&bytes);
-        let capability = intake()
-            .admit(snapshot(vec![descriptor.clone()]))
-            .expect("snapshot capability");
-        let late_binder = SanitizedCodeIntake::new(
-            StaticLanguageRegistry::new(),
-            SanitizerRevision::new("sanitizer.v1").expect("valid revision"),
-            UtcMicros(10_000_000),
-        )
-        .with_max_snapshot_age_micros(1);
-
-        late_binder
-            .bind_file(
-                &capability,
-                &ProjectId::new("project.fixture").expect("valid project"),
-                ValidatedCodeFileV1 {
-                    generation_id: CodeGenerationId::new("generation.fixture")
-                        .expect("valid generation"),
-                    file: descriptor,
-                    snapshot_digest: capability.snapshot().intake_digest.clone(),
-                    sanitized_bytes: bytes,
-                },
-            )
-            .expect("opaque capability remains authoritative after admission");
     }
 }

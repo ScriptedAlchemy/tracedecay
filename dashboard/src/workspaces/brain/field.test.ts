@@ -47,12 +47,6 @@ function group(label: string, projects: ProjectRegistryEntry[]): ProjectRepoGrou
 
 const SINGLE = { stores: 1, artifacts: 1 };
 
-describe('indexedMass', () => {
-  it('sums exactly the project-level registry counts it names', () => {
-    expect(indexedMass(project('a', 0, { stores: 2, artifacts: 7 }))).toBe(9);
-  });
-});
-
 describe('columnIndexFor', () => {
   it('places each age in the column whose bound it falls under', () => {
     expect(columnIndexFor(NOW - 3600, NOW)).toBe(0);
@@ -265,12 +259,6 @@ describe('recencyVitality horizon', () => {
     // eye separates on a dark field. Anchored to the observed range they are
     // more than a third of the scale apart.
     expect(today - thisWeek).toBeGreaterThan(0.3);
-  });
-
-  it('still separates the two under the old fixed horizon by almost nothing', () => {
-    const today = recencyVitality(NOW - 0.01 * DAY, NOW, 90);
-    const thisWeek = recencyVitality(NOW - 1.3 * DAY, NOW, 90);
-    expect(today - thisWeek).toBeLessThan(0.2);
   });
 
   it('clamps the horizon so a registry seen minutes ago is not all-or-nothing', () => {

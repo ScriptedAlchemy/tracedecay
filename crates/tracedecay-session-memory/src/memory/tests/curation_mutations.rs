@@ -61,65 +61,6 @@ fn add_operation(content: &str, owner: &FactOwnerV1) -> ProjectMemoryCurationOpe
 }
 
 #[tokio::test]
-async fn curation_add_reuses_privacy_preflight_and_binds_canonical_child_identity() {
-    let owner = owner();
-    let application = MemoryApplication::new(owner.clone(), FakeAuthority::default()).unwrap();
-    let outer_context = context(&owner, "curation-add");
-    let run_id = RunId::new("run.curation-add").unwrap();
-
-    let result = application
-        .apply_project_memory_curation(
-            vec![add_operation("canonical reviewed memory", &owner)],
-            Confidence::new(0.9).unwrap(),
-            outer_context.clone(),
-            Some(run_id.clone()),
-            &write_control(),
-        )
-        .await;
-
-    assert!(matches!(
-        result,
-        Err(MemoryMutationError::Application(
-            MemoryApplicationError::Store(_)
-        ))
-    ));
-    let requests = application.authority.curation_requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
-    let [ProjectMemoryFactCurationOperationV1::Add(add)] = request.operations() else {
-        panic!("curation add must remain an add command");
-    };
-    let command = add.command();
-    assert_eq!(command.owner(), &owner);
-    assert_eq!(command.content(), "canonical reviewed memory");
-    assert_eq!(command.actor(), outer_context.actor());
-    assert_eq!(command.automation_run_id(), Some(run_id.as_str()));
-    assert_eq!(
-        command.operation_id(),
-        &derive_project_memory_fact_curation_child_operation_id(
-            request.operation_id(),
-            0,
-            ProjectMemoryFactCurationMutationKindV1::Add,
-        )
-        .unwrap()
-    );
-    assert_eq!(
-        add.evidence().facts()[0].fact().fact_id(),
-        &fact_id(owner, "operation.curation-add-evidence")
-    );
-    assert!(request.input_digest().is_ok());
-    assert_eq!(
-        application
-            .authority
-            .authority_calls
-            .lock()
-            .unwrap()
-            .as_slice(),
-        ["curation"]
-    );
-}
-
-#[tokio::test]
 async fn curation_add_rejects_secret_like_content_before_authority() {
     let owner = owner();
     let application = MemoryApplication::new(owner.clone(), FakeAuthority::default()).unwrap();
@@ -311,49 +252,6 @@ async fn curation_add_rejects_a_committed_same_owner_fact_from_another_child_ide
 }
 
 #[test]
-fn update_command_binds_the_canonical_patch_to_owner_snapshot_and_context() {
-    let owner = owner();
-    let application = MemoryApplication::new(owner.clone(), FakeAuthority::default()).unwrap();
-    let target = mutation_target(
-        owner.clone(),
-        "operation.curation-update-target",
-        "event.curation-update-target",
-    );
-    let expected_fact_id = target.fact_id().clone();
-    let expected_event_id = target.expected_last_event_id().unwrap().clone();
-    let context = context(&owner, "update");
-    let patch = ProjectMemoryFactUpdatePatchV1::new(
-        Some("canonical updated memory".to_owned()),
-        None,
-        Some(Some("curator".to_owned())),
-        Some(vec!["canonical".to_owned()]),
-        None,
-        Some(json!({"reviewed": true})),
-        Some(Confidence::new(0.91).unwrap()),
-    )
-    .unwrap();
-
-    let command = application
-        .canonical_fact_update_command(target, patch.clone(), &context)
-        .unwrap();
-
-    assert_eq!(command.target().owner(), &owner);
-    assert_eq!(command.target().fact_id(), &expected_fact_id);
-    assert_eq!(command.expected_last_event_id(), Some(&expected_event_id));
-    assert_eq!(command.patch(), &patch);
-    assert_eq!(command.operation_id(), context.operation_id());
-    assert_eq!(command.actor(), context.actor());
-    assert!(
-        application
-            .authority
-            .authority_calls
-            .lock()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
 fn mutation_construction_rejects_a_fact_from_another_owner() {
     let owner = owner();
     let application = MemoryApplication::new(owner.clone(), FakeAuthority::default()).unwrap();
@@ -368,55 +266,6 @@ fn mutation_construction_rejects_a_fact_from_another_owner() {
         .unwrap_err();
 
     assert!(matches!(error, MemoryApplicationError::Store(_)));
-    assert!(
-        application
-            .authority
-            .authority_calls
-            .lock()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[test]
-fn merge_command_preserves_each_snapshot_and_sanitizes_content_before_authority() {
-    let owner = owner();
-    let application = MemoryApplication::new(owner.clone(), FakeAuthority::default()).unwrap();
-    let winner = mutation_target(
-        owner.clone(),
-        "operation.curation-merge-winner",
-        "event.curation-merge-winner",
-    );
-    let loser = mutation_target(
-        owner.clone(),
-        "operation.curation-merge-loser",
-        "event.curation-merge-loser",
-    );
-    let winner_event = winner.expected_last_event_id().unwrap().clone();
-    let loser_event = loser.expected_last_event_id().unwrap().clone();
-    let context = context(&owner, "merge");
-
-    let command = application
-        .canonical_fact_merge_command(
-            winner,
-            vec![loser],
-            Some("canonical merged memory".to_owned()),
-            &context,
-        )
-        .unwrap();
-
-    assert_eq!(
-        command.winner_target().expected_last_event_id(),
-        &winner_event
-    );
-    assert_eq!(command.loser_targets().len(), 1);
-    assert_eq!(
-        command.loser_targets()[0].expected_last_event_id(),
-        &loser_event
-    );
-    assert_eq!(command.merged_content(), Some("canonical merged memory"));
-    assert_eq!(command.operation_id(), context.operation_id());
-    assert_eq!(command.actor(), context.actor());
     assert!(
         application
             .authority

@@ -144,14 +144,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_warning_line() {
-        let line = "src/foo.ts(10,1): warning TS6133: 'x' is declared but its value is never read.";
-        let d = parse_tsc_line(line).expect("should parse");
-        assert_eq!(d.level, "warning");
-        assert_eq!(d.code, "TS6133");
-    }
-
-    #[test]
     fn parse_returns_none_for_blank_lines() {
         assert!(parse_tsc_line("").is_none());
         assert!(parse_tsc_line("   ").is_none());

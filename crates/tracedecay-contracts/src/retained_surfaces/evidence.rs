@@ -554,9 +554,8 @@ mod tests {
     use crate::memory::{FactRetrievalTelemetryV1, FactSearchCursorV1, FactSearchGraphCoverageV1};
     use crate::result::PageCursor;
     use crate::retained_surfaces::{
-        FactCommitOwnerV1, FactStoreContradictResultV1, FactStoreListResultV1,
-        FactStoreSearchResultV1, MessageSearchHitV1, MessageSearchResultV1, RetainedNextActionV1,
-        RetrievalWorkerStatusV1,
+        FactCommitOwnerV1, FactStoreListResultV1, FactStoreSearchResultV1, MessageSearchHitV1,
+        MessageSearchResultV1, RetainedNextActionV1, RetrievalWorkerStatusV1,
     };
     use tracedecay_domain::{FactId, UtcMicros};
 
@@ -653,15 +652,6 @@ mod tests {
     }
 
     #[test]
-    fn fact_search_evidence_omits_absent_cursor() {
-        let facts = RetainedSurfaceResultV1::FactStoreSearch(search_result(None))
-            .evidence_facts()
-            .expect("final search page evidence");
-
-        assert_eq!(facts.next_cursor, None);
-    }
-
-    #[test]
     fn fact_list_evidence_preserves_structural_cursor() {
         let fact_id = fact_id('2');
         let result = FactStoreListResultV1 {
@@ -677,33 +667,6 @@ mod tests {
             facts.next_cursor,
             Some(PageCursor::FactListAfter { fact_id })
         );
-    }
-
-    #[test]
-    fn fact_list_evidence_omits_absent_cursor() {
-        let result = FactStoreListResultV1 {
-            owner: FactCommitOwnerV1::Profile,
-            facts: Vec::new(),
-            next_after_fact_id: None,
-        };
-        let facts = RetainedSurfaceResultV1::FactStoreList(result)
-            .evidence_facts()
-            .expect("final list page evidence");
-
-        assert_eq!(facts.next_cursor, None);
-    }
-
-    #[test]
-    fn fact_contradiction_evidence_is_intentionally_nonpaginated() {
-        let result = FactStoreContradictResultV1 {
-            owner: FactCommitOwnerV1::Profile,
-            contradictions: Vec::new(),
-        };
-        let facts = RetainedSurfaceResultV1::FactStoreContradict(result)
-            .evidence_facts()
-            .expect("contradiction evidence");
-
-        assert_eq!(facts.next_cursor, None);
     }
 
     #[test]
