@@ -619,6 +619,7 @@ async fn structural_task_session_refusal_remains_typed_in_hydration_omission() {
 fn structural_budget_stage_survives_hydration_rendering() {
     let refusal = SessionRetrievalStructuralRefusalV1::BudgetExhausted {
         stage: crate::retrieval::SessionRetrievalBudgetStageV1::ContextTokens,
+        accounting: None,
     };
 
     assert_eq!(

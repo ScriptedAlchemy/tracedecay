@@ -98,7 +98,7 @@ pub(in crate::retrieval) fn load_record_relations(
     let relation_limit = request.page_item_limit().saturating_add(1);
     if relation_limit == 0 {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "record relations",
+            resource: "record relations", accounting: None,
         });
     }
     let cancellation: Arc<dyn GraphCancellation> =
@@ -163,7 +163,7 @@ pub(in crate::retrieval) fn load_record_relations(
                     .map_or(0, str::len);
                 if source_bytes > request.max_item_bytes() {
                     return Err(TemporalPortError::BudgetExceeded {
-                        resource: "summary source bytes",
+                        resource: "summary source bytes", accounting: None,
                     });
                 }
                 relation_bytes = relation_bytes.saturating_add(source_bytes);
@@ -219,7 +219,7 @@ pub(in crate::retrieval) fn load_record_relations(
         let remaining = relation_limit.saturating_sub(copies.len());
         if remaining == 0 {
             return Err(TemporalPortError::BudgetExceeded {
-                resource: "record relations",
+                resource: "record relations", accounting: None,
             });
         }
         let batches = store
@@ -239,7 +239,7 @@ pub(in crate::retrieval) fn load_record_relations(
         for relation in relations {
             if copies.len() == relation_limit {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "record relations",
+                    resource: "record relations", accounting: None,
                 });
             }
             let proof_json = serde_json::to_string(&relation.proof)
@@ -255,7 +255,7 @@ pub(in crate::retrieval) fn load_record_relations(
                 .saturating_add(valid_time_json.len());
             if copy_bytes > request.max_item_bytes() {
                 return Err(TemporalPortError::BudgetExceeded {
-                    resource: "record relation bytes",
+                    resource: "record relation bytes", accounting: None,
                 });
             }
             relation_bytes = relation_bytes.saturating_add(copy_bytes);
@@ -272,7 +272,7 @@ pub(in crate::retrieval) fn load_record_relations(
     }
     if relation_bytes > request.page_total_byte_limit() {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "record relation batch bytes",
+            resource: "record relation batch bytes", accounting: None,
         });
     }
     control.checkpoint()?;
@@ -386,7 +386,7 @@ fn map_relation_error(
     }
     match error {
         SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
-            resource: "record relations",
+            resource: "record relations", accounting: None,
         },
         SessionRelationError::Cancelled => TemporalPortError::Cancelled,
         SessionRelationError::DeadlineExceeded => TemporalPortError::DeadlineExceeded,

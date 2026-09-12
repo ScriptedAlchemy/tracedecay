@@ -18332,6 +18332,70 @@
       "description": "Strongly typed canonical identity: `SessionId`.",
       "type": "string"
     },
+    "SessionRetrievalBudgetAccountingV1": {
+      "additionalProperties": false,
+      "description": "The ceiling and count behind a budget refusal.\n\n`stage` names which budget refused; this is what tells an oversized request\napart from a read whose cost was mis-sized for it. The ceiling value also\ndistinguishes the resources inside one stage — a record read that stopped at\n1024 hit the item count, one that stopped at 16 MiB hit the byte total — so\nthe kernel's resource spelling stays in the kernel instead of becoming a\nsecond wire vocabulary to keep in step.",
+      "properties": {
+        "limit": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed": {
+          "$ref": "#/$defs/SessionRetrievalBudgetObservationV1"
+        }
+      },
+      "required": [
+        "limit",
+        "observed"
+      ],
+      "type": "object"
+    },
+    "SessionRetrievalBudgetObservationV1": {
+      "description": "What a refusing budget boundary had counted.\n\nBoth variants are exact. A bounded read never counts the rows it declined to\nread, so an exhausted read reports what it consumed and that storage held\nmore — never a total it would have to run the refused scan to learn.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The request asked for more units than the admitted maximum.",
+          "properties": {
+            "observation": {
+              "const": "requested",
+              "type": "string"
+            },
+            "units": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "observation",
+            "units"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The read consumed its whole budget and storage still held more.",
+          "properties": {
+            "observation": {
+              "const": "consumed_with_more_available",
+              "type": "string"
+            },
+            "units": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "observation",
+            "units"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SessionRetrievalBudgetStageV1": {
       "description": "Structural budget boundary that rejected a session retrieval request.\nThese causes are non-retryable request corrections; concurrent permit or\nqueue pressure remains a separate capacity-saturation failure.",
       "enum": [
@@ -18389,6 +18453,17 @@
         {
           "additionalProperties": false,
           "properties": {
+            "accounting": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionRetrievalBudgetAccountingV1"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present when the refusing boundary keeps a counter. A request-shape\ncheck has none and reports `None` rather than inventing numbers."
+            },
             "refusal": {
               "const": "budget_exhausted",
               "type": "string"
@@ -18399,7 +18474,8 @@
           },
           "required": [
             "refusal",
-            "stage"
+            "stage",
+            "accounting"
           ],
           "type": "object"
         }

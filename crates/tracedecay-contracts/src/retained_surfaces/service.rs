@@ -17,7 +17,10 @@ use super::{
     RetainedSurfaceRequestV1, RetainedSurfaceResultV1, SessionRefreshRequestV1,
     SessionsForRequestV1, WorkflowsRequestV1, retained_surface_application_operation,
 };
-use crate::retrieval::SessionRetrievalBudgetStageV1;
+use crate::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
+    SessionRetrievalBudgetStageV1,
+};
 use crate::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, CancellationSignal,
     CancellationStage, EffectReceipt, LegalAction, RequestAdmission, RequestContext,
@@ -68,10 +71,12 @@ pub enum RetainedSurfaceExecutionErrorV1 {
 /// Bounded structural refusals that callers must correct rather than retry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetainedStructuralRefusalV1 {
-    /// The budget boundary that refused. Without the stage a caller cannot tell
-    /// an oversized request from a kernel read whose cost was mis-sized for it.
+    /// The budget boundary that refused, with its ceiling and count where the
+    /// boundary keeps one. Without them a caller cannot tell an oversized
+    /// request from a kernel read whose cost was mis-sized for it.
     SessionRetrievalBudget {
         stage: SessionRetrievalBudgetStageV1,
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
     },
     SessionCursorManifestLimit {
         kind: CursorManifestLimitKindV1,
@@ -682,8 +687,14 @@ impl RetainedSurfaceExecutionErrorV1 {
     /// Fail-closed structural budget refusal naming the boundary that refused.
     /// True concurrent saturation stays [`Self::Saturated`] and retryable; this
     /// path never is.
-    pub fn structural_budget_refusal(stage: SessionRetrievalBudgetStageV1) -> Self {
-        Self::StructuralRefusal(RetainedStructuralRefusalV1::SessionRetrievalBudget { stage })
+    pub fn structural_budget_refusal(
+        stage: SessionRetrievalBudgetStageV1,
+        accounting: Option<SessionRetrievalBudgetAccountingV1>,
+    ) -> Self {
+        Self::StructuralRefusal(RetainedStructuralRefusalV1::SessionRetrievalBudget {
+            stage,
+            accounting,
+        })
     }
 
     pub fn cursor_manifest_limit_refusal(
@@ -699,15 +710,34 @@ impl RetainedSurfaceExecutionErrorV1 {
     }
 }
 
+/// Renders a refusing boundary's own numbers. A bounded read reports what it
+/// consumed, never a total it would have to run the refused scan to learn.
+fn budget_accounting_detail(accounting: SessionRetrievalBudgetAccountingV1) -> String {
+    match accounting.observed {
+        SessionRetrievalBudgetObservationV1::Requested { units } => {
+            format!(" (limit {}, requested {units})", accounting.limit)
+        }
+        SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable { units } => {
+            format!(
+                " (limit {}, consumed {units} with more available)",
+                accounting.limit
+            )
+        }
+    }
+}
+
 fn structural_refusal_problem(refusal: RetainedStructuralRefusalV1) -> ApplicationProblem {
     let diagnostic = match refusal {
-        RetainedStructuralRefusalV1::SessionRetrievalBudget { stage } => SafeDiagnostic {
-            code: "application.retained.budget-refused".to_owned(),
-            message: format!(
-                "The request exceeds the admitted retrieval budget at the \
-                 {stage:?} boundary. Narrow the scope or limit."
-            ),
-        },
+        RetainedStructuralRefusalV1::SessionRetrievalBudget { stage, accounting } => {
+            SafeDiagnostic {
+                code: "application.retained.budget-refused".to_owned(),
+                message: format!(
+                    "The request exceeds the admitted retrieval budget at the \
+                     {stage:?} boundary{}. Narrow the scope or limit.",
+                    accounting.map_or_else(String::new, budget_accounting_detail)
+                ),
+            }
+        }
         RetainedStructuralRefusalV1::SessionCursorManifestLimit {
             kind: CursorManifestLimitKindV1::Participants,
             ..
@@ -862,6 +892,7 @@ mod tests {
         let problem = retained_surface_execution_problem(
             RetainedSurfaceExecutionErrorV1::structural_budget_refusal(
                 SessionRetrievalBudgetStageV1::RecordReadExhausted,
+                None,
             ),
         );
         assert_eq!(problem.kind(), ApplicationProblemKind::InvalidRequest);
@@ -877,15 +908,16 @@ mod tests {
 
     #[test]
     fn structural_budget_refusal_names_the_boundary_that_refused() {
-        let message_for = |stage| {
+        let message_for = |stage, accounting| {
             retained_surface_execution_problem(
-                RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage),
+                RetainedSurfaceExecutionErrorV1::structural_budget_refusal(stage, accounting),
             )
             .diagnostic()
             .map(|diagnostic| diagnostic.message.clone())
         };
-        let record_read = message_for(SessionRetrievalBudgetStageV1::RecordReadExhausted);
-        let candidate_read = message_for(SessionRetrievalBudgetStageV1::CandidateReadExhausted);
+        let record_read = message_for(SessionRetrievalBudgetStageV1::RecordReadExhausted, None);
+        let candidate_read =
+            message_for(SessionRetrievalBudgetStageV1::CandidateReadExhausted, None);
         assert!(
             record_read
                 .as_deref()
@@ -895,6 +927,43 @@ mod tests {
         assert_ne!(
             record_read, candidate_read,
             "two different budget boundaries must not share one refusal message"
+        );
+    }
+
+    #[test]
+    fn structural_budget_refusal_reports_the_ceiling_and_count_it_observed() {
+        let diagnostic = |accounting| {
+            retained_surface_execution_problem(
+                RetainedSurfaceExecutionErrorV1::structural_budget_refusal(
+                    SessionRetrievalBudgetStageV1::RecordReadExhausted,
+                    Some(accounting),
+                ),
+            )
+            .diagnostic()
+            .map(|diagnostic| diagnostic.message.clone())
+            .expect("budget refusals carry a diagnostic")
+        };
+        let exhausted = diagnostic(SessionRetrievalBudgetAccountingV1 {
+            limit: 1024,
+            observed: SessionRetrievalBudgetObservationV1::ConsumedWithMoreAvailable {
+                units: 1024,
+            },
+        });
+        assert!(
+            exhausted.contains("limit 1024") && exhausted.contains("consumed 1024"),
+            "an exhausted read must report its ceiling and what it consumed: {exhausted}"
+        );
+        let oversized = diagnostic(SessionRetrievalBudgetAccountingV1 {
+            limit: 1024,
+            observed: SessionRetrievalBudgetObservationV1::Requested { units: 2156 },
+        });
+        assert!(
+            oversized.contains("requested 2156"),
+            "an oversized request must report what it asked for: {oversized}"
+        );
+        assert_ne!(
+            exhausted, oversized,
+            "an exhausted read and an oversized request must not read alike"
         );
     }
 
@@ -970,6 +1039,7 @@ mod tests {
             (
                 RetainedSurfaceExecutionErrorV1::structural_budget_refusal(
                     SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                    None,
                 ),
                 ApplicationProblemKind::InvalidRequest,
             ),

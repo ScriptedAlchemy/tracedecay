@@ -38,7 +38,7 @@ pub(super) fn build_record_query_with_relations(
 ) -> Result<RecordQuery, TemporalPortError> {
     if candidates.len() > request.page_item_limit().saturating_add(1) {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "record candidate window",
+            resource: "record candidate window", accounting: None,
         });
     }
     let mut params = Vec::with_capacity(
@@ -164,7 +164,7 @@ pub(super) fn build_record_query_with_relations(
     ));
     if params.len() > MAX_RECORD_QUERY_PARAMETERS {
         return Err(TemporalPortError::BudgetExceeded {
-            resource: "record query parameters",
+            resource: "record query parameters", accounting: None,
         });
     }
     let mode = RecordModeSql::new(snapshot.temporal_mode(), cutoff_param);

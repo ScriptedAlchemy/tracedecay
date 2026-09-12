@@ -3,7 +3,9 @@ use std::fmt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_contracts::RequestContext;
-use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
+use tracedecay_contracts::retrieval::{
+    SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetStageV1,
+};
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
     ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
@@ -356,9 +358,12 @@ fn execution_deadline(context: &RequestContext) -> std::time::Instant {
     std::time::Instant::now() + std::time::Duration::from_micros(remaining_micros)
 }
 
-fn budget_exhausted<T>(stage: SessionRetrievalBudgetStageV1) -> SessionRetrievalOutcome<T> {
+fn budget_exhausted<T>(
+    stage: SessionRetrievalBudgetStageV1,
+    accounting: Option<SessionRetrievalBudgetAccountingV1>,
+) -> SessionRetrievalOutcome<T> {
     crate::session::hotpath_observe::session_retrieval_budget_stage(stage);
-    SessionRetrievalOutcome::BudgetExhausted { stage }
+    SessionRetrievalOutcome::BudgetExhausted { stage, accounting }
 }
 
 fn request_budget_refusal(
@@ -503,7 +508,7 @@ fn map_report(
                 ContextOmissionReasonV1::ByteBudget | ContextOmissionReasonV1::TokenBudget
             )
         }) {
-            return budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes);
+            return budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes, None);
         }
         if !freshness_policy.accepts(freshness) {
             return SessionRetrievalOutcome::Stale { freshness };
@@ -563,8 +568,14 @@ fn map_execution_error(
         SessionTemporalExecutionError::Empty { freshness } => {
             SessionRetrievalOutcome::CompleteZero { freshness }
         }
-        SessionTemporalExecutionError::BudgetExhausted { stage } => budget_exhausted(stage),
+        SessionTemporalExecutionError::BudgetExhausted { stage, accounting } => {
+            budget_exhausted(stage, accounting)
+        }
+        // A failed storage read is not an absent authority; the operation and
+        // cause travel with it so the surface can say which read broke.
+        SessionTemporalExecutionError::Storage { .. } => SessionRetrievalOutcome::Unavailable,
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
+        SessionTemporalExecutionError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
     }
 }
@@ -572,18 +583,22 @@ fn map_execution_error(
 fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<TemporalKernelResult> {
     match error {
         TemporalKernelError::InvalidLimit => {
-            budget_exhausted(SessionRetrievalBudgetStageV1::KernelResultLimit)
+            budget_exhausted(SessionRetrievalBudgetStageV1::KernelResultLimit, None)
         }
         TemporalKernelError::BudgetExceeded => {
-            budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted)
+            budget_exhausted(SessionRetrievalBudgetStageV1::ExecutionWorkExhausted, None)
         }
         TemporalKernelError::Cancelled => SessionRetrievalOutcome::Cancelled,
         TemporalKernelError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
         TemporalKernelError::Port(error) => match error {
             TemporalPortError::Cancelled => SessionRetrievalOutcome::Cancelled,
             TemporalPortError::DeadlineExceeded => SessionRetrievalOutcome::TimedOut,
-            TemporalPortError::BudgetExceeded { resource } => budget_exhausted(
+            TemporalPortError::BudgetExceeded {
+                resource,
+                accounting,
+            } => budget_exhausted(
                 SessionRetrievalBudgetStageV1::for_port_budget_resource(resource),
+                accounting.map(tracedecay_session_temporal_store::execution::port_budget_accounting),
             ),
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
                 crate::session::hotpath_observe::session_retrieval_budget_stage(
@@ -645,7 +660,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         },
         TemporalKernelError::Hydration(error) => match error {
             HydrationError::BudgetExceeded { .. } => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes)
+                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes, None)
             }
             HydrationError::Interrupted(TemporalPortError::Cancelled) => {
                 SessionRetrievalOutcome::Cancelled
@@ -654,7 +669,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::TimedOut
             }
             HydrationError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes)
+                budget_exhausted(SessionRetrievalBudgetStageV1::HydrationBytes, None)
             }
             HydrationError::ResetRequired { .. }
             | HydrationError::Interrupted(TemporalPortError::ResetRequired { .. }) => {
@@ -666,7 +681,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         },
         TemporalKernelError::Context(error) => match error {
             ContextError::BudgetExceeded { resource } => {
-                budget_exhausted(context_budget_stage(resource))
+                budget_exhausted(context_budget_stage(resource), None)
             }
             ContextError::Interrupted(TemporalPortError::Cancelled) => {
                 SessionRetrievalOutcome::Cancelled
@@ -675,7 +690,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
                 SessionRetrievalOutcome::TimedOut
             }
             ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
-                budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes)
+                budget_exhausted(SessionRetrievalBudgetStageV1::ContextBytes, None)
             }
             ContextError::Interrupted(TemporalPortError::ResetRequired { .. }) => {
                 SessionRetrievalOutcome::ResetRequired
@@ -968,12 +983,14 @@ mod tests {
                 TemporalKernelError::InvalidLimit,
                 SessionRetrievalOutcome::BudgetExhausted {
                     stage: SessionRetrievalBudgetStageV1::KernelResultLimit,
+                    accounting: None,
                 },
             ),
             (
                 TemporalKernelError::BudgetExceeded,
                 SessionRetrievalOutcome::BudgetExhausted {
                     stage: SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
+                    accounting: None,
                 },
             ),
             (

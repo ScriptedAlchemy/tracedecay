@@ -540,9 +540,9 @@ pub(super) fn accept_automation_temporal_outcome(
                 maximum,
             },
         ),
-        SessionRetrievalOutcome::BudgetExhausted { stage } => {
+        SessionRetrievalOutcome::BudgetExhausted { stage, accounting } => {
             AutomationTemporalRetrieval::StructuralRefusal(
-                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage },
+                SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, accounting },
             )
         }
         SessionRetrievalOutcome::TimedOut => {
@@ -579,7 +579,7 @@ pub(super) const fn automation_structural_refusal_reason(
             kind: tracedecay_domain::CursorManifestLimitKindV1::CanonicalBytes,
             ..
         } => "session_cursor_manifest_canonical_bytes_limit_exceeded",
-        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage } => {
+        SessionRetrievalStructuralRefusalV1::BudgetExhausted { stage, .. } => {
             automation_budget_refusal_reason(stage)
         }
     }

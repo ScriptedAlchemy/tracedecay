@@ -90,7 +90,9 @@ pub use git_topology_anchor::{
 pub use grep_analysis::RedundancyResultV1;
 pub use ports::{
     AffectedTestsRetrievalPort, OperationalRetrievalPort, RetrievalPortContext,
-    RetrievalPortOutcome, SessionRetrievalBudgetStageV1, SessionRetrievalStructuralRefusalV1,
+    RetrievalPortOutcome, SessionRetrievalBudgetAccountingV1,
+    SessionRetrievalBudgetObservationV1, SessionRetrievalBudgetStageV1,
+    SessionRetrievalStructuralRefusalV1,
     SourceRetrievalPort, TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
 };
 pub use primitive_surface::{

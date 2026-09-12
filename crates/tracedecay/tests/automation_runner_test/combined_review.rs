@@ -86,6 +86,7 @@ impl AutomationSessionRetrieval for CombinedBudgetRefusalRetrieval {
                 AutomationTemporalRetrieval::StructuralRefusal(
                     tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
                         stage,
+                        accounting: None,
                     },
                 )
             });

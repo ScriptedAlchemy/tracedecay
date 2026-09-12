@@ -59,7 +59,7 @@ impl SessionExecutionAdmissionFailure {
             Self::WrongScope => SessionRetrievalOutcome::WrongScope,
             Self::Denied => SessionRetrievalOutcome::Denied,
             Self::Unavailable => SessionRetrievalOutcome::Unavailable,
-            Self::BudgetExhausted { stage } => super::budget_exhausted(stage),
+            Self::BudgetExhausted { stage } => super::budget_exhausted(stage, None),
             Self::TimedOut => SessionRetrievalOutcome::TimedOut,
             Self::Cancelled => SessionRetrievalOutcome::Cancelled,
         }
@@ -326,7 +326,7 @@ fn map_task_session_execution_error(
         SessionRetrievalOutcome::Stale { freshness } => {
             TaskSessionRetrievalOutcomeV1::Stale { freshness }
         }
-        SessionRetrievalOutcome::BudgetExhausted { stage } => {
+        SessionRetrievalOutcome::BudgetExhausted { stage, .. } => {
             TaskSessionRetrievalOutcomeV1::BudgetExhausted { stage }
         }
         SessionRetrievalOutcome::TimedOut => TaskSessionRetrievalOutcomeV1::TimedOut,
