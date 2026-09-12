@@ -243,20 +243,27 @@ impl HostAdmissionFacade<'_> {
                     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
                     DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT,
                 )
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%error, "Git evidence convergence failed during host drain");
-                    HostAdmissionOutcome::retained_unavailable(
-                        "git_evidence_convergence_unavailable",
-                    )
-                })?;
-            if let Some(error) = convergence.later_failure() {
-                tracing::warn!(%error, "Git evidence convergence made partial progress during host drain");
-            }
+                .await;
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            outcome.deferred |= git_evidence_convergence_deferred(&convergence);
+            match convergence {
+                Ok(convergence) => {
+                    if let Some(error) = convergence.later_failure() {
+                        tracing::warn!(%error, "Git evidence convergence made partial progress during host drain");
+                    }
+                    outcome.deferred |= git_evidence_convergence_deferred(&convergence);
+                }
+                Err(
+                    tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Cancelled,
+                ) => {
+                    return Err(classify_error(&ObservationApplicationError::Cancelled));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Git evidence convergence deferred during host drain");
+                    outcome.deferred = true;
+                }
+            }
         }
         outcome.session_ids = session_ids.into_iter().collect();
         Ok(outcome)

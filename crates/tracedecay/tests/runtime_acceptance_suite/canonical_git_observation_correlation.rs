@@ -21,7 +21,7 @@ use tracedecay_sessions::observation::{
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitRelationFilter, GitRefFilter, SessionsForQuery,
+    CommitRelationFilter, GitRefFilter, SessionsForQuery, pending_git_evidence_publication_count,
 };
 
 fn run_git(project: &Path, args: &[&str]) -> String {
@@ -128,13 +128,14 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
         session_id.clone(),
     )
     .unwrap();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
     let request = CaptureObservationRequest::new(
         parsed,
         ObservationIdentityMaterialV1::for_native_record(
             source,
-            ObservationScopeV1::Project {
-                project_id: project_id.clone(),
-            },
+            scope.clone(),
             ObservationSourceGenerationV1::new(1).unwrap(),
             range,
             ObservationOrderingDomainV1::FileBytes,
@@ -162,6 +163,38 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
     assert!(sanitized.contains(&commit_sha));
 
     let store = GlobalDbGitCorrelationStore::new(database);
+    assert_eq!(
+        pending_git_evidence_publication_count(database)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        store
+            .sessions_for_with_relation(
+                &SessionsForQuery {
+                    git_ref: GitRefFilter::Branch("capture-branch".to_owned()),
+                    since: None,
+                    until: None,
+                    limit: 10,
+                },
+                CommitRelationFilter::All,
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "capture stages evidence without publishing the Git graph inline"
+    );
+    facade
+        .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending_git_evidence_publication_count(database)
+            .await
+            .unwrap(),
+        0
+    );
     let branch_hits = store
         .sessions_for_with_relation(
             &SessionsForQuery {
