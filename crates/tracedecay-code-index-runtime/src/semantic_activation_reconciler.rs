@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use tracedecay_application::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticActivationCoordinationErrorV1,

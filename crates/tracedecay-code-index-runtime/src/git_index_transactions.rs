@@ -35,6 +35,7 @@ mod safety;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use patch::PatchDigestMaterial;
 pub use patch::ValidatedIndexPatch;
 use process::{
     current_operation_state, git_command, joined_patch_bytes, parse_git_oid,
