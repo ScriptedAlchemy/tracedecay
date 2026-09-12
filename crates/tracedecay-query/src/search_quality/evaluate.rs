@@ -1069,6 +1069,18 @@ fn pairwise_candidate_evaluation(
             unavailable = true;
             continue;
         };
+        // The compared stratum is not protected, so `MAX_PROTECTED_QUALITY_
+        // REGRESSION_PPM` never guards it and the only other requirement is a
+        // gain in its *mean*. A mean hides a per-query loss: the last packaged
+        // qualification raised the stratum mean while dropping one of
+        // `validation-006`'s labelled targets out of the ranking entirely
+        // (recall 2/3 to 1/3), because fusion admits a bounded number of
+        // approximate candidates per file and a semantic candidate displaced
+        // the labelled one. Losing labelled evidence the baseline already
+        // retrieved is a regression whatever the mean does.
+        if let Some(diagnostic) = dropped_relevant_label(candidate, baseline) {
+            return (DirectEvaluationStatusV1::Fail, Some(diagnostic));
+        }
         if candidate_natural
             .ndcg_at_10_ppm
             .saturating_sub(baseline_natural.ndcg_at_10_ppm)
@@ -1154,6 +1166,33 @@ fn pairwise_candidate_evaluation(
     }
 }
 
+/// The first compared query whose candidate retrieves fewer labelled targets
+/// than the baseline. Both sides score the same checked-in label set, so the
+/// recall numerators compare directly.
+fn dropped_relevant_label(
+    candidate: &DirectProfileEvaluationV1,
+    baseline: &DirectProfileEvaluationV1,
+) -> Option<String> {
+    report::pairwise_query_pairs(&candidate.queries, &baseline.queries)
+        .into_iter()
+        .find(|(candidate_query, baseline_query)| {
+            candidate_query.quality.recall_at_10.numerator
+                < baseline_query.quality.recall_at_10.numerator
+        })
+        .map(|(candidate_query, baseline_query)| {
+            format!(
+                "pairwise candidate quality failed: profile={} partition={} stratum=natural_language query={} metric=recall_at_10 baseline={}/{} candidate={}/{} (the candidate dropped a labelled target the baseline retrieved)",
+                candidate.profile_id,
+                candidate.partition,
+                candidate_query.query_id,
+                baseline_query.quality.recall_at_10.numerator,
+                baseline_query.quality.recall_at_10.denominator,
+                candidate_query.quality.recall_at_10.numerator,
+                candidate_query.quality.recall_at_10.denominator,
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1167,7 +1206,8 @@ mod tests {
         WorkloadQueryV1,
     };
     use crate::search_quality::report::{
-        DirectProfileEvaluationV1, DirectQualityMetricsV1, DirectStratumQualityV1,
+        DirectProfileEvaluationV1, DirectQualityMetricsV1, DirectQueryEvaluationV1,
+        DirectStratumQualityV1,
     };
 
     fn ranked(anchor: &str) -> RankedCandidateRowV1 {
@@ -1447,6 +1487,64 @@ mod tests {
             .expect("saturated baseline still refuses activation");
         assert!(diagnostic.contains("baseline=1000000 candidate=1000000 required_gain=1"));
         assert!(diagnostic.contains("lexical baseline is saturated"));
+    }
+
+    /// A stratum mean must not buy a candidate the right to lose labelled
+    /// evidence: this is the shape the last packaged qualification shipped,
+    /// where semantic gain on one natural-language query paid for a labelled
+    /// target dropped out of another query's ranking.
+    #[test]
+    fn candidate_that_drops_a_labelled_target_fails_despite_a_stratum_mean_gain() {
+        let labels = query("nl-lost", "natural_language", &["a", "b", "c"]);
+        let baseline_query = evaluate_query(
+            &labels,
+            &row("nl-lost", vec![ranked("a"), ranked("noise"), ranked("b")]),
+        )
+        .expect("baseline query");
+        let candidate_query = evaluate_query(
+            &labels,
+            &row(
+                "nl-lost",
+                vec![ranked("a"), ranked("displaced"), ranked("noise")],
+            ),
+        )
+        .expect("candidate query");
+        assert_eq!(baseline_query.quality.recall_at_10.numerator, 2);
+        assert_eq!(candidate_query.quality.recall_at_10.numerator, 1);
+
+        let profile_with = |profile_id: &str,
+                            natural_language_ndcg_at_10_ppm: u32,
+                            evaluated: DirectQueryEvaluationV1| {
+            let mut profile =
+                passing_profile(profile_id, natural_language_ndcg_at_10_ppm, 1_000_000);
+            profile.queries = vec![evaluated];
+            profile
+        };
+
+        let baseline = profile_with(QUERY_BASELINE_PROFILE, 500_000, baseline_query.clone());
+        let candidate = profile_with(SEMANTIC_PROFILE, 900_000, candidate_query);
+
+        assert_eq!(
+            aggregate_profile_status(&[baseline.clone(), candidate.clone()]),
+            super::DirectEvaluationStatusV1::Fail
+        );
+        let diagnostic = super::pairwise_candidate_failure_diagnostic(&[baseline, candidate])
+            .expect("a dropped labelled target refuses activation");
+        assert!(diagnostic.contains("query=nl-lost"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("metric=recall_at_10 baseline=2/3 candidate=1/3"),
+            "{diagnostic}"
+        );
+
+        // Retaining the baseline's labelled evidence keeps the same gain
+        // admissible, so the floor refuses the loss and not the gain.
+        assert_eq!(
+            aggregate_profile_status(&[
+                profile_with(QUERY_BASELINE_PROFILE, 500_000, baseline_query.clone()),
+                profile_with(SEMANTIC_PROFILE, 900_000, baseline_query),
+            ]),
+            super::DirectEvaluationStatusV1::Pass
+        );
     }
 
     #[test]
