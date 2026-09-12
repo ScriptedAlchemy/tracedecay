@@ -453,7 +453,7 @@ async fn store_layout_resolution_surfaces_split_identity_conflict()
         "proj_doctor_selected",
     )?;
 
-    let open_options = crate::tracedecay::TraceDecayOpenOptions {
+    let open_options = crate::project::TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: Some(dir.path().join("global.db")),
     };
@@ -462,7 +462,7 @@ async fn store_layout_resolution_surfaces_split_identity_conflict()
     let selected_before = std::fs::read(&selected_db)?;
     let legacy_before = std::fs::read(&legacy_db)?;
 
-    let resolution = crate::tracedecay::TraceDecay::try_initialized_store_layout_with_options(
+    let resolution = crate::project::TraceDecay::try_initialized_store_layout_with_options(
         &project_root,
         &open_options,
     )

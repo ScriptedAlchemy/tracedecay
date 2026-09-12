@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::project::TraceDecay;
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
     ContextScoutSelectionInputV1, select_deterministic_context_scout,

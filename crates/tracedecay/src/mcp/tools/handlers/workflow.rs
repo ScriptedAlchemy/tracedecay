@@ -12,6 +12,7 @@ use std::time::Duration;
 use futures_util::stream::{self, StreamExt};
 use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_code_index::intake::content_digest;
 use tracedecay_contracts::clock::now_micros;
 use tracedecay_contracts::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, OperationBudgetUsage,
@@ -21,7 +22,7 @@ use tracedecay_domain::{CommitId, UtcMicros};
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
-use crate::tracedecay::{TraceDecay, is_test_file};
+use crate::project::{TraceDecay, is_test_file};
 use tracedecay_application::diagnose::{Severity, parse_cargo_output};
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_application::diagnostics_query::DiagnosticsQuery;
@@ -759,10 +760,7 @@ async fn managed_test_document_content_digests(
         .map(|(index, (changed_path, absolute))| async move {
             let outcome = match tokio::fs::read(&absolute).await {
                 Ok(bytes) => match Url::from_file_path(&absolute) {
-                    Ok(uri) => Ok(Some((
-                        uri.to_string(),
-                        crate::code_index::intake::content_digest(&bytes),
-                    ))),
+                    Ok(uri) => Ok(Some((uri.to_string(), content_digest(&bytes)))),
                     Err(()) => Err(TraceDecayError::Config {
                         message: format!("managed test-run source URI is invalid: {changed_path}"),
                     }),

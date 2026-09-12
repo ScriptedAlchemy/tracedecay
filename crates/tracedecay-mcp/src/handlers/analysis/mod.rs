@@ -4,6 +4,7 @@ mod circular;
 mod complexity;
 mod constructors;
 mod dead_code;
+mod dispatch;
 mod field_sites;
 mod hotspots;
 mod metrics;
@@ -13,11 +14,10 @@ mod unmounted_files;
 mod unsafe_patterns;
 
 pub use circular::handle_circular;
-pub use complexity::{
-    handle_complexity, handle_doc_coverage, handle_god_class, is_documentable_kind,
-};
+pub use complexity::{handle_complexity, handle_doc_coverage, handle_god_class};
 pub use constructors::handle_constructors;
 pub use dead_code::handle_dead_code;
+pub use dispatch::dispatch_tool;
 pub use field_sites::handle_field_sites;
 pub use hotspots::handle_hotspots;
 pub use metrics::{

@@ -15,45 +15,46 @@ pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
-) -> Result<crate::tracedecay::TraceDecay> {
+) -> Result<crate::project::TraceDecay> {
     let open_options = crate::daemon::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
-    let (store_layout, first_touch) =
-        match Box::pin(crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+    let (store_layout, first_touch) = match Box::pin(
+        crate::project::TraceDecay::resolve_registered_configuration_layout(
             project_path,
             &open_options,
             registry_database.as_ref(),
-        ))
-        .await
-        {
-            Ok(layout) => (layout, false),
-            // A brand-new project has no enrollment marker or registry match,
-            // so identity resolution fails closed. When the client
-            // explicitly asked to initialize (first-touch `tracedecay init`),
-            // mint a fresh path-derived identity and let the missing-index
-            // fallback below bootstrap it.
-            Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
-                Box::pin(
-                    crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
-                        project_path,
-                        &open_options,
-                        registry_database.as_ref(),
-                        &handshake.moved_store_adoption,
-                    ),
-                )
-                .await?,
-                true,
-            ),
-            Err(err) if is_unregistered_identity_error(&err) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "no TraceDecay index found at '{}'; run 'tracedecay init' first",
-                        project_path.display()
-                    ),
-                });
-            }
-            Err(err) => return Err(err),
-        };
+        ),
+    )
+    .await
+    {
+        Ok(layout) => (layout, false),
+        // A brand-new project has no enrollment marker or registry match,
+        // so identity resolution fails closed. When the client
+        // explicitly asked to initialize (first-touch `tracedecay init`),
+        // mint a fresh path-derived identity and let the missing-index
+        // fallback below bootstrap it.
+        Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
+            Box::pin(
+                crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+                    project_path,
+                    &open_options,
+                    registry_database.as_ref(),
+                    &handshake.moved_store_adoption,
+                ),
+            )
+            .await?,
+            true,
+        ),
+        Err(err) if is_unregistered_identity_error(&err) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "no TraceDecay index found at '{}'; run 'tracedecay init' first",
+                    project_path.display()
+                ),
+            });
+        }
+        Err(err) => return Err(err),
+    };
     let project_id =
         store_layout
             .identity
@@ -85,7 +86,7 @@ pub(super) async fn open_project_for_handshake(
     // and durable store authority; project composition schedules the maintained
     // bounded code-index owner after publication.
     let open_result = Box::pin(
-        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+        crate::project::TraceDecay::open_with_registered_configuration(
             project_path,
             open_options.clone(),
             store_layout.clone(),
@@ -99,7 +100,7 @@ pub(super) async fn open_project_for_handshake(
         Ok(cg) => Ok(cg),
         Err(open_err) if is_readonly_database_error(&open_err) => {
             match Box::pin(
-                crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
+                crate::project::TraceDecay::open_read_only_with_registered_configuration(
                     project_path,
                     open_options,
                     store_layout,
@@ -123,7 +124,7 @@ pub(super) async fn open_project_for_handshake(
             // activation owner performs indexing after admission, so opening a
             // project never waits for a repository scan or rebuild.
             Box::pin(
-                crate::tracedecay::TraceDecay::init_with_registered_configuration(
+                crate::project::TraceDecay::init_with_registered_configuration(
                     project_path,
                     open_options,
                     store_layout,

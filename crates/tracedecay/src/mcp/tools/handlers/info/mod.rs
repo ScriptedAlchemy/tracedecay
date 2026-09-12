@@ -38,6 +38,6 @@ pub(crate) async fn graph_statistics_value(
 
 pub(super) use serde_json::{Value, json};
 
-pub(super) use crate::tracedecay::TraceDecay;
+pub(super) use crate::project::TraceDecay;
 pub(super) use tracedecay_domain::errors::{Result, TraceDecayError};
 pub(super) use tracedecay_mcp::ToolResult;

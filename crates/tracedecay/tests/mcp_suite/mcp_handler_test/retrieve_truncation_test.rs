@@ -18,7 +18,7 @@ async fn retrieve_tool_returns_full_stored_response() {
     let stored = tracedecay_mcp::response_handles::store_response_handle(
         cg.project_root(),
         original,
-        tracedecay::tracedecay::current_timestamp(),
+        tracedecay::project::current_timestamp(),
     )
     .unwrap();
 
@@ -97,7 +97,7 @@ async fn retrieve_pages_reconstruct_large_and_multibyte_handles_with_bounded_fra
         let stored = tracedecay_mcp::response_handles::store_response_handle(
             cg.project_root(),
             &original,
-            tracedecay::tracedecay::current_timestamp(),
+            tracedecay::project::current_timestamp(),
         )
         .unwrap();
         let mut offset = 0usize;
@@ -154,7 +154,7 @@ async fn retrieve_offset_beyond_content_returns_typed_reason() {
     let stored = tracedecay_mcp::response_handles::store_response_handle(
         cg.project_root(),
         "short",
-        tracedecay::tracedecay::current_timestamp(),
+        tracedecay::project::current_timestamp(),
     )
     .unwrap();
 
@@ -211,7 +211,7 @@ async fn retrieve_tool_reports_missing_and_expired_handles_actionably() {
     let expired = tracedecay_mcp::response_handles::store_response_handle(
         cg.project_root(),
         "{\"items\":[42]}",
-        tracedecay::tracedecay::current_timestamp()
+        tracedecay::project::current_timestamp()
             - tracedecay_mcp::response_handles::RESPONSE_HANDLE_TTL_SECS
             - 5,
     )

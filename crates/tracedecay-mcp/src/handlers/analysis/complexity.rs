@@ -1,6 +1,8 @@
 //! `tracedecay_complexity`, `tracedecay_doc_coverage`, and `tracedecay_god_class`.
 
 use super::*;
+use tracedecay_code_index::intake::content_digest;
+use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
 #[hotpath::measure(future = true, label = "mcp.analysis.complexity.total")]
 pub async fn handle_complexity(
@@ -106,7 +108,7 @@ fn analysis_score(
         .saturating_add(fan_in.get(&symbol.occurrence).copied().unwrap_or(0))
 }
 
-pub fn is_documentable_kind(kind: &str) -> bool {
+fn is_documentable_kind(kind: &str) -> bool {
     matches!(
         kind,
         "function"
@@ -143,12 +145,143 @@ pub fn is_documentable_kind(kind: &str) -> bool {
     )
 }
 
+const DOC_COVERAGE_SYMBOL_BUDGET: usize = 500_000;
+
+fn doc_coverage_unavailable(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("verified-doc-coverage-unavailable", false, detail.into())
+}
+
+fn admitted_doc_source(project_root: &Path, path: &str) -> Result<Vec<u8>> {
+    let raw = std::fs::read(project_root.join(path)).map_err(|error| {
+        doc_coverage_unavailable(format!(
+            "verified documentation source `{path}` could not be read: {error}"
+        ))
+    })?;
+    let shape = match path.rsplit('.').next() {
+        Some("json" | "toml" | "yaml" | "yml") => CodeSourceShapeV1::StructuredData,
+        _ => CodeSourceShapeV1::CodeOrProse,
+    };
+    let sanitized = sanitize_code_source_bytes(&raw, shape).map_err(|error| {
+        doc_coverage_unavailable(format!(
+            "verified documentation source `{path}` could not be admitted through the code sanitizer: {error}"
+        ))
+    })?;
+    Ok(sanitized.into_parts().0)
+}
+
+/// Refuses a documentation census whose public symbols no longer match the
+/// source on disk: the admitted generation's content digest must agree with
+/// every candidate's current bytes, or the report would describe a tree the
+/// caller is not looking at.
+fn verify_doc_coverage_sources_current(
+    project_root: &Path,
+    graph: &tracedecay_graph_query::VerifiedGraphQuery,
+    args: &Value,
+    scope_prefix: Option<&str>,
+) -> Result<()> {
+    let path_prefix = effective_path(args, scope_prefix);
+    let page = graph.symbols_page(None, DOC_COVERAGE_SYMBOL_BUDGET)?;
+    if page.has_more {
+        return Err(doc_coverage_unavailable(
+            "verified documentation census exceeded its declared symbol budget",
+        ));
+    }
+    let mut candidates = Vec::new();
+    for symbol in page.symbols {
+        let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+            doc_coverage_unavailable(format!(
+                "symbol {} has no admitted documentation metadata",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        let path = symbol
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref())
+            .ok_or_else(|| {
+                doc_coverage_unavailable(format!(
+                    "symbol {} has no admitted logical file binding",
+                    symbol.occurrence.as_str()
+                ))
+            })?;
+        if metadata.visibility == "public"
+            && is_documentable_kind(&metadata.kind)
+            && path_matches_optional_scope(path, path_prefix)
+        {
+            candidates.push(symbol);
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref())
+            .cmp(
+                &right
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_deref()),
+            )
+            .then_with(|| left.occurrence.cmp(&right.occurrence))
+    });
+
+    let mut admitted_path = None::<String>;
+    let mut admitted_bytes = Vec::new();
+    for symbol in candidates {
+        let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+            doc_coverage_unavailable("documentation candidate metadata disappeared")
+        })?;
+        let binding = symbol.binding.as_ref().ok_or_else(|| {
+            doc_coverage_unavailable("documentation candidate file binding disappeared")
+        })?;
+        let path = binding.logical_path.as_deref().ok_or_else(|| {
+            doc_coverage_unavailable("documentation candidate logical path disappeared")
+        })?;
+        if admitted_path.as_deref() != Some(path) {
+            admitted_bytes = admitted_doc_source(project_root, path)?;
+            admitted_path = Some(path.to_owned());
+        }
+        let source_span = binding.source_span.ok_or_else(|| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} has no admitted source span",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        let start = usize::try_from(source_span.start_byte).map_err(|error| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} source start does not fit this host: {error}",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        let end = usize::try_from(source_span.end_byte).map_err(|error| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} source end does not fit this host: {error}",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        let source = admitted_bytes.get(start..end).ok_or_else(|| {
+            doc_coverage_unavailable(format!(
+                "public symbol {} source span is outside `{path}`",
+                symbol.occurrence.as_str()
+            ))
+        })?;
+        if content_digest(source) != metadata.content_digest {
+            return Err(doc_coverage_unavailable(format!(
+                "documentation source for symbol {} no longer matches the admitted graph generation",
+                symbol.occurrence.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[hotpath::measure(future = true, label = "mcp.analysis.doc_coverage.total")]
 pub async fn handle_doc_coverage(
+    project_root: &Path,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
+    verify_doc_coverage_sources_current(project_root, graph, &args, scope_prefix)?;
     let path_prefix = effective_path(&args, scope_prefix);
     let limit = args
         .get("limit")

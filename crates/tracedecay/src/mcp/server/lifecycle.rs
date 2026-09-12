@@ -409,7 +409,7 @@ impl McpServer {
             return;
         }
 
-        let now = crate::tracedecay::current_timestamp();
+        let now = crate::project::current_timestamp();
         let cooldown = self.sync_config.read_cooldown_secs as i64;
         let previous = self.last_background_refresh_at.load(Ordering::Acquire);
         if previous != 0 && now.saturating_sub(previous) < cooldown {
@@ -474,7 +474,7 @@ impl McpServer {
                     );
                 }
             }
-            done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
+            done_at.store(crate::project::current_timestamp(), Ordering::Release);
         });
     }
 

@@ -26,11 +26,11 @@ use tokio::sync::{Mutex, MutexGuard};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
+use tracedecay::project::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay::test_support::host_admission::{
     HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
 };
-use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::errors::TraceDecayError;
 #[cfg(feature = "test-transport")]
