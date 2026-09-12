@@ -1855,32 +1855,15 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(row["problem_code"], code)
         self.assertEqual(len(client.calls), 2)
 
-    def test_multi_root_probes_reach_the_exact_daemon_denial(self) -> None:
-        """Materialized multi-root bodies parse, so the typed owner denial is exact."""
+    def test_multi_root_tools_require_the_shared_public_journey(self) -> None:
         runner = load_runner()
         for name in (
             "tracedecay_multi_root_scope_set_compare_and_swap",
             "tracedecay_multi_root_execute",
+            "tracedecay_multi_root_scope_set_read",
         ):
-            kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
-            self.assertEqual((kind, code), ("unavailable", "multi_root.daemon_unavailable"))
-            denial = self.text_response(
-                f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}', is_error=True
-            )
-            client = self.scripted_client({name: [denial]})
-            row = runner._read_tool_row(
-                client, self.definition(name), self.policy(runner, name), fixture={}
-            )
-            self.assertEqual(row["verdict"], "PASS", name)
-            self.assertTrue(row["expected_denial"], name)
-            self.assertEqual(len(client.calls), 1, name)
-            arguments = client.calls[0][1]
-            self.assertEqual(arguments["scope_set_id"], "tool-sweep-scope-set.v1", name)
-
-    def test_multi_root_read_no_longer_claims_the_superseded_daemon_denial(self) -> None:
-        runner = load_runner()
+            self.assertNotIn(name, runner.EXPECTED_HERMETIC_DENIALS)
         name = "tracedecay_multi_root_scope_set_read"
-        self.assertNotIn(name, runner.EXPECTED_HERMETIC_DENIALS)
         arguments = runner.materialize_tool_arguments(
             {
                 "name": name,
@@ -1890,9 +1873,9 @@ class MountRetryTests(unittest.TestCase):
                     "required": ["scope_set_id"],
                 },
             },
-            {},
+            {"native_read_arguments": {name: {"scope_set_id": "scope-set.real"}}},
         )
-        self.assertEqual(arguments, {"scope_set_id": "tool-sweep-scope-set.v1"})
+        self.assertEqual(arguments, {"scope_set_id": "scope-set.real"})
 
     def test_expired_preview_is_reminted_from_the_live_producer(self) -> None:
         """An expired stage-preview cursor re-mints through git_hunks, never a blind replay."""
