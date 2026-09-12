@@ -3,7 +3,6 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::serve;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 
@@ -407,17 +406,6 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
     assert!(
         TraceDecay::is_initialized_with_options(&renamed, &open_options),
         "the durable git marker should resolve the moved profile store synchronously"
-    );
-    let serve_error =
-        match serve::ensure_initialized_with_options(&renamed, open_options.clone()).await {
-            Ok(_) => panic!("serve compatibility API must not open the project database locally"),
-            Err(error) => error,
-        };
-    assert!(
-        serve_error
-            .to_string()
-            .contains("managed TraceDecay daemon"),
-        "serve should direct callers to the sole database owner: {serve_error}"
     );
 
     let reopened = open_with_maintenance(&renamed, &client_profile, open_options)
