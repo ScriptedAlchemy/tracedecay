@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
+#[cfg(feature = "hotpath")]
+use std::time::Instant;
 
 use rayon::prelude::*;
 use rusqlite::functions::FunctionFlags;
@@ -4384,12 +4386,7 @@ fn build_serving_index_step(
         // table scan, under 4 s covered in both regimes). Uniqueness of the
         // (kind, ngram, page_ordinal) prefix is already guaranteed by the
         // table primary key, so the wider UNIQUE declaration loses nothing.
-        3 => hotpath::measure_block!(
-            "query.artifact.finalization.index.ngram_postings_by_ngram",
-            transaction.execute_batch(
-                "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal, cardinality)",
-            )
-        ),
+        3 => build_ngram_serving_index(transaction),
         4 => hotpath::measure_block!(
             "query.artifact.finalization.ngram_statistics",
             transaction.execute_batch(
@@ -4409,6 +4406,21 @@ fn build_serving_index_step(
         }
     }
     .map_err(sqlite_error)
+}
+
+fn build_ngram_serving_index(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+    #[cfg(feature = "hotpath")]
+    let started = Instant::now();
+    let result = hotpath::measure_block!(
+        "query.artifact.finalization.index.ngram_postings_by_ngram",
+        transaction.execute_batch(
+            "CREATE UNIQUE INDEX ngram_postings_by_ngram ON ngram_postings(kind, ngram, page_ordinal, cardinality)",
+        )
+    );
+    #[cfg(feature = "hotpath")]
+    hotpath::gauge!("query.artifact.finalization.index.ngram_latest_micros")
+        .set(started.elapsed().as_micros() as u64);
+    result
 }
 
 impl PersistedFinalizationStateV1 {
@@ -6106,6 +6118,31 @@ mod tests {
             .expect("start serving-index transaction");
         build_serving_index_step(&transaction, 3, LexicalArtifactLayoutV1::V11)
             .expect("build ngram serving index");
+        let statistics_plan = transaction
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 INSERT INTO ngram_statistics(kind, ngram, document_frequency)
+                 SELECT kind, ngram, SUM(cardinality)
+                 FROM ngram_postings INDEXED BY ngram_postings_by_ngram
+                 GROUP BY kind, ngram",
+            )
+            .expect("prepare ngram statistics plan")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("query ngram statistics plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect ngram statistics plan");
+        assert!(
+            statistics_plan
+                .iter()
+                .any(|detail| detail.contains("USING COVERING INDEX ngram_postings_by_ngram")),
+            "n-gram statistics must stream the covering serving index, got {statistics_plan:?}"
+        );
+        assert!(
+            statistics_plan
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE")),
+            "n-gram statistics must not perform another grouped sort, got {statistics_plan:?}"
+        );
         build_serving_index_step(&transaction, 4, LexicalArtifactLayoutV1::V11)
             .expect("build ngram serving statistics");
         transaction.commit().expect("commit ngram serving index");
