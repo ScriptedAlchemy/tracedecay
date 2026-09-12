@@ -1088,6 +1088,104 @@ fn published_generation_serves_current_conservative_test_attribution() {
 }
 
 #[test]
+fn published_generation_attributes_inline_rust_tests_to_called_symbols() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_with_source(
+                "file.production.inline-test",
+                1_100_000,
+                "commit.production.inline-test",
+                "tree.production.inline-test",
+                r#"pub fn feedback_entry(input: u32) -> u32 {
+    feedback_public_replay_missing_symbol(input)
+}
+
+#[cfg(test)]
+mod tests {
+    fn support_helper() {
+        super::feedback_entry(0);
+    }
+
+    #[test]
+    fn feedback_entry_test() {
+        assert_eq!(super::feedback_entry(1), 1);
+    }
+}
+
+#[test]
+fn root_feedback_entry_test() {
+    assert_eq!(feedback_entry(2), 2);
+}
+"#,
+            ),
+            &ActiveControl,
+        )
+        .expect("test generation publishes");
+    let authority = generation
+        .test_attribution_authority()
+        .expect("attribution authority");
+
+    let read = authority.read_test_attribution(&generation.manifest().generation_id);
+    let join = read.evidence.expect("generation attribution");
+    let inline_test = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol
+                .qualified_name
+                .ends_with("::tests::feedback_entry_test")
+        })
+        .expect("inline test symbol");
+    let root_test = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol
+                .qualified_name
+                .ends_with("::root_feedback_entry_test")
+        })
+        .expect("root test symbol");
+    let support_helper = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name.ends_with("::tests::support_helper"))
+        .expect("test-module helper symbol");
+    let records = join
+        .records
+        .iter()
+        .filter(|record| {
+            record.attribution.test_occurrence == inline_test.occurrence
+                || record.attribution.test_occurrence == root_test.occurrence
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    assert!(
+        join.records
+            .iter()
+            .all(|record| record.attribution.test_occurrence != support_helper.occurrence)
+    );
+    let feedback_entry = generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| symbol.qualified_name.ends_with("::feedback_entry"))
+        .expect("called production symbol");
+
+    assert!(records.iter().all(|record| {
+        record
+            .attribution
+            .covered_occurrences
+            .contains(&feedback_entry.occurrence)
+    }));
+}
+
+#[test]
 fn production_owner_publishes_complete_generation_and_restores_it_after_restart() {
     let store = SharedPublicationStore::default();
     let mut owner =
