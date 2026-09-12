@@ -1174,9 +1174,7 @@ async fn test_redundancy_finds_planted_duplicate() {
     fs::create_dir_all(project.join("src")).unwrap();
 
     // Two functions: identical structure, renamed identifiers.
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
+    let source = r#"
 pub fn compute_a(value: i32) -> i32 {
     let mut acc = 0;
     for i in 0..value {
@@ -1204,9 +1202,8 @@ pub fn compute_b(input: i32) -> i32 {
 pub fn unrelated(x: i32) -> i32 {
     x * 2
 }
-"#,
-    )
-    .unwrap();
+"#;
+    fs::write(project.join("src/lib.rs"), source).unwrap();
 
     let (cg, _env) = init_test_project(project).await;
     wait_for_current_graph(&cg).await;
@@ -1256,6 +1253,19 @@ pub fn unrelated(x: i32) -> i32 {
         names.contains(&"compute_a") && names.contains(&"compute_b"),
         "expected compute_a/compute_b in pair, got {names:?}"
     );
+    for endpoint in [&top["a"], &top["b"]] {
+        let name = endpoint["name"].as_str().expect("endpoint name");
+        let expected_line = source
+            .lines()
+            .position(|line| line.starts_with(&format!("pub fn {name}")))
+            .map(|line| line as u64 + 1)
+            .expect("function declaration in source fixture");
+        assert_eq!(
+            endpoint["line"].as_u64(),
+            Some(expected_line),
+            "public redundancy locations must use one-based source lines"
+        );
+    }
     let groups = parsed["groups"].as_array().expect("groups array");
     assert!(
         groups
