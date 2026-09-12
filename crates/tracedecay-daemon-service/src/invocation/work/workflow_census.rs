@@ -52,27 +52,31 @@ fn try_persist_workflow_fan_out_census(
         &registered.database,
     )
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
-    let snapshot = work
-        .projections()
-        .snapshot(context, tracedecay_contracts::MAX_WORK_PROJECTION_PAGE_SIZE)
-        .ok();
-    let topology_generation = tracedecay_domain::WorkAuthority::new(
-        context.scope().project_id.clone(),
-        context.scope().repository_id.clone(),
-        context.scope().worktree_id.clone(),
-        context.actor().clone(),
-        context.grant().digest.clone(),
-    )
-    .ok()
-    .and_then(|authority| {
-        work.topology()
-            .verified_snapshot(
-                &authority,
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            )
-            .ok()
-    })
-    .and_then(|topology| topology.evidence_ref().ok());
+    let workflow_use_case = tracedecay_tool_catalog::UseCaseId::new("use-case.work.mutate_graph")
+        .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+    let snapshot = match super::preparation::current_work_product_snapshot(
+        registered,
+        context,
+        "capability.work.mutate_graph",
+        &workflow_use_case,
+        observed_at,
+    ) {
+        Ok(snapshot) => Some(snapshot),
+        Err(_) => None,
+    };
+    let topology_generation = match super::preparation::current_work_product_attempt_topology(
+        registered,
+        context,
+        "capability.work.mutate_graph",
+        &workflow_use_case,
+        observed_at,
+    ) {
+        Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Verified(binding)) => Some(
+            tracedecay_domain::WorkTopologyGenerationRefV1::new(binding.generation)
+                .map_err(|_| DaemonInvocationProblem::Unavailable)?,
+        ),
+        Ok(tracedecay_contracts::WorkAttemptTopologyStateV1::Absent) | Err(_) => None,
+    };
     let mut attempts = Vec::new();
     let mut attempt_reads_complete = true;
     for child in projection
@@ -99,6 +103,7 @@ fn try_persist_workflow_fan_out_census(
         &work,
         context,
         projection,
+        snapshot.as_ref(),
         &attempts,
         attempt_reads_complete,
     );
@@ -129,22 +134,25 @@ fn try_persist_workflow_fan_out_census(
         projection.sequence(),
     )
     .map_err(|_| DaemonInvocationProblem::Unavailable)?;
-    let non_duplicate_attempts = snapshot
-        .as_ref()
-        .zip(topology_generation.as_ref())
-        .and_then(|(snapshot, topology_generation)| {
-            if !matches!(
-                snapshot.coverage(),
-                tracedecay_domain::WorkProjectionCoverageV1::Complete { .. }
-            ) {
-                return None;
-            }
-            let read = work
+    let non_duplicate_attempts = match (snapshot.as_ref(), topology_generation.as_ref()) {
+        (_, None) => tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
+            tracedecay_domain::WorkflowCensusEvidenceReasonV1::WorkTopologyUnavailable,
+        ),
+        (None, Some(_)) => {
+            tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
+                tracedecay_domain::WorkflowCensusEvidenceReasonV1::WorkProjectionUnavailable,
+            )
+        }
+        (Some(snapshot), Some(topology_generation)) => {
+            let work_generation =
+                tracedecay_contracts::work_product_projection_generation(snapshot)
+                    .map_err(|_| DaemonInvocationProblem::Unavailable)?;
+            match work
                 .duplicate_adjudications()
                 .classify_attempts(
                     context,
                     tracedecay_contracts::WorkDuplicateAttemptClassificationRequestV1 {
-                        work_generation: snapshot.generation_id().clone(),
+                        work_generation,
                         topology_generation: topology_generation.clone(),
                         attempts: attempts
                             .iter()
@@ -152,22 +160,26 @@ fn try_persist_workflow_fan_out_census(
                             .collect(),
                         observed_at,
                     },
-                )
-                .ok()?;
-            match read {
-                tracedecay_contracts::WorkDuplicateAttemptClassificationReadV1::Complete {
+                ) {
+                Ok(tracedecay_contracts::WorkDuplicateAttemptClassificationReadV1::Complete {
                     classification,
-                } => Some(
+                }) => tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Complete(
                     classification
                         .non_duplicate_attempts
                         .into_iter()
                         .collect::<std::collections::BTreeSet<_>>(),
                 ),
-                tracedecay_contracts::WorkDuplicateAttemptClassificationReadV1::Unavailable {
+                Ok(tracedecay_contracts::WorkDuplicateAttemptClassificationReadV1::Unavailable {
                     ..
-                } => None,
+                })
+                | Err(_) => {
+                    tracedecay_contracts::WorkflowNonDuplicateAttemptsEvidenceV1::Unavailable(
+                        tracedecay_domain::WorkflowCensusEvidenceReasonV1::DuplicateAdjudicationUnavailable,
+                    )
+                }
             }
-        });
+        }
+    };
     let census = match latest {
         Some(census) if census.workflow_sequence == projection.sequence() => census,
         Some(_) | None => {
@@ -178,7 +190,7 @@ fn try_persist_workflow_fan_out_census(
                     attempts: &attempts,
                     attempt_reads_complete,
                     shared_authority_waits: shared_authority_waits.as_ref(),
-                    non_duplicate_attempts: non_duplicate_attempts.as_ref(),
+                    non_duplicate_attempts,
                     runnable_children: runnable,
                     blocked_children: blocked,
                     previous: previous.as_ref(),
@@ -275,6 +287,7 @@ fn census_readiness(
     work: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     projection: &tracedecay_domain::WorkflowRunProjection,
+    snapshot: Option<&tracedecay_contracts::WorkGraphVersionEntryV1>,
     attempts: &[tracedecay_domain::WorkAttemptV1],
     attempt_reads_complete: bool,
 ) -> Option<(
@@ -382,13 +395,18 @@ fn census_readiness(
             blocked.insert(child.attempt_identity.clone());
             continue;
         }
-        match work.commands().readiness(context, &child.task_id).ok()? {
-            tracedecay_contracts::WorkReadiness::Ready => {}
-            tracedecay_contracts::WorkReadiness::Blocked { .. }
-            | tracedecay_contracts::WorkReadiness::Accepted => {
-                blocked.insert(child.attempt_identity.clone());
-                continue;
-            }
+        let snapshot = snapshot?;
+        let item = snapshot.graph().item(&child.task_id)?;
+        if item.is_accepted()
+            || item.dependencies().iter().any(|dependency| {
+                !snapshot
+                    .graph()
+                    .item(dependency)
+                    .is_some_and(tracedecay_domain::WorkItemV1::is_accepted)
+            })
+        {
+            blocked.insert(child.attempt_identity.clone());
+            continue;
         }
         match work.run_control().admit_reservation(
             context,

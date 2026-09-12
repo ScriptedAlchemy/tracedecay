@@ -120,11 +120,6 @@ libc = "0.2"
 name = "work_rollup"
 harness = false
 
-[[bench]]
-name = "work_readiness"
-harness = false
-required-features = ["test-helpers"]
-
 # Same dual-mode coverage as `work_rollup`; the commit sweep carries a
 # bounded `measure_block!` so the expected-label set is nonempty.
 [[bench]]
