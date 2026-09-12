@@ -7,6 +7,7 @@
 #![cfg(feature = "test-transport")]
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -420,6 +421,7 @@ async fn workflows_query_surface_end_to_end() {
     assert_eq!(by_branch["runs"][0]["run_id"], RUN_ID, "{by_branch}");
 
     // A branch nothing ran on returns no runs.
+    let started = Instant::now();
     let by_absent = call(
         &cg,
         &runtime,
@@ -427,6 +429,11 @@ async fn workflows_query_surface_end_to_end() {
         json!({ "branch": "feat/absent" }),
     )
     .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "a bounded empty workflow listing took {:?}",
+        started.elapsed()
+    );
     assert_eq!(by_absent["count"], 0, "{by_absent}");
 
     drop(runtime);

@@ -391,6 +391,66 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn retained_session_reads_bound_large_sessions_to_the_requested_page() {
+    const RECORDS: usize = 300;
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let mut projections = Vec::with_capacity(RECORDS);
+    for index in 0..RECORDS {
+        projections.push(
+            seed_temporal_lcm_session_message_for_provider(
+                &cg,
+                "codex",
+                "lcm-budgeted-page",
+                &format!("lcm-budgeted-message-{index}"),
+                &format!("bounded retained message {index}"),
+                i64::try_from(index + 1).unwrap(),
+            )
+            .await,
+        );
+    }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, "lcm-budgeted-page", projections).await;
+
+    let loaded = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "codex",
+            "session_id": "lcm-budgeted-page",
+            "limit": 1,
+            "content_limit": 80
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("one-message load must fit the admitted budget");
+    let loaded: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
+    assert_eq!(loaded["messages"].as_array().unwrap().len(), 1, "{loaded}");
+
+    let described = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_describe",
+        json!({"provider": "codex", "session_id": "lcm-budgeted-page"}),
+        None,
+        None,
+    )
+    .await
+    .expect("bounded describe must fit the admitted budget");
+    let described: Value = serde_json::from_str(extract_text(&described.value)).unwrap();
+    assert_eq!(described["description"]["raw_message_count"], RECORDS);
+    assert!(
+        described["description"]["raw_messages"]
+            .as_array()
+            .unwrap()
+            .len()
+            <= 20,
+        "{described}"
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let db = open_active_project_session_db(&cg).await;

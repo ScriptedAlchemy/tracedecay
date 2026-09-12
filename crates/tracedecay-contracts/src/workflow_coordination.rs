@@ -320,6 +320,9 @@ pub struct WorkflowDefinitionActivateRequest {
     pub definition_id: WorkflowDefinitionId,
     #[schemars(range(min = 1))]
     pub definition_version: u64,
+    /// Current candidate disposition revision. A newly registered candidate
+    /// starts at revision 1; activation reports expected and observed values
+    /// when this compare-and-swap precondition is stale.
     #[schemars(range(min = 1))]
     pub expected_revision: u64,
 }
