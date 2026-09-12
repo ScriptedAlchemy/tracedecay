@@ -12728,6 +12728,47 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .expect("mount daemon-owned scheduler");
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
     let generation = latest.generation.manifest().generation_id.clone();
+    let cancellation =
+        tracedecay_contracts::CancellationSignal::active("cancel.callable-graph-projection")
+            .expect("graph cancellation");
+    let publisher =
+        tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore::memory(
+            &cancellation,
+        )
+        .expect("graph publisher");
+    publisher
+        .publish_indexed_with_cancellation(
+            &generation,
+            latest.generation.edges(),
+            latest.generation.chunks().chunks(),
+            &latest.generation.snapshot().files,
+            latest.generation.symbols(),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("publish indexed graph");
+    let graph_store = Arc::new(
+        publisher
+            .verified_store(&generation)
+            .expect("verified graph"),
+    );
+    graph_store
+        .warm_interactive_catalog_with_cancellation(Arc::new(tracedecay_graph_db::NeverCancelled))
+        .expect("warm graph catalog");
+    let graph_reader = graph_store
+        .evidence_reader_with_cancellation(
+            &generation,
+            Some(latest.generation.snapshot().repository.clone()),
+            latest.source_freshness().expect("source freshness"),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("graph reader");
+    latest
+        .install_graph_serving(
+            graph_reader,
+            Some(graph_store),
+            super::CodeGraphServingAuthorityV1::Memory,
+        )
+        .expect("install interactive graph serving");
     assert_eq!(latest.generation.manifest().generation_id, generation);
     let repository = latest.generation.snapshot().repository.clone();
     let worktree = latest
@@ -13233,6 +13274,51 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             .expect("references page")
             .items
             .is_empty()
+    );
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted
+            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .expect("mounted worktree");
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        assert!(
+            worktree
+                .text_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some(),
+            "the verified graph remains seated on its lightweight generation owner"
+        );
+        Arc::clone(&worktree.scheduler)
+    };
+    let decodes_before = scheduler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .sealed_decode_count();
+    let graph = registry
+        .callees(
+            RetrievalPortContext {
+                request: &graph_context,
+                operation: &graph_operation,
+            },
+            &graph_request,
+        )
+        .await;
+    assert!(
+        matches!(graph, RetrievalPortOutcome::Completed(_)),
+        "a generation-pinned graph query must use the retained verified graph: {graph:?}"
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        decodes_before,
+        "graph-only query admission must not decode the sealed lexical generation"
     );
 
     registry.shutdown().await;
