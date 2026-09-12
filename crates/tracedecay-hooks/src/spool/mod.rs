@@ -822,6 +822,7 @@ impl HookSpoolV1 {
                 .get_mut(index)
                 .ok_or(HookSpoolError::MetadataCorrupted)?;
             pending.envelope = Some(record.envelope.clone());
+            pending.native_lifecycle = record.native_lifecycle.clone();
             records.push(record);
         }
         Ok(records)
