@@ -326,11 +326,37 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         }
 
         arguments = runner.materialize_tool_arguments(
-            definition, {"node_id": "function:graph", "code_node_id": "sym:code"}
+            definition,
+            {
+                "node_id": "function:graph",
+                "code_navigation_node_ids": {
+                    "tracedecay_code_declaration": "sym:code",
+                },
+            },
         )
-        self.assertEqual(arguments["node_id"], "sym:code")
+        self.assertEqual(arguments, {"node_id": "sym:code", "format": "json"})
         with self.assertRaises(runner.SweepError):
             runner.materialize_tool_arguments(definition, {"node_id": "function:graph"})
+
+    def test_each_navigation_consumer_uses_its_matching_search_result(self) -> None:
+        runner = load_runner()
+        identities = {
+            name: f"symbol:{index}"
+            for index, name in enumerate(runner.CODE_NAVIGATION_NODE_NAMES, 1)
+        }
+        for name, node_id in identities.items():
+            arguments = runner.materialize_tool_arguments(
+                {
+                    "name": name,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"node_id": {"type": "string"}},
+                        "required": ["node_id"],
+                    },
+                },
+                {"code_navigation_node_ids": identities},
+            )
+            self.assertEqual(arguments, {"node_id": node_id, "format": "json"}, name)
 
     def test_graph_file_consumers_use_the_seeded_source_file(self) -> None:
         runner = load_runner()
@@ -1296,7 +1322,14 @@ class FixturePrimingRetryTests(unittest.TestCase):
             ),
             "tracedecay_read": cls.response('{"handle":"rh_fixture"}'),
             "tracedecay_retrieve": cls.response("catalog sweep handle source"),
-            "tracedecay_code_symbol_search": cls.response('{"node_id":"sym:code"}'),
+            "tracedecay_code_symbol_search": cls.response(
+                '{"items":['
+                '{"name":"sweep_anchor","kind":"function","node_id":"sym:anchor"},'
+                '{"name":"sweep_peer","kind":"function","node_id":"sym:peer"},'
+                '{"name":"sweep_typed","kind":"function","node_id":"sym:typed"},'
+                '{"name":"SweepType","kind":"struct","node_id":"sym:type"}'
+                ']}'
+            ),
             "tracedecay_git_hunks": cls.response(
                 '{"preview_input_id":"preview.fixture","hunks":'
                 '[{"digest":"sha256:fixture","hunk":{}}]}'
@@ -1475,7 +1508,17 @@ class FixturePrimingRetryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(fixture["node_id"], "function:fixture")
-        self.assertEqual(fixture["code_node_id"], "sym:code")
+        self.assertEqual(
+            fixture["code_navigation_node_ids"],
+            {
+                "tracedecay_code_callees": "sym:peer",
+                "tracedecay_code_callers": "sym:anchor",
+                "tracedecay_code_declaration": "sym:anchor",
+                "tracedecay_code_references": "sym:anchor",
+                "tracedecay_code_type_definition": "sym:typed",
+                "tracedecay_code_type_hierarchy": "sym:type",
+            },
+        )
         self.assertEqual(fixture["preview_input_id"], "preview.fixture")
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
         self.assertEqual(fixture["lcm_store_id"], 41)
@@ -1840,6 +1883,36 @@ class MountRetryTests(unittest.TestCase):
 
         self.assertEqual(row["verdict"], "PASS")
         self.assertEqual(len(client.calls), 3)
+
+    def test_navigation_requires_nonempty_symbol_evidence(self) -> None:
+        runner = load_runner()
+        name = "tracedecay_code_declaration"
+        definition = {
+            "name": name,
+            "inputSchema": {
+                "type": "object",
+                "properties": {"node_id": {"type": "string"}},
+                "required": ["node_id"],
+            },
+        }
+        fixture = {"code_navigation_node_ids": {name: "symbol:fixture"}}
+
+        empty = self.scripted_client(
+            {name: [self.text_response('{"payload":{"items":[]}}')]}
+        )
+        row = runner._read_tool_row(
+            empty, definition, self.policy(runner, name), fixture
+        )
+        self.assertEqual(row["verdict"], "FAIL")
+        self.assertEqual(row["problem_code"], "tool_sweep.navigation_evidence_empty")
+
+        populated = self.scripted_client(
+            {name: [self.text_response('{"payload":{"items":[{"node_id":"symbol:fixture"}]}}')]}
+        )
+        row = runner._read_tool_row(
+            populated, definition, self.policy(runner, name), fixture
+        )
+        self.assertEqual(row["verdict"], "PASS")
 
     def test_persistent_unavailable_still_fails_after_the_budget(self) -> None:
         """The retry is falsifiable: an authority that never mounts stays a FAIL."""
