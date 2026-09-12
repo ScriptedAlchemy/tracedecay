@@ -641,7 +641,7 @@ pub(super) fn assemble_published_generation(
             let (edges, edge_abstentions) =
                 hotpath::measure_block!("code_index.sealed_decode.edge_evidence", {
                     collect_edge_evidence(&files)
-                });
+                })?;
             let projection =
                 hotpath::measure_block!("code_index.sealed_decode.projection_handoff", {
                     ProjectionPublicationHandoffV1::restore(projection_request, projection_receipt)
