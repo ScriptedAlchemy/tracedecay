@@ -6,21 +6,26 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 use super::fence::{
-    StoreContentFence, capture_store_content_fence, capture_store_content_fence_controlled,
-    capture_store_directory_fence, profile_relative_store_path,
+    StoreContentFence, StoreDirectoryFence, capture_store_content_fence,
+    capture_store_content_fence_controlled, capture_store_directory_fence,
 };
+#[cfg(test)]
+use super::quarantine::store_finding_is_profile_contained;
+use super::quarantine::{RegularFileSnapshot, read_regular_file};
 use super::unregistered_page::{
-    UnregisteredStoreSweepReport, UnregisteredSweepCompletionV1, sweep_unregistered_store_page,
+    DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
+    UnregisteredStoreSweepRequestV1, UnregisteredSweepCompletionV1, sweep_unregistered_store_page,
 };
 use super::{
-    CollectionControl, CollectionFailureKind, CollectionOutcome, CollectionPlan, OrphanStoreFinding,
-    StoreCensusEntry, StoreDisposition, classify_stores, execute_registered_collection,
-    plan_collection, unbounded_collection_control,
+    CollectionControl, CollectionFailureKind, CollectionOutcome, CollectionPlan, StoreCensusEntry,
+    StoreDisposition, classify_one,
 };
+#[cfg(test)]
+use super::{CollectionFailure, classify_stores, execute_registered_collection, plan_collection};
 
 pub(super) struct StoreWalkStats {
-    newest_mtime_secs: i64,
-    size_bytes: u64,
+    pub(super) newest_mtime_secs: i64,
+    pub(super) size_bytes: u64,
 }
 
 /// One no-follow walk for age and size. Symlinks contribute mtime but are
@@ -600,10 +605,11 @@ pub fn plan_unregistered_collection(
     plan
 }
 
-/// Deletes unregistered directories through the same two-phase boundary:
-/// content/durable inspection and quarantine first, then a short final
-/// still-unregistered confirmation before the irreversible phase.
-#[cfg(test)]
+/// Compatibility convenience for one bounded read/apply page. The daemon uses
+/// [`sweep_unregistered_store_page`] directly so it can persist the returned
+/// cursor across maintenance cadences; Doctor deliberately receives one
+/// bounded preview rather than a hidden full-profile traversal.
+#[hotpath::measure(label = "maintenance.orphan_stores.sweep_unregistered", future = true)]
 pub async fn sweep_unregistered_stores(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
