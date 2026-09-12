@@ -515,6 +515,40 @@ pub fn rmcp_response_result<T: DeserializeOwned>(
     }
 }
 
+fn attach_missing_tool_timing(response: &mut JsonRpcResponse, elapsed_us: Option<u64>) {
+    let Some(elapsed_us) = elapsed_us else {
+        return;
+    };
+    let Some(result) = response.result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let meta = result.entry("_meta").or_insert_with(|| json!({}));
+    let Some(meta) = meta.as_object_mut() else {
+        return;
+    };
+    meta.entry("duration_us")
+        .or_insert_with(|| json!(elapsed_us));
+}
+
+#[cfg(test)]
+mod tool_timing_tests {
+    use super::*;
+
+    #[test]
+    fn fills_only_a_missing_enabled_tool_timing() {
+        let mut missing = JsonRpcResponse::success(json!(1), json!({"content": []}));
+        attach_missing_tool_timing(&mut missing, Some(17));
+        assert_eq!(missing.result.unwrap()["_meta"]["duration_us"], 17);
+
+        let mut existing = JsonRpcResponse::success(
+            json!(2),
+            json!({"_meta": {"duration_us": 11}, "content": []}),
+        );
+        attach_missing_tool_timing(&mut existing, Some(29));
+        assert_eq!(existing.result.unwrap()["_meta"]["duration_us"], 11);
+    }
+}
+
 /// The typed refusal for an `initialize` whose params `rmcp` could not decode.
 const MALFORMED_INITIALIZE_MESSAGE: &str = "initialize params are missing or malformed: \
      protocolVersion, capabilities and clientInfo are required";
@@ -647,11 +681,15 @@ where
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        rmcp_response_result::<CallToolResult>(
-            self.dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
-                .await?,
-        )
-        .map(Into::into)
+        let started = self.timings_enabled.then(std::time::Instant::now);
+        let mut response = self
+            .dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
+            .await?;
+        attach_missing_tool_timing(
+            &mut response,
+            started.map(|started| started.elapsed().as_micros() as u64),
+        );
+        rmcp_response_result::<CallToolResult>(response).map(Into::into)
     }
 
     #[hotpath::skip]
