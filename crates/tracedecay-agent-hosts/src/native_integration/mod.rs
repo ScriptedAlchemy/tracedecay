@@ -18,6 +18,8 @@ mod worktree_cleanup;
 mod journey_tests;
 
 pub use analysis::DaemonNativeIntegrationAnalysisV1;
-pub use registry::{DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry};
+pub use registry::{
+    DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry, NativeIntegrationTargetV1,
+};
 pub use stack_hook_wakeup::{github_stack_hook_available, register_github_stack_hook_runtime};
 pub use worktree::{WorktreeHolderAdmissionFenceV1, daemon_worktree_holder_admission_fence};
