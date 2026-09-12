@@ -1,15 +1,19 @@
 //! GPU execution-provider selection for the FastEmbed/ORT session builder
 //! (CoreML on macOS, CUDA or WebGPU on Linux).
 //!
-//! `semantic-gpu-cuda` and `semantic-gpu-webgpu` participate in the Linux auto
-//! ladder. A compiled `semantic-gpu-coreml` feature is explicit opt-in only
-//! (see `automatic_provider` for the measurement). `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu`
-//! opts out; `coreml`, `cuda`, or `webgpu` explicitly requests that provider.
+//! A compiled `semantic-gpu-coreml` feature enables automatic CoreML on Apple
+//! targets (MLProgram format, Metal GPU compute units, persistent compiled-model
+//! cache — see `coreml_dispatch`), while `semantic-gpu-cuda` and
+//! `semantic-gpu-webgpu` participate in the Linux auto ladder.
+//! `TRACEDECAY_EMBED_EXECUTION_PROVIDER=cpu` opts out; `coreml`, `cuda`, or
+//! `webgpu` explicitly requests that provider.
 //!
 //! An unavailable automatic provider is normal and quietly falls back to
 //! ONNX Runtime's CPU provider. An unavailable explicitly requested provider
 //! also falls back, but warns the operator. This module only narrows to CPU;
 //! it never fails a session open.
+
+use std::path::Path;
 
 use fastembed::ExecutionProviderDispatch;
 use tracedecay_domain::EmbeddingExecutionProviderV1;
@@ -52,7 +56,7 @@ fn requested_execution_provider() -> RequestedExecutionProviderV1 {
 /// which is what a build without a usable automatic provider produces.
 #[cfg(test)]
 pub(crate) fn requested_execution_providers() -> Vec<ExecutionProviderDispatch> {
-    execution_providers(resolved_execution_provider())
+    execution_providers(resolved_execution_provider(), None)
 }
 
 pub(crate) fn resolved_execution_provider() -> EmbeddingExecutionProviderV1 {
@@ -79,11 +83,13 @@ pub(crate) fn resolved_execution_provider() -> EmbeddingExecutionProviderV1 {
 }
 
 fn automatic_provider() -> EmbeddingExecutionProviderV1 {
-    // CoreML is explicit opt-in until it measures faster than CPU: on an Apple
-    // Silicon Mac Studio (2026-09-11, Jina v2 base code, warm sample) CoreML
-    // embedded 0.12 units/s with embed_batch avg 105 s against ~5 units/s and
-    // 7.5 s on the Linux CPU baseline, so auto-selecting it would make every
-    // Mac slower. `TRACEDECAY_EMBED_EXECUTION_PROVIDER=coreml` still forces it.
+    if cfg!(all(
+        feature = "semantic-gpu-coreml",
+        target_vendor = "apple"
+    )) && let Some(provider) = coreml_provider(false)
+    {
+        return provider;
+    }
     if cfg!(all(feature = "semantic-gpu-cuda", target_os = "linux"))
         && let Some(provider) = cuda_provider(false)
     {
@@ -259,25 +265,56 @@ fn webgpu_provider(_explicit: bool) -> Option<EmbeddingExecutionProviderV1> {
     None
 }
 
+/// Execution providers to register for `provider`. `coreml_cache_dir` is
+/// where the CoreML EP persists its compiled model; without it ORT recompiles
+/// the captured subgraphs on every session open, which the ORT docs put at
+/// "even minutes" for a model this size.
 pub(crate) fn execution_providers(
     provider: EmbeddingExecutionProviderV1,
+    coreml_cache_dir: Option<&Path>,
 ) -> Vec<ExecutionProviderDispatch> {
     match provider {
         EmbeddingExecutionProviderV1::Cpu => Vec::new(),
-        EmbeddingExecutionProviderV1::CoreMl => coreml_dispatch(),
+        EmbeddingExecutionProviderV1::CoreMl => coreml_dispatch(coreml_cache_dir),
         EmbeddingExecutionProviderV1::Cuda => cuda_dispatch(),
         EmbeddingExecutionProviderV1::WebGpu => webgpu_dispatch(),
     }
 }
 
 #[cfg(feature = "semantic-gpu-coreml")]
-fn coreml_dispatch() -> Vec<ExecutionProviderDispatch> {
+fn coreml_dispatch(cache_dir: Option<&Path>) -> Vec<ExecutionProviderDispatch> {
+    use ort::ep::coreml::{ComputeUnits, ModelFormat};
     use ort::execution_providers::CoreML;
-    vec![CoreML::default().build()]
+
+    // `CoreML::default()` is the wrong shape for a BERT-style encoder:
+    // - the default `NeuralNetwork` format has no LayerNormalization, Gelu,
+    //   Erf or ReduceMean and only accepts MatMul with a constant right-hand
+    //   side, so every attention matmul, layer norm and GELU fell back to CPU
+    //   (216 of 1012 nodes on the Mac dogfood) with a tensor copy at each of
+    //   the resulting partition boundaries; `MLProgram` supports all of them;
+    // - `ALL` compute units let CoreML route to the Neural Engine, which is
+    //   poor for long-sequence attention; `CPUAndGPU` pins it to Metal.
+    let mut provider = CoreML::default()
+        .with_model_format(ModelFormat::MLProgram)
+        .with_compute_units(ComputeUnits::CPUAndGPU);
+    match cache_dir {
+        Some(dir) => match std::fs::create_dir_all(dir) {
+            Ok(()) => provider = provider.with_model_cache_dir(dir.display()),
+            Err(error) => tracing::warn!(
+                %error,
+                dir = %dir.display(),
+                "CoreML model cache directory is unavailable; every session open recompiles the model"
+            ),
+        },
+        None => tracing::warn!(
+            "no CoreML model cache directory for this artifact source; every session open recompiles the model"
+        ),
+    }
+    vec![provider.build()]
 }
 
 #[cfg(not(feature = "semantic-gpu-coreml"))]
-fn coreml_dispatch() -> Vec<ExecutionProviderDispatch> {
+fn coreml_dispatch(_cache_dir: Option<&Path>) -> Vec<ExecutionProviderDispatch> {
     Vec::new()
 }
 
@@ -397,6 +434,7 @@ mod tests {
     fn auto_without_a_compiled_provider_uses_cpu() {
         with_env(None, || {
             if !cfg!(any(
+                all(feature = "semantic-gpu-coreml", target_vendor = "apple"),
                 all(feature = "semantic-gpu-cuda", target_os = "linux"),
                 feature = "semantic-gpu-webgpu"
             )) {
@@ -409,14 +447,16 @@ mod tests {
         });
     }
 
-    // CoreML is opt-in only: `Auto` must never resolve to it on any build.
+    // CoreML is Apple-only: `Auto` must never resolve to it off Apple.
     #[test]
-    fn auto_never_selects_coreml() {
+    fn auto_selects_coreml_only_on_apple() {
         with_env(None, || {
-            assert_ne!(
-                resolved_execution_provider(),
-                EmbeddingExecutionProviderV1::CoreMl
-            );
+            if !cfg!(target_vendor = "apple") {
+                assert_ne!(
+                    resolved_execution_provider(),
+                    EmbeddingExecutionProviderV1::CoreMl
+                );
+            }
         });
     }
 
