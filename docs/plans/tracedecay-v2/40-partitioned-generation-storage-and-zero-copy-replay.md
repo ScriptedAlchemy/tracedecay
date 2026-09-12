@@ -153,6 +153,28 @@ what a segment is and where it lives, under one `format_revision` bump:
    index that duplicates every row. Accept only against the V13/V14 append and
    probe measurements recorded in `builder.rs`.
 
-**Order.** 1 and 2 ship together (they change the same digest); 3 and 4 can
-follow within the same revision; 5 is independent. Each step carries the
+6. **Incremental publication records name what changed, not what did not.**
+   Measured later the same day on the head scope of the same repository: the
+   two largest "segments" (344 MB each, one per retained generation) are not
+   file segments at all but the incremental publication record for a
+   generation in which 25 chunks changed and 11 were deleted. The record
+   enumerates the 413,743 *reused* chunk ids three times — as
+   `projection_request.changes.reused` (117 MB), as one `Reused` receipt per
+   chunk in `projection_receipt.receipts` (64 MB), and as 200,504 `unchanged`
+   lineage candidates (163 MB) that each repeat the constant
+   `(prior_generation, current_generation)` pair (49 MB), an identical
+   `prior_digest`/`current_digest` (18 MB), and the same
+   `exact_identity_tuple` / `exact` / empty-alternatives boilerplate. The
+   prior generation's manifest is immutable and digest-addressed, so the
+   reused set is a complement, not a list: the record should carry the
+   changed and deleted sets, the prior manifest digest, and one digest over
+   the ordered reused set for the recovered-digest proof; `unchanged` lineage
+   collapses to the occurrence-id pairs under a segment-level header. On this
+   scope that is ~330 MB of 344 MB per generation, twice per scope, across
+   every worktree scope of the repository. It is a contract change in
+   `tracedecay-domain` (`ChangedCodeChunkSetV1`, `ProjectionReceipt`,
+   `SymbolLineageCandidateV1` persistence) and belongs to this revision.
+
+**Order.** 1 and 2 ship together (they change the same digest); 3, 4, and 6
+can follow within the same revision; 5 is independent. Each step carries the
 dedup or byte figure it changes, measured on the repository above.
