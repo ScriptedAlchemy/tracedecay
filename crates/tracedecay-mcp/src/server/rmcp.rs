@@ -647,7 +647,8 @@ where
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let started = self.timings_enabled.then(std::time::Instant::now);
+        let started =
+            (self.timings_enabled || self.context.timings_enabled()).then(std::time::Instant::now);
         let mut result = rmcp_response_result::<CallToolResult>(
             self.dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
                 .await?,
