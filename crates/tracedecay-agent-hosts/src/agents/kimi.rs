@@ -201,7 +201,7 @@ impl AgentIntegration for KimiIntegration {
         let Some(entry) = kimi_installed_entry(&installed) else {
             return State::Missing;
         };
-        if !kimi_manager_points_at_staged_source(entry, &ctx.home) {
+        if !kimi_manager_has_active_staged_install(entry, &ctx.home, &code_home) {
             return State::Repairable;
         }
         let staged_dir = kimi_staged_plugin_dir(&ctx.home);
@@ -349,25 +349,32 @@ fn kimi_plugin_is_natively_active(home: &Path, code_home: &Path) -> Result<bool>
             ),
         })?;
     Ok(kimi_installed_entry(&installed)
-        .is_some_and(|entry| kimi_manager_points_at_staged_source(entry, home)))
+        .is_some_and(|entry| kimi_manager_has_active_staged_install(entry, home, code_home)))
 }
 
-/// True when Kimi's `installed.json` entry is enabled, sourced from a local
-/// path, and that path is the TraceDecay-staged plugin directory.
-fn kimi_manager_points_at_staged_source(entry: &serde_json::Value, home: &Path) -> bool {
-    let staged_dir = kimi_staged_plugin_dir(home);
-    let expected_root = staged_dir
-        .canonicalize()
-        .unwrap_or_else(|_| staged_dir.clone());
-    entry.get("enabled").and_then(serde_json::Value::as_bool) != Some(false)
+/// True when Kimi's native manager has enabled its managed copy of the
+/// TraceDecay-staged local plugin source.
+fn kimi_manager_has_active_staged_install(
+    entry: &serde_json::Value,
+    home: &Path,
+    code_home: &Path,
+) -> bool {
+    entry.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
         && entry.get("source").and_then(serde_json::Value::as_str) == Some("local-path")
-        && entry
-            .get("root")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|root| {
-                let root = Path::new(root);
-                root.canonicalize().unwrap_or_else(|_| root.to_path_buf()) == expected_root
-            })
+        && kimi_manager_path_matches(entry, "root", &code_home.join("plugins/managed/tracedecay"))
+        && kimi_manager_path_matches(entry, "originalSource", &kimi_staged_plugin_dir(home))
+}
+
+fn kimi_manager_path_matches(entry: &serde_json::Value, field: &str, expected: &Path) -> bool {
+    let Some(path) = entry.get(field).and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Ok(expected) = expected.canonicalize() else {
+        return false;
+    };
+    Path::new(path)
+        .canonicalize()
+        .is_ok_and(|path| path == expected)
 }
 
 /// Canonical rendered Kimi Code plugin inventory shared by native-activation
@@ -545,6 +552,57 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_manager_recognizes_only_its_managed_copy_of_staged_source() {
+        let home = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let staged_source = kimi_staged_plugin_dir(home.path());
+        let managed_root = code_home.join("plugins/managed/tracedecay");
+        std::fs::create_dir_all(&staged_source).unwrap();
+        std::fs::create_dir_all(&managed_root).unwrap();
+        std::fs::create_dir_all(code_home.join("plugins")).unwrap();
+
+        // Sanitized from Kimi Code 0.42's host-owned installed.json after
+        // `/plugins install <TraceDecay staged source>`.
+        let installed = json!({
+            "id": "tracedecay",
+            "root": managed_root,
+            "source": "local-path",
+            "originalSource": staged_source,
+            "enabled": true,
+            "installedAt": "2026-09-12T00:00:00Z",
+            "updatedAt": "2026-09-12T00:00:00.000Z"
+        });
+        let write_registry = |entry: &serde_json::Value| {
+            std::fs::write(
+                kimi_installed_json_path(&code_home),
+                serde_json::to_vec(&json!({ "version": 1, "plugins": [entry] })).unwrap(),
+            )
+            .unwrap();
+        };
+
+        write_registry(&installed);
+        assert!(kimi_plugin_is_natively_active(home.path(), &code_home).unwrap());
+
+        let mut missing_source = installed.clone();
+        missing_source
+            .as_object_mut()
+            .unwrap()
+            .remove("originalSource");
+        write_registry(&missing_source);
+        assert!(!kimi_plugin_is_natively_active(home.path(), &code_home).unwrap());
+
+        let mut foreign_source = installed.clone();
+        foreign_source["originalSource"] = json!(home.path().join("foreign-plugin"));
+        write_registry(&foreign_source);
+        assert!(!kimi_plugin_is_natively_active(home.path(), &code_home).unwrap());
+
+        let mut foreign_root = installed;
+        foreign_root["root"] = json!(code_home.join("plugins/managed/foreign-plugin"));
+        write_registry(&foreign_root);
+        assert!(!kimi_plugin_is_natively_active(home.path(), &code_home).unwrap());
+    }
 
     #[test]
     fn rendered_plugin_uses_kimi_supported_mcp_command() {
