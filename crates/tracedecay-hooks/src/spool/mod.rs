@@ -73,7 +73,6 @@ const CONTROL_FRAME_RESERVE_BYTES: u64 = 4 * 1024;
 // Acknowledgements can arrive out of global sequence order because replay is
 // fair across sessions. Reserve room for one bounded marker per live record.
 const MAX_META_BYTES: usize = 1024 * 1024;
-const MAX_LEASE_BYTES: usize = 512;
 const MAX_REPLAY_SESSIONS: usize = 4;
 const RECORDS_FILE: &str = "records.v1.bin";
 const META_FILE: &str = "meta.v1.json";

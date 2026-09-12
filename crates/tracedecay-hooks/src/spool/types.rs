@@ -315,14 +315,6 @@ pub(super) struct AcknowledgedSequenceV1 {
     pub(super) disposition: HookSpoolAckDispositionV1,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct LeaseFileV1 {
-    pub(super) version: u16,
-    pub(super) token: [u8; 16],
-    pub(super) expires_at: UtcMicros,
-}
-
 #[derive(Debug)]
 pub(super) struct ScanResult {
     pub(super) records: Vec<PendingRecordV1>,
