@@ -2613,11 +2613,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// continuation waits for shared admission; a bare `Notify` permit is not
     /// observable by freshness readers.
     fn note_worker_continuation(pending_wake: &PendingWakeV1, wake: &tokio::sync::Notify) {
-        if !Self::note_wake_if_idle(
-            pending_wake,
-            wake,
-            CodeIndexCadenceTriggerV1::BusyFollowUp,
-        ) {
+        if !Self::note_wake_if_idle(pending_wake, wake, CodeIndexCadenceTriggerV1::BusyFollowUp) {
             // This pass may have consumed the permit for an arrival it has not
             // claimed yet. Keep that observable arrival and replenish its
             // coalesced permit so the continuation cannot sleep behind it.
