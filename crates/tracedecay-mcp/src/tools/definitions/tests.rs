@@ -212,14 +212,14 @@ fn per_session_budget_does_not_leak_through_the_cached_registry() {
     let small = get_tool_definitions_with_budget(11, 2).expect("tool definitions");
     let small_description = context_description(&small);
     assert!(
-        small_description.contains("2 calls maximum"),
+        small_description.contains("2 broad context calls"),
         "budget must reach the context description: {small_description}"
     );
 
     let large = get_tool_definitions_with_budget(999_999, 9).expect("tool definitions");
     let large_description = context_description(&large);
     assert!(
-        large_description.contains("9 calls maximum"),
+        large_description.contains("9 broad context calls"),
         "budget must reach the context description: {large_description}"
     );
 
@@ -237,7 +237,7 @@ fn per_session_budget_does_not_leak_through_the_cached_registry() {
     let neutral = get_tool_definitions().expect("tool definitions");
     let neutral_description = context_description(&neutral);
     assert!(
-        !neutral_description.contains("9 calls maximum"),
+        !neutral_description.contains("9 broad context calls"),
         "an unbudgeted caller inherited another session's budget: {neutral_description}"
     );
 }
