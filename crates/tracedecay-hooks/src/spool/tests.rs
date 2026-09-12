@@ -1,6 +1,8 @@
 use std::io::{Seek, SeekFrom, Write};
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
+
 use super::*;
 use crate::{
     HookCapabilityV1, HookEventFamily, HookEventSupportV1, HookEventV2, HookHostV1, HookOrderingV1,
@@ -798,6 +800,46 @@ fn replay_hydrates_only_checkpointed_records_in_the_batch() {
             .count(),
         batches[0].records.len()
     );
+}
+
+#[test]
+fn checkpointed_replay_hydrates_native_lifecycle() {
+    let root = TestDir::new("checkpoint-native-lifecycle");
+    let config = HookSpoolConfigV1::stock(HookHostV1::OpenCode);
+    let mut envelope = numbered_envelope(1, 9);
+    envelope.producer = HookHostV1::OpenCode;
+    envelope.protected_session_id = Sha256::digest(b"session.native.checkpoint").into();
+    envelope.event = HookEventV2::ToolLifecycle {
+        tool_id: [8; 16],
+        phase: crate::HookLifecyclePhaseV1::Completed,
+        effect_receipt_id: None,
+    };
+    let lifecycle = NativeContextScoutLifecycleV1::new(
+        "session.native.checkpoint",
+        "call.native.checkpoint",
+        envelope.event_id,
+    )
+    .unwrap();
+    let binding = binding_for_envelopes(config.host, std::slice::from_ref(&envelope));
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+    spool
+        .append_with_native_lifecycle(
+            envelope.clone(),
+            Some(lifecycle.clone()),
+            &binding,
+            UtcMicros(10),
+        )
+        .unwrap();
+    drop(spool);
+    fs::remove_file(checkpoint_path(&root.0)).unwrap();
+    drop(HookSpoolV1::open(&root.0, config, UtcMicros(11)).unwrap().0);
+
+    let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
+    assert_eq!(report.checkpoint_records, 1);
+    assert!(spool.pending[0].envelope.is_none());
+    let batches = spool.claim_replay_batches(UtcMicros(12), 1).unwrap();
+    assert_eq!(batches[0].records[0].envelope, envelope);
+    assert_eq!(batches[0].records[0].native_lifecycle, Some(lifecycle));
 }
 
 #[test]
