@@ -2250,6 +2250,24 @@ mod tests {
         id(&format!("sha256:{}", byte.to_string().repeat(64)))
     }
 
+    /// Exact declared bytes of the shipped default code model and its
+    /// tokenizer, from the production catalog.
+    const CATALOG_MEMBER_BYTES: u64 = 641_517_466 + 2_561_316;
+
+    /// What one session actually costs at the shipped sequence length, stated
+    /// once so the two guards below cannot drift apart.
+    ///
+    /// `644,078,782 × 5/4` headroom over declared member bytes, plus the
+    /// budget-bounded activation of `attention_token_square_budget(32, 4096)`:
+    /// 1,660,736,493 B, or 1.547 GiB. Measured cold-load resident growth per
+    /// session on the tiny corpus is 0.96–1.39 GiB, so the reservation is
+    /// deliberately conservative against what a session retains in practice.
+    const CATALOG_SESSION_ESTIMATE_BYTES: u64 = 1_660_736_493;
+
+    /// The semantic share a 96 GiB host derives (`admitted / 8`), which is
+    /// what B1 restored to production.
+    const HOST_DERIVED_CEILING: u64 = 12 * 1024 * 1024 * 1024;
+
     /// A session must be charged what one session retains, not the whole
     /// process budget.
     ///
@@ -2258,23 +2276,42 @@ mod tests {
     /// later acquisition and embedding collapses to one session on every
     /// host, whatever the CPU width arithmetic asked for.
     #[test]
-    fn resident_estimate_accounts_for_model_and_activation_memory() {
-        const CEILING: u64 = 16 * 1024 * 1024 * 1024;
-        // The shipped default code model plus its tokenizer.
-        const MEMBER_BYTES: u64 = 612 * 1024 * 1024 + 2 * 1024 * 1024;
-
-        let estimate = resident_bytes_estimate_for(MEMBER_BYTES, 32, 4096, CEILING);
+    fn resident_estimate_admits_more_than_one_session_under_the_process_ceiling() {
+        let estimate =
+            resident_bytes_estimate_for(CATALOG_MEMBER_BYTES, 32, 4096, HOST_DERIVED_CEILING);
+        assert_eq!(estimate, CATALOG_SESSION_ESTIMATE_BYTES);
         assert!(
-            estimate < CEILING,
-            "a single session must not reserve the whole process budget"
-        );
-        assert!(
-            estimate >= MEMBER_BYTES,
+            estimate >= CATALOG_MEMBER_BYTES,
             "the estimate must still cover the artifact's own declared bytes"
         );
         assert!(
-            CEILING / estimate >= 2,
-            "the host-derived ceiling must admit multiple sessions"
+            HOST_DERIVED_CEILING / estimate >= 2,
+            "the host-derived ceiling must admit at least the two concurrent \
+             sessions the host width arithmetic derives, but only \
+             {} fit at {estimate} bytes each",
+            HOST_DERIVED_CEILING / estimate
+        );
+    }
+
+    /// The shipped 2 GiB default admits exactly one session at the shipped
+    /// 4096-token sequence. That is the truth, so it is what the test says.
+    ///
+    /// The reservation is not padded and the ceiling is not raised to make a
+    /// wider claim pass. Width comes from B1's host derivation reaching
+    /// production, not from softening this number: an operator who pins
+    /// 2 GiB is pinning one session, and the doc above says so.
+    #[test]
+    fn the_shipped_default_ceiling_admits_exactly_one_session() {
+        let estimate = resident_bytes_estimate_for(
+            CATALOG_MEMBER_BYTES,
+            32,
+            4096,
+            tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES,
+        );
+        assert_eq!(estimate, CATALOG_SESSION_ESTIMATE_BYTES);
+        assert_eq!(
+            tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES / estimate,
+            1
         );
     }
 
@@ -2287,8 +2324,8 @@ mod tests {
     /// second acquisition and `RuntimeChunkVectorEncoderV1::ensure_sessions`
     /// silently broke out of its loop at one session.
     #[test]
-    fn production_scale_artifact_admits_multiple_sessions_on_a_large_host() {
-        const CEILING: u64 = 16 * 1024 * 1024 * 1024;
+    fn production_scale_artifact_admits_the_derived_session_width() {
+        const CEILING: u64 = HOST_DERIVED_CEILING;
         const MODEL_BYTES: u64 = 612 * 1024 * 1024;
         const TOKENIZER_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -2314,7 +2351,8 @@ mod tests {
             .count();
         assert!(
             admitted >= 2,
-            "a large host ceiling must admit multiple sessions, but only \
+            "the host-derived ceiling must admit at least the two concurrent \
+             sessions the host width arithmetic derives, but only \
              {admitted} fit at {reserved} bytes each"
         );
     }
