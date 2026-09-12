@@ -1040,6 +1040,9 @@ impl McpServer {
             && let Some(map) = result.value.as_object_mut()
         {
             let meta = map.entry("_meta").or_insert_with(|| json!({}));
+            if meta.is_null() {
+                *meta = json!({});
+            }
             if let Some(meta_obj) = meta.as_object_mut() {
                 meta_obj.insert("duration_us".to_string(), json!(us));
             }
