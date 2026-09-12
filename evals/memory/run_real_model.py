@@ -81,7 +81,7 @@ def parse_args(argv):
         "--driver",
         choices=("hermes", "cursor-agent"),
         default="hermes",
-        help="Agent driver. cursor-agent support is experimental.",
+        help="Agent driver. Cursor Composer uses its cursor-agent CLI.",
     )
     parser.add_argument("--agent-turn", action="store_true", help="Actually run real agent turns.")
     parser.add_argument(
@@ -408,7 +408,7 @@ def read_hermes_usage(profile_dir, started_after):
 
 
 def drive_cursor_agent(args, scenario, fixture, log_dir, eval_env):
-    """Experimental: drives `cursor-agent -p` against the profile MCP setup."""
+    """Drive Cursor Composer through `cursor-agent -p` and the profile plugin."""
     run(
         [args.tracedecay_bin, "install", "--agent", "cursor"],
         cwd=fixture,
@@ -426,6 +426,7 @@ def drive_cursor_agent(args, scenario, fixture, log_dir, eval_env):
             "--plugin-dir",
             str(plugin_dir),
             "--approve-mcps",
+            "--force",
             "--trust",
             "--model",
             args.model,
