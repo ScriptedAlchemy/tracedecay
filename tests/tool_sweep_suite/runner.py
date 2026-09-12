@@ -24,13 +24,16 @@ if str(SUITE_DIR) not in sys.path:
 
 from dispatch_policy import READ_EFFECTS, ToolPolicy, decode_tool_policy
 from journeys import (
+    FACT_READ_TOOLS,
     JourneyError,
     WORKFLOW_LIFECYCLE_EFFECTS,
     api_migration_plan_arguments,
     prepare as prepare_journey,
+    prime_fact_read_lifecycle,
     prime_work_lifecycle,
     prime_workflow_lifecycle,
     profile_refresh_selectors,
+    validate_fact_read_response,
 )
 from outcomes import (
     duration_us,
@@ -819,6 +822,16 @@ def prime_fixture_values(
             }
         )
 
+    if effect_target is None and FACT_READ_TOOLS.intersection(policies):
+        with prime_group("facts"):
+            prime_fact_read_lifecycle(
+                fixture,
+                lambda tool, arguments, deadline_ms: _producer_call(
+                    client, tool, arguments, deadline_ms
+                ),
+                deadline,
+            )
+
     if effect_target is None:
         with prime_group("automation"):
             ready_at = time.monotonic() + 10
@@ -1238,6 +1251,8 @@ def git_preview_arguments(fixture: dict[str, Any]) -> dict[str, Any]:
 def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, Any]) -> dict[str, Any]:
     """Produce valid ordinary inputs from the negotiated schema; opaque values are never invented."""
     name = definition.get("name")
+    if isinstance(name, str) and name in fixture.get("fact_read_arguments", {}):
+        return dict(fixture["fact_read_arguments"][name])
     if name == "tracedecay_api_migration_plan":
         return api_migration_plan_arguments(fixture)
     if isinstance(name, str) and name in fixture.get("workflow_read_arguments", {}):
@@ -1715,10 +1730,21 @@ def execute_effect(
         try:
             rollback_note = prepared.cleanup(response)
         except Exception as error:
-            row.update({"verdict": "FAIL", "problem_code": "tool_sweep.rollback_failed", "note": f"{row['note']}; rollback failed: {error}"})
+            kind = "rollback" if prepared.settlement == "verified" else "settlement"
+            row.update(
+                {
+                    "verdict": "FAIL",
+                    "problem_code": f"tool_sweep.{kind}_failed",
+                    "note": f"{row['note']}; {kind} failed: {error}",
+                }
+            )
         else:
-            row["rollback"] = prepared.settlement
-            row["rollback_note"] = rollback_note
+            if prepared.settlement == "verified":
+                row["rollback"] = "verified"
+                row["rollback_note"] = rollback_note
+            else:
+                row["settlement"] = prepared.settlement
+                row["settlement_note"] = rollback_note
         return row
     except Exception as error:
         if isinstance(error, CallDeadlineExceeded):
@@ -1830,7 +1856,19 @@ def _read_tool_row(
             except Exception as error:
                 return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
             row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
-    return _expected_denial_row(row, policy.name, response)
+    row = _expected_denial_row(row, policy.name, response)
+    if row["verdict"] == "PASS" and policy.name in FACT_READ_TOOLS:
+        try:
+            validate_fact_read_response(policy.name, response, fixture)
+        except JourneyError as error:
+            row.update(
+                {
+                    "verdict": "FAIL",
+                    "problem_code": "tool_sweep.consumer_unverified",
+                    "note": str(error),
+                }
+            )
+    return row
 
 
 def _write_phase_report(out: Path, report: dict[str, Any]) -> None:
