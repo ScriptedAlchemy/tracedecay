@@ -4699,13 +4699,17 @@ impl CodeIndexSchedulerRegistryV1 {
                                     *serving_source_witness
                                         .write()
                                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                        pass_proves_latest.then(|| super::ServingSourceWitnessV1 {
-                                            generation_id: latest
-                                                .generation()
-                                                .manifest()
-                                                .generation_id
-                                                .clone(),
-                                        });
+                                        pass_proves_latest
+                                            .then(|| {
+                                                source_freshness.source_currency_witness_for(
+                                                    &latest.generation().manifest().generation_id,
+                                                    &latest
+                                                        .generation()
+                                                        .snapshot()
+                                                        .content_identity,
+                                                )
+                                            })
+                                            .flatten();
                                 }
                                 // The durable pointer names a successor, so no
                                 // proof of this seat's currency exists to bind.
