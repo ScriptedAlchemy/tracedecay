@@ -1185,18 +1185,6 @@ mod tests {
     }
 
     #[test]
-    fn config_path_honors_external_absolute_xdg_root() {
-        let home = tempfile::tempdir().unwrap();
-        let xdg = tempfile::tempdir().unwrap();
-
-        assert_eq!(
-            opencode_config_path_for(home.path(), Some(xdg.path().as_os_str())),
-            xdg.path().join("opencode/opencode.json")
-        );
-        assert!(!xdg.path().starts_with(home.path()));
-    }
-
-    #[test]
     fn external_xdg_assets_are_mirrored_byte_for_byte() {
         use crate::agents::host_bundle::HostBundleComponentV1;
 

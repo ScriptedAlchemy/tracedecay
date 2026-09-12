@@ -769,11 +769,6 @@ fn journal_cleanup_names(journal_name: &str, state: JournalCleanupState) -> [Str
     }
 }
 
-#[cfg(test)]
-pub(super) fn committed_journal_cleanup_names(journal_name: &str) -> [String; 3] {
-    journal_cleanup_names(journal_name, JournalCleanupState::DeletionConfirmed)
-}
-
 fn clear_journal_in_order(
     parent: &Dir,
     parent_path: &Path,

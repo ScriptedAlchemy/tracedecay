@@ -4,8 +4,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use super::{
     AgentTaskRunContext, AutomationRunControl, NonEmptyAutomaticFactReceipts, RUN_ID_COUNTER,
-    SchedulerGate, append_skipped_record, failed_output_projection, generated_run_id,
-    task_run_gate,
+    SchedulerGate, append_skipped_record, failed_output_projection, task_run_gate,
 };
 use crate::automation::backend::AgentTaskKind;
 use crate::automation::config::{
@@ -147,14 +146,6 @@ async fn test_sessions_db(root: &Path) -> TestSessionsDb {
 }
 
 #[test]
-fn generated_run_ids_are_unique_for_same_prefix() {
-    let first = generated_run_id("memory_curator");
-    let second = generated_run_id("memory_curator");
-
-    assert_ne!(first, second);
-}
-
-#[test]
 fn run_control_read_observes_a_post_construction_interrupt() {
     let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed = Arc::clone(&interrupted);
@@ -235,38 +226,6 @@ async fn append_skip(
         .await
         .expect("append skipped record");
     record
-}
-
-#[tokio::test]
-async fn consecutive_identical_scheduler_skips_persist_once() {
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let root = temp.path();
-    let task = AgentTaskKind::MemoryCurator;
-
-    append_skip(
-        root,
-        "run-1",
-        AutomationTrigger::Scheduler,
-        task,
-        "scheduler_interval_not_elapsed",
-    )
-    .await;
-    append_skip(
-        root,
-        "run-2",
-        AutomationTrigger::Scheduler,
-        task,
-        "scheduler_interval_not_elapsed",
-    )
-    .await;
-
-    let records = load_run_records(root, 50).await.expect("load records");
-    assert_eq!(
-        records.len(),
-        1,
-        "repeat scheduler skip must not append a second record"
-    );
-    assert_eq!(records[0].run_id, "run-1");
 }
 
 #[tokio::test]

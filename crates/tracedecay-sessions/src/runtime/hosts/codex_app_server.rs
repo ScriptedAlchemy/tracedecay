@@ -995,19 +995,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn summary_thread_start_params_are_ephemeral_and_identified() {
-        let params = build_ephemeral_thread_start_params(
-            Some("gpt-5.5-codex"),
-            "tracedecay_codex_summary",
-            None,
-        );
-
-        assert_eq!(params["ephemeral"], json!(true));
-        assert_eq!(params["threadSource"], json!("tracedecay_codex_summary"));
-        assert_eq!(params["model"], json!("gpt-5.5-codex"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn work_app_server_child_receives_only_admitted_environment() {

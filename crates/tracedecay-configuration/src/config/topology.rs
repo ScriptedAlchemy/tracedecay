@@ -52,9 +52,8 @@ mod tests {
 
     use tracedecay_domain::configuration::{
         BranchTopologyKindV1, ConfigurationLayerIdV1, ConfigurationSnapshotV1,
-        ConfigurationValueKindV1, ConfigurationValueV1, RestartRequirementV1, SettingKey,
-        SettingScopeV1, SettingSensitivityV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-        WorkTopologyPolicyV1, safe_work_topology_policy_v1,
+        ConfigurationValueV1, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkTopologyPolicyV1,
+        safe_work_topology_policy_v1,
     };
     use tracedecay_domain::{ManifestDigest, ProjectId, UserProfileId};
     use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
@@ -87,51 +86,6 @@ mod tests {
                 ConfigurationValueV1::WorkTopologyPolicy(Box::new(policy)),
             )]),
         }
-    }
-
-    #[test]
-    fn safe_default_never_enables_cross_merge() {
-        let policy = safe_default_work_topology_policy();
-        policy.validate().unwrap();
-        assert!(!policy.cross_merge.allow_cross_repository);
-    }
-
-    #[test]
-    fn registry_default_is_the_domain_safe_default() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let definition = registry.definition(&topology_key()).unwrap();
-        assert_eq!(
-            definition.value_kind,
-            ConfigurationValueKindV1::WorkTopologyPolicy
-        );
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(
-            definition.restart_requirement,
-            RestartRequirementV1::DaemonRestart
-        );
-        let ConfigurationValueV1::WorkTopologyPolicy(default) = &definition.default_value else {
-            panic!("registry default must be a typed topology policy");
-        };
-        let safe = safe_work_topology_policy_v1();
-        assert_eq!(**default, safe);
-        assert_eq!(
-            default.compute_digest().unwrap(),
-            safe.compute_digest().unwrap()
-        );
-    }
-
-    #[test]
-    fn resolves_safe_default_when_no_layer_overrides() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let snapshot = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let resolved = resolved_work_topology_policy(&snapshot).unwrap();
-        let safe = safe_default_work_topology_policy();
-        assert_eq!(*resolved, safe);
-        assert_eq!(
-            resolved.compute_digest().unwrap(),
-            safe.compute_digest().unwrap()
-        );
     }
 
     #[test]

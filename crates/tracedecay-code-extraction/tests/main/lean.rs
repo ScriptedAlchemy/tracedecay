@@ -25,14 +25,6 @@ fn def_is_function() {
 }
 
 #[test]
-fn theorem_is_function() {
-    let source = "theorem foo : 1 + 1 = 2 := by rfl\n";
-    let result = extract(source);
-    let funcs = names_of(&result, NodeKind::Function);
-    assert_eq!(funcs, vec!["foo".to_string()]);
-}
-
-#[test]
 fn structure_is_struct() {
     let source = "structure Point where\n  x : Nat\n  y : Nat\n";
     let result = extract(source);

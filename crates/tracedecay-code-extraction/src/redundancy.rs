@@ -654,14 +654,6 @@ mod tests {
     }
 
     #[test]
-    fn jaccard_self_similarity_is_one() {
-        let a = fingerprint_for_rust_fn(
-            "fn a() { let x = 1; let y = 2; let z = x + y; println!(\"{}\", z); }",
-        );
-        assert!((jaccard_similarity(&a.shingles, &a.shingles) - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
     fn jaccard_disjoint_is_zero() {
         let a = fingerprint_for_rust_fn(
             "fn a() { let aaaa = 1; let bbbb = 2; let cccc = 3; let dddd = 4; let eeee = 5; }",

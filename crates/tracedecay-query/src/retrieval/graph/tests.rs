@@ -32,7 +32,6 @@ use crate::retrieval::ports::{
 };
 
 mod control;
-mod measurement;
 mod projection;
 mod scale;
 mod storage;

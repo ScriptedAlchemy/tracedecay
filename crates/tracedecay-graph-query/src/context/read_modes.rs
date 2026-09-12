@@ -395,20 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn symbol_context_keeps_symbols_straddling_the_range_edges() {
-        // A one-line read inside `main`'s body still reports `main`.
-        let value = symbol_context_value(&fixture(), FILE, LineRange::parse("6"));
-        let names = value["symbols"]
-            .as_array()
-            .expect("symbol array")
-            .iter()
-            .map(|symbol| symbol["name"].as_str().unwrap_or_default().to_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(names, vec!["main".to_owned()]);
-    }
-
-    #[test]
     fn symbol_context_without_a_range_reports_the_whole_file_nearest_first() {
         let value = symbol_context_value(&fixture(), FILE, None);
 

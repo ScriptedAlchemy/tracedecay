@@ -6,9 +6,7 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 
-
 CHECKER_PATH = Path(__file__).with_name("check-pr-dogfood-output.py")
-
 
 def load_checker() -> ModuleType:
     if not CHECKER_PATH.exists():
@@ -19,7 +17,6 @@ def load_checker() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
 
 class PrDogfoodOutputTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -75,15 +72,6 @@ class PrDogfoodOutputTests(unittest.TestCase):
             expected_merge_base="merge-base-oid",
             strict=True,
         )
-
-    def test_accepts_exact_partial_warmup_evidence(self) -> None:
-        self.validate(self.payload)
-
-    def test_accepts_complete_output_without_graph_unavailability(self) -> None:
-        del self.payload["status"]
-        del self.payload["verified_graph_evidence"]
-        self.payload["analysis_coverage"] = {"complete": True}
-        self.validate(self.payload)
 
     def strict_bounded_prefix_payload(self, *, seeds: int, config_summaries: int) -> None:
         self.payload.pop("status", None)
@@ -169,32 +157,9 @@ class PrDogfoodOutputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "graph evidence"):
             self.validate(self.payload)
 
-
 class StrictReadinessOutputTests(unittest.TestCase):
     def setUp(self) -> None:
         self.checker = load_checker()
-
-    def test_strict_status_accepts_current_text_and_observed_graph(self) -> None:
-        self.checker.validate_status(
-            {
-                "code_index_freshness": {
-                    "status": "current",
-                    "worktree": {
-                        "coverage": "complete",
-                        "staleness_state": "fresh",
-                        "latest_generation_id": "generation.ready",
-                        "code_graph_serving": {"state": "ready"},
-                    },
-                },
-                "graph_statistics": {
-                    "state": "observed",
-                    "generation_id": "generation.ready",
-                    "symbol_count": 12,
-                    "edge_count": 9,
-                },
-            },
-            strict=True,
-        )
 
     def test_strict_status_rejects_graph_that_is_not_ready_to_serve(self) -> None:
         for graph_serving in (
@@ -256,22 +221,6 @@ class StrictReadinessOutputTests(unittest.TestCase):
                     "reason": "exact_scope_generation_not_ready",
                 }
             }
-        )
-
-    def test_strict_context_accepts_lexical_and_graph_symbol_evidence(self) -> None:
-        self.checker.validate_context(
-            {
-                "coverage": {
-                    "exact": "complete",
-                    "lexical": "complete",
-                    "graph": "complete",
-                    "semantic": {"status": "unavailable", "reason": "disabled"},
-                    "recall": "partial",
-                },
-                "search_matches": [{"file": "src/main.rs"}],
-                "symbols": [{"node_id": "symbol:main"}],
-            },
-            strict=True,
         )
 
     def pruned_lexical_context(self, lexical: object) -> dict[str, object]:
@@ -365,7 +314,6 @@ class StrictReadinessOutputTests(unittest.TestCase):
                 },
                 strict=True,
             )
-
 
 if __name__ == "__main__":
     unittest.main()

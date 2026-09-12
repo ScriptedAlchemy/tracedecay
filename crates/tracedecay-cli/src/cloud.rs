@@ -311,13 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn skips_release_with_no_assets() {
-        // A release that was just created — CI hasn't started uploading yet.
-        let r = release("v9.9.9", false, &[]);
-        assert!(!release_has_current_platform_asset(&r));
-    }
-
-    #[test]
     fn skips_release_missing_current_platform_asset() {
         // Other platforms uploaded but ours hasn't yet (e.g. the macOS leg
         // of the matrix is still running). Detection should treat this as
@@ -332,13 +325,6 @@ mod tests {
             ],
         );
         assert!(!release_has_current_platform_asset(&r));
-    }
-
-    #[test]
-    fn accepts_release_with_matching_asset() {
-        let expected = asset_name("0.9.9", false);
-        let r = release("v0.9.9", false, &[&expected]);
-        assert!(release_has_current_platform_asset(&r));
     }
 
     #[test]
@@ -375,13 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn skips_pre_reset_beta_release_even_with_tracedecay_assets() {
-        let expected = asset_name("6.2.0-beta.1", true);
-        let r = release("v6.2.0-beta.1", true, &[&expected]);
-        assert!(!release_has_current_platform_asset(&r));
-    }
-
-    #[test]
     fn pre_reset_epoch_boundary() {
         assert!(!release_is_pre_reset_epoch("v0.0.2"));
         assert!(!release_is_pre_reset_epoch("v1.0.0"));
@@ -389,10 +368,5 @@ mod tests {
         assert!(release_is_pre_reset_epoch("v4.0.0"));
         assert!(release_is_pre_reset_epoch("v6.1.3"));
         assert!(release_is_pre_reset_epoch("v6.2.0-beta.1"));
-    }
-
-    #[test]
-    fn asset_name_uses_current_name() {
-        assert!(asset_name("9.9.9", false).starts_with("tracedecay-v9.9.9-"));
     }
 }

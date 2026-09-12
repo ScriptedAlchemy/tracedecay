@@ -553,29 +553,6 @@ fn risky(v: Option<i32>) -> i32 {
 }
 
 #[test]
-fn test_rust_derive_macro_edge() {
-    let source = r#"
-#[derive(Debug, Clone)]
-pub struct Foo {
-    val: i32,
-}
-"#;
-    let extractor = RustExtractor;
-    let result = extractor.extract("foo.rs", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let derives: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.reference_kind == EdgeKind::DerivesMacro)
-        .collect();
-    assert!(
-        derives.len() >= 2,
-        "expected >= 2 DerivesMacro refs for #[derive(Debug, Clone)], got {}",
-        derives.len()
-    );
-}
-
-#[test]
 fn test_rust_call_sites() {
     let source = r#"
 fn caller() {

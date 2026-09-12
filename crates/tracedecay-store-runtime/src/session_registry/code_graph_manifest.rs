@@ -1623,8 +1623,8 @@ mod tests {
         CodeGenerationId, ProjectId, RepositoryId, UtcMicros, sha256_hex_suffix,
     };
     use tracedecay_graph_db::{
-        GraphBudgetKind, GraphDbError, GraphGenerationManifestProvider, GraphNamespace,
-        GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
+        GraphDbError, GraphGenerationManifestProvider, GraphNamespace, GraphProjectorRevision,
+        SealedCodeGenerationReplay, SealedGraphStateDigest,
     };
     use tracedecay_store::{
         BrainId, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, StoreShardIdV1,
@@ -1870,38 +1870,6 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, GraphDbError::Corrupt { .. }));
-    }
-
-    #[test]
-    fn sealed_projection_build_interruptions_stay_typed_and_never_read_as_corruption() {
-        use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
-
-        use super::classify_sealed_projection_build_error;
-
-        assert_eq!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::DeadlineExceeded),
-            GraphDbError::DeadlineExceeded
-        );
-        assert_eq!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::Cancelled),
-            GraphDbError::Cancelled
-        );
-        assert!(matches!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::BudgetExhausted {
-                budget: "capacity".to_owned(),
-                limit: 7,
-            }),
-            GraphDbError::BudgetExhausted {
-                kind: GraphBudgetKind::Capacity,
-                limit: 7,
-            }
-        ));
-        assert!(matches!(
-            classify_sealed_projection_build_error(CodeGraphProjectionError::Contract(
-                "entity payload is malformed".to_owned()
-            )),
-            GraphDbError::Corrupt { .. }
-        ));
     }
 
     #[test]

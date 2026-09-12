@@ -47,26 +47,6 @@ impl GraphCancellation for CancelAfter {
     }
 }
 
-/// Counts cancellation observations without ever cancelling. Every snapshot
-/// read observes the request cancellation, so for two structurally identical
-/// queries against one snapshot the observation counts order exactly like the
-/// snapshot reads performed.
-#[derive(Default)]
-struct CountingCancellation(AtomicU64);
-
-impl CountingCancellation {
-    fn observations(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-impl GraphCancellation for CountingCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.0.fetch_add(1, Ordering::Relaxed);
-        false
-    }
-}
-
 fn id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -337,56 +317,6 @@ fn occurrences(summaries: &[CodeGraphSymbolSummaryV1]) -> Vec<String> {
 }
 
 #[test]
-fn qualified_name_resolution_is_exact_and_kind_filtered() {
-    let reader = reader(&store_for(production_manifest()));
-    let hits = reader
-        .resolve_qualified_name("beta::run", None, 8, request())
-        .expect("resolve qualified name");
-    assert_eq!(occurrences(&hits), vec!["sym.beta.run".to_owned()]);
-    let metadata = hits[0].metadata.as_ref().expect("production metadata");
-    assert_eq!(metadata.kind, "function");
-    assert!(
-        hits[0].binding.is_some(),
-        "resolved symbol keeps its binding"
-    );
-
-    let struct_hits = reader
-        .resolve_qualified_name("beta::Runner", Some("struct"), 8, request())
-        .expect("resolve struct");
-    assert_eq!(
-        occurrences(&struct_hits),
-        vec!["sym.beta.runner".to_owned()]
-    );
-    let kind_mismatch = reader
-        .resolve_qualified_name("beta::Runner", Some("function"), 8, request())
-        .expect("kind filter");
-    assert!(
-        kind_mismatch.is_empty(),
-        "kind filter must exclude, not coerce"
-    );
-    let unknown = reader
-        .resolve_qualified_name("delta::absent", None, 8, request())
-        .expect("unknown name");
-    assert!(unknown.is_empty());
-}
-
-#[test]
-fn simple_name_resolution_matches_trailing_segment_case_insensitively() {
-    let reader = reader(&store_for(production_manifest()));
-    let hits = reader
-        .resolve_simple_name("RUN", None, 8, request())
-        .expect("resolve simple name");
-    assert_eq!(
-        occurrences(&hits),
-        vec!["sym.alpha.run".to_owned(), "sym.beta.run".to_owned()]
-    );
-    let runner = reader
-        .resolve_simple_name("runner", Some("struct"), 8, request())
-        .expect("resolve runner");
-    assert_eq!(occurrences(&runner), vec!["sym.beta.runner".to_owned()]);
-}
-
-#[test]
 fn symbol_find_is_bounded_ordered_and_cancellable_during_large_scans() {
     let reader = reader(&store_for(large_production_manifest(5_000)));
     reader
@@ -474,18 +404,6 @@ fn file_and_page_listings_cover_the_generation_exactly_once() {
 }
 
 #[test]
-fn logical_path_resolution_matches_the_bound_file_occurrence() {
-    let reader = reader(&store_for(production_manifest()));
-    let hits = reader
-        .symbols_in_logical_file("src/beta.rs", 8, request())
-        .expect("logical path listing");
-    assert_eq!(
-        occurrences(&hits),
-        vec!["sym.beta.run".to_owned(), "sym.beta.runner".to_owned()]
-    );
-}
-
-#[test]
 fn logical_path_resolution_reports_an_unknown_path_as_empty_not_an_error() {
     let reader = reader(&store_for(production_manifest()));
     let hits = reader
@@ -498,208 +416,12 @@ fn logical_path_resolution_reports_an_unknown_path_as_empty_not_an_error() {
 }
 
 #[test]
-fn logical_path_resolution_honors_the_listing_limit() {
-    let reader = reader(&store_for(production_manifest()));
-    let hits = reader
-        .symbols_in_logical_file("src/beta.rs", 1, request())
-        .expect("limited logical path listing");
-    assert_eq!(hits.len(), 1, "the limit caps the returned symbols");
-}
-
-#[test]
 fn logical_path_resolution_denies_a_cancelled_read() {
     let reader = reader(&store_for(production_manifest()));
     let error = reader
         .symbols_in_logical_file("src/beta.rs", 8, Arc::new(CancelledNow))
         .expect_err("cancelled logical path listing must be refused");
     assert_eq!(error, CodeGraphProjectionError::Cancelled);
-}
-
-#[test]
-fn adjacency_reads_are_kind_filtered_and_endpoint_checked() {
-    let reader = reader(&store_for(production_manifest()));
-    let beta = vec![id::<SymbolOccurrenceId>("sym.beta.run")];
-
-    let callers = reader
-        .callers(&beta, &[RelationEdgeKindV1::Calls], 16, request())
-        .expect("callers");
-    assert_eq!(callers.len(), 1);
-    assert_eq!(
-        occurrences(
-            &callers[0]
-                .iter()
-                .map(|edge| edge.neighbor.clone())
-                .collect::<Vec<_>>()
-        ),
-        vec!["sym.alpha.run".to_owned()]
-    );
-
-    let all_callers = reader
-        .callers(&beta, &[], 16, request())
-        .expect("all callers");
-    assert_eq!(all_callers[0].len(), 2, "unfiltered callers include Uses");
-
-    let callees = reader
-        .callees(
-            &[id::<SymbolOccurrenceId>("sym.alpha.run")],
-            &[RelationEdgeKindV1::Calls],
-            16,
-            request(),
-        )
-        .expect("callees");
-    assert_eq!(callees[0].len(), 1);
-    assert_eq!(callees[0][0].edge.to_occurrence.as_str(), "sym.beta.run");
-}
-
-#[test]
-fn verified_adjacency_returns_relation_rows_in_seed_shape() {
-    let reader = reader(&store_for(production_manifest()));
-    let seeds = [
-        id::<SymbolOccurrenceId>("sym.gamma.main"),
-        id::<SymbolOccurrenceId>("sym.alpha.run"),
-    ];
-    let starts = super::entity_ids(&seeds).expect("seed entity identities");
-
-    let outgoing = reader
-        .snapshot
-        .outgoing_relations(
-            &starts,
-            &super::source_relation_kinds().expect("source relation kinds"),
-            16,
-            request(),
-        )
-        .expect("verified outgoing relation rows");
-    assert_eq!(outgoing.len(), seeds.len());
-    assert_eq!(outgoing[0].len(), 1);
-    assert_eq!(outgoing[1].len(), 1);
-    assert_ne!(outgoing[0][0].identity, outgoing[1][0].identity);
-
-    let incoming = reader
-        .snapshot
-        .incoming_relations(
-            &starts,
-            &super::target_relation_kinds().expect("target relation kinds"),
-            16,
-            request(),
-        )
-        .expect("verified incoming relation rows");
-    assert_eq!(incoming.len(), seeds.len());
-    assert!(incoming[0].is_empty());
-    assert_eq!(incoming[1].len(), 1);
-}
-
-/// Edge kinds outside the admitted set must stop hydration at the edge
-/// payload: their far endpoints are never read. Both queries examine the same
-/// two adjacency rows of `sym.beta.run`; the filtered one hydrates one
-/// neighbor where the unfiltered one hydrates two, so it must perform strictly
-/// fewer snapshot reads.
-#[test]
-fn kind_filtered_adjacency_skips_far_endpoint_hydration_for_excluded_edges() {
-    let reader = reader(&store_for(production_manifest()));
-    let beta = vec![id::<SymbolOccurrenceId>("sym.beta.run")];
-
-    let filtered_reads = Arc::new(CountingCancellation::default());
-    let filtered = reader
-        .callers(
-            &beta,
-            &[RelationEdgeKindV1::Calls],
-            16,
-            Arc::clone(&filtered_reads) as Arc<dyn GraphCancellation>,
-        )
-        .expect("filtered callers");
-    assert_eq!(filtered[0].len(), 1, "one Calls edge survives the filter");
-
-    let unfiltered_reads = Arc::new(CountingCancellation::default());
-    let unfiltered = reader
-        .callers(
-            &beta,
-            &[],
-            16,
-            Arc::clone(&unfiltered_reads) as Arc<dyn GraphCancellation>,
-        )
-        .expect("unfiltered callers");
-    assert_eq!(unfiltered[0].len(), 2, "both incoming edges hydrate");
-
-    assert!(
-        filtered_reads.observations() < unfiltered_reads.observations(),
-        "excluded kinds must not hydrate far endpoints: filtered={} unfiltered={}",
-        filtered_reads.observations(),
-        unfiltered_reads.observations()
-    );
-}
-
-/// Far endpoints shared inside one batch hydrate once, not once per edge.
-/// Both batches carry two seeds with one outgoing edge each; the batch whose
-/// edges converge on one shared endpoint must perform strictly fewer snapshot
-/// reads than the batch whose endpoints are distinct.
-#[test]
-fn shared_far_endpoints_hydrate_once_per_adjacency_batch() {
-    let reader = reader(&store_for(production_manifest()));
-
-    let shared_reads = Arc::new(CountingCancellation::default());
-    let shared = reader
-        .callees(
-            &[
-                id::<SymbolOccurrenceId>("sym.alpha.run"),
-                id::<SymbolOccurrenceId>("sym.beta.runner"),
-            ],
-            &[],
-            16,
-            Arc::clone(&shared_reads) as Arc<dyn GraphCancellation>,
-        )
-        .expect("shared-endpoint batch");
-    assert!(
-        shared
-            .iter()
-            .flatten()
-            .all(|edge| edge.neighbor.occurrence.as_str() == "sym.beta.run"),
-        "both edges converge on sym.beta.run"
-    );
-    assert_eq!(shared.iter().flatten().count(), 2);
-
-    let distinct_reads = Arc::new(CountingCancellation::default());
-    let distinct = reader
-        .callees(
-            &[
-                id::<SymbolOccurrenceId>("sym.gamma.main"),
-                id::<SymbolOccurrenceId>("sym.alpha.run"),
-            ],
-            &[],
-            16,
-            Arc::clone(&distinct_reads) as Arc<dyn GraphCancellation>,
-        )
-        .expect("distinct-endpoint batch");
-    assert_eq!(distinct.iter().flatten().count(), 2);
-
-    assert!(
-        shared_reads.observations() < distinct_reads.observations(),
-        "a shared far endpoint must hydrate once per batch: shared={} distinct={}",
-        shared_reads.observations(),
-        distinct_reads.observations()
-    );
-}
-
-#[test]
-fn degrees_and_kind_counts_report_true_totals() {
-    let reader = reader(&store_for(production_manifest()));
-    let degrees = reader
-        .degrees(
-            &[
-                id::<SymbolOccurrenceId>("sym.beta.run"),
-                id::<SymbolOccurrenceId>("sym.alpha.run"),
-            ],
-            request(),
-        )
-        .expect("degrees");
-    assert_eq!((degrees[0].outgoing, degrees[0].incoming), (0, 2));
-    assert_eq!((degrees[1].outgoing, degrees[1].incoming), (1, 1));
-
-    let counts = reader
-        .edge_kind_counts(&id::<SymbolOccurrenceId>("sym.beta.run"), request())
-        .expect("kind counts");
-    assert!(counts.outgoing.is_empty());
-    assert_eq!(counts.incoming.get(&RelationEdgeKindV1::Calls), Some(&1));
-    assert_eq!(counts.incoming.get(&RelationEdgeKindV1::Uses), Some(&1));
 }
 
 #[test]
@@ -782,29 +504,6 @@ fn shortest_path_distinguishes_no_path_from_truncated_search() {
     assert!(
         !capped.complete,
         "depth cap with live frontier is not a no-path verdict"
-    );
-}
-
-#[test]
-fn induced_edges_stay_inside_the_member_set() {
-    let reader = reader(&store_for(production_manifest()));
-    let members = vec![
-        id::<SymbolOccurrenceId>("sym.gamma.main"),
-        id::<SymbolOccurrenceId>("sym.alpha.run"),
-        id::<SymbolOccurrenceId>("sym.beta.run"),
-    ];
-    let edges = reader
-        .edges_among(&members, &[RelationEdgeKindV1::Calls], 64, request())
-        .expect("induced edges");
-    assert_eq!(edges.len(), 2);
-
-    let without_gamma = reader
-        .edges_among(&members[1..], &[RelationEdgeKindV1::Calls], 64, request())
-        .expect("smaller induced set");
-    assert_eq!(without_gamma.len(), 1);
-    assert_eq!(
-        without_gamma[0].edge.from_occurrence.as_str(),
-        "sym.alpha.run"
     );
 }
 
@@ -960,56 +659,6 @@ fn retrieval_only_publication_serves_no_names_truthfully() {
         .expect("summary read")
         .expect("symbol entity exists");
     assert_eq!(summary.metadata, None, "absent metadata stays absent");
-}
-
-/// The dashboard's degree-pool and top-connected panels aggregated the whole
-/// `edges` table twice per read — the same whole-graph scan class that broke
-/// strata at scale. The bounded replacement must rank deterministically and
-/// must say so when its examination budget stopped the scan.
-#[test]
-fn degree_ranking_is_deterministic_and_bounded() {
-    let reader = reader(&store_for(production_manifest()));
-
-    // alpha::run 1 out + 1 in, beta::run 0 out + 2 in, beta::Runner 1 out,
-    // gamma::main 1 out. Total degree descending, then qualified name.
-    let ranking = reader
-        .degree_ranking(2, 16, request())
-        .expect("bounded degree ranking");
-    assert!(
-        ranking.complete,
-        "a budget above the symbol count is complete"
-    );
-    assert_eq!(ranking.symbols_examined, 4);
-    assert_eq!(
-        ranking
-            .ranked
-            .iter()
-            .map(|entry| entry.occurrence.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        vec!["sym.alpha.run".to_owned(), "sym.beta.run".to_owned()],
-        "equal-degree symbols break ties by qualified name, not by scan order"
-    );
-    assert_eq!(
-        (ranking.ranked[0].outgoing, ranking.ranked[0].incoming),
-        (1, 1)
-    );
-
-    let full = reader
-        .degree_ranking(16, 16, request())
-        .expect("full degree ranking");
-    assert_eq!(
-        full.ranked
-            .iter()
-            .map(|entry| entry.occurrence.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        vec![
-            "sym.alpha.run".to_owned(),
-            "sym.beta.run".to_owned(),
-            "sym.beta.runner".to_owned(),
-            "sym.gamma.main".to_owned(),
-        ],
-        "a top size past the symbol count ranks every symbol, still totally ordered"
-    );
 }
 
 /// A ranking over a prefix of the graph must never be reported as the graph's

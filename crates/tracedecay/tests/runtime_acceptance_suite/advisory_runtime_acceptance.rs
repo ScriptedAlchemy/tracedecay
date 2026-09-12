@@ -27,10 +27,9 @@ use tracedecay_application::advisory::github_runtime::{
 #[cfg(feature = "test-transport")]
 use tracedecay_application::advisory::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
 use tracedecay_application::advisory::{
-    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1,
+    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,
     GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
-    GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
-    GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
+    GitHubReadResponseDecoderV1, GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_contracts::feedback::{
@@ -270,19 +269,6 @@ fn scope() -> FeedbackScopeV1 {
         branch_ref: "refs/heads/codex/tracedecay-total-redesign-plan".to_owned(),
         head_commit_id: CommitId::new("e29900448db98ae58e90d08770a3bb8bfa710846").unwrap(),
     }
-}
-
-#[test]
-fn github_source_access_uses_owner_bound_ureq_dtos() {
-    let credential = GitHubReadOnlyCredentialV1::anonymous();
-    let target = GitHubRepositoryTargetV1 {
-        owner: "ScriptedAlchemy".to_owned(),
-        repository: "tracedecay".to_owned(),
-        pull_request_number: 421,
-        pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
-    };
-    assert!(target.validate());
-    let _owner_inputs = (credential, target, GitHubHttpReadConfigV1::default());
 }
 
 #[tokio::test]

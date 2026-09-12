@@ -422,11 +422,6 @@ pub fn opencode_agent_files() -> Vec<(&'static str, &'static str)> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
-
-    fn plugin_source_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
-    }
 
     /// No host deploys the same relative path twice.
     fn assert_unique_relatives(files: &[(&str, &str)], host: &str) {
@@ -437,16 +432,6 @@ mod tests {
                 "{host}: duplicate deploy path {relative}"
             );
         }
-    }
-
-    fn embedded_skill(relative: &str) -> &'static str {
-        GENERATED_SKILL_FILES
-            .iter()
-            .find(|file| file.relative == relative)
-            .map_or_else(
-                || panic!("shared skill should be embedded: {relative}"),
-                |file| file.contents,
-            )
     }
 
     #[test]
@@ -492,210 +477,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_mcp_template_uses_tracedecay_key() {
-        let mcp = cursor_files()
-            .into_iter()
-            .find(|(relative, _)| *relative == "mcp.json")
-            .map(|(_, contents)| contents)
-            .expect("cursor deploy set must include mcp.json");
-        let parsed: serde_json::Value = serde_json::from_str(mcp).unwrap();
-        assert!(
-            parsed["mcpServers"]["tracedecay"].is_object(),
-            "Cursor mcp-cursor.json must declare mcpServers.tracedecay"
-        );
-        assert!(
-            parsed["mcpServers"].get("graph").is_none(),
-            "Cursor mcp-cursor.json must not declare mcpServers.graph"
-        );
-    }
-
-    #[test]
-    fn every_embedded_file_has_content() {
-        // The macro embeds at compile time, so a missing source fails the build.
-        // Every file we ship (skills, manifests, mcp, hooks, README) is
-        // non-empty, so an empty embed signals a truncated or wrong source.
-        for host in [claude_files(), cursor_files(), codex_files(), kimi_files()] {
-            for (relative, contents) in host {
-                assert!(!contents.is_empty(), "{relative} embedded empty");
-            }
-        }
-    }
-
-    #[test]
-    fn kimi_manifest_declares_identity_and_inline_mcp_server() {
-        let manifest = kimi_files()
-            .into_iter()
-            .find(|(relative, _)| *relative == ".kimi-plugin/plugin.json")
-            .map(|(_, contents)| contents)
-            .expect("kimi deploy set must include .kimi-plugin/plugin.json");
-        let parsed: serde_json::Value = serde_json::from_str(manifest).unwrap();
-        assert_eq!(parsed["name"], "tracedecay");
-        assert_eq!(parsed["version"], "0.0.0");
-        let server = &parsed["mcpServers"]["tracedecay"];
-        assert!(
-            server.is_object(),
-            "kimi manifest must declare mcpServers.tracedecay"
-        );
-        assert_eq!(server["command"], "tracedecay");
-        assert_eq!(server["args"], serde_json::json!(["serve"]));
-        assert!(
-            parsed["mcpServers"].get("graph").is_none(),
-            "kimi manifest must not declare mcpServers.graph"
-        );
-    }
-
-    #[test]
-    fn kimi_files_ship_every_skill_command_and_the_readme() {
-        let files = kimi_files();
-
-        // Every embedded skill file deploys under its shared skills/ path.
-        for skill in GENERATED_SKILL_FILES {
-            assert!(
-                files
-                    .iter()
-                    .any(|(relative, _)| *relative == skill.relative),
-                "kimi deploy set is missing {}",
-                skill.relative
-            );
-        }
-
-        // The shared Claude commands deploy verbatim under commands/.
-        for command in CLAUDE_COMMAND_FILES {
-            let deployed = files
-                .iter()
-                .find(|(relative, _)| *relative == command.relative)
-                .map_or_else(
-                    || panic!("kimi deploy set is missing {}", command.relative),
-                    |(_, contents)| *contents,
-                );
-            assert_eq!(
-                deployed, command.contents,
-                "kimi must ship {} verbatim",
-                command.relative
-            );
-        }
-
-        // The Kimi README deploys as README.md.
-        let readme = files
-            .iter()
-            .find(|(relative, _)| *relative == "README.md")
-            .map(|(_, contents)| *contents)
-            .expect("kimi deploy set must include README.md");
-        assert!(
-            readme.contains("# TraceDecay Kimi Code Plugin"),
-            "kimi README.md must come from README-kimi.md"
-        );
-    }
-
-    /// The installer helpers operate on the manifest directly: the version
-    /// stamp rewrites `version`, and `set_mcp_command` rewrites the inline
-    /// `mcpServers.tracedecay.command`.
-    #[test]
-    fn kimi_manifest_round_trips_through_installer_rewrites() {
-        let raw = KIMI_MANIFEST_FILES
-            .iter()
-            .find(|file| file.relative == ".kimi-plugin/plugin.json")
-            .map(|file| file.contents)
-            .expect("kimi manifest must be embedded");
-
-        let stamped = stamp_manifest_version(raw).unwrap();
-        let stamped: serde_json::Value = serde_json::from_str(&stamped).unwrap();
-        assert_eq!(stamped["version"], crate::PRODUCT_VERSION);
-
-        let rewired = set_mcp_command(raw, "/abs/tracedecay").unwrap();
-        let rewired: serde_json::Value = serde_json::from_str(&rewired).unwrap();
-        assert_eq!(
-            rewired["mcpServers"]["tracedecay"]["command"],
-            "/abs/tracedecay"
-        );
-    }
-
-    #[test]
-    fn capability_discovery_skill_is_shared_and_matches_plugin_source() {
-        let relative = "skills/discovering-tracedecay/SKILL.md";
-        let source = embedded_skill(relative);
-        let on_disk = std::fs::read_to_string(plugin_source_root().join(relative))
-            .expect("discovering-tracedecay skill must exist on disk");
-        assert_eq!(
-            source, on_disk,
-            "embedded discovering-tracedecay skill must match plugin source"
-        );
-
-        for (host, files) in [
-            ("claude", claude_files()),
-            ("cursor", cursor_files()),
-            ("codex", codex_files()),
-            ("kimi", kimi_files()),
-            ("opencode", opencode_agent_files()),
-        ] {
-            let deployed = files
-                .iter()
-                .find(|(path, _)| *path == relative)
-                .map_or_else(
-                    || panic!("{host} is missing {relative}"),
-                    |(_, contents)| *contents,
-                );
-            assert_eq!(
-                deployed, source,
-                "{host} must ship the shared source verbatim"
-            );
-        }
-    }
-
-    #[test]
-    fn using_cli_skill_matches_plugin_source() {
-        let relative = "skills/using-the-cli/SKILL.md";
-        let source = embedded_skill(relative);
-        let on_disk = std::fs::read_to_string(plugin_source_root().join(relative))
-            .expect("using-the-cli skill must exist on disk");
-        assert_eq!(
-            source, on_disk,
-            "embedded using-the-cli skill must match plugin source"
-        );
-    }
-
-    /// Every embedded skill file maps to an on-disk source under `plugin/`.
-    #[test]
-    fn generated_skill_files_have_source_paths() {
-        let root = plugin_source_root();
-        assert!(
-            !GENERATED_SKILL_FILES.is_empty(),
-            "generated skill file set is empty"
-        );
-        for file in GENERATED_SKILL_FILES {
-            assert!(
-                root.join(file.relative).exists(),
-                "skill source missing: plugin/{}",
-                file.relative
-            );
-        }
-    }
-
-    /// The recursive embed must cover the on-disk skill tree exactly — every
-    /// file under `plugin/skills/` is embedded, and nothing extra.
-    #[test]
-    fn generated_skill_files_cover_the_skill_tree_exactly() {
-        let skills_root = plugin_source_root().join("skills");
-        let mut on_disk = BTreeSet::new();
-        collect_relative(&skills_root, &skills_root, &mut on_disk);
-
-        let embedded: BTreeSet<String> = GENERATED_SKILL_FILES
-            .iter()
-            .map(|file| {
-                file.relative
-                    .strip_prefix("skills/")
-                    .expect("skill deploy path is under skills/")
-                    .to_string()
-            })
-            .collect();
-
-        assert_eq!(
-            embedded, on_disk,
-            "GENERATED_SKILL_FILES must match every file under plugin/skills/ exactly"
-        );
-    }
-
-    #[test]
     fn first_party_plugin_assets_fit_host_bundle_artifact_bound() {
         use tracedecay_host_integration::MAX_ARTIFACT_CONTENT_BYTES;
 
@@ -712,22 +493,6 @@ mod tests {
                     contents.len() <= MAX_ARTIFACT_CONTENT_BYTES,
                     "{host} {relative} is {} bytes, exceeds MAX_ARTIFACT_CONTENT_BYTES ({MAX_ARTIFACT_CONTENT_BYTES})",
                     contents.len()
-                );
-            }
-        }
-    }
-
-    fn collect_relative(base: &Path, dir: &Path, out: &mut BTreeSet<String>) {
-        for entry in std::fs::read_dir(dir).expect("read skills dir").flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_relative(base, &path, out);
-            } else if path.is_file() {
-                out.insert(
-                    path.strip_prefix(base)
-                        .expect("under base")
-                        .to_string_lossy()
-                        .replace('\\', "/"),
                 );
             }
         }

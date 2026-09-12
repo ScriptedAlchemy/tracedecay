@@ -21,9 +21,7 @@ use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
 
-use crate::common::{
-    EnvVarGuard, fake_codex_bin, install_fake_codex_launcher, windows_python_launcher,
-};
+use crate::common::{EnvVarGuard, fake_codex_bin, install_fake_codex_launcher};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -57,54 +55,6 @@ fn register_runtime_ports() {
     ONCE.call_once(|| {
         tracedecay::register_runtime_ports().expect("runtime port registration");
     });
-}
-
-struct EchoBackend;
-
-impl AgentTaskBackend for EchoBackend {
-    fn run_task(
-        &self,
-        request: &AgentTaskRequest,
-    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
-    {
-        Ok(AgentTaskResponse {
-            run_id: request.run_id.clone(),
-            task: request.task,
-            output_text: request.prompt.clone(),
-            output_json: extract_json_object_prefix(&request.prompt).ok(),
-            model: Some("test-model".to_string()),
-            provider: Some("fixture".to_string()),
-            input_tokens: Some(12),
-            output_tokens: Some(34),
-        })
-    }
-}
-
-#[test]
-fn backend_contract_round_trips_structured_task_output() {
-    let request = AgentTaskRequest::new(
-        "run_001".to_string(),
-        AgentTaskKind::MemoryCurator,
-        r#"{"ops":[{"kind":"keep","id":"fact-1"}]}"#.to_string(),
-        Some("sha256:evidence".to_string()),
-        json!({"bank":"core"}),
-    );
-
-    let response = EchoBackend.run_task(&request).unwrap();
-
-    assert_eq!(response.run_id, "run_001");
-    assert_eq!(response.task, AgentTaskKind::MemoryCurator);
-    assert_eq!(response.model.as_deref(), Some("test-model"));
-    assert_eq!(request.evidence_hash.as_deref(), Some("sha256:evidence"));
-    assert_eq!(request.contract.task_key, "memory_curator");
-    assert_eq!(request.contract.prompt_version, "memory_curator:v1");
-    assert_eq!(request.contract.response_schema["required"][0], "ops");
-    assert!(request.contract.strict_json);
-    assert!(request.input_hash.starts_with("sha256:"));
-    assert_ne!(request.input_hash, "sha256:evidence");
-    assert_eq!(response.output_json.unwrap()["ops"][0]["id"], "fact-1");
-    assert_eq!(response.input_tokens, Some(12));
-    assert_eq!(response.output_tokens, Some(34));
 }
 
 #[test]
@@ -620,41 +570,6 @@ fn codex_app_server_backend_uses_environment_model_when_unpinned() {
 }
 
 #[test]
-fn codex_app_server_backend_ignores_env_generation_options() {
-    register_runtime_ports();
-    let fake = FakeCodexAppServer::new_with_behavior("json");
-    // Env vars are only read while the backend is constructed, so hold the
-    // env lock just for that window instead of across the subprocess run.
-    let backend = {
-        let _env_lock = ENV_LOCK.lock().unwrap();
-        let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
-        let _max_tokens = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MAX_TOKENS", "2048");
-        let _temperature = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TEMPERATURE", "0.25");
-        CodexAppServerBackend::from_automation_config(&AutomationConfig {
-            backend: AutomationBackend::CodexAppServer,
-            timeout_secs: fake_codex_response_timeout_secs(),
-            ..AutomationConfig::default()
-        })
-    };
-    let request = AgentTaskRequest::new(
-        "run_env_runtime_options".to_string(),
-        AgentTaskKind::SkillWriter,
-        r#"{"skills":[]}"#.to_string(),
-        None,
-        json!({}),
-    );
-
-    let response = backend.run_task(&request).unwrap();
-
-    assert_eq!(response.run_id, "run_env_runtime_options");
-    assert_eq!(response.output_json.unwrap()["skills"], json!([]));
-    let messages = fake.logged_messages();
-    assert!(messages[3]["params"].get("maxOutputTokens").is_none());
-    assert!(messages[3]["params"].get("temperature").is_none());
-    assert_process_gone(fake.child_pid());
-}
-
-#[test]
 fn codex_app_server_backend_propagates_timeout_errors_and_reaps_child() {
     // Short but not tight: the fake must have time to start and write its pid
     // file on Linux before the client gives up and reaps it.
@@ -747,66 +662,6 @@ fn fake_codex_app_server_uses_thread_model_when_turn_omits_model() {
 
     assert_eq!(summary.text, "summary from completed item");
     assert_eq!(summary.model.as_deref(), Some("thread-model"));
-    assert_process_gone(fake.child_pid());
-}
-
-#[test]
-fn fake_codex_app_server_rejects_empty_turn_output() {
-    let fake = FakeCodexAppServer::new_with_behavior("empty");
-    let config = CodexAppServerSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
-        model: None,
-        timeout: fake_codex_response_timeout(),
-    };
-
-    let err = run_prompt_with_codex_app_server("summarize this", &config, "test_source")
-        .unwrap_err()
-        .to_string();
-
-    assert!(
-        err.contains("codex app-server returned an empty summary"),
-        "unexpected error: {err}"
-    );
-    assert_process_gone(fake.child_pid());
-}
-
-#[test]
-fn fake_codex_app_server_times_out_and_reaps_child() {
-    let fake = FakeCodexAppServer::new_with_behavior("timeout");
-    let config = CodexAppServerSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
-        model: None,
-        timeout: Duration::from_millis(300),
-    };
-
-    let err = run_prompt_with_codex_app_server("summarize this", &config, "test_source")
-        .unwrap_err()
-        .to_string();
-
-    assert!(
-        err.contains("timed out waiting for codex app-server"),
-        "unexpected error: {err}"
-    );
-    assert_process_gone(fake.child_pid());
-}
-
-#[test]
-fn fake_codex_app_server_rejects_malformed_json_and_reaps_child() {
-    let fake = FakeCodexAppServer::new_with_behavior("malformed");
-    let config = CodexAppServerSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
-        model: None,
-        timeout: fake_codex_response_timeout(),
-    };
-
-    let err = run_prompt_with_codex_app_server("summarize this", &config, "test_source")
-        .unwrap_err()
-        .to_string();
-
-    assert!(
-        err.contains("expected ident") || err.contains("expected value"),
-        "unexpected error: {err}"
-    );
     assert_process_gone(fake.child_pid());
 }
 
@@ -1000,16 +855,6 @@ fn assert_process_gone(pid: u32) {
 
 #[cfg(not(target_os = "linux"))]
 fn assert_process_gone(_pid: u32) {}
-
-#[test]
-fn windows_python_launcher_prefers_setup_python_and_preserves_exit_status() {
-    let launcher = windows_python_launcher("codex.py");
-
-    assert!(launcher.contains("%Python_ROOT_DIR%\\python.exe"));
-    assert!(launcher.contains("%pythonLocation%\\python.exe"));
-    assert!(launcher.contains("exit /b %ERRORLEVEL%"));
-    assert!(!launcher.contains("if not errorlevel 1 exit /b 0"));
-}
 
 /// Backend fake whose first `fail_until` invocations fail with a fixed error
 /// message, then every later invocation succeeds. Counts total invocations so

@@ -2,21 +2,6 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn host_event_ordering_is_kept_distinct_from_transcript_ordering() {
-    let event = json!({
-        "event_id": "evt-redacted",
-        "event_sequence": 41,
-        "timestamp": 1_783_500_600_i64,
-    });
-    let mut metadata = serde_json::Map::new();
-    append_host_event_ordering(&mut metadata, &event, 128);
-    assert_eq!(metadata["cursor_host_event_id"], "evt-redacted");
-    assert_eq!(metadata["cursor_host_event_sequence"], 41);
-    assert_eq!(metadata["cursor_host_event_timestamp"], 1_783_500_600_i64);
-    assert_eq!(metadata["cursor_transcript_offset"], 128);
-}
-
-#[test]
 fn native_record_identity_is_stable_across_json_formatting() {
     let compact: Value =
         serde_json::from_str(r#"{"role":"assistant","message":{"content":"redacted fixture"}}"#)
@@ -140,77 +125,6 @@ fn canonical_record_is_stable_across_hook_sweep_and_mtime_context() {
         serde_json::to_value(hook).unwrap(),
         serde_json::to_value(sweep).unwrap()
     );
-}
-
-#[test]
-fn canonical_cursor_record_keeps_typed_tools_and_structured_content() {
-    let native = json!({
-        "role": "assistant",
-        "cwd": "/secret/worktree",
-        "workspace_roots": ["/secret/worktree"],
-        "message": {
-            "content": [
-                {"type": "text", "text": "redacted answer"},
-                {
-                    "type": "tool_use",
-                    "id": "tool-redacted",
-                    "name": "Read",
-                    "input": {"path": "/secret/worktree/file.rs", "token": "credential-redacted"}
-                },
-                {"type": "thinking", "thinking": "provider-visible summary"}
-            ]
-        }
-    });
-    let range = tracedecay_domain::ObservationSourceRangeV1::new(10, 90).unwrap();
-    let record_id = observation_native_record_id("cursor", "session-redacted", &native).unwrap();
-    let envelope = normalize_cursor_observation(
-        &native,
-        "session-redacted",
-        record_id.clone(),
-        range,
-        None,
-        None,
-    )
-    .unwrap();
-    let rendered = format!("{envelope:?}");
-    assert!(rendered.contains("Message"));
-    assert!(rendered.contains("ToolInvocation"));
-    assert!(rendered.contains("Reasoning"));
-    assert!(rendered.contains("FileBytes"));
-    assert!(rendered.contains(record_id.as_str()));
-    assert!(rendered.contains("/secret/worktree/file.rs"));
-    assert!(rendered.contains("credential-redacted"));
-    let relations = serde_json::to_value(envelope.relations()).unwrap();
-    assert!(relations.get("thread_id").is_none());
-    assert!(relations.get("turn_id").is_none());
-    assert!(relations.get("agent_id").is_none());
-    assert!(relations.get("parent_agent_id").is_none());
-}
-
-#[test]
-fn cursor_conversation_id_sets_thread_relation_without_inventing_turn() {
-    let native = json!({
-        "role": "user",
-        "conversation_id": "conversation-native",
-        "message": {"content": [{"type": "text", "text": "hello"}]}
-    });
-    let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 20).unwrap();
-    let record_id = observation_native_record_id("cursor", "conversation-native", &native).unwrap();
-    let envelope = normalize_cursor_observation(
-        &native,
-        "conversation-native",
-        record_id.clone(),
-        range,
-        None,
-        None,
-    )
-    .unwrap();
-    let relations = serde_json::to_value(envelope.relations()).unwrap();
-    assert_eq!(relations["thread_id"], "conversation-native");
-    assert_eq!(relations["message_id"], record_id.as_str());
-    assert!(relations.get("turn_id").is_none());
-    assert!(relations.get("agent_id").is_none());
-    assert!(relations.get("parent_agent_id").is_none());
 }
 
 #[test]

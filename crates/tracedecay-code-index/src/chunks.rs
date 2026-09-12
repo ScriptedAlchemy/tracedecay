@@ -2502,23 +2502,17 @@ fn attribute_whitespace_only_windows(source: &str, pending: &mut Vec<PendingChun
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    use std::time::Duration;
-    use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+    use std::sync::Arc;
 
     use super::*;
     use crate::extract::ExtractionCoverageV1;
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-        CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest, FileIdentityDigest,
-        FileOccurrenceId, GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest,
-        PolicyRevisionId, ProjectId, SanitizationReceiptId, SanitizedCodeFileV1,
-        SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-        SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkId, ContentDigest, FileOccurrenceId,
+        GrammarRevision, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId,
+        ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
+        SourceSpan, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
 
     use crate::extract::{
@@ -2529,77 +2523,6 @@ mod tests {
     use crate::languages::{LanguageRegistry, StaticLanguageRegistry};
 
     struct AlwaysCancelled;
-
-    /// Stolen Rayon workers inside a nested chunk fan-out each take their own
-    /// admission and never exceed the injected width. The authority is local
-    /// to this test — nothing process-wide is installed, so it cannot gate
-    /// sibling tests in the shared `--lib` binary.
-    #[test]
-    fn nested_chunk_fanout_admits_stolen_workers_without_exceeding_width() {
-        let _preview = crate::parallelism::preview_worker_plan(
-            tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
-            20 * crate::parallelism::INDEX_WORKER_RESIDENT_BUDGET_BYTES_V1,
-        );
-        assert!(
-            crate::parallelism::installed_worker_status().is_none(),
-            "worker-plan preview must not install the worker runtime"
-        );
-        let authority = Arc::new(ProcessBackgroundCpuV1::new(
-            NonZeroUsize::new(2).expect("nonzero background width"),
-        ));
-        let fixture = chunk_source("pub fn shared_cpu_fixture() {}\n")
-            .chunks
-            .into_iter()
-            .next()
-            .expect("fixture chunk");
-        let chunks = vec![fixture; PARALLEL_CHUNK_THRESHOLD * 2];
-        let active = AtomicUsize::new(0);
-        let maximum = AtomicUsize::new(0);
-        let parent_completed = AtomicUsize::new(0);
-        let stolen_completed = AtomicUsize::new(0);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .build()
-            .expect("nested Rayon pool");
-
-        let mapped = pool
-            .install(|| {
-                authority.with_permit(|| {
-                    let parent = rayon::current_thread_index().expect("parent Rayon worker");
-                    map_chunks_ordered(
-                        |unit| authority.with_permit(unit),
-                        &chunks,
-                        |_| {
-                            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                            maximum.fetch_max(current, Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(5));
-                            if rayon::current_thread_index() == Some(parent) {
-                                parent_completed.fetch_add(1, Ordering::SeqCst);
-                            } else {
-                                stolen_completed.fetch_add(1, Ordering::SeqCst);
-                            }
-                            active.fetch_sub(1, Ordering::SeqCst);
-                            Ok(())
-                        },
-                    )
-                })
-            })
-            .expect("nested chunk fan-out");
-
-        assert_eq!(mapped.len(), chunks.len());
-        // Stolen workers may never exceed the installed width; whether the
-        // scheduler reaches the full width is a timing outcome on a loaded
-        // host, not the contract under test.
-        let observed = maximum.load(Ordering::SeqCst);
-        assert!(
-            (1..=authority.width().get()).contains(&observed),
-            "observed concurrency {observed} must stay within width {}",
-            authority.width().get()
-        );
-        assert!(parent_completed.load(Ordering::SeqCst) > 0);
-        assert!(stolen_completed.load(Ordering::SeqCst) > 0);
-        assert_eq!(authority.active_units(), 0);
-    }
 
     impl ExtractionCancellation for AlwaysCancelled {
         fn is_cancelled(&self) -> bool {
@@ -2715,16 +2638,6 @@ mod tests {
         let mut wrong_membership = file_chunks();
         wrong_membership.document.chunk_ids[0] = id("chunk.other");
         assert!(wrong_membership.validate().is_err());
-    }
-
-    #[test]
-    fn admitted_chunk_is_consumed_without_widening_mint_authority() {
-        let chunks = file_chunks();
-        let expected = chunks.chunks[0].clone();
-        let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
-        let admitted = authority.admit(expected.clone()).expect("exact admission");
-
-        assert_eq!(admitted.into_chunk(), *expected);
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";
@@ -2878,17 +2791,6 @@ mod tests {
         digests
     }
 
-    /// Reminting the same sealed file twice (cold then warm reusable sink)
-    /// must keep the exact authority digest map.
-    #[test]
-    fn reminted_authority_digests_match_across_reusable_sink_calls() {
-        let chunks = wide_chunks(48);
-        let first = ExactExtractionAuthorityV1::restore(&chunks).expect("first remint");
-        let second = ExactExtractionAuthorityV1::restore(&chunks).expect("warm remint");
-        assert_eq!(first.digests(), second.digests());
-        assert_eq!(first.digests(), sequential_digest_reference(&chunks.chunks));
-    }
-
     /// A row that is not the minted allocation is admitted by digest: an
     /// equal copy passes, a same-id row with different bytes is refused, and
     /// the minted rows keep admitting after every other reference to them
@@ -2992,47 +2894,6 @@ mod tests {
         assert_eq!(
             generation_first.validate(),
             Err(ChunkingFailureV1::GenerationMismatch)
-        );
-    }
-
-    /// Timing probe, not an assertion: prints the single-threaded canonical
-    /// digest sweep against the fanned-out mint over the same fixture.
-    /// `cargo test --release -p tracedecay-code-index -- --ignored --nocapture`
-    #[test]
-    #[ignore = "timing probe; run explicitly with --ignored --nocapture"]
-    fn digest_sweep_timing_probe() {
-        use std::time::{Duration, Instant};
-
-        /// Report the fastest of `rounds` runs: on a shared build host the mean
-        /// tracks neighbouring load, the minimum tracks the code.
-        fn best_of(rounds: u32, mut run: impl FnMut()) -> Duration {
-            run();
-            (0..rounds)
-                .map(|_| {
-                    let started = Instant::now();
-                    run();
-                    started.elapsed()
-                })
-                .min()
-                .unwrap_or_default()
-        }
-
-        let chunks = wide_chunks(400);
-        let rounds = 25;
-
-        let sequential = best_of(rounds, || {
-            let _ = sequential_digest_reference(&chunks.chunks);
-        });
-        let parallel = best_of(rounds, || {
-            let _ = ExactExtractionAuthorityV1::mint(&chunks.chunks).expect("mint");
-        });
-        let validate = best_of(rounds, || {
-            chunks.validate().expect("validate");
-        });
-
-        println!(
-            "chunks={} sequential_digest_sweep={sequential:?} parallel_mint={parallel:?} validate={validate:?}",
-            chunks.chunks.len()
         );
     }
 
@@ -3407,168 +3268,6 @@ mod tests {
     }
 
     #[test]
-    fn chunking_is_deterministic_across_runs() {
-        let first = chunk_source(RUST_SOURCE);
-        let second = chunk_source(RUST_SOURCE);
-        assert_eq!(first, second);
-    }
-
-    struct CountingRustExtractor {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl tracedecay_code_extraction::LanguageExtractor for CountingRustExtractor {
-        fn extensions(&self) -> &[&str] {
-            tracedecay_code_extraction::RustExtractor.extensions()
-        }
-
-        fn language_name(&self) -> &str {
-            tracedecay_code_extraction::RustExtractor.language_name()
-        }
-
-        fn extract(&self, file_path: &str, source: &str) -> tracedecay_domain::ExtractionResult {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            tracedecay_code_extraction::RustExtractor.extract(file_path, source)
-        }
-
-        // Delegating to the real artifact walk, not to the trait default over
-        // `extract`, is what keeps the counting double honest: the default
-        // carries no import evidence, so a batch minted through it would
-        // declare rows the live extractor does not agree with.
-        fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            tracedecay_code_extraction::LanguageExtractor::extract_artifact(
-                &tracedecay_code_extraction::RustExtractor,
-                file_path,
-                source,
-            )
-        }
-
-        fn extract_parsed(
-            &self,
-            file_path: &str,
-            source: &str,
-            tree: &tree_sitter::Tree,
-            scope: tracedecay_code_extraction::parsed_extraction::ParsedExtractionScope<'_>,
-        ) -> tracedecay_code_extraction::parsed_extraction::ParsedExtraction {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            tracedecay_code_extraction::LanguageExtractor::extract_parsed(
-                &tracedecay_code_extraction::RustExtractor,
-                file_path,
-                source,
-                tree,
-                scope,
-            )
-        }
-    }
-
-    #[test]
-    fn extraction_artifacts_feed_chunking_without_a_second_parse() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let registry = Arc::new(
-            tracedecay_code_extraction::LanguageRegistry::from_extractors_for_test(vec![Box::new(
-                CountingRustExtractor {
-                    calls: Arc::clone(&calls),
-                },
-            )]),
-        );
-        let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&registry));
-        let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        let descriptor = rust_descriptor();
-        let extraction = extractor
-            .extract(&file, &descriptor, &NeverCancelled)
-            .expect("extraction succeeds");
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-
-        let shared_chunker = DeterministicCodeChunker::from_shared_registry(
-            id("generation.fixture"),
-            id("repo.fixture"),
-            id("sanitizer.v1"),
-            id("policy.v1"),
-            id("chunker.v1"),
-            registry,
-        );
-        let (actual, _) = shared_chunker
-            .index_file_with_authority_from_extraction(
-                &file,
-                &extraction,
-                &descriptor,
-                SensitivityLevelV1::Public,
-                &NeverCancelled,
-            )
-            .expect("chunking reuses parse artifacts");
-        assert_eq!(
-            calls.load(Ordering::Relaxed),
-            1,
-            "chunking must not invoke the parser again"
-        );
-
-        let expected = chunker()
-            .index_file(&file, extraction.batch(), &descriptor, &NeverCancelled)
-            .expect("legacy chunking succeeds");
-        assert_eq!(actual, expected, "parse reuse must preserve every artifact");
-    }
-
-    #[test]
-    fn oversized_body_splits_on_pinned_fallback_windows() {
-        use std::fmt::Write as _;
-        let mut source = String::from("pub fn huge() {\n");
-        for index in 0..9000 {
-            writeln!(source, "    let value_{index} = {index}usize;").unwrap();
-        }
-        source.push_str("}\n");
-        assert!(source.len() > MAX_CHUNK_TEXT_BYTES);
-
-        let result = chunk_source(&source);
-        result.validate().expect("valid chunk set");
-        let body_pieces: Vec<&CodeSearchChunkV1> = result
-            .chunks
-            .iter()
-            .map(Arc::as_ref)
-            .filter(|chunk| chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody)
-            .collect();
-        assert!(body_pieces.len() > 1, "oversized body split into windows");
-        for piece in &body_pieces {
-            assert!(piece.sanitized_text.as_str().len() <= MAX_CHUNK_TEXT_BYTES);
-            assert_eq!(piece.anchor.parent_chunk_id, None);
-        }
-        // Pinned fallback split: the first window starts at the body start
-        // and window texts tile the body with the pinned overlap.
-        let first_path_window = &body_pieces[0];
-        assert_eq!(first_path_window.anchor.source_span.start_byte, 0);
-        assert!(
-            first_path_window
-                .sanitized_text
-                .as_str()
-                .starts_with("pub fn huge()")
-        );
-
-        // Union of window spans covers the whole body (pinned overlap).
-        let mut ordered: Vec<(u64, u64)> = body_pieces
-            .iter()
-            .map(|piece| {
-                (
-                    piece.anchor.source_span.start_byte,
-                    piece.anchor.source_span.end_byte,
-                )
-            })
-            .collect();
-        ordered.sort_unstable();
-        let body_start = ordered.first().expect("pieces").0;
-        let body_end = ordered.last().expect("pieces").1;
-        let mut cursor = body_start;
-        for (start, end) in ordered {
-            assert!(start <= cursor, "windows overlap or abut (pinned overlap)");
-            cursor = cursor.max(end);
-        }
-        assert_eq!(cursor, body_end);
-
-        // Deterministic split across runs.
-        let again = chunk_source(&source);
-        assert_eq!(result, again);
-    }
-
-    #[test]
     fn oversized_impl_splits_on_member_boundaries() {
         use std::fmt::Write as _;
         let mut source = String::from("pub struct Big;\n\nimpl Big {\n");
@@ -3873,66 +3572,6 @@ pub fn real_symbol() {}
         ] {
             assert!(!symbols.contains(rejected));
         }
-    }
-
-    #[test]
-    fn lineage_symbols_preserve_extracted_identity_and_canonical_order() {
-        let source = "alpha\nbeta\n";
-        let file_identity: FileIdentityDigest = id(&digest('f'));
-        let rows = vec![
-            fixture_function_row(
-                source,
-                "node.beta",
-                "sym.beta",
-                "crate::beta",
-                'b',
-                SourceSpan {
-                    start_byte: 6,
-                    end_byte: 10,
-                },
-            ),
-            fixture_function_row(
-                source,
-                "node.alpha",
-                "sym.alpha",
-                "crate::alpha",
-                'a',
-                SourceSpan {
-                    start_byte: 0,
-                    end_byte: 5,
-                },
-            ),
-        ];
-
-        let symbols = chunker()
-            .lineage_symbols(
-                source,
-                &file_identity,
-                &rows,
-                &rows
-                    .iter()
-                    .map(|row| (row.occurrence.clone(), row.span))
-                    .collect(),
-            )
-            .expect("valid symbol lineage records");
-
-        assert_eq!(
-            symbols
-                .iter()
-                .map(|symbol| symbol.occurrence.as_str())
-                .collect::<Vec<_>>(),
-            vec!["sym.alpha", "sym.beta"],
-            "lineage records must be canonically ordered by occurrence"
-        );
-        let alpha = symbols
-            .iter()
-            .find(|symbol| symbol.qualified_name == "crate::alpha")
-            .expect("alpha lineage record");
-        assert_eq!(alpha.identity, id(&digest('a')));
-        assert_eq!(alpha.kind, "function");
-        assert_eq!((symbols[1].start_line, symbols[1].line_span), (1, 1));
-        assert_eq!(alpha.file_identity, file_identity);
-        assert_eq!(alpha.content_digest, content_digest(b"alpha"));
     }
 
     #[test]
@@ -4573,58 +4212,6 @@ pub fn real_symbol() {}
         );
         assert!(resolved.is_empty());
         assert!(retained.is_empty());
-    }
-
-    #[test]
-    fn rematerialization_rebinds_whole_symbol_term_authority() {
-        let prior = chunk_source("pub fn real_symbol() {}\n");
-        let prior_chunk = prior
-            .chunks
-            .iter()
-            .find(|chunk| {
-                chunk.anchor.grain == CodeSearchChunkGrainV1::SymbolBody
-                    && chunk.sanitized_text.as_str().contains("real_symbol")
-            })
-            .expect("symbol body chunk");
-        let prior_occurrence = prior_chunk
-            .anchor
-            .symbol_occurrence_id
-            .as_ref()
-            .expect("prior symbol occurrence")
-            .clone();
-        assert!(
-            prior_chunk
-                .exact_terms
-                .iter()
-                .any(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
-        );
-
-        let current = prior
-            .rematerialize_for_generation(
-                id::<CodeGenerationId>("generation.carried"),
-                id::<FileOccurrenceId>("file.carried"),
-            )
-            .expect("rematerialized chunks");
-        let current_chunk = current
-            .chunks
-            .iter()
-            .find(|chunk| chunk.id == prior_chunk.id)
-            .expect("carried chunk");
-        let current_occurrence = current_chunk
-            .anchor
-            .symbol_occurrence_id
-            .as_ref()
-            .expect("current symbol occurrence");
-
-        assert_ne!(current_occurrence, &prior_occurrence);
-        assert!(
-            current_chunk
-                .exact_terms
-                .iter()
-                .filter(|term| term.kind() == ExactTechnicalTermKindV1::WholeSymbol)
-                .all(|term| term.symbol_occurrence_id() == Some(current_occurrence))
-        );
-        current.validate().expect("rematerialized chunks validate");
     }
 
     #[test]

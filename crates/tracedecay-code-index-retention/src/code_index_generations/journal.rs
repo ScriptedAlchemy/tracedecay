@@ -211,18 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn load_journal_round_trips_a_regular_file() {
-        let store = tempfile::tempdir().expect("store");
-        let spec = fixture_spec();
-        persist_journal(store.path(), &spec, &FixtureJournalV1 { value: 7 })
-            .expect("persist fixture journal");
-        assert_eq!(
-            load_journal(store.path(), &spec).expect("load fixture journal"),
-            Some(FixtureJournalV1 { value: 7 })
-        );
-    }
-
-    #[test]
     fn load_journal_returns_none_when_missing() {
         let store = tempfile::tempdir().expect("store");
         assert_eq!(

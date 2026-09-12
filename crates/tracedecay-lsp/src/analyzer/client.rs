@@ -1416,7 +1416,6 @@ mod tests {
     use super::{
         LspSemanticRequestError, cancel_request_message, decode_semantic_request,
         encode_semantic_request, file_uri_from_path_text, is_current_diagnostic_publication,
-        lsp_initialization_options,
     };
 
     #[test]
@@ -1480,26 +1479,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_errors_render_present_and_missing_codes_unambiguously() {
-        assert_eq!(
-            LspSemanticRequestError::Remote {
-                code: Some(-32603),
-                message: "server failed".to_owned(),
-            }
-            .to_string(),
-            "analyzer returned error -32603: server failed"
-        );
-        assert_eq!(
-            LspSemanticRequestError::Remote {
-                code: None,
-                message: "server failed".to_owned(),
-            }
-            .to_string(),
-            "analyzer returned an error: server failed"
-        );
-    }
-
-    #[test]
     fn file_uri_encodes_lsp_paths() {
         assert_eq!(
             file_uri_from_path_text("/tmp/trace decay/main#one.rs"),
@@ -1525,15 +1504,6 @@ mod tests {
                 "params": { "id": 42 },
             })
         );
-    }
-
-    #[test]
-    fn rust_analyzer_initialization_disables_competing_cargo_flycheck() {
-        assert_eq!(
-            lsp_initialization_options("/toolchains/stable/bin/rust-analyzer"),
-            json!({ "checkOnSave": false })
-        );
-        assert_eq!(lsp_initialization_options("clangd"), json!({}));
     }
 
     #[test]

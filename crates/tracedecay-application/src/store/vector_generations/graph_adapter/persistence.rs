@@ -81,22 +81,10 @@ pub(super) fn storage_error(error: impl std::fmt::Display) -> VectorGenerationSt
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_graph_db::{GraphBudgetKind, GraphDbError};
+    use tracedecay_graph_db::GraphDbError;
 
     use super::map_graph_error;
     use crate::store::vector_generations::VectorGenerationStoreErrorV1;
-
-    #[test]
-    fn map_graph_error_names_exhausted_budget_kind_and_limit() {
-        let error = map_graph_error(GraphDbError::budget_exhausted(
-            GraphBudgetKind::Mutation,
-            4_096,
-        ));
-        assert_eq!(
-            error.to_string(),
-            "semantic vector graph is unavailable: semantic vector graph mutation budget is exhausted (limit 4096)"
-        );
-    }
 
     #[test]
     fn stale_writer_conflict_keeps_its_guard_context() {

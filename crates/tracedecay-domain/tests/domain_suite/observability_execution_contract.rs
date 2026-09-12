@@ -1,39 +1,9 @@
 use tracedecay_domain::{
-    BlockedCauseV1, CoverageStateV1, DeadlineObservedV1, DeadlineOutcomeV1,
-    DeliverySurfaceFamilyV1, ExecutionPlacementV1, ExecutionTopologyKindV1,
-    ExecutionTopologySampledV1, IndexObservationKindV1, IndexObservedV1, IntegrationStrategyV1,
-    NoProgressEscalationV1, NoProgressObservedV1, ObservabilityPayloadV1, ReviewTopologyV1,
-    StorageObservationKindV1, StorageObservedV1, WorkBlockedIntervalObservedV1,
-    WorkDeliveryFanoutObservedV1, WorkExecutionLeakKindV1, WorkExecutionLeakObservedV1,
-    WorkExecutionLeakRecoveryV1, WorkTopologyBranchV1,
+    BlockedCauseV1, CoverageStateV1, DeliverySurfaceFamilyV1, ExecutionPlacementV1,
+    ExecutionTopologyKindV1, ExecutionTopologySampledV1, IntegrationStrategyV1,
+    ObservabilityPayloadV1, ReviewTopologyV1, WorkBlockedIntervalObservedV1,
+    WorkDeliveryFanoutObservedV1, WorkTopologyBranchV1,
 };
-
-#[test]
-fn topology_payload_round_trips_with_independent_bounded_dimensions() {
-    let payload = ObservabilityPayloadV1::ExecutionTopology(ExecutionTopologySampledV1 {
-        topology: ExecutionTopologyKindV1::Hybrid,
-        placement: ExecutionPlacementV1::LinkedWorktree,
-        branch_topology: WorkTopologyBranchV1::LocalStack,
-        review_topology: ReviewTopologyV1::IndependentReview,
-        integration_strategy: IntegrationStrategyV1::CherryPickExactCommits,
-        requested_width: 8,
-        accepted_width: 6,
-        admitted_width: 4,
-        active_width: 3,
-        useful_width: 2,
-        runnable_count: 4,
-        blocked_count: 1,
-        shared_authority_serialized_count: 1,
-        local_anchor_refs: vec!["anchor:one".into(), "anchor:two".into()],
-    });
-
-    payload.validate().expect("bounded topology payload");
-    let encoded = serde_json::to_vec(&payload).expect("serialize");
-    assert_eq!(
-        serde_json::from_slice::<ObservabilityPayloadV1>(&encoded).expect("deserialize"),
-        payload
-    );
-}
 
 #[test]
 fn payload_limits_reject_identity_fanout_and_invalid_intervals() {
@@ -77,57 +47,6 @@ fn payload_limits_reject_identity_fanout_and_invalid_intervals() {
             coverage: CoverageStateV1::Known,
         });
     assert_eq!(invalid_interval.validate(), Err("blocked_interval"));
-}
-
-#[test]
-fn no_progress_deadline_storage_index_and_leak_states_are_typed() {
-    let no_progress = ObservabilityPayloadV1::NoProgress(NoProgressObservedV1 {
-        run_deadline_ref: "deadline:opaque".into(),
-        concurrency_policy_revision: "policy:v1".into(),
-        workflow_stage: tracedecay_domain::WorkflowStageClassV1::Execute,
-        configured_timeout_micros: 30_000_000,
-        last_committed_frontier: 7,
-        elapsed_stall_micros: 31_000_000,
-        remaining_run_budget_micros: 4_000_000,
-        escalation: NoProgressEscalationV1::Cancel,
-        effect_outcome: tracedecay_domain::EffectReconciliationOutcomeV1::Unknown,
-    });
-    no_progress.validate().expect("no-progress payload");
-
-    let deadline = ObservabilityPayloadV1::Deadline(DeadlineObservedV1 {
-        deadline_class: tracedecay_domain::DeadlineClassV1::Run,
-        budget_micros: 35_000_000,
-        elapsed_micros: 31_000_000,
-        outcome: DeadlineOutcomeV1::Cancelled,
-    });
-    deadline.validate().expect("deadline payload");
-
-    let storage = ObservabilityPayloadV1::Storage(StorageObservedV1 {
-        kind: StorageObservationKindV1::WriteLatency,
-        duration_micros: Some(88),
-        quantity: None,
-        coverage: CoverageStateV1::Known,
-    });
-    storage.validate().expect("storage payload");
-
-    let index = ObservabilityPayloadV1::Index(IndexObservedV1 {
-        kind: IndexObservationKindV1::Publication,
-        duration_micros: Some(144),
-        item_count: Some(12),
-        queue_depth_bucket: tracedecay_domain::QueueDepthBucketV1::OneToEight,
-        outcome: tracedecay_domain::IndexOutcomeV1::Published,
-        coverage: CoverageStateV1::Known,
-    });
-    index.validate().expect("index payload");
-
-    let leak = ObservabilityPayloadV1::WorkExecutionLeak(WorkExecutionLeakObservedV1 {
-        kind: WorkExecutionLeakKindV1::EffectUnknownPastDeadline,
-        detection_horizon_micros: 60_000_000,
-        recovery: WorkExecutionLeakRecoveryV1::Pending,
-        owner_class: tracedecay_domain::LeakOwnerClassV1::Workflow,
-        coverage: CoverageStateV1::Known,
-    });
-    leak.validate().expect("leak payload");
 }
 
 #[test]

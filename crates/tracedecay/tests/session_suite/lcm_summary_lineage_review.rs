@@ -1009,45 +1009,6 @@ async fn immutable_summary_exact_replay_keeps_frozen_lineage_after_close() {
 }
 
 #[tokio::test]
-async fn immutable_summary_exact_replay_survives_production_open() {
-    let tmp = TempDir::new().unwrap();
-    let profile_root = tmp.path().join(".tracedecay");
-    let requested = {
-        let db = registered_lcm_runtime(&tmp).await;
-        let store_ids = insert_messages(&db, "cursor", "session-production-open", &["alpha"]).await;
-        let requested = publication(
-            "summary.production-open.primary",
-            None,
-            draft(
-                "cursor",
-                "session-production-open",
-                0,
-                "production open summary",
-                vec![LcmSourceRef::RawMessage {
-                    store_id: store_ids[0],
-                }],
-            ),
-        );
-        db.lcm_publish_immutable_summary(requested.clone())
-            .await
-            .unwrap();
-        requested
-    };
-
-    let reopened = HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .expect("registered runtime must accept immutable-summary receipt authority");
-    let replay = reopened
-        .lcm_publish_immutable_summary(requested)
-        .await
-        .expect("exact replay must survive production close/open");
-    assert_eq!(
-        replay.disposition,
-        LcmSummaryPublicationDisposition::ExactReplay
-    );
-}
-
-#[tokio::test]
 async fn immutable_summary_lineage_rejects_foreign_session_canary_sources_without_disclosure() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;

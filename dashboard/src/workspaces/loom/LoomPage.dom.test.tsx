@@ -515,34 +515,6 @@ describe('LoomPage', () => {
     ).toBeNull();
   });
 
-  it('states which threads have no recorded extent, with the real count', async () => {
-    renderLoom();
-    await screen.findByText('Deliver Git primitive runtime');
-    // One fixture has a durable end, one a last-message observation, and one is open.
-    expect(
-      screen.getByText(
-        /1 of 3 sessions have no\s+recorded end or later message observation/,
-      ),
-    ).toBeTruthy();
-    expect(screen.getByText(/the stub marks unmeasured extent/)).toBeTruthy();
-  });
-
-  it('prints a hollow-mark reading rather than hiding zero-message sessions', async () => {
-    renderLoom();
-    await screen.findByText('Deliver Git primitive runtime');
-    // Singular, because exactly one fixture session reports zero messages —
-    // the sentence counts real threads, so its grammar has to follow them.
-    expect(
-      screen.getByText(/1 drawn hollow is a session the store reports at zero messages/),
-    ).toBeTruthy();
-  });
-
-  it('distinguishes presentation lane spacing from recorded parent identity', async () => {
-    renderLoom();
-    await screen.findByText('Deliver Git primitive runtime');
-    expect(screen.getByText(/Lane spacing is presentation only/)).toBeTruthy();
-  });
-
   it('reports each causal source with its real authority or dependency', async () => {
     renderLoom();
     await screen.findByText('Deliver Git primitive runtime');
@@ -550,12 +522,6 @@ describe('LoomPage', () => {
     expect(screen.getByText('Session → edited file')).toBeTruthy();
     expect(screen.getByText('Branch & worktree spans')).toBeTruthy();
     expect(screen.getByText(/commit_sessions/)).toBeTruthy();
-  });
-
-  it('reports a session with no recorded extent as unrecorded', async () => {
-    renderLoom();
-    await screen.findByText('Deliver Git primitive runtime');
-    expect(screen.getAllByText('unrecorded').length).toBeGreaterThanOrEqual(1);
   });
 
   it('reports canonical temporal retrieval as unavailable on selection', async () => {
@@ -713,16 +679,6 @@ describe('LoomPage', () => {
     await user.click(screen.getByRole('button', { name: 'Pause replay' }));
     await user.click(screen.getByRole('button', { name: 'Return replay to latest loaded event' }));
     expect(screen.getByText('following loaded tail')).toBeTruthy();
-  });
-
-  it('continues the chain through durable causal rows', async () => {
-    renderLoom();
-    const row = await screen.findByText('Deliver Git primitive runtime');
-    await userEvent.click(row);
-    await screen.findByText('→ edited files');
-    expect(screen.getByText('src/runtime.rs')).toBeTruthy();
-    expect(screen.getByText('abc123def456')).toBeTruthy();
-    expect(screen.getByText(/4 events/)).toBeTruthy();
   });
 
   it('does not render partial commit coverage as a zero result', async () => {

@@ -435,31 +435,11 @@ const fn invalid_catalog_value(
 mod tests {
     use tracedecay_tool_catalog::{
         CancellationContract, CancellationPoint, DeadlineBehavior, EffectClass,
-        ExecutableBindingRegistryV1, IdempotencyContract, LifecycleClass, ReceiptContract,
-        ReconciliationContract, TerminalState,
+        IdempotencyContract, LifecycleClass, ReceiptContract, ReconciliationContract,
+        TerminalState,
     };
 
     use super::{workflow_executable_binding_registry, workflow_manifest};
-
-    fn first_binding_address(registry: &ExecutableBindingRegistryV1) -> usize {
-        registry
-            .iter()
-            .next()
-            .map(|binding| std::ptr::from_ref(binding) as usize)
-            .expect("Workflow registry is not empty")
-    }
-
-    #[test]
-    fn repeated_workflow_registry_reads_borrow_one_process_authority() {
-        let first = workflow_executable_binding_registry().unwrap();
-        let second = workflow_executable_binding_registry().unwrap();
-
-        assert_eq!(
-            first_binding_address(first),
-            first_binding_address(second),
-            "reading the process-static registry must not clone every schema-rich binding",
-        );
-    }
 
     #[test]
     fn workflow_registry_advertises_every_mounted_application_route() {

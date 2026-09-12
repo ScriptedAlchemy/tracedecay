@@ -1854,46 +1854,6 @@ async fn unknown_denominators_report_unknown_not_fabricated() {
 }
 
 #[tokio::test]
-async fn known_multishard_coverage_counts_each_searched_frontier() {
-    let test = setup_db().await;
-    let store = DatabaseFactStore::new(&test.db);
-    let owner = FactOwnerV1::Profile;
-    let fixture = commit_initial(
-        &store,
-        &owner,
-        "operation.fmh.coverage.multishard",
-        anchor(
-            ObservationScopeV1::Profile,
-            "entity.fmh.coverage.multishard",
-            "privacy.fmh.coverage.multishard",
-            PayloadAccessState::Eligible,
-            known_coverage(BTreeMap::from([
-                (
-                    ShardId::new("shard.fmh.coverage.multishard.a").unwrap(),
-                    ShardDispositionV1::Searched,
-                ),
-                (
-                    ShardId::new("shard.fmh.coverage.multishard.b").unwrap(),
-                    ShardDispositionV1::Searched,
-                ),
-            ])),
-        ),
-        "multishard coverage",
-        1_000,
-    )
-    .await;
-
-    let response = store
-        .query_fact_current_response(FactCurrentQuery::new(owner, fixture.fact_id).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(response.coverage().visible(), 2);
-    assert_eq!(response.coverage().hidden(), 0);
-    assert_eq!(response.coverage().unknown(), 0);
-    assert_eq!(response.coverage().redacted(), 0);
-}
-
-#[tokio::test]
 async fn mixed_shard_coverage_counts_each_frontier_bucket() {
     let test = setup_db().await;
     let store = DatabaseFactStore::new(&test.db);

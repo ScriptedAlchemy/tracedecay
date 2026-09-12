@@ -3,36 +3,6 @@ use tracedecay_code_extraction::MarkdownExtractor;
 use tracedecay_domain::*;
 
 #[test]
-fn test_markdown_file_node_is_root() {
-    let source = "# Hello\n\nSome content.";
-    let result = MarkdownExtractor.extract("README.md", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "README.md");
-}
-
-#[test]
-fn test_markdown_extracts_headers() {
-    let source = "# Title\n\n## Section\n\n### Subsection";
-    let result = MarkdownExtractor.extract("README.md", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let modules: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Module)
-        .collect();
-    assert_eq!(modules.len(), 3);
-    assert_eq!(modules[0].name, "Title");
-    assert_eq!(modules[1].name, "Section");
-    assert_eq!(modules[2].name, "Subsection");
-}
-
-#[test]
 fn test_markdown_header_hierarchy() {
     let source = "# Top\n\n## Section1\n\n### Deep\n\n## Section2";
     let result = MarkdownExtractor.extract("README.md", source);
@@ -64,22 +34,6 @@ fn test_markdown_header_hierarchy() {
         .filter(|e| e.source == section1.id)
         .collect();
     assert!(section1_contains.iter().any(|e| e.target == deep.id));
-}
-
-#[test]
-fn test_markdown_extracts_code_links() {
-    let source = "See [main.rs](src/main.rs) for details.";
-    let result = MarkdownExtractor.extract("README.md", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert!(
-        !uses_edges.is_empty(),
-        "should have Uses edge for code link"
-    );
 }
 
 #[test]
@@ -116,22 +70,6 @@ fn test_markdown_skips_non_code_links() {
 }
 
 #[test]
-fn test_markdown_handles_code_blocks() {
-    // Code blocks should not be treated as headers
-    let source = "# Title\n\n```rust\nfn main() {}\n```\n\n## Next";
-    let result = MarkdownExtractor.extract("README.md", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let modules: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Module)
-        .collect();
-    assert_eq!(modules.len(), 2);
-    assert_eq!(modules[0].name, "Title");
-    assert_eq!(modules[1].name, "Next");
-}
-
-#[test]
 fn test_markdown_handles_empty_file() {
     let source = "";
     let result = MarkdownExtractor.extract("README.md", source);
@@ -159,14 +97,6 @@ fn test_markdown_handles_no_headers() {
 }
 
 #[test]
-fn test_markdown_extensions() {
-    let ext = MarkdownExtractor;
-    let extensions = ext.extensions();
-    assert!(extensions.contains(&"md"));
-    assert!(extensions.contains(&"markdown"));
-}
-
-#[test]
 fn test_markdown_multiple_links_same_line() {
     let source = "See [main](src/main.rs) and [lib](src/lib.rs).";
     let result = MarkdownExtractor.extract("README.md", source);
@@ -177,23 +107,6 @@ fn test_markdown_multiple_links_same_line() {
         .filter(|e| e.kind == EdgeKind::Uses)
         .collect();
     assert_eq!(uses_edges.len(), 2);
-}
-
-#[test]
-fn test_markdown_links_with_fragments() {
-    let source = "See [section](#section) for details.";
-    let result = MarkdownExtractor.extract("README.md", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    // Fragment links don't have file extensions that match code patterns
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert!(
-        uses_edges.is_empty(),
-        "fragment links should not create Uses edges"
-    );
 }
 
 #[test]

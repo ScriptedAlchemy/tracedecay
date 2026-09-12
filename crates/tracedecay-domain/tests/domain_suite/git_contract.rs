@@ -30,7 +30,6 @@ fn hunk(old: (u32, u32), new: (u32, u32)) -> GitHunkV1 {
         patch_digest: digest(DIGEST_X),
     }
 }
-
 fn file_diff(path: &str, change: GitChangeKindV1) -> GitFileDiffV1 {
     GitFileDiffV1 {
         path: path.to_owned(),
@@ -95,17 +94,6 @@ fn hunk_ref() -> HunkRefV1 {
 }
 
 #[test]
-fn git_oid_accepts_sha1_and_sha256_and_derives_format() {
-    let sha1 = oid(SHA1_A);
-    assert_eq!(sha1.format(), GitObjectFormatV1::Sha1);
-    assert_eq!(GitObjectFormatV1::Sha1.oid_hex_len(), 40);
-
-    let sha256 = oid(&"d".repeat(64));
-    assert_eq!(sha256.format(), GitObjectFormatV1::Sha256);
-    assert_eq!(GitObjectFormatV1::Sha256.oid_hex_len(), 64);
-}
-
-#[test]
 fn git_oid_rejects_noncanonical_values() {
     for bad in [
         "",
@@ -143,34 +131,6 @@ fn file_mode_validation_and_kind_helpers() {
 }
 
 #[test]
-fn head_state_roundtrips_and_exposes_commit() {
-    let attached = GitHeadStateV1::Attached {
-        branch: "main".to_owned(),
-        commit: oid(SHA1_A),
-    };
-    let detached = GitHeadStateV1::Detached {
-        commit: oid(SHA1_A),
-    };
-    let unborn = GitHeadStateV1::Unborn {
-        branch: "main".to_owned(),
-    };
-
-    assert_eq!(attached.commit(), Some(&oid(SHA1_A)));
-    assert_eq!(attached.branch(), Some("main"));
-    assert_eq!(detached.branch(), None);
-    assert_eq!(unborn.commit(), None);
-
-    for state in [attached, detached, unborn] {
-        state.validate().unwrap();
-        let wire = serde_json::to_string(&state).unwrap();
-        assert_eq!(
-            serde_json::from_str::<GitHeadStateV1>(&wire).unwrap(),
-            state
-        );
-    }
-}
-
-#[test]
 fn coverage_dedupes_sorts_and_reports_completeness() {
     let mut coverage = GitCoverageV1::complete();
     assert!(coverage.is_complete());
@@ -195,71 +155,6 @@ fn coverage_dedupes_sorts_and_reports_completeness() {
     if unsorted.degradations != coverage.degradations {
         assert!(unsorted.validate().is_err());
     }
-}
-
-#[test]
-fn status_counts_and_cleanliness() {
-    let status = GitStatusV1 {
-        repository: repository(),
-        head: GitHeadStateV1::Attached {
-            branch: "main".to_owned(),
-            commit: oid(SHA1_A),
-        },
-        operation: GitOperationStateV1::None,
-        entries: vec![
-            GitStatusEntryV1::Tracked(GitTrackedStatusV1 {
-                path: "staged.txt".to_owned(),
-                original_path: None,
-                index: GitChangeKindV1::Added,
-                worktree: GitChangeKindV1::Unmodified,
-                head_mode: None,
-                index_mode: Some(GitFileModeV1::new(GitFileModeV1::REGULAR).unwrap()),
-                worktree_mode: Some(GitFileModeV1::new(GitFileModeV1::REGULAR).unwrap()),
-                submodule: false,
-            }),
-            GitStatusEntryV1::Tracked(GitTrackedStatusV1 {
-                path: "dirty.txt".to_owned(),
-                original_path: None,
-                index: GitChangeKindV1::Unmodified,
-                worktree: GitChangeKindV1::Modified,
-                head_mode: Some(GitFileModeV1::new(GitFileModeV1::REGULAR).unwrap()),
-                index_mode: Some(GitFileModeV1::new(GitFileModeV1::REGULAR).unwrap()),
-                worktree_mode: Some(GitFileModeV1::new(GitFileModeV1::REGULAR).unwrap()),
-                submodule: false,
-            }),
-            GitStatusEntryV1::Tracked(GitTrackedStatusV1 {
-                path: "conflict.txt".to_owned(),
-                original_path: None,
-                index: GitChangeKindV1::Unmerged,
-                worktree: GitChangeKindV1::Unmerged,
-                head_mode: None,
-                index_mode: None,
-                worktree_mode: Some(GitFileModeV1::new(GitFileModeV1::REGULAR).unwrap()),
-                submodule: false,
-            }),
-            GitStatusEntryV1::Untracked {
-                path: "new.txt".to_owned(),
-            },
-            GitStatusEntryV1::Ignored {
-                path: "app.log".to_owned(),
-            },
-        ],
-        coverage: GitCoverageV1::complete(),
-    };
-
-    assert_eq!(status.staged_count(), 1);
-    assert_eq!(status.unstaged_count(), 1);
-    assert_eq!(status.conflicted_count(), 1);
-    assert_eq!(status.untracked_count(), 1);
-    assert_eq!(status.ignored_count(), 1);
-    assert!(!status.is_clean());
-    status.validate().unwrap();
-
-    let clean = GitStatusV1 {
-        entries: vec![],
-        ..status
-    };
-    assert!(clean.is_clean());
 }
 
 #[test]

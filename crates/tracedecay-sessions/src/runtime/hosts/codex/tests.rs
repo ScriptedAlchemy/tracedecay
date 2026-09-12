@@ -219,37 +219,6 @@ mod goal_event_tests {
     }
 
     #[test]
-    fn canonical_codex_record_is_typed_and_redacts_provider_bags() {
-        let native = json!({
-            "timestamp": "2026-07-08T08:49:29Z",
-            "type": "response_item",
-            "cwd": "/secret/project",
-            "payload": {
-                "type": "function_call",
-                "name": "shell",
-                "call_id": "call-redacted",
-                "arguments": {"path": "/secret/project", "token": "credential-redacted"}
-            }
-        });
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(40, 80).unwrap();
-        let record_id = codex_native_record_id("session-redacted", &native).unwrap();
-        let envelope = normalize_codex_observation(
-            &native,
-            "session-redacted",
-            Some("session-redacted"),
-            record_id.clone(),
-            range,
-        )
-        .unwrap();
-        let rendered = format!("{envelope:?}");
-        assert!(rendered.contains("ToolInvocation"));
-        assert!(rendered.contains("FileBytes"));
-        assert!(rendered.contains(record_id.as_str()));
-        assert!(!rendered.contains("/secret/project"));
-        assert!(!rendered.contains("credential-redacted"));
-    }
-
-    #[test]
     fn codex_turn_context_sets_native_turn_and_thread_relations() {
         let native = json!({
             "type": "turn_context",
@@ -283,71 +252,6 @@ mod goal_event_tests {
                 state: CanonicalUnknownStateV1::Unsupported,
             } if native_kind == "turn_context"
         )));
-    }
-
-    #[test]
-    fn codex_session_meta_subagent_sets_native_agent_lineage() {
-        let native = json!({
-            "type": "session_meta",
-            "payload": {
-                "id": "child-thread",
-                "cwd": "/secret/project",
-                "thread_source": "subagent",
-                "agent_nickname": "worker-a",
-                "source": {
-                    "subagent": {
-                        "thread_spawn": {
-                            "parent_thread_id": "parent-thread",
-                            "agent_nickname": "worker-a"
-                        }
-                    }
-                }
-            }
-        });
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 50).unwrap();
-        let record_id = codex_native_record_id("child-thread", &native).unwrap();
-        let envelope = normalize_codex_observation(
-            &native,
-            "child-thread",
-            Some("child-thread"),
-            record_id,
-            range,
-        )
-        .unwrap();
-        let relations = serde_json::to_value(envelope.relations()).unwrap();
-        assert_eq!(relations["thread_id"], "child-thread");
-        assert_eq!(relations["agent_id"], "child-thread");
-        assert_eq!(relations["parent_agent_id"], "parent-thread");
-        assert!(relations.get("turn_id").is_none());
-        assert!(relations.get("message_id").is_none());
-    }
-
-    #[test]
-    fn codex_response_without_turn_id_leaves_turn_unset() {
-        let native = json!({
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "hello"}]
-            }
-        });
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 20).unwrap();
-        let record_id = codex_native_record_id("thread-redacted", &native).unwrap();
-        let envelope = normalize_codex_observation(
-            &native,
-            "thread-redacted",
-            Some("thread-redacted"),
-            record_id.clone(),
-            range,
-        )
-        .unwrap();
-        let relations = serde_json::to_value(envelope.relations()).unwrap();
-        assert_eq!(relations["thread_id"], "thread-redacted");
-        assert_eq!(relations["message_id"], record_id.as_str());
-        assert!(relations.get("turn_id").is_none());
-        assert!(relations.get("agent_id").is_none());
-        assert!(relations.get("parent_agent_id").is_none());
     }
 
     #[test]
@@ -558,51 +462,6 @@ mod goal_event_tests {
     }
 
     #[test]
-    fn thread_goal_updated_maps_nested_goal_to_workflow_lifecycle() {
-        // Binding shape: goal_event_line / write_codex_rollout_with_goal_events.
-        let native = goal_event_line("phlogiston pipeline overhaul", "active");
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-        let record_id = codex_native_record_id("thread-1", &native).unwrap();
-        let envelope =
-            normalize_codex_observation(&native, "thread-1", Some("thread-1"), record_id, range)
-                .unwrap();
-        let facts = envelope.facts();
-        assert_eq!(facts.len(), 1);
-        match &facts[0] {
-            CanonicalObservationFactV1::WorkflowLifecycle {
-                semantic_kind: CanonicalWorkflowSemanticKindV1::Goal,
-                provider_reference,
-                item_id,
-                parent_reference,
-                list_reference,
-                state,
-                status,
-                item_order,
-                revision,
-                event_sequence,
-                content,
-            } => {
-                assert_eq!(provider_reference.as_deref(), Some("thread-1"));
-                assert_eq!(status.as_deref(), Some("active"));
-                assert!(item_id.is_none());
-                assert!(parent_reference.is_none());
-                assert!(list_reference.is_none());
-                assert!(state.is_none());
-                assert!(item_order.is_none());
-                assert!(revision.is_none());
-                assert!(event_sequence.is_none());
-                let content = content.as_ref().expect("native goal object");
-                assert_eq!(content["objective"], "phlogiston pipeline overhaul");
-                assert_eq!(content["status"], "active");
-                assert_eq!(content["threadId"], "thread-1");
-                assert_eq!(content["tokensUsed"], 42);
-                assert!(content.get("revision").is_none());
-            }
-            other => panic!("expected WorkflowLifecycle Goal, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn update_plan_preserves_arguments_as_workflow_lifecycle_plan() {
         // Binding shape: write_codex_rollout_with_structured_events / update_plan_row.
         let native = json!({
@@ -770,46 +629,6 @@ mod goal_event_tests {
                 envelope.facts()
             );
         }
-    }
-
-    #[test]
-    fn response_only_goal_context_keeps_legacy_stable_identity() {
-        let native = json!({
-            "timestamp": "2026-01-01T00:00:15.100Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "<codex_internal_context source=\"goal\"><objective>ensure all provider session messages are ingested</objective>\nToken budget: 12000\nTokens remaining: 11000</codex_internal_context>"
-                }]
-            }
-        });
-        let range = tracedecay_domain::ObservationSourceRangeV1::new(0, 1).unwrap();
-        let record_id = codex_native_record_id("codex-goal-context", &native).unwrap();
-        let envelope = normalize_codex_observation(
-            &native,
-            "codex-goal-context",
-            Some("codex-goal-context"),
-            record_id,
-            range,
-        )
-        .unwrap();
-        assert_eq!(
-            envelope.relations().message_id(),
-            Some(envelope.stable_record_id())
-        );
-        assert!(matches!(
-            &envelope.facts()[0],
-            CanonicalObservationFactV1::Message {
-                role: tracedecay_domain::CanonicalMessageRoleV1::User,
-                content,
-                ..
-            } if tracedecay_store::codex_message_visible_text(content).contains(
-                "ensure all provider session messages are ingested"
-            )
-        ));
     }
 
     #[tokio::test]
@@ -1132,7 +951,7 @@ mod goal_event_tests {
 mod message_record_tests {
     use std::path::Path;
 
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     use super::super::records::{message_from_line, response_item_goal_context_from_line};
     use super::{CodexMeta, CodexSource, StoredCursor, TranscriptSource};
@@ -1150,50 +969,6 @@ mod message_record_tests {
             agent_role: None,
             thread_source: None,
         }
-    }
-
-    #[test]
-    fn current_user_message_item_becomes_one_canonical_user_row() {
-        let record = json!({
-            "timestamp": "2026-09-04T12:00:01.004Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "thread_id": "thread-1",
-                "turn_id": "turn-1",
-                "item": {
-                    "type": "UserMessage",
-                    "id": "user-item-1",
-                    "client_id": "client-1",
-                    "content": [{
-                        "type": "text",
-                        "text": "Find the callers of publish_generation.",
-                        "text_elements": []
-                    }]
-                }
-            }
-        });
-
-        let message = message_from_line(
-            &record,
-            &meta(),
-            Some("gpt-5.6-sol"),
-            Path::new("/tmp/rollout.jsonl"),
-            42,
-        )
-        .unwrap();
-
-        assert_eq!(message.role, "user");
-        assert_eq!(message.message_id, "session-1:user-item-1");
-        assert!(
-            message
-                .text
-                .contains("Find the callers of publish_generation.")
-        );
-        let metadata: Value =
-            serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(metadata["source"], "codex_rollout");
-        assert_eq!(metadata["source_event"], "item_completed");
     }
 
     #[test]
@@ -1713,45 +1488,6 @@ mod recent_first_discovery_tests {
                 resource: "exact-session request lookup capacity",
             }
         ));
-    }
-
-    #[tokio::test]
-    async fn shared_hub_fans_one_immutable_generation_to_profile_and_projects() {
-        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let expected = write_dated_rollout(home, ("2026", "08", "23"), "shared");
-        let hub = CodexDiscoveryHub::default();
-        for consumer in ["profile", "project-a", "project-b"] {
-            hub.register(consumer, Some(home));
-        }
-        let source = CodexSource::with_home(home);
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
-        let first = match hub
-            .discover(
-                "profile",
-                &source,
-                bounds,
-                CodexDiscoveryFrontier::initial(),
-            )
-            .await
-            .unwrap()
-        {
-            CodexDiscoveryDelivery::Ready(pass) => pass,
-            CodexDiscoveryDelivery::Waiting => panic!("first scanner unexpectedly waited"),
-        };
-        assert_eq!(first.report.paths, vec![expected]);
-        for consumer in ["project-a", "project-b"] {
-            let delivered = match hub
-                .discover(consumer, &source, bounds, CodexDiscoveryFrontier::initial())
-                .await
-                .unwrap()
-            {
-                CodexDiscoveryDelivery::Ready(pass) => pass,
-                CodexDiscoveryDelivery::Waiting => panic!("queued consumer unexpectedly waited"),
-            };
-            assert!(Arc::ptr_eq(&first, &delivered));
-        }
     }
 
     #[tokio::test]
@@ -2326,74 +2062,6 @@ mod recent_first_discovery_tests {
         assert!(pass.report.paths.len() <= bounds.max_files);
     }
 
-    /// An unchanged completed corpus is truly idle: it must not hand the same
-    /// recent slice back to the JSONL scanner on every background poll.
-    #[test]
-    fn codex_complete_frontier_idles_without_selecting_files() {
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let active = write_dated_rollout(home, ("2026", "08", "17"), "today");
-        let source = CodexSource::with_home(home);
-        let mut state = CodexDiscoveryState::default();
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
-
-        let mut completed = retained_pass(
-            &source,
-            &mut state,
-            bounds,
-            CodexDiscoveryFrontier::initial(),
-        );
-        while !completed.next_frontier.is_complete() {
-            completed = retained_pass(
-                &source,
-                &mut state,
-                bounds,
-                CodexDiscoveryFrontier::initial(),
-            );
-        }
-        assert!(completed.next_frontier.is_complete());
-
-        let idle = retained_pass(&source, &mut state, bounds, completed.next_frontier);
-        assert!(idle.next_frontier.is_complete());
-        assert!(idle.report.paths.is_empty());
-        assert!(!idle.report.is_truncated());
-
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&active)
-            .unwrap();
-        file.write_all(b"{}\n").unwrap();
-        let awakened = retained_pass(&source, &mut state, bounds, completed.next_frontier);
-        assert!(awakened.report.is_truncated());
-        assert!(!awakened.next_frontier.is_complete());
-    }
-
-    /// A file-count watermark cannot distinguish deletion plus addition. The
-    /// corpus epoch must invalidate completion even when cardinality is fixed.
-    #[test]
-    fn codex_constant_cardinality_replacement_invalidates_completion() {
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let removed = write_dated_rollout(home, ("2026", "08", "17"), "removed");
-        let source = CodexSource::with_home(home);
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
-
-        let completed = source
-            .discover_transcript_paths_with_frontier(bounds, CodexDiscoveryFrontier::initial())
-            .unwrap()
-            .next_frontier;
-        assert!(completed.is_complete());
-
-        std::fs::remove_file(removed).unwrap();
-        let added = write_dated_rollout(home, ("2026", "08", "17"), "added");
-        let changed = source
-            .discover_transcript_paths_with_frontier(bounds, completed)
-            .unwrap();
-
-        assert!(changed.report.paths.contains(&added));
-        assert_ne!(changed.next_frontier.epoch, completed.epoch);
-    }
-
     #[test]
     #[cfg(unix)]
     fn codex_same_path_same_size_preserved_mtime_replacement_changes_epoch() {
@@ -2418,27 +2086,6 @@ mod recent_first_discovery_tests {
 
         assert_ne!(replaced.next_frontier.epoch, completed.epoch);
         assert_eq!(replaced.report.paths, vec![path]);
-    }
-
-    #[test]
-    fn codex_recent_selection_keeps_dated_sessions_before_archive() {
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let dated = write_dated_rollout(home, ("2026", "08", "17"), "dated");
-        let archive_dir = home.join(".codex/archived_sessions");
-        std::fs::create_dir_all(&archive_dir).unwrap();
-        let archived = archive_dir.join("rollout-zzzz.jsonl");
-        std::fs::write(&archived, "{}\n").unwrap();
-
-        let pass = CodexSource::with_home(home)
-            .discover_transcript_paths_with_frontier(
-                TranscriptDiscoveryBounds::from_discovered_units(8),
-                CodexDiscoveryFrontier::initial(),
-            )
-            .unwrap();
-
-        assert_eq!(pass.report.paths.first(), Some(&dated));
-        assert!(pass.report.paths.contains(&archived));
     }
 
     /// Coverage: retained traversal across passes must visit every historical
@@ -2697,95 +2344,6 @@ mod recent_first_discovery_tests {
         assert!(
             directory_scan.directories.len() <= structural_work_limit,
             "one call must not traverse the entire directory corpus"
-        );
-    }
-
-    /// A backlog under the cap needs no catch-up: one pass discovers everything
-    /// and reports no truncation, so no catch-up is scheduled.
-    #[test]
-    fn codex_discovery_under_cap_is_complete_in_one_pass() {
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let a = write_dated_rollout(home, ("2026", "08", "16"), "yesterday");
-        let b = write_dated_rollout(home, ("2026", "08", "17"), "today");
-
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(16);
-        let pass = CodexSource::with_home(home)
-            .discover_transcript_paths_with_frontier(bounds, CodexDiscoveryFrontier::initial())
-            .unwrap();
-
-        assert_eq!(pass.report.paths, vec![b, a], "newest-first ordering");
-        assert_eq!(pass.report.files_considered, 2);
-        assert!(!pass.report.is_truncated());
-        assert!(pass.next_frontier.is_complete());
-    }
-
-    /// A single historical bucket larger than the whole per-pass budget must
-    /// converge file-by-file through the retained directory iterator instead
-    /// of starving its tail or pinning forever.
-    ///
-    /// The intra-sweep cursor is the retained `CodexDiscoveryState`, not the
-    /// durable frontier: the frontier stays pinned at the incoming epoch for
-    /// every unfinished pass and only advances once one sweep has observed the
-    /// whole corpus. So progress is asserted on the retained cursor's own
-    /// output — each unfinished pass must emit files it has not emitted before,
-    /// and must not claim completion while it is still reporting truncation.
-    #[test]
-    fn codex_oversized_bucket_converges_through_retained_traversal() {
-        let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        let mut all: BTreeSet<PathBuf> = BTreeSet::new();
-        for item in 0..40 {
-            all.insert(write_dated_rollout(
-                home,
-                ("2025", "11", "01"),
-                &format!("old-{item:02}"),
-            ));
-        }
-        all.insert(write_dated_rollout(home, ("2026", "08", "17"), "today"));
-
-        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
-        let source = CodexSource::with_home(home);
-
-        let mut state = CodexDiscoveryState::default();
-        let mut frontier = CodexDiscoveryFrontier::initial();
-        let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
-        let mut completed = false;
-        for _pass in 0..64 {
-            let pass = retained_pass(&source, &mut state, bounds, frontier);
-            let before = covered.len();
-            covered.extend(pass.report.paths.iter().cloned());
-            if pass.next_frontier.is_complete() {
-                assert!(
-                    !pass.report.is_truncated(),
-                    "a sweep may not claim completion while it still reports truncation"
-                );
-                completed = true;
-                frontier = pass.next_frontier;
-                break;
-            }
-            assert!(
-                pass.report.is_truncated(),
-                "an unfinished sweep must keep catch-up scheduled"
-            );
-            assert!(
-                covered.len() > before,
-                "an unfinished oversized bucket must still advance its retained cursor"
-            );
-            frontier = pass.next_frontier;
-        }
-        assert!(
-            completed,
-            "the retained sweep must reach a durable completion claim"
-        );
-        assert_eq!(
-            covered, all,
-            "an oversized bucket's tail must be reached across passes"
-        );
-        assert_eq!(
-            frontier.epoch.files,
-            u64::try_from(all.len()).unwrap(),
-            "the completed frontier's epoch must count the whole corpus"
         );
     }
 

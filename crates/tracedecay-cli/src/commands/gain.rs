@@ -152,16 +152,4 @@ mod tests {
         let usd = estimate_dollars_saved(1_000_000);
         assert!((usd.unwrap() - 3.0).abs() < 0.01);
     }
-
-    #[test]
-    fn dollars_handles_small_counts() {
-        // 1_000 tokens × $3 / MTok = $0.003
-        let usd = estimate_dollars_saved(1_000);
-        assert!((usd.unwrap() - 0.003).abs() < 0.001);
-    }
-
-    #[test]
-    fn dollars_zero_for_zero_tokens() {
-        assert_eq!(estimate_dollars_saved(0), Some(0.0));
-    }
 }

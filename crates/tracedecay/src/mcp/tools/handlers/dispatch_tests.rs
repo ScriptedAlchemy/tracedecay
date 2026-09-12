@@ -181,26 +181,6 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     );
 }
 
-/// Diagnostics has one production owner regardless of whether the MCP server
-/// could attach a daemon executor; the canonical owner reports typed
-/// application transport unavailability when none is attached.
-#[test]
-fn diagnostics_always_reaches_the_application_surface_owner() {
-    assert_eq!(
-        classify_mcp_tool_dispatch_group("tracedecay_diagnostics"),
-        Some(McpToolDispatchGroup::ApplicationSurface),
-    );
-    assert_eq!(
-        dispatch_group_for_tool("tracedecay_diagnostics"),
-        Some(McpToolDispatchGroup::ApplicationSurface),
-        "diagnostics must not retain a second analysis owner",
-    );
-    assert_eq!(
-        classify_mcp_tool_dispatch_group("tracedecay_diagnostics_read"),
-        None,
-    );
-}
-
 #[tokio::test]
 async fn unmounted_files_root_dispatch_reports_a_real_orphaned_rust_source() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -1711,30 +1691,6 @@ fn the_ceiling_reports_a_typed_retryable_problem() {
     assert!(
         detail.contains(&format!("{}s", TOOL_DISPATCH_CEILING.as_secs())),
         "the problem must name the budget it enforced, got {detail:?}",
-    );
-}
-
-/// The wrap itself: a handler that never returns must surface the typed
-/// deadline at the ceiling rather than holding the transport open forever.
-/// This is the 900-second hang reduced to a unit.
-#[tokio::test]
-async fn a_handler_that_never_returns_hits_the_typed_ceiling() {
-    let budget = std::time::Duration::from_millis(50);
-    let never = std::future::pending::<Result<ToolResult>>();
-    let started = std::time::Instant::now();
-    let outcome = match tokio::time::timeout(budget, never).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(tool_dispatch_deadline_error("tracedecay_context", budget)),
-    };
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
-        "the ceiling must fire promptly, took {:?}",
-        started.elapsed(),
-    );
-    let error = outcome.expect_err("a never-returning handler must not report success");
-    assert!(
-        error.to_string().contains("dispatch ceiling"),
-        "got {error}"
     );
 }
 

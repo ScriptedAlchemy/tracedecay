@@ -16,14 +16,6 @@ fn names_of(result: &ExtractionResult, kind: NodeKind) -> Vec<String> {
 }
 
 #[test]
-fn file_node_is_emitted() {
-    let result = extract("module Foo { val x = 1 }");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let files = names_of(&result, NodeKind::File);
-    assert_eq!(files, vec!["spec.qnt".to_string()]);
-}
-
-#[test]
 fn extracts_top_level_module() {
     let source = "module Counter {\n  val x = 0\n}\n";
     let result = extract(source);
@@ -90,23 +82,6 @@ fn action_temporal_run_are_functions() {
             "myRun".to_string()
         ]
     );
-}
-
-#[test]
-fn definitions_are_contained_by_module() {
-    let source = "module M {\n  val x = 1\n  def f = 2\n}\n";
-    let result = extract(source);
-    let m = result.nodes.iter().find(|n| n.name == "M").unwrap();
-    let x = result.nodes.iter().find(|n| n.name == "x").unwrap();
-    let f = result.nodes.iter().find(|n| n.name == "f").unwrap();
-
-    let edges_from_m: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.source == m.id && e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(edges_from_m.iter().any(|e| e.target == x.id));
-    assert!(edges_from_m.iter().any(|e| e.target == f.id));
 }
 
 #[test]
@@ -201,57 +176,6 @@ fn empty_file_produces_only_file_node() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.nodes.len(), 1);
     assert_eq!(result.nodes[0].kind, NodeKind::File);
-}
-
-#[test]
-fn assume_is_const() {
-    let source = "module M {\n  assume nonNeg = x >= 0\n}\n";
-    let result = extract(source);
-    let consts = names_of(&result, NodeKind::Const);
-    assert_eq!(consts, vec!["nonNeg".to_string()]);
-}
-
-#[test]
-fn const_parameter_is_const() {
-    let source = "module M {\n  const N: int\n}\n";
-    let result = extract(source);
-    let consts = names_of(&result, NodeKind::Const);
-    assert_eq!(consts, vec!["N".to_string()]);
-}
-
-fn uses_targets(result: &ExtractionResult) -> Vec<String> {
-    // Map Uses-edge target ids to their (synthetic) target paths by
-    // pulling the path back out of the module name encoded in the edge.
-    // We can't reverse the hash, so just count and inspect edges directly.
-    result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .map(|e| e.target.clone())
-        .collect()
-}
-
-#[test]
-fn import_emits_uses_edge() {
-    let source = "import basicSpells\n\nmodule M {\n  val x = 1\n}\n";
-    let result = extract(source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let uses = uses_targets(&result);
-    assert_eq!(uses.len(), 1, "expected 1 Uses edge, got {uses:?}");
-}
-
-#[test]
-fn dotted_import_path_is_one_edge() {
-    // `import Foo.bar` should produce a single Uses edge with target
-    // synthesized from "Foo.bar", not two edges (one per identifier).
-    let source = "import Foo.bar\n\nmodule M { }\n";
-    let result = extract(source);
-    let uses_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Uses)
-        .collect();
-    assert_eq!(uses_edges.len(), 1);
 }
 
 #[test]

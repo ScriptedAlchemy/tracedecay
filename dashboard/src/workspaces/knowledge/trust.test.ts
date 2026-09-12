@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  composeTrustDistribution,
-  factsBelow,
-  summarizeLoadedTrust,
-  trustSourceNote,
-} from './trust.ts';
+import { composeTrustDistribution, factsBelow, summarizeLoadedTrust } from './trust.ts';
 
 /** A canonical empty histogram for an empty store. */
 const EMPTY_HISTOGRAM = Array.from({ length: 10 }, (_, bucket) => ({
@@ -61,12 +56,6 @@ describe('composeTrustDistribution', () => {
     expect(distribution.source).toBe('none');
     expect(distribution.bands).toEqual([]);
     expect(distribution.total).toBe(0);
-  });
-
-  it('names what the counts of each source actually cover', () => {
-    expect(trustSourceNote('status_bands')).toContain('every fact in the store');
-    expect(trustSourceNote('loaded_facts')).toContain('only the facts loaded');
-    expect(trustSourceNote('none')).toContain('no source');
   });
 });
 

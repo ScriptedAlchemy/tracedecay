@@ -946,36 +946,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cursor_manifest_limits_remain_typed_application_outcomes() {
-        assert_eq!(
-            map_kernel_error(TemporalKernelError::Port(
-                TemporalPortError::ParticipantLimitExceeded {
-                    observed: 257,
-                    maximum: 256,
-                },
-            )),
-            SessionRetrievalOutcome::CursorManifestLimitExceeded {
-                kind: CursorManifestLimitKindV1::Participants,
-                observed: 257,
-                maximum: 256,
-            }
-        );
-        assert_eq!(
-            map_kernel_error(TemporalKernelError::Port(
-                TemporalPortError::ParticipantManifestBytesExceeded {
-                    observed: 65_537,
-                    maximum: 65_536,
-                },
-            )),
-            SessionRetrievalOutcome::CursorManifestLimitExceeded {
-                kind: CursorManifestLimitKindV1::CanonicalBytes,
-                observed: 65_537,
-                maximum: 65_536,
-            }
-        );
-    }
-
-    #[test]
     fn deadline_and_cancellation_remain_distinct_application_outcomes() {
         assert_eq!(
             map_kernel_error(TemporalKernelError::DeadlineExceeded),

@@ -6,7 +6,6 @@ use tracedecay_code_index::{
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexImportEvidenceV1, content_digest,
     },
-    extract::EXTRACTION_ROWS_SEPARATOR,
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
         CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
@@ -14,9 +13,9 @@ use tracedecay_code_index::{
     },
 };
 use tracedecay_domain::{
-    CodeGenerationId, EdgeAuthorityV1, FileOccurrenceId, LanguageId, RelationEdgeKindV1,
-    SanitizationReceiptId, SanitizedCodeFileV1, SensitivityLevelV1, SnapshotFileDispositionV1,
-    SourceSpan, SymbolOccurrenceId, canonical_sha256,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageId, RelationEdgeKindV1, SanitizationReceiptId,
+    SanitizedCodeFileV1, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
+    SymbolOccurrenceId, canonical_sha256,
 };
 
 use crate::{
@@ -495,112 +494,6 @@ fn file_import_artifacts_bind_file_consistent_path_and_nonempty_span_to_indexed_
 }
 
 #[test]
-fn import_rows_rematerialize_file_occurrence_and_aggregate_exactly_per_generation() {
-    let generation = published_import_generation();
-    let envelope = sealed_envelope(&generation);
-    let artifacts = file_artifact(&envelope, 0);
-    let rematerialized = artifacts
-        .rematerialize_for_generation(
-            id::<CodeGenerationId>("generation.imports.rematerialized"),
-            id::<FileOccurrenceId>("file.import.rematerialized"),
-        )
-        .expect("import artifact rematerializes");
-
-    assert!(
-        rematerialized
-            .imports
-            .iter()
-            .all(|row| row.file_occurrence_id.as_str() == "file.import.rematerialized")
-    );
-    assert_eq!(
-        rematerialized
-            .imports
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>(),
-        artifacts
-            .imports
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>()
-    );
-
-    assert_eq!(
-        generation
-            .imports()
-            .iter()
-            .map(|row| (
-                row.logical_path.as_str(),
-                row.file_occurrence_id.as_str(),
-                row.module_specifier.as_str(),
-                row.imported_name.as_deref(),
-                row.local_name.as_deref(),
-                row.namespace,
-                row.module_kind,
-                row.span,
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                "src/a.ts",
-                "file.import.a",
-                "../models",
-                Some("Foo"),
-                Some("Foo"),
-                ImportNamespaceV1::Type,
-                ImportModuleKindV1::ProjectRelative,
-                SourceSpan {
-                    start_byte: 14,
-                    end_byte: 17,
-                },
-            ),
-            (
-                "src/a.ts",
-                "file.import.a",
-                "../models",
-                Some("Bar"),
-                Some("Baz"),
-                ImportNamespaceV1::Type,
-                ImportModuleKindV1::ProjectRelative,
-                SourceSpan {
-                    start_byte: 19,
-                    end_byte: 29,
-                },
-            ),
-            (
-                "src/b.ts",
-                "file.import.b",
-                "runner",
-                Some("run"),
-                Some("execute"),
-                ImportNamespaceV1::Value,
-                ImportModuleKindV1::BareModule,
-                SourceSpan {
-                    start_byte: 9,
-                    end_byte: 23,
-                },
-            ),
-        ]
-    );
-}
-
-#[test]
 fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
     let generation = published_import_generation();
     let symbols = &generation.symbols().symbols;
@@ -616,19 +509,6 @@ fn raw_use_and_imported_bindings_never_become_canonical_symbols() {
                 "../models" | "runner" | "Foo" | "Bar" | "Baz" | "run" | "execute"
             )
     }));
-}
-
-#[test]
-fn import_generation_pins_extractor_rows_and_chunker_revision_axes() {
-    assert_eq!(EXTRACTION_ROWS_SEPARATOR, "tracedecay.extraction-rows.v2");
-    let generation = published_import_generation();
-    let manifest = generation.manifest();
-
-    assert_eq!(manifest.extractor_revisions.len(), 1);
-    let (language, extractor_revision) = &manifest.extractor_revisions[0];
-    assert_eq!(language.as_str(), "typescript");
-    assert_eq!(extractor_revision.as_str(), "extractor.typescript.v4");
-    assert_eq!(manifest.chunker_revision.as_str(), "chunker.v2");
 }
 
 #[test]

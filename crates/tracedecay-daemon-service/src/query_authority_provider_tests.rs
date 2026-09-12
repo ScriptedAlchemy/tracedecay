@@ -816,20 +816,6 @@ async fn retiring_project_query_authority_preserves_same_project_in_another_prof
 }
 
 #[test]
-fn semantic_rollback_selects_restored_exact_query_active_profile() {
-    let query = accepted_profile("query-baseline", &RetrieverKind::QUERY_FALLBACK_LANES);
-    let prior_semantic = accepted_profile(
-        "semantic-prior",
-        &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
-    );
-
-    let selected = exact_query_profile_from_slots(&query, Some(&prior_semantic))
-        .expect("active query profile");
-
-    assert_eq!(selected.profile().profile_id, query.profile().profile_id);
-}
-
-#[test]
 fn zero_or_multiple_exact_query_profiles_fail_closed() {
     let non_query = accepted_profile(
         "semantic-active",

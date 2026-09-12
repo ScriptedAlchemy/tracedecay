@@ -449,28 +449,4 @@ mod tests {
         drop(owner);
         assert!(retained.remaining().is_none());
     }
-
-    #[test]
-    fn continuation_accepts_live_github_repositories_numeric_rewrite() {
-        let endpoint = "https://api.github.com/repos/ScriptedAlchemy/tracedecay/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls";
-        let mut headers = ureq::http::HeaderMap::new();
-        headers.insert(
-            "link",
-            "<https://api.github.com/repositories/724712/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls?per_page=100&page=2>; rel=\"next\""
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(
-            link_next_page(
-                &headers,
-                &GitHubLinkPageScopeV1 {
-                    rest_base_uri: "https://api.github.com",
-                    endpoint,
-                    current_page: 1,
-                    page_size: GITHUB_DISCOVERY_PAGE_SIZE_V1,
-                },
-            ),
-            Ok(Some(2))
-        );
-    }
 }

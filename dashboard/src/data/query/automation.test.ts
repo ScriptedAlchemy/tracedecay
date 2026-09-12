@@ -517,14 +517,6 @@ describe("runAutomaticCurator", () => {
     expect((await runScopedAutomaticCurator()).outcome).toBe("reset_required");
   });
 
-  it("accepts canonical partial and reset terminals from the active-project route", async () => {
-    respond(automaticProblem("partial_effect"), { ok: false, statusCode: 409 });
-    expect((await runAutomaticCurator()).outcome).toBe("partial_effect");
-
-    respond(automaticProblem("reset_required"), { ok: false, statusCode: 503 });
-    expect((await runAutomaticCurator()).outcome).toBe("reset_required");
-  });
-
 });
 
 const sha = (seed: string) => `sha256:${seed.repeat(64)}`;

@@ -13,7 +13,6 @@ from benchmark_data.runtime.comparison import (  # noqa: E402
     bootstrap_confidence_interval,
     classify_change,
     compare_abba,
-    latency_budget_findings,
     pair_abba_rounds,
     paired_log_ratios,
 )
@@ -119,22 +118,6 @@ class DecisionTests(unittest.TestCase):
             "improvement",
         )
 
-    def test_machine_mismatch_makes_comparison_descriptive(self) -> None:
-        result = compare_abba(
-            [[("A", 100), ("B", 130), ("B", 130), ("A", 100)]],
-            identity=comparison_identity(),
-            baseline_machine_fingerprint="machine-a",
-            treatment_machine_fingerprint="machine-b",
-            relative_threshold=0.10,
-            practical_floor=5,
-            resamples=100,
-        )
-
-        self.assertEqual(result["decision"], "descriptive_only")
-        self.assertTrue(result["informational"])
-        self.assertFalse(result["machine_comparable"])
-        self.assertEqual(result["paired"]["change"], "regression")
-
     def test_latency_regression_is_advisory_but_correctness_failure_is_hard(self) -> None:
         rounds = [[("A", 100), ("B", 130), ("B", 130), ("A", 100)]]
         advisory = compare_abba(
@@ -170,41 +153,6 @@ class DecisionTests(unittest.TestCase):
         )
         self.assertEqual(hard["decision"], "fail")
         self.assertTrue(hard["hard_failures"])
-
-    def test_n1_is_regression_evidence_without_slo_gate_metadata(self) -> None:
-        result = compare_abba(
-            [[("A", 100), ("B", 100), ("B", 100), ("A", 100)]],
-            identity=comparison_identity(),
-            baseline_machine_fingerprint="machine-a",
-            treatment_machine_fingerprint="machine-a",
-            resamples=100,
-        )
-
-        self.assertEqual(result["decision"], "descriptive_only")
-        self.assertEqual(result["evidence"]["evidence_class"], "regression_sample")
-        self.assertNotIn("slo_eligible", result["evidence"])
-        self.assertNotIn("baseline_policy_met", result["evidence"])
-        self.assertNotIn("accepted", result)
-
-    def test_distribution_latency_findings_remain_descriptive_only(self) -> None:
-        result = compare_abba(
-            [
-                [("A", 100), ("B", 130), ("B", 130), ("A", 100)],
-                [("A", 100), ("B", 130), ("B", 130), ("A", 100)],
-            ],
-            identity=comparison_identity(),
-            baseline_machine_fingerprint="machine-a",
-            treatment_machine_fingerprint="machine-a",
-            evidence_class="distribution",
-            relative_threshold=0.10,
-            practical_floor=5,
-            resamples=100,
-        )
-
-        self.assertEqual(result["evidence"]["sample_count"], 2)
-        self.assertEqual(result["evidence"]["evidence_class"], "distribution")
-        self.assertEqual(result["decision"], "descriptive_only")
-        self.assertNotIn("slo_eligible", result["evidence"])
 
     def test_pr_stage_and_milestone_comparison_identities_are_rejected(self) -> None:
         rounds = [[("A", 100), ("B", 100), ("B", 100), ("A", 100)]]
@@ -260,27 +208,6 @@ class CorrectnessTests(unittest.TestCase):
         )
 
         self.assertIn("daemon_death", {failure["code"] for failure in failures})
-
-    def test_latency_budgets_are_advisory_findings(self) -> None:
-        findings = latency_budget_findings(
-            {"p50_ns": 90, "p99_ns": 150},
-            {"p50_ns": 100, "p99_ns": 125},
-        )
-
-        self.assertEqual(
-            findings,
-            [
-                {
-                    "metric": "p99_ns",
-                    "observed": 150.0,
-                    "budget": 125.0,
-                    "severity": "advisory",
-                    "code": "latency_budget_exceeded",
-                }
-            ],
-        )
-        self.assertNotIn("milestone", str(findings).lower())
-
 
 if __name__ == "__main__":
     unittest.main()

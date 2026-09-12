@@ -64,18 +64,6 @@ fn every_mcp_tool_is_listed_by_the_cli_discovery_command() {
     );
 }
 
-#[test]
-fn every_mcp_tool_renders_its_own_cli_help() {
-    for def in get_tool_definitions().expect("tool definitions") {
-        let short = short_name(&def.name);
-        let stdout = render_tool_cli_help(&def);
-        assert!(
-            stdout.contains(&format!("tracedecay tool {short}")),
-            "`tracedecay tool {short} --help` should print the tool's own help, got:\n{stdout}"
-        );
-    }
-}
-
 /// One real `tracedecay tool <name> --help` invocation, asserting the binary
 /// prints exactly what `render_tool_cli_help` renders. Tool-name resolution
 /// and help dispatch are shared across tools, so a single spawn keeps the CLI

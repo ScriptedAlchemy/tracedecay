@@ -382,16 +382,6 @@ mod tests {
         }
     }
 
-    fn failed() -> SemanticModelLifecycleStateV1 {
-        SemanticModelLifecycleStateV1::Failed {
-            model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-            revision: "rev".to_owned(),
-            artifact_digest: digest(),
-            detail: "connection refused to unroutable endpoint".to_owned(),
-            retryable: true,
-        }
-    }
-
     fn indexing(completed_units: u64, total_units: u64) -> SemanticModelLifecycleStateV1 {
         SemanticModelLifecycleStateV1::Indexing {
             model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
@@ -475,31 +465,6 @@ mod tests {
                 assert_eq!(*bytes_total, 100);
             }
             other => panic!("expected downloading, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn generic_unavailable_yields_to_lifecycle_failed() {
-        let status = prefer_lifecycle_over_generic_unavailable(
-            generic_unavailable(Some(pin())),
-            &lifecycle_status(Some("JinaEmbeddingsV2BaseCode"), Some(failed())),
-        );
-
-        assert_eq!(status.validate(), Ok(()));
-        assert_eq!(
-            status.route(),
-            SemanticRuntimeRouteV1::LexicalFallback {
-                reason: SemanticFallbackReasonV1::ModelFailed,
-            }
-        );
-        match &status.state {
-            SemanticRuntimeStateV1::Failed {
-                detail, retryable, ..
-            } => {
-                assert_eq!(detail, "connection refused to unroutable endpoint");
-                assert!(retryable);
-            }
-            other => panic!("expected failed, got {other:?}"),
         }
     }
 

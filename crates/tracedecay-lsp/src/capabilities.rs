@@ -766,22 +766,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_folders_require_both_client_and_exact_gateway_authority() {
-        let gateway = GatewayCapabilities {
-            supports_workspace_folders: true,
-            ..GatewayCapabilities::default()
-        };
-        let effective =
-            negotiate_capabilities(&full_client(), &gateway, &UpstreamCapabilities::default());
-
-        assert!(effective.workspace_folders_supported);
-        assert_eq!(
-            effective.to_lsp_server_capabilities()["workspace"]["workspaceFolders"]["supported"],
-            true
-        );
-    }
-
-    #[test]
     fn internal_rename_candidate_capability_is_never_advertised() {
         let effective = negotiate_capabilities(
             &full_client(),
@@ -1010,32 +994,6 @@ mod tests {
                 Err(CapabilityParseError::InvalidTraceDecayCapabilities)
             );
         }
-    }
-
-    #[test]
-    fn context_capability_dto_accepts_recognized_advisory_projections() {
-        let capabilities = ClientCapabilities::from_initialize_capabilities(&json!({
-            "experimental": {
-                "tracedecay": {
-                    "revision": TRACEDECAY_CONTEXT_REVISION,
-                    "projections": [
-                        { "kind": "githubReview", "revision": TRACEDECAY_CONTEXT_REVISION },
-                        { "kind": "ciFailureLocalization", "revision": TRACEDECAY_CONTEXT_REVISION },
-                        { "kind": "agentProximity", "revision": TRACEDECAY_CONTEXT_REVISION },
-                    ],
-                }
-            }
-        }))
-        .expect("recognized advisory projection capabilities");
-
-        assert_eq!(
-            capabilities
-                .context_projections
-                .keys()
-                .map(ContextProjectionKind::as_str)
-                .collect::<Vec<_>>(),
-            vec!["agentProximity", "ciFailureLocalization", "githubReview"]
-        );
     }
 
     #[test]

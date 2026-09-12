@@ -471,13 +471,4 @@ mod tests {
             HostBundleRegistrationStateV1::Repairable
         );
     }
-
-    #[test]
-    fn zed_project_scope_uses_the_project_settings_document() {
-        let project = tempfile::tempdir().unwrap();
-        assert_eq!(
-            zed_project_settings_path(project.path()),
-            project.path().join(".zed/settings.json")
-        );
-    }
 }

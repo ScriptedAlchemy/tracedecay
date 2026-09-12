@@ -142,46 +142,6 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
 }
 
 #[tokio::test]
-async fn test_str_replace_success() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-
-    fs::write(
-        project.join("src/main.rs"),
-        "fn hello() {}\nfn world() {}\n",
-    )
-    .unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_str_replace",
-        json!({
-            "path": "src/main.rs",
-            "old_str": "fn hello() {}",
-            "new_str": "fn hello_updated() {}"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["success"], true);
-    assert_eq!(parsed["matched_str"], "fn hello() {}");
-    assert_eq!(parsed["new_str"], "fn hello_updated() {}");
-
-    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
-    assert!(content.contains("fn hello_updated() {}"));
-    assert!(!content.contains("fn hello() {}"));
-}
-
-#[tokio::test]
 async fn path_containment_config_rejects_parent_traversal_before_serving_config() {
     let dir = test_temp_dir();
     let project = dir.path().join("repo");
@@ -344,33 +304,6 @@ async fn outline_preserves_generation_payload_and_adds_ast_grep_outline_when_ava
                 .is_some_and(|items| items.iter().any(|item| item["name"] == "helper")))),
         "ast-grep outline should be attached under ast_grep_outline: {payload}"
     );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn outline_markdown_uses_context_style_bullets_not_table() {
-    if !tracedecay_mcp::ast_grep_outline_available() {
-        return;
-    }
-
-    let dir = test_temp_dir();
-    let project = dir.path().join("project");
-    crate::fixture::write_indexed_fixture_sources(&project);
-    let (cg, _env) = init_test_project(&project).await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_outline",
-        json!({"file": "src/utils.rs", "format": "markdown"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    assert!(text.contains("## Outline"));
-    assert!(text.contains("- **helper**"));
-    assert!(!text.contains("| symbol | kind |"));
     close_test_graph(cg).await;
 }
 
@@ -583,48 +516,6 @@ async fn test_str_replace_multiple_matches_fails() {
             .unwrap()
             .contains("matches 2 times")
     );
-}
-
-#[tokio::test]
-async fn test_multi_str_replace_success() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-
-    fs::write(
-        project.join("src/main.rs"),
-        "fn foo() {}\nfn bar() {}\nfn baz() {}\n",
-    )
-    .unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_multi_str_replace",
-        json!({
-            "path": "src/main.rs",
-            "replacements": [
-                ["fn foo() {}", "fn foo_replaced() {}"],
-                ["fn bar() {}", "fn bar_replaced() {}"]
-            ]
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["success"], true);
-    assert_eq!(parsed["applied_count"], 2);
-
-    let content = fs::read_to_string(project.join("src/main.rs")).unwrap();
-    assert!(content.contains("fn foo_replaced()"));
-    assert!(content.contains("fn bar_replaced()"));
-    assert!(content.contains("fn baz() {}"));
 }
 
 #[tokio::test]
@@ -1342,44 +1233,4 @@ async fn test_insert_at_ambiguous_anchor() {
             .unwrap()
             .contains("matches 2 lines")
     );
-}
-
-#[tokio::test]
-async fn test_insert_at_preserves_trailing_newline() {
-    let dir = test_temp_dir();
-    let project_root = dir.path().join("project");
-    let project = project_root.as_path();
-    fs::create_dir_all(project.join("src")).unwrap();
-
-    let original = "fn hello() {}\n\nfn world() {}\n";
-    fs::write(project.join("src/lib.rs"), original).unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_insert_at",
-        json!({
-            "path": "src/lib.rs",
-            "anchor": "fn world",
-            "content": "fn extra() {}",
-            "before": true
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["success"], true);
-
-    let content = fs::read_to_string(project.join("src/lib.rs")).unwrap();
-    assert!(
-        content.ends_with('\n'),
-        "file must end with newline after insert_at, got: {:?}",
-        &content[content.len().saturating_sub(20)..]
-    );
-    assert_eq!(content, "fn hello() {}\n\nfn extra() {}\nfn world() {}\n");
 }

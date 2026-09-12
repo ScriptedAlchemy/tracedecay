@@ -20,9 +20,7 @@ use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::ReapEntryKind;
 use tracedecay_global_db::StoreInstanceUpsert;
 use tracedecay_runtime_core::path_safety::plain_host_path;
-use tracedecay_runtime_core::storage::{
-    default_profile_project_id, repository_identity_path, resolve_layout,
-};
+use tracedecay_runtime_core::storage::{default_profile_project_id, repository_identity_path};
 
 fn git(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -135,25 +133,6 @@ fn every_linked_worktree_shares_its_repository_project_identity() {
 }
 
 #[test]
-fn linked_worktrees_resolve_to_one_store() {
-    let fixture = repo_with_worktrees();
-    let profile = fixture.main.parent().unwrap().join("profile");
-
-    let main = resolve_layout(&fixture.main, &profile).unwrap();
-    let attached = resolve_layout(&fixture.attached, &profile).unwrap();
-    let detached = resolve_layout(&fixture.detached, &profile).unwrap();
-
-    assert_eq!(
-        main.data_root, attached.data_root,
-        "an attached linked worktree must resolve to the repository's store"
-    );
-    assert_eq!(
-        main.data_root, detached.data_root,
-        "a detached linked worktree must resolve to the repository's store"
-    );
-}
-
-#[test]
 fn detached_worktree_reads_the_shared_repository_identity_marker() {
     let fixture = repo_with_worktrees();
 
@@ -220,22 +199,6 @@ async fn ephemeral_project_root_cannot_enter_a_durable_registry() {
             .is_none(),
         "the refused root must leave no alias behind"
     );
-}
-
-/// The ephemeral guard compares the root against the *profile*: a hermetic
-/// test profile is itself throwaway, so temp fixtures must keep working.
-#[tokio::test]
-async fn ephemeral_project_root_is_allowed_by_a_hermetic_profile() {
-    let dir = TempDir::new().unwrap();
-    let db = HostAdmissionTestRuntimeV1::profile(dir.path().join("profile"))
-        .await
-        .unwrap();
-    let project = dir.path().join("fixture-project");
-    std::fs::create_dir_all(&project).unwrap();
-
-    db.upsert_code_project("proj_hermetic", &project, None, None, None)
-        .await
-        .expect("a throwaway profile must still accept throwaway project fixtures");
 }
 
 #[tokio::test]

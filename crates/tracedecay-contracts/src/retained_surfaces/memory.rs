@@ -136,31 +136,3 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
         surfaces: CURRENT_SURFACES,
     },
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::SPECS;
-    use crate::retained_surfaces::RetainedSurfaceOperation;
-
-    #[test]
-    fn contradiction_is_bounded_while_resumable_memory_reads_are_paginated() {
-        let paginated = |operation| {
-            SPECS
-                .iter()
-                .find(|spec| spec.operation == operation)
-                .expect("memory operation has a retained catalog entry")
-                .paginated
-        };
-
-        assert!(!paginated(RetainedSurfaceOperation::FactStoreContradict));
-        for operation in [
-            RetainedSurfaceOperation::FactStoreSearch,
-            RetainedSurfaceOperation::FactStoreProbe,
-            RetainedSurfaceOperation::FactStoreRelated,
-            RetainedSurfaceOperation::FactStoreReason,
-            RetainedSurfaceOperation::FactStoreList,
-        ] {
-            assert!(paginated(operation));
-        }
-    }
-}

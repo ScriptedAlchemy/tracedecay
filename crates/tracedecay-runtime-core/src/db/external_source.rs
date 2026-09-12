@@ -63,11 +63,14 @@ pub async fn install_external_source_schema(
     // each retired table into its successor and drop it; a store at the
     // current shape has none of them and this is a single catalog probe.
     for (retired_table, migration) in RETIRED_MUTATION_COPY_TABLES {
-        if !table_exists(connection, retired_table).await.map_err(|error| {
-            failure(format!(
-                "{operation}: failed to probe for retired table {retired_table}: {error}"
-            ))
-        })? {
+        if !table_exists(connection, retired_table)
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "{operation}: failed to probe for retired table {retired_table}: {error}"
+                ))
+            })?
+        {
             continue;
         }
         connection.execute_batch(migration).await.map_err(|error| {
@@ -109,12 +112,16 @@ mod tests {
     async fn install_migrates_retired_mutation_copy_tables() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("graph.db");
-        let authority = DatabaseAuthority::acquire_test(&path, "external source migration").unwrap();
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "external source migration").unwrap();
         let (db, _) =
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
                 .unwrap();
-        let writer = db.begin_write_transaction("seed retired shape").await.unwrap();
+        let writer = db
+            .begin_write_transaction("seed retired shape")
+            .await
+            .unwrap();
         // The fixture runtime already installed the current schema; recreate
         // the retired tables beside it exactly as an older binary left them.
         writer

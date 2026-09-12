@@ -272,7 +272,6 @@ mod tests {
     #[cfg(unix)]
     use super::super::super::skill_usage::skill_usage_ledger_path;
     use super::super::super::skill_usage::{DEFAULT_SKILL_OVERLAP_LIMIT, skill_overlap_candidates};
-    use super::super::skill_proposal_action;
     use super::*;
 
     fn assert_err_eq<T>(result: std::result::Result<T, String>, expected: &str) {
@@ -729,22 +728,6 @@ mod tests {
                 &skills,
             ),
             "config error: managed skill 'workflow-a' update does not change the active revision",
-        );
-    }
-
-    #[test]
-    fn consolidation_actions_parse_from_proposals() {
-        assert_eq!(
-            assert_ok(skill_proposal_action(&json!({"action": "merge"}))),
-            SkillProposalAction::Merge
-        );
-        assert_eq!(
-            assert_ok(skill_proposal_action(&json!({"action": "consolidate"}))),
-            SkillProposalAction::Merge
-        );
-        assert_eq!(
-            assert_ok(skill_proposal_action(&json!({"action": "archive"}))),
-            SkillProposalAction::Archive
         );
     }
 

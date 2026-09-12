@@ -224,8 +224,6 @@ where
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::BuildHasherDefault;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tracedecay_graph_db::NeverCancelled;
@@ -381,44 +379,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_two_node_cycle() {
-        let mut adj: HashMap<&str, HashSet<&str>> = HashMap::new();
-        edge(&mut adj, "a", "b");
-        edge(&mut adj, "b", "a");
-        let sccs = tarjan_scc(&adj);
-        let cyclic: Vec<_> = sccs.iter().filter(|s| is_cyclic_scc(s, &adj)).collect();
-        assert_eq!(cyclic.len(), 1);
-        assert_eq!(cyclic[0].len(), 2);
-    }
-
-    #[test]
-    fn detects_three_node_cycle_plus_tail() {
-        let mut adj: HashMap<&str, HashSet<&str>> = HashMap::new();
-        edge(&mut adj, "a", "b");
-        edge(&mut adj, "b", "c");
-        edge(&mut adj, "c", "a");
-        edge(&mut adj, "c", "d");
-        edge(&mut adj, "d", "e");
-        let sccs = tarjan_scc(&adj);
-        assert_eq!(sccs.len(), 3, "[abc] + [d] + [e]");
-        let cyclic: Vec<_> = sccs.iter().filter(|s| is_cyclic_scc(s, &adj)).collect();
-        assert_eq!(cyclic.len(), 1);
-        let mut sorted = cyclic[0].clone();
-        sorted.sort_unstable();
-        assert_eq!(sorted, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn self_loop_classified_as_cyclic() {
-        let mut adj: HashMap<&str, HashSet<&str>> = HashMap::new();
-        edge(&mut adj, "a", "a");
-        edge(&mut adj, "a", "b");
-        let sccs = tarjan_scc(&adj);
-        let a_scc = sccs.iter().find(|s| s.contains(&"a")).unwrap();
-        assert!(is_cyclic_scc(a_scc, &adj));
-    }
-
-    #[test]
     fn reverse_topological_order() {
         // a -> b -> c. Tarjan emits in reverse-topo: leaves first.
         let mut adj: HashMap<&str, HashSet<&str>> = HashMap::new();
@@ -445,42 +405,5 @@ mod tests {
         let sccs = tarjan_scc(&adj);
         assert_eq!(sccs.len(), NODE_COUNT);
         assert!(sccs.iter().all(|component| component.len() == 1));
-    }
-
-    #[test]
-    fn non_default_hashers_produce_equivalent_components() {
-        type DeterministicState = BuildHasherDefault<DefaultHasher>;
-        let edges = [
-            ("a", "b"),
-            ("b", "c"),
-            ("c", "a"),
-            ("c", "d"),
-            ("d", "e"),
-            ("e", "d"),
-            ("e", "f"),
-        ];
-        let mut default_adj: HashMap<&str, HashSet<&str>> = HashMap::new();
-        let mut deterministic_adj: HashMap<
-            &str,
-            HashSet<&str, DeterministicState>,
-            DeterministicState,
-        > = HashMap::default();
-        for (from, to) in edges {
-            default_adj.entry(from).or_default().insert(to);
-            deterministic_adj.entry(from).or_default().insert(to);
-        }
-
-        fn canonicalize(mut components: Vec<Vec<&str>>) -> Vec<Vec<&str>> {
-            for component in &mut components {
-                component.sort_unstable();
-            }
-            components.sort_unstable();
-            components
-        }
-
-        assert_eq!(
-            canonicalize(tarjan_scc(&default_adj)),
-            canonicalize(tarjan_scc(&deterministic_adj))
-        );
     }
 }

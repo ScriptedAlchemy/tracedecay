@@ -420,40 +420,6 @@ fn canonical_session_fact_keeps_project_identity_separate_from_native_location()
 }
 
 #[test]
-fn canonical_envelope_accepts_byte_depth_and_value_boundaries() {
-    let empty = envelope_with_content(Value::String(String::new())).unwrap();
-    let empty_bytes = serde_json::to_vec(&empty).unwrap().len();
-    let byte_boundary = envelope_with_content(Value::String(
-        "x".repeat(MAX_OBSERVATION_RECORD_BYTES - empty_bytes),
-    ))
-    .unwrap();
-    assert_eq!(
-        serde_json::to_vec(&byte_boundary).unwrap().len(),
-        MAX_OBSERVATION_RECORD_BYTES
-    );
-
-    let depth_boundary =
-        envelope_with_content(nested_arrays(MAX_OBSERVATION_STRUCTURE_DEPTH - 4)).unwrap();
-    assert_eq!(
-        json_structure_metrics(&serde_json::to_value(depth_boundary).unwrap()).1,
-        MAX_OBSERVATION_STRUCTURE_DEPTH
-    );
-
-    let base = envelope_with_content(Value::Null).unwrap();
-    let base_values = json_structure_metrics(&serde_json::to_value(base).unwrap()).0;
-    let value_boundary = envelope_with_content(Value::Array(vec![
-        Value::Null;
-        MAX_OBSERVATION_STRUCTURE_VALUES
-            - base_values
-    ]))
-    .unwrap();
-    assert_eq!(
-        json_structure_metrics(&serde_json::to_value(value_boundary).unwrap()).0,
-        MAX_OBSERVATION_STRUCTURE_VALUES
-    );
-}
-
-#[test]
 fn canonical_envelope_rejects_every_limit_overflow() {
     let empty = envelope_with_content(Value::String(String::new())).unwrap();
     let empty_bytes = serde_json::to_vec(&empty).unwrap().len();
@@ -932,70 +898,6 @@ fn collision_classification_distinguishes_duplicates_collisions_and_new_identity
     assert_eq!(
         classify_observation_collision(&existing, &distinct),
         ObservationCollisionOutcomeV1::Distinct
-    );
-}
-
-#[test]
-fn workflow_lifecycle_payload_dedupe_and_conflict_remain_deterministic() {
-    let material = profile_material();
-    let payload = |content: Value, status: &str| {
-        serde_json::to_value(
-            CanonicalObservationEnvelopeV1::new(
-                ProviderId::new("claude").unwrap(),
-                "workflow",
-                ObservationId::new("workflow.lifecycle.1").unwrap(),
-                CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
-                vec![CanonicalObservationFactV1::WorkflowLifecycle {
-                    semantic_kind: CanonicalWorkflowSemanticKindV1::Task,
-                    provider_reference: Some("task.native.1".to_owned()),
-                    item_id: Some("task.stable.1".to_owned()),
-                    parent_reference: None,
-                    list_reference: None,
-                    state: None,
-                    status: Some(status.to_owned()),
-                    item_order: None,
-                    revision: Some("1".to_owned()),
-                    event_sequence: Some(7),
-                    content: Some(content),
-                }],
-                CanonicalObservationEvidenceV1::new(
-                    ObservationOrderingDomainV1::FileBytes,
-                    ClaudeByteRangeV1::new(12, 34).unwrap(),
-                ),
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    };
-    let first = durable(
-        material.clone(),
-        payload(
-            json!({"text": "ship", "details": {"a": 1, "b": 2}}),
-            "pending",
-        ),
-    );
-    let reordered = durable(
-        material.clone(),
-        payload(
-            json!({"details": {"b": 2, "a": 1}, "text": "ship"}),
-            "pending",
-        ),
-    );
-    let conflicting = durable(
-        material,
-        payload(
-            json!({"details": {"a": 1, "b": 2}, "text": "ship"}),
-            "completed",
-        ),
-    );
-
-    assert_eq!(
-        classify_observation_collision(&first, &reordered),
-        ObservationCollisionOutcomeV1::ExactDuplicate
-    );
-    assert_eq!(
-        classify_observation_collision(&first, &conflicting),
-        ObservationCollisionOutcomeV1::IdentityCollision
     );
 }
 

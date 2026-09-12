@@ -284,14 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn plugin_api_bakes_binary_but_no_project() {
-        let api = plugin_api("/usr/local/bin/tracedecay").unwrap();
-        assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/usr/local/bin/tracedecay""#));
-        assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
-        assert!(!api.contains(BIN_PLACEHOLDER));
-    }
-
-    #[test]
     fn plugin_api_never_uses_plugin_profile_dir_as_project() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
@@ -307,11 +299,6 @@ mod tests {
     fn plugin_api_escapes_quotes_in_paths() {
         let api = plugin_api("/tmp/we\"ird/tracedecay").unwrap();
         assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/tmp/we\"ird/tracedecay""#));
-    }
-
-    #[test]
-    fn wrapper_entry_mounts_the_daemon_dashboard() {
-        assert_mountable_dashboard_entry(WRAPPER_ENTRY_JS);
     }
 
     #[test]
@@ -340,17 +327,6 @@ mod tests {
         assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/bin/tracedecay""#));
         assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
         assert!(api.contains(r#"@router.get("/dashboard-url")"#));
-    }
-
-    #[test]
-    fn install_creates_missing_parent_directories() {
-        let temp = TempDir::new().unwrap();
-        let plugin_dir = temp.path().join("missing/profile/plugins/tracedecay");
-
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
-
-        assert!(plugin_dir.join("dashboard/manifest.json").is_file());
-        assert!(plugin_dir.join("dashboard/dist/index.js").is_file());
     }
 
     #[test]

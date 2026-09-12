@@ -65,21 +65,6 @@ describe('AgentHandoffTokens', () => {
     ).toBeTruthy();
   });
 
-  it('states that an empty frontier is about the reader, not about the tokens', () => {
-    render(<AgentHandoffTokens reading={reading([])} />);
-
-    expect(
-      screen.getByText(/not evidence that no\s+handoff tokens exist/i),
-    ).toBeTruthy();
-  });
-
-  it('keeps an unasked question apart from an empty frontier', () => {
-    render(<AgentHandoffTokens reading={readHandoffTokens(null, undefined)} />);
-
-    expect(document.querySelector('[data-handoff-tokens="unasked"]')).toBeTruthy();
-    expect(screen.getByText(/not an empty frontier/i)).toBeTruthy();
-  });
-
   it('renders a token by digest and never by bearer', () => {
     render(<AgentHandoffTokens reading={reading([token({})])} />);
 

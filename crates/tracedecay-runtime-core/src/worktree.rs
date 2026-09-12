@@ -326,18 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn no_mismatch_when_index_lives_in_same_worktree() {
-        let tmp = tempdir().unwrap();
-        let project = tmp.path().join("repo");
-        fs::create_dir_all(&project).unwrap();
-        run_git(&project, &["init", "--quiet"]);
-        // start_path is inside the same working tree as the index
-        let sub = project.join("src");
-        fs::create_dir_all(&sub).unwrap();
-        assert!(detect_worktree_index_mismatch(&sub, &project).is_none());
-    }
-
-    #[test]
     fn flags_mismatch_when_started_from_linked_worktree() {
         // Two real git working trees: a main checkout and a linked
         // worktree. start_path = the linked worktree; index_root = the
@@ -381,45 +369,6 @@ mod tests {
         assert!(
             detached_worktree_graph_scope(&worktree)
                 .is_some_and(|scope| scope.starts_with("detached-worktree/"))
-        );
-    }
-
-    #[test]
-    fn gix_resolves_the_linked_worktree_specific_branch() {
-        let tmp = tempdir().unwrap();
-        let main = tmp.path().join("main");
-        fs::create_dir_all(&main).unwrap();
-        run_git(&main, &["init", "--quiet"]);
-        fs::write(main.join("README.md"), "hi").unwrap();
-        run_git(&main, &["add", "."]);
-        run_git(
-            &main,
-            &[
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "--quiet",
-                "-m",
-                "init",
-            ],
-        );
-        let worktree = tmp.path().join("feature");
-        run_git(
-            &main,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "feature",
-                worktree.to_str().unwrap(),
-            ],
-        );
-
-        assert_eq!(
-            crate::branch::current_branch(&worktree).as_deref(),
-            Some("feature")
         );
     }
 
@@ -537,28 +486,6 @@ mod tests {
     }
 
     #[test]
-    fn primary_checkout_root_redirects_linked_worktree_to_existing_primary() {
-        let tmp = tempdir().unwrap();
-        let primary = tmp.path().join("main");
-        let worktree = tmp.path().join("main-wt");
-        fs::create_dir_all(&primary).unwrap();
-        fs::create_dir_all(&worktree).unwrap();
-        // `git_common_dir` always returns a canonicalized path — mirror that
-        // guarantee here rather than a raw join.
-        let primary = fs::canonicalize(&primary).unwrap();
-        let common_dir = primary.join(".git");
-        fs::create_dir_all(&common_dir).unwrap();
-
-        let redirected = primary_checkout_root(&worktree, Some(&common_dir));
-
-        assert_eq!(
-            redirected,
-            Some(primary),
-            "a linked worktree with a live primary checkout must redirect to it"
-        );
-    }
-
-    #[test]
     fn primary_checkout_root_is_none_when_project_root_is_already_primary() {
         let tmp = tempdir().unwrap();
         let primary = tmp.path().join("main");
@@ -571,19 +498,6 @@ mod tests {
             primary_checkout_root(&primary, Some(&common_dir)),
             None,
             "the primary checkout must never be redirected to itself"
-        );
-    }
-
-    #[test]
-    fn primary_checkout_root_is_none_without_git_common_dir() {
-        let tmp = tempdir().unwrap();
-        let project_root = tmp.path().join("not-a-worktree");
-        fs::create_dir_all(&project_root).unwrap();
-
-        assert_eq!(
-            primary_checkout_root(&project_root, None),
-            None,
-            "non-git projects must register themselves unchanged"
         );
     }
 

@@ -21,7 +21,6 @@ mod facade;
 mod graph_binding;
 mod integrity;
 mod memory_graph_reconciliation;
-mod pragmas;
 mod query_write;
 mod registry;
 mod retained_maintenance;
@@ -38,8 +37,6 @@ pub use memory_graph_reconciliation::{
     MemoryGraphReconciliationTaskOwnerV1, ProjectMemoryReconciliationTelemetryObserverV1,
     ProjectMemoryReconciliationTelemetrySnapshotV1,
 };
-#[cfg(test)]
-pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
 pub use registry::{
     DatabaseClientGuardV1, DatabaseGraphOwnerRetirementCompositionRefusalV1, DatabaseOwnerErrorV1,
     DatabaseOwnerRetirementReservationV1, DatabaseOwnerV1, DatabaseOwnerWeakLeaseIssuerErrorV1,

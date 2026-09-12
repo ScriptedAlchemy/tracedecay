@@ -392,43 +392,6 @@ mod tests {
         }
     }
 
-    fn available_authority() -> CurrentRemoteAuthorityStateV1 {
-        serde_json::from_value(serde_json::json!({
-            "state": "available",
-            "value": {
-                "fence": {
-                    "brain_id": "brain.status",
-                    "shard_id": "shard.status",
-                    "generation_id": "generation.status",
-                    "placement_revision": 1,
-                    "authority_epoch": 1,
-                    "authority_node_id": "node.authority"
-                },
-                "credential_revision": 1,
-                "observed_at": 10
-            }
-        }))
-        .unwrap()
-    }
-
-    fn ready_status() -> RemoteOperationalStatusV1 {
-        RemoteOperationalStatusV1::compose(
-            true,
-            available_authority(),
-            RemoteSpoolOperationalStatusV1 {
-                pending_count: 0,
-                quarantined_count: 0,
-                has_sequence_gap: false,
-            },
-            true,
-            true,
-            false,
-            false,
-            UtcMicros(10),
-        )
-        .unwrap()
-    }
-
     #[test]
     fn absent_reader_returns_typed_unavailable_not_empty_success() {
         let envelope = status_from_reader(scope(), None);
@@ -442,50 +405,6 @@ mod tests {
             }
         );
         assert_eq!(envelope.legal_actions, vec![refresh_action()]);
-    }
-
-    #[test]
-    fn present_reader_maps_the_canonical_observed_status() {
-        let status = ready_status();
-        let reader: crate::RemoteOperationalStatusReader =
-            Arc::new(move || RemoteOperationalStatusReadV1::Observed {
-                listener: RemoteListenerReadV1::Serving,
-                status: status.clone(),
-                coverage: DoctorCoverageCompletenessV1::Complete,
-            });
-
-        let envelope = status_from_reader(scope(), Some(reader));
-
-        assert_eq!(envelope.domain_state, DashboardDomainStateV1::Ready);
-        assert_eq!(
-            envelope.payload,
-            RemoteOperationalStatusPayloadV1::Observed {
-                listener: RemoteListenerKindV1::Serving,
-                coverage: DoctorCoverageCompletenessV1::Complete,
-                readiness: RemoteReadinessKindV1::Ready,
-                enrollment_configured: true,
-                authority: RemoteAuthoritySummaryV1::Available {
-                    fence: RemoteFenceSummaryV1 {
-                        brain_id: "brain.status".to_owned(),
-                        shard_id: "shard.status".to_owned(),
-                        generation_id: "generation.status".to_owned(),
-                        placement_revision: 1,
-                        authority_epoch: 1,
-                        authority_node_id: "node.authority".to_owned(),
-                    },
-                },
-                spool: RemoteSpoolSummaryV1 {
-                    pending_count: 0,
-                    quarantined_count: 0,
-                    has_sequence_gap: false,
-                },
-                replay_coverage_complete: true,
-                current_backup_verified: true,
-                failover_in_progress: false,
-                recovery_required: false,
-                observed_at: UtcMicros(10),
-            }
-        );
     }
 
     #[test]

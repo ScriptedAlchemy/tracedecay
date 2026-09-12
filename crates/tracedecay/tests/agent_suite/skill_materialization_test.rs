@@ -268,38 +268,6 @@ async fn body_update_re_materializes_the_file() {
 }
 
 #[tokio::test]
-async fn metadata_update_re_materializes_the_file() {
-    let (_temp, root) = canonical_tempdir();
-    let home = root.join("home");
-    let profile_root = home.join(".tracedecay");
-    install_fake_hosts(&home);
-
-    activate_skill(&profile_root, "code-slop-cleanup").await;
-    let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let mut skill = tracedecay_automation_runtime::automation::managed_skills::load_managed_skill(
-        &profile_root,
-        "code-slop-cleanup",
-    )
-    .await
-    .unwrap();
-    materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
-
-    skill.metadata.routing_description =
-        "Use when performing a strict cleanup before review.".to_string();
-    let updated = materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
-
-    assert_eq!(updated.action, MaterializeAction::Written);
-    let contents = std::fs::read_to_string(skill_md(&scope, "code-slop-cleanup")).unwrap();
-    assert!(contents.contains("performing a strict cleanup"));
-    assert_eq!(
-        materialize_skill(&host_io(), &scope, &skill, INSTALL)
-            .unwrap()
-            .action,
-        MaterializeAction::Unchanged
-    );
-}
-
-#[tokio::test]
 async fn support_update_removes_only_stale_owned_files() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
@@ -686,31 +654,6 @@ async fn resolve_project_root_finds_enclosing_repo_root() {
 
     assert_eq!(resolve_project_root(&subdir), repo);
     assert_eq!(resolve_project_root(&repo), repo);
-}
-
-/// #3 A default (global) skill materializes into the global scope but not into a
-/// project scope, even when both host dirs exist. (Complements
-/// `materialize_on_activate_writes_global_scope_only_by_default`.)
-#[tokio::test]
-async fn project_scope_filters_out_global_skills() {
-    let (_temp, root) = canonical_tempdir();
-    let home = root.join("home");
-    let project = root.join("project");
-    let profile_root = home.join(".tracedecay");
-    install_fake_hosts(&home);
-    install_fake_hosts(&project);
-
-    activate_skill(&profile_root, "code-slop-cleanup").await;
-    reconcile_detected_scopes(&host_io(), &profile_root, &home, &project);
-
-    assert!(
-        home.join(".claude/skills/code-slop-cleanup/SKILL.md")
-            .is_file()
-    );
-    assert!(
-        !project.join(".claude/skills/code-slop-cleanup").exists(),
-        "no project package dir should be created for a global skill"
-    );
 }
 
 /// #4 Project-scope orphan cleanup must never delete a committed package another

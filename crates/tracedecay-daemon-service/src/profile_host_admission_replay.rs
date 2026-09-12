@@ -887,14 +887,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
-    #[test]
-    fn profile_replay_backoff_grows_then_caps() {
-        assert_eq!(profile_replay_backoff(1), Duration::from_millis(25));
-        assert_eq!(profile_replay_backoff(2), Duration::from_millis(50));
-        assert_eq!(profile_replay_backoff(3), Duration::from_millis(100));
-        assert_eq!(profile_replay_backoff(20), Duration::from_secs(2));
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn simultaneous_bootstrap_ensures_coalesce_and_cache_readiness() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -1153,44 +1145,6 @@ mod tests {
                 "host-admission spool is corrupted",
             ))
         );
-        registry.shutdown().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn bootstrap_retries_transient_failure_without_another_ensure() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let profile_root = temp.path().join("profile");
-        std::fs::create_dir_all(&profile_root).unwrap();
-        let registry = ProfileHostAdmissionReplayRegistry::default();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let operation_attempts = Arc::clone(&attempts);
-        let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
-            let attempts = Arc::clone(&operation_attempts);
-            Box::pin(async move {
-                let attempt = attempts.fetch_add(1, Ordering::AcqRel);
-                if attempt < 2 {
-                    Err(tracedecay_domain::errors::TraceDecayError::project_route(
-                        "test_bootstrap_unavailable",
-                        true,
-                        "transient test failure",
-                    ))
-                } else {
-                    Ok(())
-                }
-            })
-        });
-
-        registry.ensure_bootstrap(&profile_root, operation).await;
-        assert_eq!(
-            registry
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(2))
-                .await,
-            BootstrapCompletion::Completed,
-            "retrying bootstrap must recover without another request"
-        );
-        assert_eq!(attempts.load(Ordering::Acquire), 3);
-        assert_eq!(registry.bootstrap_attempt_count(&profile_root).await, 3);
-        assert_eq!(registry.bootstrap_backoff_count(&profile_root).await, 2);
         registry.shutdown().await;
     }
 

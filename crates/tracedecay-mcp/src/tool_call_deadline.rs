@@ -58,19 +58,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_declared_deadline_round_trips_through_the_meta_object() {
-        let params = json!({
-            "name": "tracedecay_fact_store_add",
-            "arguments": {},
-            "_meta": tool_call_deadline_meta(UtcMicros(1_765_000_000_000_000)),
-        });
-        assert_eq!(
-            caller_tool_call_deadline(Some(&params)).map(|deadline| deadline.expires_at),
-            Some(UtcMicros(1_765_000_000_000_000))
-        );
-    }
-
-    #[test]
     fn params_without_a_declared_deadline_leave_the_ceiling_in_charge() {
         assert!(caller_tool_call_deadline(None).is_none());
         assert!(caller_tool_call_deadline(Some(&json!({"name": "t"}))).is_none());

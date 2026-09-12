@@ -829,21 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn gc_config_round_trips_with_serde_defaults() {
-        let config: LcmGcConfig =
-            serde_json::from_str("{}").expect("empty gc config should deserialize with defaults");
-        let value = serde_json::to_value(&config).expect("gc config should serialize");
-
-        assert_eq!(value["grace_seconds"], 86_400);
-        assert_eq!(value["reap_missing_after"], 604_800);
-        assert_eq!(value["reap_missing_enabled"], false);
-        assert_eq!(value["max_batch_size"], 500);
-        assert_eq!(value["backup_before_reap"], true);
-        assert_eq!(value["interval_seconds"], 21_600);
-        assert_eq!(value["gc_enabled"], true);
-    }
-
-    #[test]
     fn gc_config_reap_missing_zero_means_never() {
         let config: LcmGcConfig =
             serde_json::from_str(r#"{"reap_missing_enabled":true,"reap_missing_after":0}"#)

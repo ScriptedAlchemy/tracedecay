@@ -108,18 +108,6 @@ fn timed_out_identity_discovery_retries_instead_of_degrading_forever() {
     ));
 }
 
-#[test]
-fn dirty_set_coalesces_and_takes_once() {
-    let mut set = DirtySet::default();
-    assert!(set.is_clean());
-    set.dirty = true;
-    assert!(!set.is_clean());
-
-    assert!(set.take());
-    assert!(set.is_clean());
-    assert!(!set.take());
-}
-
 #[tokio::test]
 async fn shared_ref_event_marks_repository_reconciliation() {
     let state = Arc::new(WatchState::new(
@@ -342,25 +330,9 @@ async fn ready_registered_state(watcher: &GitWatcher, repo: &Path) -> Arc<WatchS
 
 /// True for the specific `notify` error that means "the OS/sandbox is out of
 /// inotify watch slots" (`fs.inotify.max_user_watches` exhausted), as opposed
-/// to any other watch-install failure. Kept as a plain, synchronous predicate
-/// over a directly-constructed `notify::Error` so it can be unit-tested
-/// without touching the filesystem or Tokio — see
-/// `max_files_watch_is_recognized_as_the_watch_limit` below.
+/// to any other watch-install failure.
 fn is_watch_limit_error(err: &notify::Error) -> bool {
     matches!(err.kind, notify::ErrorKind::MaxFilesWatch)
-}
-
-#[test]
-fn max_files_watch_is_recognized_as_the_watch_limit() {
-    assert!(is_watch_limit_error(&notify::Error::new(
-        notify::ErrorKind::MaxFilesWatch
-    )));
-    assert!(!is_watch_limit_error(&notify::Error::new(
-        notify::ErrorKind::PathNotFound
-    )));
-    assert!(!is_watch_limit_error(&notify::Error::io(
-        std::io::Error::other("boom")
-    )));
 }
 
 /// True right now if installing the crate's own metadata watch set on

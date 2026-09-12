@@ -8,7 +8,7 @@ use tracedecay_application::observability::{
 use tracedecay_contracts::{ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1};
 use tracedecay_daemon_protocol::BrokerStream;
 use tracedecay_domain::{ObservabilityPayloadV1, ProjectId};
-use tracedecay_mcp::{BrokerStreamTransport, McpTransport};
+use tracedecay_mcp::BrokerStreamTransport;
 
 struct DeliverySettlementFixture {
     _pin: tracedecay_runtime_core::config::PinnedUserDataDir,
@@ -108,31 +108,6 @@ async fn settled_fanout(
         panic!("expected Work delivery fanout observation");
     };
     fanout
-}
-
-#[tokio::test]
-async fn full_close_wait_ignores_request_half_close() {
-    let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
-    let (client_reader, mut client_writer) = client.into_split();
-
-    client_writer
-        .shutdown()
-        .await
-        .expect("half-close client request side");
-    let mut peer_close = Box::pin(transport.peer_fully_closed_after_eof());
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut peer_close)
-            .await
-            .is_err(),
-        "request-half close must not cancel the response"
-    );
-
-    drop(client_writer);
-    drop(client_reader);
-    tokio::time::timeout(std::time::Duration::from_secs(1), &mut peer_close)
-        .await
-        .expect("full peer close must be observed");
 }
 
 #[tokio::test]

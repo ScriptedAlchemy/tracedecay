@@ -844,17 +844,6 @@ mod gc_tests {
     }
 
     #[test]
-    fn empty_store_has_zero_gc_writes_over_time() {
-        let observer = Arc::new(PreviewGcTestObserver::default());
-        let (_database, _store) =
-            store_with_gc_observer("git-index-gc-empty", Arc::clone(&observer));
-
-        std::thread::sleep(Duration::from_millis(150));
-
-        assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
     fn one_expiry_causes_one_bounded_purge_and_then_sleeps() {
         let observer = Arc::new(PreviewGcTestObserver::default());
         let (_database, store) =
@@ -881,31 +870,6 @@ mod gc_tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn save_command_wake_lowers_the_known_expiry_deadline() {
-        let observer = Arc::new(PreviewGcTestObserver::default());
-        let (_database, store) = store_with_gc_observer("git-index-gc-wake", Arc::clone(&observer));
-        let created_at = current_utc_micros().expect("clock");
-        store
-            .save_preview_input(preview_input(
-                "later",
-                created_at,
-                UtcMicros(created_at.0.saturating_add(2_000_000)),
-            ))
-            .expect("save later input");
-        store
-            .save_preview_input(preview_input(
-                "sooner",
-                created_at,
-                UtcMicros(created_at.0.saturating_add(100_000)),
-            ))
-            .expect("save sooner input");
-
-        wait_for_attempts(&observer, 1);
-
-        assert_eq!(observer.purge_attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]

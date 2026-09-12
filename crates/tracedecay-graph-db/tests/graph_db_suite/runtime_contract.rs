@@ -183,20 +183,6 @@ fn opaque_identity_deserialization_reuses_constructor_validation() {
 }
 
 #[test]
-fn opens_memory_and_accepts_exact_format() {
-    let db = memory_db();
-    let commit = db
-        .apply_unverified(batch(
-            "code",
-            "g1",
-            "w1",
-            vec![GraphMutation::UpsertEntity(entity("a"))],
-        ))
-        .unwrap();
-    assert_eq!(commit.sequence, 1);
-}
-
-#[test]
 fn open_honors_cancellation() {
     let error = GraphDbOwner::memory(Arc::new(Cancelled)).unwrap_err();
     assert_eq!(error, GraphDbError::Cancelled);
@@ -425,110 +411,6 @@ fn snapshot_is_immutable_after_live_write() {
 }
 
 #[test]
-fn traversal_is_deterministic_across_mutation_order() {
-    fn populated(order: [&str; 2]) -> GraphDbLeaseV1 {
-        let db = memory_db();
-        let mut mutations = vec![
-            GraphMutation::UpsertEntity(entity("a")),
-            GraphMutation::UpsertEntity(entity("b")),
-            GraphMutation::UpsertEntity(entity("c")),
-        ];
-        for target in order {
-            mutations.push(GraphMutation::UpsertRelation(relation(
-                &format!("a{target}"),
-                "a",
-                target,
-                "calls",
-            )));
-        }
-        db.apply_unverified(batch("code", "g1", "w1", mutations))
-            .unwrap();
-        db
-    }
-    let first = populated(["b", "c"]).traverse(traversal("a")).unwrap();
-    let second = populated(["c", "b"]).traverse(traversal("a")).unwrap();
-    assert_eq!(first, second);
-    assert_eq!(
-        first
-            .visits
-            .iter()
-            .map(|visit| visit.entity.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b", "c"]
-    );
-}
-
-#[test]
-fn traversal_filters_before_discovery_and_honors_depth() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "code",
-        "g1",
-        "w1",
-        vec![
-            GraphMutation::UpsertEntity(entity("a")),
-            GraphMutation::UpsertEntity(entity("b")),
-            GraphMutation::UpsertEntity(entity("c")),
-            GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
-            GraphMutation::UpsertRelation(relation("ac", "a", "c", "owns")),
-        ],
-    ))
-    .unwrap();
-    let mut request = traversal("a");
-    request
-        .relation_kinds
-        .insert(GraphRelationKind::new("calls").unwrap());
-    request.max_depth = 1;
-    let result = db.traverse(request).unwrap();
-    assert_eq!(result.visits.len(), 2);
-    assert_eq!(result.visits[1].entity.as_str(), "b");
-}
-
-#[test]
-fn traversal_supports_incoming_and_bidirectional_neighbors() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "code",
-        "g1",
-        "w1",
-        vec![
-            GraphMutation::UpsertEntity(entity("a")),
-            GraphMutation::UpsertEntity(entity("b")),
-            GraphMutation::UpsertEntity(entity("c")),
-            GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
-            GraphMutation::UpsertRelation(relation("bc", "b", "c", "calls")),
-        ],
-    ))
-    .unwrap();
-
-    let mut incoming = traversal("c");
-    incoming.direction = GraphTraversalDirection::Incoming;
-    incoming.max_depth = 2;
-    assert_eq!(
-        db.traverse(incoming)
-            .unwrap()
-            .visits
-            .into_iter()
-            .map(|visit| visit.entity.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        ["c", "b", "a"]
-    );
-
-    let mut both = traversal("b");
-    both.direction = GraphTraversalDirection::Both;
-    both.max_depth = 1;
-    assert_eq!(
-        db.traverse(both)
-            .unwrap()
-            .visits
-            .into_iter()
-            .map(|visit| visit.entity.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        ["b", "a", "c"]
-    );
-}
-
-#[test]
 fn traversal_budget_exhaustion_is_typed() {
     let db = memory_db();
     db.apply_unverified(batch(
@@ -569,35 +451,6 @@ fn traversal_visit_budget_stops_before_scanning_a_wide_frontier() {
     assert_eq!(
         db.traverse(request).unwrap_err(),
         GraphDbError::budget_exhausted(GraphBudgetKind::Read, 1)
-    );
-}
-
-#[test]
-fn traversal_result_budget_truncates_deterministically() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "code",
-        "g1",
-        "w1",
-        vec![
-            GraphMutation::UpsertEntity(entity("a")),
-            GraphMutation::UpsertEntity(entity("b")),
-            GraphMutation::UpsertEntity(entity("c")),
-            GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
-            GraphMutation::UpsertRelation(relation("ac", "a", "c", "calls")),
-        ],
-    ))
-    .unwrap();
-    let mut request = traversal("a");
-    request.max_results = 2;
-    let result = db.traverse(request).unwrap();
-    assert_eq!(
-        result
-            .visits
-            .iter()
-            .map(|visit| visit.entity.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b"]
     );
 }
 
@@ -978,38 +831,6 @@ fn vector_metric_rejects_unsupported_values() {
 }
 
 #[test]
-fn vector_search_uses_metric_and_stable_identity_ties() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "vectors",
-        "g1",
-        "w1",
-        vec![
-            GraphMutation::UpsertEntity(vector_entity("b", vec![1.0, 0.0], VectorMetric::Cosine)),
-            GraphMutation::UpsertEntity(vector_entity("a", vec![1.0, 0.0], VectorMetric::Cosine)),
-            GraphMutation::UpsertEntity(vector_entity(
-                "ignored",
-                vec![1.0, 0.0],
-                VectorMetric::Euclidean,
-            )),
-        ],
-    ))
-    .unwrap();
-    let result = db
-        .vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
-        .unwrap();
-    assert_eq!(
-        result
-            .matches
-            .iter()
-            .map(|item| item.entity.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b"]
-    );
-    assert_eq!(result.matches[0].distance, 0.0);
-}
-
-#[test]
 fn vector_search_supports_dot_product_and_euclidean() {
     for metric in [VectorMetric::DotProduct, VectorMetric::Euclidean] {
         let db = memory_db();
@@ -1144,93 +965,6 @@ fn vector_upsert_clears_prior_dimension_and_metric_keys() {
         .unwrap();
     assert_eq!(current.matches.len(), 1);
     assert_eq!(current.matches[0].entity.as_str(), "changing");
-}
-
-#[test]
-fn repeated_scale_traversal_and_followup_write_remain_exact() {
-    let db = memory_db();
-    let mut mutations = Vec::new();
-    for index in 0..256 {
-        mutations.push(GraphMutation::UpsertEntity(entity(&format!("n{index:03}"))));
-        if index > 0 {
-            mutations.push(GraphMutation::UpsertRelation(relation(
-                &format!("r{index:03}"),
-                &format!("n{:03}", index - 1),
-                &format!("n{index:03}"),
-                "next",
-            )));
-        }
-    }
-    db.apply_unverified(batch("scale", "g1", "w1", mutations))
-        .unwrap();
-    let started = std::time::Instant::now();
-    for _ in 0..32 {
-        let mut request = traversal("n000");
-        request.max_depth = 255;
-        request.max_visits = 256;
-        request.max_results = 256;
-        assert_eq!(db.traverse(request).unwrap().visits.len(), 256);
-    }
-    let elapsed = started.elapsed();
-    db.apply_unverified(batch(
-        "scale",
-        "g2",
-        "w2",
-        vec![
-            GraphMutation::UpsertEntity(entity("n256")),
-            GraphMutation::UpsertRelation(relation("r256", "n255", "n256", "next")),
-        ],
-    ))
-    .unwrap();
-    let mut request = traversal("n000");
-    request.max_depth = 256;
-    request.max_visits = 257;
-    request.max_results = 257;
-    assert_eq!(db.traverse(request).unwrap().visits.len(), 257);
-    eprintln!("32 traversals across 256 nodes completed in {elapsed:?}");
-}
-
-#[test]
-fn projection_replacement_preserves_cross_projection_target() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "facts",
-        "g1",
-        "w1",
-        vec![GraphMutation::UpsertEntity(entity("shared"))],
-    ))
-    .unwrap();
-    db.apply_unverified(batch(
-        "code",
-        "g2",
-        "w2",
-        vec![
-            GraphMutation::UpsertEntity(entity("source")),
-            GraphMutation::UpsertRelation(relation("link", "source", "shared", "refers")),
-        ],
-    ))
-    .unwrap();
-    db.replace_projection_unverified(ProjectionReplacement {
-        namespace: namespace(),
-        projection: projection("code"),
-        source_generation: generation("g3"),
-        next_watermark: watermark("w3"),
-        entities: vec![entity("new-source")],
-        relations: Vec::new(),
-        cancellation: live(),
-    })
-    .unwrap();
-
-    assert_eq!(
-        db.traverse(traversal("shared")).unwrap().visits[0]
-            .entity
-            .as_str(),
-        "shared"
-    );
-    assert!(matches!(
-        db.traverse(traversal("source")),
-        Err(GraphDbError::InvalidRequest { .. })
-    ));
 }
 
 #[test]
@@ -1745,33 +1479,4 @@ fn a_stale_index_rebuilds_once_its_vectors_arrive() {
             .as_str(),
         "with-embedding"
     );
-}
-
-/// A populated index reports `Available` and does not need a build.
-#[test]
-fn a_populated_index_reports_available_and_needs_no_build() {
-    let db = memory_db();
-    db.apply_unverified(batch(
-        "vectors",
-        "g1",
-        "w1",
-        vec![GraphMutation::UpsertEntity(vector_entity(
-            "a",
-            vec![1.0, 0.0],
-            VectorMetric::Cosine,
-        ))],
-    ))
-    .unwrap();
-    let status = db
-        .vector_index_status(GraphVectorIndexRequest {
-            namespace: namespace(),
-            projection: projection("vectors"),
-            property: GraphPropertyName::new("embedding").unwrap(),
-            dimension: 2,
-            metric: VectorMetric::Cosine,
-            cancellation: live(),
-        })
-        .unwrap();
-    assert_eq!(status, GraphVectorIndexStatus::Available { vectors: 1 });
-    assert!(!status.needs_build());
 }

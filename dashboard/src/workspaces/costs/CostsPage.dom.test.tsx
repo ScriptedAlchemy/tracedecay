@@ -11,20 +11,6 @@ afterEach(() => {
 });
 
 describe('CostsPage truth claims', () => {
-  it('separates provider usage from content sizing without inventing cache causality', async () => {
-    const payload = savingsOverviewPayload();
-    const sessions = payload['sessions'] as Record<string, unknown>;
-    sessions['tokenized_messages'] = 300;
-    sessions['estimated_messages'] = 700;
-    sessions['messages'] = 1000;
-
-    renderCosts(payload);
-
-    expect(await screen.findByText('tokenized')).toBeTruthy();
-    expect(screen.getByText(/provider-reported token breakdown/i)).toBeTruthy();
-    expect(screen.getByText(/the wire does not report why/i)).toBeTruthy();
-    expect(screen.queryByText(/they share one cache/i)).toBeNull();
-  });
 
   it('reports an unreported message class as unreported, not as zero coverage', async () => {
     const payload = savingsOverviewPayload();

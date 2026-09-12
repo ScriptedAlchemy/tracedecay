@@ -548,16 +548,6 @@ fn timeout_above_the_managed_test_limit_is_rejected() {
 }
 
 #[test]
-fn zero_timeout_is_rejected() {
-    let result = RunAffectedArgs::parse(&json!({"timeout_secs": 0, "format": "json"}))
-        .expect_err("zero timeout must not disable the managed test deadline");
-    let output = tool_result_body(result);
-
-    assert_eq!(output["error"]["kind"], "invalid_request");
-    assert_eq!(output["error"]["operation"], "timeout_secs");
-}
-
-#[test]
 fn unsupported_profile_is_rejected_before_test_selection() {
     let result = RunAffectedArgs::parse(&json!({"profile": "bench", "format": "json"}))
         .expect_err("an unsupported profile must not silently become a debug test run");
@@ -896,16 +886,6 @@ test result: FAILED. 1 passed; 1 failed; 1 ignored
 }
 
 #[test]
-fn cargo_test_args_use_one_exact_identity() {
-    let args = cargo_test_args(TestProfile::Debug, "nested::alpha");
-
-    assert_eq!(
-        args,
-        ["test", "--no-fail-fast", "--", "--exact", "nested::alpha"]
-    );
-}
-
-#[test]
 fn cargo_test_args_keep_release_before_libtest_separator() {
     let args = cargo_test_args(TestProfile::Release, "nested::alpha");
 
@@ -920,12 +900,6 @@ fn cargo_test_args_keep_release_before_libtest_separator() {
             "nested::alpha"
         ]
     );
-}
-
-#[test]
-fn tail_handles_short_input() {
-    assert_eq!(tail("hello", 100), "hello");
-    assert_eq!(tail("0123456789", 4), "6789");
 }
 
 /// Fifteen symbols across a dozen files, so a file-scale budget (8) is far

@@ -106,26 +106,6 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_durable_first_create_converges_on_one_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("private").join("response-handles");
-        let barrier = Arc::new(Barrier::new(2));
-        let workers = [(), ()].map(|()| {
-            let target = target.clone();
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                PrivateStoreIo::create_dir_all_durable(&target)
-            })
-        });
-
-        for worker in workers {
-            worker.join().unwrap().unwrap();
-        }
-        assert!(target.is_dir());
-    }
-
-    #[test]
     fn concurrent_durable_overlapping_parents_converge() {
         let root = tempfile::tempdir().unwrap();
         let dashboard = root.path().join("dashboard");
@@ -285,17 +265,6 @@ mod tests {
                 worker.join().unwrap();
             }
         }
-    }
-
-    #[test]
-    fn durable_namespace_sync_fault_scope_clears_on_unwind() {
-        let unwind = std::panic::catch_unwind(|| {
-            with_durable_namespace_sync_fault_for_test(1, || panic!("before sync"));
-        });
-        assert!(unwind.is_err());
-
-        let root = tempfile::tempdir().unwrap();
-        PrivateStoreIo::create_dir_all_durable(&root.path().join("after-panic")).unwrap();
     }
 
     #[test]

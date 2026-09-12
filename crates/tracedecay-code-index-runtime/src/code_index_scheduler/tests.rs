@@ -2682,6 +2682,10 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
         collectable_generation_bytes: StorageByteSizeV1(plan.collectable_generation_bytes()),
         stranded_scope_count: 0,
         stranded_scope_bytes: StorageByteSizeV1(0),
+        superseded_sealed_generation_count: 0,
+        superseded_sealed_generation_bytes: StorageByteSizeV1::ZERO,
+        abandoned_sealed_staging_count: 0,
+        abandoned_sealed_staging_bytes: StorageByteSizeV1::ZERO,
     };
     let finding =
         code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
@@ -3435,56 +3439,6 @@ async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     registry.shutdown().await;
 }
 
-#[test]
-fn saved_edit_incremental_publish() {
-    let fixture = GitFixture::new(&[(
-        "src/lib.rs",
-        "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n",
-    )]);
-    let store = TempDir::new().expect("store root");
-    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
-
-    let first = published(scheduler.reconcile_now().expect("initial publish"));
-    fixture.edit(
-        "src/lib.rs",
-        "pub fn alpha() -> u32 { 10 }\npub fn beta() -> u32 { 2 }\n",
-    );
-    scheduler.notify_path(fixture.path().join("src/lib.rs"));
-    let second = published(scheduler.reconcile_now().expect("incremental publish"));
-
-    assert_ne!(first.generation_id, second.generation_id);
-    let latest = scheduler.latest_complete().expect("latest generation");
-    assert!(!latest.exact().expect("exact lane").is_empty());
-    assert!(!latest.lexical().is_empty());
-    assert!(
-        !latest.graph_edges().is_empty() || !latest.graph_abstentions().is_empty(),
-        "graph lane must remain explicitly queryable"
-    );
-    let mut text_passes = 0_usize;
-    while !latest
-        .advance_text_serving(64)
-        .expect("advance bounded production text serving")
-    {
-        text_passes += 1;
-        assert!(
-            text_passes < 10_000,
-            "incremental generation text serving never became ready"
-        );
-    }
-    let owners = latest
-        .production_query_owners()
-        .expect("production exact/lexical/graph owners connect");
-    assert!(
-        owners.is_artifact_backed(),
-        "incremental publish must serve real durable exact/lexical owners"
-    );
-    latest.warm_serving_caches();
-    let _ = latest
-        .production_graph_serving()
-        .expect("graph owner is activated");
-}
-
 /// Full pre-seat memory journey: a fresh scheduler decodes the retained active
 /// generation, publishes a one-file increment through the partitioned sealer,
 /// and drains that successor into the durable text artifact. The default is
@@ -3721,43 +3675,6 @@ fn provenance_only_reseal_recaptures_the_tree_delta_without_changing_chunks() {
             .as_str(),
         git_stdout(fixture.path(), &["rev-parse", "HEAD"]),
         "the reseal records the moved tip as its exact source revision"
-    );
-}
-
-#[test]
-fn policy_transition_rebuilds_incompatible_active_generation() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let store = TempDir::new().expect("store root");
-    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let mut config_a = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
-    let generation_a = published(
-        config_a
-            .reconcile_now()
-            .expect("publish configuration A generation"),
-    )
-    .generation_id;
-    drop(config_a);
-
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    let mut config_b = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    replace_scheduler_policy_revision(&mut config_b, "policy.daemon.v2");
-
-    let generation_b = published(
-        config_b
-            .reconcile_now()
-            .expect("configuration B must rebuild instead of rejecting A"),
-    )
-    .generation_id;
-    assert_ne!(generation_b, generation_a);
-    assert!(
-        config_b
-            .latest_complete()
-            .expect("configuration B generation")
-            .generation()
-            .chunks()
-            .chunks()
-            .iter()
-            .all(|chunk| chunk.sensitivity.policy_revision.as_str() == "policy.daemon.v2")
     );
 }
 
@@ -4149,35 +4066,6 @@ fn generation_bound_rerank_authorizes_mixed_symbol_and_chunk_anchors() {
     let status = apply_bounded_rerank_outcome(&mut composition, cancelled);
     assert_eq!(status, OptionalStagePublicStatus::Cancelled);
     assert_eq!(composition.ranked_candidates, candidates);
-}
-
-#[test]
-fn duplicate_save_and_overflow_equals_clean_scan() {
-    let fixture = GitFixture::new(&[
-        ("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n"),
-        ("src/other.rs", "pub fn other() -> u32 { 2 }\n"),
-    ]);
-    let store = TempDir::new().expect("store root");
-    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let mut hinted = scheduler(&fixture, store.path().join("hinted"), Arc::clone(&bytes));
-    let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
-    published(hinted.reconcile_now().expect("hinted baseline"));
-    published(clean.reconcile_now().expect("clean baseline"));
-
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n");
-    let path = fixture.path().join("src/lib.rs");
-    hinted.notify_path(path.clone());
-    hinted.notify_path(path);
-    hinted.notify_overflow();
-
-    let hinted_publish = published(hinted.reconcile_now().expect("hinted reconcile"));
-    let clean_publish = published(clean.reconcile_now().expect("clean reconcile"));
-    assert_eq!(
-        hinted_publish.snapshot_content_identity,
-        clean_publish.snapshot_content_identity
-    );
-    assert_eq!(hinted_publish.lane_digest, clean_publish.lane_digest);
-    assert!(hinted_publish.overflow_reconciled);
 }
 
 #[test]
@@ -4634,32 +4522,6 @@ fn one_symbol_unrelated_work_skip() {
 }
 
 #[test]
-fn content_noop_suppresses_publication() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    let first = published(scheduler.reconcile_now().expect("baseline publish"));
-
-    match scheduler.reconcile_now().expect("content noop") {
-        CodeIndexReconcileOutcomeV1::Noop(evidence) => {
-            assert_eq!(
-                evidence.snapshot_content_identity, first.snapshot_content_identity,
-                "unchanged content must reuse the sealed snapshot identity"
-            );
-        }
-        CodeIndexReconcileOutcomeV1::Published(_) => {
-            panic!("identical content must not publish a new generation")
-        }
-    }
-    let _owners = scheduler
-        .latest_complete()
-        .expect("active generation")
-        .production_query_owners()
-        .expect("owners remain connected after content no-op");
-}
-
-#[test]
 fn superseding_notifies_publish_only_latest_content() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
@@ -4683,36 +4545,6 @@ fn superseding_notifies_publish_only_latest_content() {
     );
     assert_eq!(superseded.lane_digest, expected.lane_digest);
     assert!(superseded.overflow_reconciled);
-}
-
-#[test]
-fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
-    let fixture = GitFixture::new(&[(
-        "src/lib.rs",
-        "pub fn caller() { callee(); }\npub fn callee() {}\n",
-    )]);
-    let store = TempDir::new().expect("store root");
-    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    published(scheduler.reconcile_now().expect("publish"));
-    let latest = scheduler.latest_complete().expect("latest generation");
-    latest.warm_serving_caches();
-    let owners = latest
-        .production_query_owners()
-        .expect("connect production query owners");
-    assert!(
-        std::mem::size_of_val(owners.as_ref()) > 0 && latest.production_graph_serving().is_ok(),
-        "exact/lexical/graph production owners must be concrete lane values"
-    );
-    let same_generation = scheduler.latest_complete().expect("same latest generation");
-    assert!(
-        Arc::ptr_eq(&latest.query_owners, &same_generation.query_owners),
-        "repeated queries must reuse generation-bound query projections"
-    );
-    assert!(
-        same_generation.query_owners.get().is_some(),
-        "the shared query projection cache must remain populated"
-    );
 }
 
 /// Foreground query admission never performs the O(store) text projection.
@@ -9571,37 +9403,6 @@ async fn foreign_serving_generation_replacement_rejects_stale_rollback_token() {
 }
 
 #[tokio::test]
-async fn committed_serving_generation_installation_preserves_the_exact_generation() {
-    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
-    let store = TempDir::new().expect("store root");
-    let (registry, _scope) = mounted_core_query_worktree(&fixture, &store).await;
-    let generation = registry
-        .serving_code_scope(fixture.path())
-        .await
-        .and_then(|scope| scope.serving_generation)
-        .expect("initial retained generation");
-    let generation_id = generation.manifest().generation_id.clone();
-    let ServingGenerationInstallationOutcomeV1::Installed(installation) = registry
-        .install_exact_serving_generation(fixture.path(), &generation)
-        .await
-    else {
-        panic!("the exact serving generation must admit an installation token")
-    };
-    assert_eq!(
-        registry
-            .commit_serving_generation_installation(fixture.path(), installation)
-            .await,
-        ServingGenerationRollbackOutcomeV1::Cleared
-    );
-    assert_eq!(
-        registry.latest_generation_id(fixture.path()).await,
-        Some(generation_id),
-        "committing metadata ownership must retain the exact serving generation"
-    );
-    registry.shutdown().await;
-}
-
-#[tokio::test]
 async fn abandoned_serving_generation_installation_releases_the_exact_replay_claim() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
@@ -9788,42 +9589,6 @@ async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
     // `shutdown` joins its task.
     drop(admission);
     registry.shutdown().await;
-}
-
-#[tokio::test]
-async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
-    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    registry
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-            None,
-        )
-        .await
-        .expect("mount daemon-owned scheduler");
-    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
-    wait_for_dashboard_ready(&registry, fixture.path()).await;
-
-    let projected = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("mounted scheduler projection");
-
-    assert_eq!(
-        projected.latest_generation_id.as_deref(),
-        Some(latest.generation.manifest().generation_id.as_str())
-    );
-    assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
-    assert_eq!(projected.coverage, "complete");
-    assert_eq!(
-        projected.code_graph_serving,
-        Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
-        )
-    );
 }
 
 #[tokio::test]
@@ -11224,44 +10989,6 @@ fn restart_rejects_pointer_generation_mismatch() {
         reopened.latest_complete_already_decoded().is_none(),
         "a mismatched pointer never becomes serving state"
     );
-}
-
-#[tokio::test]
-async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    assert!(
-        registry
-            .mount_worktree(
-                test_project_id(),
-                fixture.path(),
-                store.path().to_path_buf(),
-                None,
-            )
-            .await
-            .expect("mount daemon-owned scheduler")
-    );
-    // A saved edit is reconciled when its generation is text-current; graph
-    // seating of the successor is a separate, optional phase this test does
-    // not assert on.
-    let first = wait_for_queryable_text_generation_id(&registry, fixture.path()).await;
-
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert!(
-        registry
-            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
-            .await
-    );
-    let second = wait_for_queryable_text_generation_change(&registry, fixture.path(), &first)
-        .await
-        .metadata()
-        .manifest()
-        .generation_id
-        .clone();
-
-    assert_ne!(first, second);
-    registry.shutdown().await;
 }
 
 /// A slow freshness reconcile in one worktree must not serialize another

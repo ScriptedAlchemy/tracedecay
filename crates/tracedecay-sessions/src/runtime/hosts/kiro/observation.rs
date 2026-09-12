@@ -1,12 +1,4 @@
 use crate::runtime::snapshot_observation::SnapshotAdmissionRecord;
-#[cfg(test)]
-use crate::runtime::snapshot_observation::snapshot_cursor_after;
-#[cfg(test)]
-use crate::runtime::source::TranscriptIngestResult;
-#[cfg(test)]
-use tracedecay_domain::{
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
-};
 
 use super::PROVIDER;
 
@@ -38,16 +30,5 @@ impl SnapshotAdmissionRecord for KiroSnapshotObservationRecord {
 
     fn payload(&self) -> &[u8] {
         &self.payload
-    }
-}
-
-#[cfg(test)]
-impl KiroSnapshotObservationRecord {
-    pub(super) fn cursor_after(
-        &self,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-    ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-        snapshot_cursor_after(PROVIDER, &self.session_id, self.order, scope, generation)
     }
 }

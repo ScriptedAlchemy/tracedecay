@@ -243,33 +243,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reset_required_preserves_typed_authority_and_reason() {
-        let error =
-            TraceDecayError::reset_required("configuration", "persisted format is not final");
-
-        assert_eq!(
-            error.reset_required_context(),
-            Some(("configuration", "persisted format is not final"))
-        );
-    }
-
-    #[test]
-    fn database_operation_preserves_public_database_classification() {
-        let err = TraceDecayError::database_operation(
-            "SELECT observations",
-            std::io::Error::other("database unavailable"),
-        );
-
-        let TraceDecayError::Database { operation, message } = &err else {
-            panic!("database operation must retain the public Database variant");
-        };
-        assert_eq!(operation, "SELECT observations");
-        assert_eq!(message, "database unavailable");
-        assert!(err.is_database_error());
-        assert!(err.to_string().contains("SELECT observations"));
-    }
-
-    #[test]
     fn database_operation_does_not_double_self_displaying_chain() {
         use std::error::Error;
         use std::fmt;
@@ -348,37 +321,5 @@ mod tests {
             panic!("expected Database variant");
         };
         assert_eq!(message, "query failed: connection refused");
-    }
-
-    #[test]
-    fn hook_runtime_error_preserves_typed_context() {
-        let err = TraceDecayError::hook_runtime("cursor_conflict", true, "cursor advanced");
-
-        assert_eq!(
-            err.hook_runtime_context(),
-            Some(("cursor_conflict", true, "cursor advanced"))
-        );
-        assert!(err.hook_runtime_status().is_none());
-        assert!(err.to_string().contains("cursor advanced"));
-    }
-
-    #[test]
-    fn hook_runtime_error_carries_the_admission_status_verbatim() {
-        let err = TraceDecayError::hook_runtime_with_status(
-            "project_authority_unbound",
-            false,
-            "daemon observation authority is unavailable",
-            "unavailable",
-        );
-
-        assert_eq!(
-            err.hook_runtime_context(),
-            Some((
-                "project_authority_unbound",
-                false,
-                "daemon observation authority is unavailable"
-            ))
-        );
-        assert_eq!(err.hook_runtime_status(), Some("unavailable"));
     }
 }

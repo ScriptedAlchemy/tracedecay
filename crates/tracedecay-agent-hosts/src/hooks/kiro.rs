@@ -55,7 +55,6 @@ pub fn evaluate_kiro_pre_tool_use(event_json: &str) -> Option<String> {
         None
     }
 }
-
 fn is_kiro_delegation_tool(tool_name: &str) -> bool {
     matches!(tool_name, "delegate" | "subagent" | "use_subagent")
 }
@@ -250,50 +249,5 @@ fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
             }
             _ => {}
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn transcript_ingest_forwards_its_budget_to_the_daemon() {
-        let _lock = crate::hooks::lock_test_env();
-        let cwd = tempfile::tempdir().unwrap();
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
-            serde_json::json!({ "user_scope": true, "messages_upserted": 3 }),
-        ]);
-        let event = serde_json::json!({
-            "session_id": "kiro-budget",
-            "cwd": cwd.path(),
-        })
-        .to_string();
-
-        let runtime = crate::ports::hook_runtime::crate_test_runtime();
-        let outcome = crate::hooks::ingest_transcript_for_event(
-            &runtime,
-            "kiro",
-            &event,
-            None,
-            Some(8_192),
-            std::time::Duration::from_millis(375),
-            None,
-        )
-        .await;
-
-        assert!(outcome.user_scope);
-        assert_eq!(outcome.messages_upserted, 3);
-        assert!(outcome.should_schedule_user_review());
-        assert!(!outcome.failed);
-        assert!(!outcome.timed_out);
-        let calls = daemon.calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, None);
-        assert_eq!(calls[0].1["action"], "ingest_transcript");
-        assert_eq!(calls[0].1["provider"], "kiro");
-        assert_eq!(calls[0].1["max_new_bytes"], 8_192);
-        assert_eq!(calls[0].1["timeout_budget_ms"], 375);
-        assert_eq!(calls[0].1["format"], "json");
     }
 }

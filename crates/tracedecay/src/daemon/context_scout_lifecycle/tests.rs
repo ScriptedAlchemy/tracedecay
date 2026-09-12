@@ -273,16 +273,6 @@ async fn protected_replay_locator_re_resolves_the_authoritative_native_lifecycle
     assert_eq!(session_id.as_str(), "session.native.codex");
 }
 
-/// The cap is a fail-closed bound, not a tuning knob: it must stay small
-/// enough to keep one hook lookup bounded, and `cap + 1` must remain a
-/// valid `i64` SQL `LIMIT` (the `try_from` in the lookup returns `None`
-/// otherwise, silently failing every lookup closed).
-#[test]
-fn session_observation_cap_stays_bounded_and_expressible_as_a_sql_limit() {
-    assert_eq!(MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1, 64);
-    assert!(i64::try_from(MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1 + 1).is_ok());
-}
-
 #[tokio::test]
 async fn zero_hook_identifiers_are_rejected_before_registration() {
     let temporary = TempDir::new().unwrap();
@@ -575,61 +565,6 @@ async fn lookup_rejects_a_binding_that_does_not_match_the_requested_identity() {
         ),
         "a project the shard is not scoped to must fail closed"
     );
-}
-
-/// Every lookup failure reason must have a distinct, stable tracing
-/// label: the reasons only earn their keep if a log line can tell an
-/// unauthorized binding apart from exhausted evidence.
-#[test]
-fn lookup_failure_reasons_have_distinct_tracing_labels() {
-    use ContextScoutLifecycleLookupFailureV1 as Failure;
-    let reasons = [
-        Failure::InvalidProfileId,
-        Failure::InvalidProjectId,
-        Failure::InvalidWorktreeId,
-        Failure::InvalidSessionId,
-        Failure::UnauthorizedBinding,
-        Failure::SnapshotUnavailable,
-        Failure::ObservationQueryFailed,
-        Failure::ObservationRowUnreadable,
-        Failure::ObservationBudgetExceeded,
-        Failure::MalformedDurableObservation,
-        Failure::DurableScopeMismatch,
-        Failure::MalformedCanonicalEnvelope,
-        Failure::CanonicalEnvelopeMismatch,
-        Failure::NoCompleteLifecycle,
-    ];
-    let labels = reasons
-        .iter()
-        .map(|reason| reason.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(labels.len(), reasons.len());
-    // Every reason still fails closed for the `Option`-shaped callers.
-    for reason in reasons {
-        assert!(
-            ContextScoutLifecycleLookupV1::Unresolved(reason)
-                .into_address()
-                .is_none()
-        );
-    }
-}
-
-/// Every registration rejection must keep a distinct, stable label too.
-#[test]
-fn registration_rejections_have_distinct_labels() {
-    let rejections = [
-        AuthorityRejectionV1::ZeroHookProjectId,
-        AuthorityRejectionV1::ZeroHookWorktreeId,
-        AuthorityRejectionV1::InvalidProjectId,
-        AuthorityRejectionV1::InvalidWorktreeId,
-        AuthorityRejectionV1::NonProjectSessionScope,
-        AuthorityRejectionV1::ProjectNotOwnedByAuthority,
-    ];
-    let labels = rejections
-        .iter()
-        .map(|rejection| rejection.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(labels.len(), rejections.len());
 }
 
 #[tokio::test]

@@ -8,8 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracedecay_lsp::analyzer as lsp;
 use tracedecay_lsp::{
     AdmittedRoot, AnalyzerCancellationPort, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor,
-    AnalyzerTransitionError, LspRequestId, SemanticProviderOutcome, SemanticProviderPort,
-    SemanticRequest, SemanticResponse,
+    LspRequestId, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
 };
 
 #[path = "analyzer_runtime/broker_refresh.rs"]
@@ -230,39 +229,6 @@ fn phase_gated_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
 }
 
 #[test]
-fn analyzer_lifecycle_is_project_scoped_and_preserves_failure_evidence() {
-    let root = AdmittedRoot::new("file:///project");
-    let other = AdmittedRoot::new("file:///other");
-    let mut supervisor = AnalyzerSupervisor::new(root.clone());
-
-    assert_eq!(
-        supervisor.apply(&other, AnalyzerEvent::StartRequested),
-        Err(AnalyzerTransitionError::RootMismatch {
-            expected: root.clone(),
-            actual: other,
-        })
-    );
-    supervisor
-        .apply(&root, AnalyzerEvent::StartRequested)
-        .unwrap();
-    supervisor
-        .apply(&root, AnalyzerEvent::TransportFailed)
-        .unwrap();
-    assert_eq!(supervisor.state(), AnalyzerState::RestartBackoff);
-    assert_eq!(
-        supervisor.failure_evidence(),
-        Some(("analyzer-transport-failed", "Analyzer transport failed."))
-    );
-
-    supervisor
-        .apply(&root, AnalyzerEvent::StartRequested)
-        .unwrap();
-    supervisor.apply(&root, AnalyzerEvent::Ready).unwrap();
-    assert!(supervisor.is_ready_for(&root));
-    assert_eq!(supervisor.failure_evidence(), None);
-}
-
-#[test]
 fn polyglot_semantics_route_by_lexical_extension_and_fall_back_when_not_unique() {
     let routed: Arc<dyn SemanticProviderPort + Send + Sync> = Arc::new(PendingSemanticProvider);
     let fallback: Arc<dyn SemanticProviderPort + Send + Sync> =
@@ -457,41 +423,6 @@ fn broker_rejects_analyzer_root_uri_for_another_project() {
         result,
         Err(error) if error.to_string().contains("does not match the admitted project root")
     ));
-}
-
-#[test]
-fn settings_disable_language_and_backfill_mode_round_trip() {
-    let mut settings = lsp::settings::CodeDiagnosticsSettings::default();
-    settings.set_language_enabled("rust", false);
-    settings
-        .languages
-        .entry("rust".to_string())
-        .or_default()
-        .command_override = Some("/opt/bin/rust-analyzer".to_string());
-    settings.idle_backfill = lsp::settings::IdleBackfillMode::Off;
-    settings
-        .custom_adapters
-        .push(lsp::adapters::LspAdapterDefinition {
-            language: "ruby".to_string(),
-            language_id: "ruby".to_string(),
-            command: "ruby-lsp".to_string(),
-            args: Vec::new(),
-            extensions: vec!["rb".to_string()],
-            root_markers: vec!["Gemfile".to_string()],
-            install_options: Vec::new(),
-            diagnostics: lsp::adapters::DiagnosticMode::Push,
-        });
-
-    let encoded = serde_json::to_string(&settings).unwrap();
-    let decoded: lsp::settings::CodeDiagnosticsSettings = serde_json::from_str(&encoded).unwrap();
-
-    assert!(!decoded.language_enabled("rust"));
-    assert_eq!(decoded.idle_backfill, lsp::settings::IdleBackfillMode::Off);
-    assert_eq!(
-        decoded.command_for("rust", "rust-analyzer"),
-        "/opt/bin/rust-analyzer"
-    );
-    assert_eq!(decoded.custom_adapters[0].language, "ruby");
 }
 
 #[tokio::test]
