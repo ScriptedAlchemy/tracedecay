@@ -1911,7 +1911,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_lcm_load_session": 2,
         })
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
-        self.assertEqual(fixture["lcm_store_id"], 41)
+        self.assertEqual(fixture["lcm_message_id"], "message.fixture")
 
     def test_effect_preparation_skips_read_only_automation_and_lcm_producers(self) -> None:
         runner = load_runner()
@@ -2435,44 +2435,19 @@ class MountRetryTests(unittest.TestCase):
         runner = load_runner()
         self.assertNotIn("tracedecay_branch_search", runner.EXPECTED_HERMETIC_DENIALS)
 
-    def test_multi_root_probes_reach_the_exact_daemon_denial(self) -> None:
-        """Materialized multi-root bodies parse, so the typed owner denial is exact."""
+    def test_multi_root_tools_use_producer_minted_arguments(self) -> None:
         runner = load_runner()
         for name in (
             "tracedecay_multi_root_scope_set_compare_and_swap",
             "tracedecay_multi_root_execute",
+            "tracedecay_multi_root_scope_set_read",
         ):
-            kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
-            self.assertEqual((kind, code), ("unavailable", "multi_root.daemon_unavailable"))
-            denial = self.text_response(
-                f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}', is_error=True
+            self.assertNotIn(name, runner.EXPECTED_HERMETIC_DENIALS)
+            expected = {"scope_set_id": "scope.fixture", "format": "json"}
+            arguments = runner.materialize_tool_arguments(
+                self.definition(name), {"native_read_arguments": {name: expected}}
             )
-            client = self.scripted_client({name: [denial]})
-            row = runner._read_tool_row(
-                client, self.definition(name), self.policy(runner, name), fixture={}
-            )
-            self.assertEqual(row["verdict"], "PASS", name)
-            self.assertTrue(row["expected_denial"], name)
-            self.assertEqual(len(client.calls), 1, name)
-            arguments = client.calls[0][1]
-            self.assertEqual(arguments["scope_set_id"], "tool-sweep-scope-set.v1", name)
-
-    def test_multi_root_read_no_longer_claims_the_superseded_daemon_denial(self) -> None:
-        runner = load_runner()
-        name = "tracedecay_multi_root_scope_set_read"
-        self.assertNotIn(name, runner.EXPECTED_HERMETIC_DENIALS)
-        arguments = runner.materialize_tool_arguments(
-            {
-                "name": name,
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {"scope_set_id": {"type": "string"}},
-                    "required": ["scope_set_id"],
-                },
-            },
-            {},
-        )
-        self.assertEqual(arguments, {"scope_set_id": "tool-sweep-scope-set.v1"})
+            self.assertEqual(arguments, expected, name)
 
     def test_expired_preview_is_reminted_from_the_live_producer(self) -> None:
         """An expired stage-preview cursor re-mints through git_hunks, never a blind replay."""
