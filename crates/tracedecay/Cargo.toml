@@ -310,7 +310,6 @@ axum = "0.8"
 # both modes (the plain tokio mutex until a binary selects the backend).
 hotpath = { workspace = true, features = ["tokio"] }
 tower = "0.5"
-tree-sitter = "0.26"
 constant_time_eq = "0.5.0"
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
@@ -358,10 +357,8 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["backup"]
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
-clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
 toml = "1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
@@ -378,7 +375,6 @@ gix.workspace = true
 dirs = "6"
 hex = "0.4"
 fs2 = "0.4"
-same-file = "1"
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
 # ourselves so a monorepo's git-ref churn coalesces into a single sync.
@@ -386,11 +382,7 @@ notify = "6"
 zeroize = "1.9.0"
 keyring = { version = "4.1.5", features = ["v1"] }
 tempfile = "3"
-cap-std = "4.0.2"
-cap-fs-ext = "4.0.2"
-schemars = "1.2.1"
 futures-util = "0.3.33"
-tokio-util = { version = "0.7.19", features = ["codec"] }
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 
 # `kill(2)` for the daemon integration suites' physical-restart journeys
@@ -400,6 +392,7 @@ rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 libc = "0.2"
 
 [dev-dependencies]
+tree-sitter = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 sha2 = "0.11"
@@ -589,6 +582,9 @@ path = "tests/claude_observation_benchmark/main.rs"
 required-features = ["test-helpers"]
 
 # Former standalone default-feature singles, compiled as modules of one binary.
+# `semantic_vector_generation_prep_test` reaches the gated
+# `vector_generation_test_support` surface.
 [[test]]
 name = "product_surface_suite"
 path = "tests/product_surface_suite/main.rs"
+required-features = ["test-helpers"]

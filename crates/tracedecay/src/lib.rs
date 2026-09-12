@@ -57,7 +57,7 @@ pub use product_runtime::{
 };
 mod project_store_runtime;
 mod runtime_ports;
-pub use runtime_ports::{hook_runtime, register_runtime_ports};
+pub use runtime_ports::{hook_runtime, register_runtime_ports, session_review_port};
 pub mod serve;
 // Session-temporal harness lives under `benches/`; the lib only paths it in
 // when a bench target or integration lane asks for `test-helpers`.
@@ -66,6 +66,7 @@ pub mod serve;
 #[allow(clippy::too_many_lines)]
 pub mod session_temporal_benchmark;
 pub mod tracedecay;
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub mod vector_generation_test_support;
 pub mod version;
