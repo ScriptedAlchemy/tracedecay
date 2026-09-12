@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import subprocess
 import time
 from typing import Any, Callable
 
@@ -1842,6 +1843,485 @@ def _git_apply(call: Call, deadline: Deadline) -> PreparedJourney:
     return PreparedJourney(arguments, cleanup)
 
 
+_NATIVE_EFFECTS = frozenset(
+    {
+        "tracedecay_multi_root_scope_set_compare_and_swap",
+        "tracedecay_approve_native_integration",
+        "tracedecay_apply_native_integration",
+        "tracedecay_cancel_native_integration",
+        "tracedecay_worktree_cleanup_remove",
+    }
+)
+
+
+def _scope_set(response: dict[str, Any], scope_set_id: str) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("scope_set_id") == scope_set_id
+            and isinstance(value.get("revision"), int)
+            and isinstance(value.get("digest"), str)
+            and isinstance(value.get("roots"), list)
+        ):
+            return value
+    raise JourneyError("scope-set producer omitted its persisted identity")
+
+
+def _native_authority(response: dict[str, Any]) -> tuple[str, str]:
+    for value in objects(response):
+        policy = value.get("policy")
+        if (
+            isinstance(value.get("grant_digest"), str)
+            and isinstance(policy, dict)
+            and isinstance(policy.get("digest"), str)
+        ):
+            return value["grant_digest"], policy["digest"]
+    raise JourneyError("native inventory omitted its grant and policy authority")
+
+
+def _inventory_snapshot(response: dict[str, Any]) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("state") == "snapshot"
+            and isinstance(value.get("snapshot_id"), str)
+            and isinstance(value.get("epoch"), int)
+            and isinstance(value.get("entries"), list)
+        ):
+            return value
+    raise JourneyError("worktree inventory omitted its exact snapshot")
+
+
+def _root_scope(scope_set: dict[str, Any], root: str) -> dict[str, Any]:
+    for value in scope_set["roots"]:
+        if not isinstance(value, dict):
+            continue
+        locator = value.get("locator")
+        scope = value.get("scope")
+        if (
+            isinstance(locator, dict)
+            and locator.get("canonical_root") == root
+            and isinstance(scope, dict)
+        ):
+            return scope
+    raise JourneyError(f"scope set omitted registered root {root}")
+
+
+def _inventory_entry(snapshot: dict[str, Any], worktree_id: str) -> dict[str, Any]:
+    for value in snapshot["entries"]:
+        if isinstance(value, dict) and value.get("worktree_id") == worktree_id:
+            return value
+    raise JourneyError(f"inventory omitted worktree {worktree_id}")
+
+
+def _native_preview(response: dict[str, Any]) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            isinstance(value.get("preview_id"), str)
+            and isinstance(value.get("preview_digest"), str)
+            and isinstance(value.get("ordered_commit_count"), int)
+        ):
+            return value
+    raise JourneyError("native preflight omitted its immutable preview")
+
+
+def _native_approval(response: dict[str, Any]) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            isinstance(value.get("approval_id"), str)
+            and isinstance(value.get("approval_digest"), str)
+            and isinstance(value.get("transaction_id"), str)
+        ):
+            return value
+    raise JourneyError("native approval omitted its daemon-minted transaction identity")
+
+
+def _native_receipt(response: dict[str, Any], transaction_id: str) -> dict[str, Any]:
+    for value in objects(response):
+        status = value.get("status")
+        if (
+            isinstance(value.get("receipt_digest"), str)
+            and isinstance(status, dict)
+            and status.get("transaction_id") == transaction_id
+        ):
+            return value
+    raise JourneyError("native apply omitted its durable transaction receipt")
+
+
+def _worktree_inspection(response: dict[str, Any]) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("state") == "inspection"
+            and isinstance(value.get("inspection_digest"), str)
+        ):
+            return value
+    raise JourneyError("worktree inspection omitted its exact digest")
+
+
+def _worktree_confirmation(response: dict[str, Any]) -> dict[str, Any]:
+    for value in objects(response):
+        if (
+            value.get("state") == "confirmed"
+            and isinstance(value.get("confirmation_digest"), str)
+            and isinstance(value.get("confirmed_at"), int)
+        ):
+            return value
+    raise JourneyError("worktree confirmation omitted its exact cleanup proof")
+
+
+def _recreate_cleanup_worktree(fixture: dict[str, Any]) -> None:
+    completed = subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "--quiet",
+            fixture["cleanup_root"],
+            fixture["cleanup_branch"],
+        ],
+        cwd=fixture["root"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise JourneyError(
+            f"cleanup worktree recreation failed: {(completed.stderr or completed.stdout).strip()}"
+        )
+
+
+def prime_native_admin_lifecycle(
+    fixture: dict[str, Any],
+    call: Call,
+    deadline: Deadline,
+    effect_target: str | None = None,
+) -> None:
+    """Use one persisted scope set for native integration and worktree cleanup."""
+    scope_set_id = f"scope-set.tool-sweep.{time.monotonic_ns()}"
+    roots = sorted(
+        [
+            {"project_id": fixture["project_id"], "root": fixture["root"]},
+            {"project_id": fixture["project_id"], "root": fixture["cleanup_root"]},
+        ],
+        key=lambda value: (value["project_id"], value["root"]),
+    )
+    cas_arguments = {
+        "scope_set_id": scope_set_id,
+        "expected_revision": None,
+        "roots": roots,
+        "format": "json",
+    }
+    applied = call(
+        "tracedecay_multi_root_scope_set_compare_and_swap",
+        cas_arguments,
+        deadline("tracedecay_multi_root_scope_set_compare_and_swap"),
+    )
+    scope_set = _scope_set(applied, scope_set_id)
+    if len(scope_set["roots"]) != 2:
+        raise JourneyError("scope-set CAS did not persist both exact worktrees")
+    read_arguments = {"scope_set_id": scope_set_id, "format": "json"}
+    read = call(
+        "tracedecay_multi_root_scope_set_read",
+        read_arguments,
+        deadline("tracedecay_multi_root_scope_set_read"),
+    )
+    if _scope_set(read, scope_set_id)["digest"] != scope_set["digest"]:
+        raise JourneyError("scope-set read changed the persisted digest")
+    execute_arguments = {
+        "scope_set_id": scope_set_id,
+        "scope_set_revision": scope_set["revision"],
+        "scope_set_digest": scope_set["digest"],
+        "operation": {
+            "kind": "git",
+            "request": {"operation": "git_status", "request": {"format": "json"}},
+        },
+        "page": 0,
+        "continuation": None,
+        "format": "json",
+    }
+    executed = call(
+        "tracedecay_multi_root_execute",
+        execute_arguments,
+        deadline("tracedecay_multi_root_execute"),
+    )
+    exact_scopes = {
+        value.get("scope_digest")
+        for value in objects(executed)
+        if isinstance(value.get("scope_digest"), str)
+        and isinstance(value.get("outcome"), dict)
+        and value["outcome"].get("outcome") == "exact"
+    }
+    if len(exact_scopes) != 2:
+        raise JourneyError("multi-root execute did not return exact Git status for both roots")
+
+    source_scope = _root_scope(scope_set, fixture["cleanup_root"])
+    destination_scope = _root_scope(scope_set, fixture["root"])
+    repository_target = {
+        "kind": "repository",
+        "project_id": source_scope["project_id"],
+        "repository_id": source_scope["repository_id"],
+    }
+    binding = {
+        "scope_set_id": scope_set_id,
+        "scope_set_revision": scope_set["revision"],
+        "scope_set_digest": scope_set["digest"],
+    }
+    inventory_arguments = {**binding, "target": repository_target, "format": "json"}
+    inventory = call(
+        "tracedecay_worktree_inventory",
+        inventory_arguments,
+        deadline("tracedecay_worktree_inventory"),
+    )
+    snapshot = _inventory_snapshot(inventory)
+    grant_digest, policy_digest = _native_authority(inventory)
+    source_entry = _inventory_entry(snapshot, source_scope["worktree_id"])
+    destination_entry = _inventory_entry(snapshot, destination_scope["worktree_id"])
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            source_scope.get("reference"),
+            destination_scope.get("reference"),
+            source_entry.get("head"),
+            destination_entry.get("head"),
+        )
+    ):
+        raise JourneyError("inventory omitted exact source/destination refs or tips")
+
+    source_node_id = "stack-node.tool-sweep.source"
+    destination_node_id = "stack-node.tool-sweep.destination"
+    nodes = [
+        {
+            "node_id": source_node_id,
+            "project_id": source_scope["project_id"],
+            "repository_id": source_scope["repository_id"],
+            "worktree_id": source_scope["worktree_id"],
+            "reference": source_scope["reference"],
+            "tip": source_entry["head"],
+        },
+        {
+            "node_id": destination_node_id,
+            "project_id": destination_scope["project_id"],
+            "repository_id": destination_scope["repository_id"],
+            "worktree_id": destination_scope["worktree_id"],
+            "reference": destination_scope["reference"],
+            "tip": destination_entry["head"],
+        },
+    ]
+    snapshot_arguments = {
+        "source": source_scope,
+        "destination": destination_scope,
+        "authorized_scope_set_id": scope_set_id,
+        "authorized_scope_set_revision": scope_set["revision"],
+        "authorized_scope_set_digest": scope_set["digest"],
+        "inventory_snapshot_id": snapshot["snapshot_id"],
+        "inventory_epoch": snapshot["epoch"],
+        "selection": {
+            "kind": "declared_stack_edge",
+            "binding": {
+                "stack_id": "stack.tool-sweep",
+                "revision_id": "stack-revision.tool-sweep.1",
+                "nodes": nodes,
+                "edges": [
+                    {"dependency": source_node_id, "dependent": destination_node_id}
+                ],
+                "source_node_id": source_node_id,
+                "destination_node_id": destination_node_id,
+                "direction": "propagate_dependency_to_dependent",
+            },
+        },
+        "grant_digest": grant_digest,
+        "policy_digest": policy_digest,
+        "format": "json",
+    }
+    stack = call(
+        "tracedecay_stack_snapshot",
+        snapshot_arguments,
+        deadline("tracedecay_stack_snapshot"),
+    )
+    sealed_snapshot = _object_field(stack, "sealed_snapshot")
+    preflight_arguments = {
+        "snapshot": sealed_snapshot,
+        "preferred_mode": "fast_forward",
+        "format": "json",
+    }
+    preflight = call(
+        "tracedecay_preflight_native_integration",
+        preflight_arguments,
+        deadline("tracedecay_preflight_native_integration"),
+    )
+    preview = _native_preview(preflight)
+    if preview["ordered_commit_count"] < 1:
+        raise JourneyError("native preflight found no source commit to integrate")
+    approve_arguments = {
+        "preview_id": preview["preview_id"],
+        "preview_digest": preview["preview_digest"],
+        "format": "json",
+    }
+
+    approval: dict[str, Any] | None = None
+    if effect_target != "tracedecay_approve_native_integration":
+        approval = _native_approval(
+            call(
+                "tracedecay_approve_native_integration",
+                approve_arguments,
+                deadline("tracedecay_approve_native_integration"),
+            )
+        )
+    apply_arguments: dict[str, Any] | None = None
+    receipt: dict[str, Any] | None = None
+    if approval is not None:
+        apply_arguments = {
+            "preview_id": preview["preview_id"],
+            "preview_digest": preview["preview_digest"],
+            "approval_id": approval["approval_id"],
+            "approval_digest": approval["approval_digest"],
+            "transaction_id": approval["transaction_id"],
+            "format": "json",
+        }
+        if effect_target != "tracedecay_apply_native_integration":
+            receipt = _native_receipt(
+                call(
+                    "tracedecay_apply_native_integration",
+                    apply_arguments,
+                    deadline("tracedecay_apply_native_integration"),
+                ),
+                approval["transaction_id"],
+            )
+            status_arguments = {
+                "transaction_id": approval["transaction_id"],
+                "format": "json",
+            }
+            status = call(
+                "tracedecay_native_integration_status",
+                status_arguments,
+                deadline("tracedecay_native_integration_status"),
+            )
+            if first_value(status, {"transaction_id"}) != approval["transaction_id"]:
+                raise JourneyError("native status changed the applied transaction identity")
+            cancel_arguments = dict(status_arguments)
+            if effect_target != "tracedecay_cancel_native_integration":
+                call(
+                    "tracedecay_cancel_native_integration",
+                    cancel_arguments,
+                    deadline("tracedecay_cancel_native_integration"),
+                )
+            fixture.update(
+                {
+                    "native_status_arguments": status_arguments,
+                    "native_cancel_arguments": cancel_arguments,
+                }
+            )
+
+    cleanup_target = {
+        "kind": "worktree",
+        "project_id": source_scope["project_id"],
+        "repository_id": source_scope["repository_id"],
+        "worktree_id": source_scope["worktree_id"],
+    }
+    inspect_arguments = {**binding, "target": cleanup_target, "format": "json"}
+    inspection = _worktree_inspection(
+        call(
+            "tracedecay_worktree_cleanup_inspect",
+            inspect_arguments,
+            deadline("tracedecay_worktree_cleanup_inspect"),
+        )
+    )
+    confirm_arguments = {
+        **binding,
+        "target": cleanup_target,
+        "inspection_digest": inspection["inspection_digest"],
+        "format": "json",
+    }
+    confirmation = _worktree_confirmation(
+        call(
+            "tracedecay_worktree_cleanup_confirm",
+            confirm_arguments,
+            deadline("tracedecay_worktree_cleanup_confirm"),
+        )
+    )
+    remove_arguments = {
+        **binding,
+        "target": cleanup_target,
+        "inspection_digest": inspection["inspection_digest"],
+        "confirmed_at": confirmation["confirmed_at"],
+        "confirmation_digest": confirmation["confirmation_digest"],
+        "format": "json",
+    }
+    reconcile_arguments = {
+        **binding,
+        "target": cleanup_target,
+        "confirmation_digest": confirmation["confirmation_digest"],
+        "format": "json",
+    }
+    if effect_target != "tracedecay_worktree_cleanup_remove":
+        removed = call(
+            "tracedecay_worktree_cleanup_remove",
+            remove_arguments,
+            deadline("tracedecay_worktree_cleanup_remove"),
+        )
+        if first_value(removed, {"state"}) not in {"removed", "already_removed"}:
+            raise JourneyError("worktree cleanup did not remove its confirmed target")
+        reconciled = call(
+            "tracedecay_worktree_cleanup_reconcile",
+            reconcile_arguments,
+            deadline("tracedecay_worktree_cleanup_reconcile"),
+        )
+        if first_value(reconciled, {"state"}) != "removed":
+            raise JourneyError("worktree cleanup reconciliation did not prove removal")
+        _recreate_cleanup_worktree(fixture)
+        recreated = call(
+            "tracedecay_worktree_inventory",
+            inventory_arguments,
+            deadline("tracedecay_worktree_inventory"),
+        )
+        recreated_snapshot = _inventory_snapshot(recreated)
+        recreated_entry = _inventory_entry(
+            recreated_snapshot, source_scope["worktree_id"]
+        )
+        if recreated_entry.get("presence") != "present":
+            raise JourneyError("worktree inventory did not observe the recreated target")
+
+    fixture.update(
+        {
+            "native_scope_set": scope_set,
+            "native_scope_roots": roots,
+            "native_read_arguments": {
+                "tracedecay_multi_root_scope_set_read": read_arguments,
+                "tracedecay_multi_root_execute": execute_arguments,
+                "tracedecay_worktree_inventory": inventory_arguments,
+                "tracedecay_stack_snapshot": snapshot_arguments,
+                "tracedecay_preflight_native_integration": preflight_arguments,
+                "tracedecay_worktree_cleanup_inspect": inspect_arguments,
+                "tracedecay_worktree_cleanup_confirm": confirm_arguments,
+                "tracedecay_worktree_cleanup_reconcile": reconcile_arguments,
+                **(
+                    {"tracedecay_native_integration_status": fixture["native_status_arguments"]}
+                    if "native_status_arguments" in fixture
+                    else {}
+                ),
+            },
+            "native_effect_arguments": {
+                "tracedecay_multi_root_scope_set_compare_and_swap": {
+                    **cas_arguments,
+                    "expected_revision": scope_set["revision"],
+                },
+                "tracedecay_approve_native_integration": approve_arguments,
+                **(
+                    {"tracedecay_apply_native_integration": apply_arguments}
+                    if apply_arguments is not None
+                    else {}
+                ),
+                **(
+                    {"tracedecay_cancel_native_integration": fixture["native_cancel_arguments"]}
+                    if "native_cancel_arguments" in fixture
+                    else {}
+                ),
+                "tracedecay_worktree_cleanup_remove": remove_arguments,
+            },
+            "native_reconcile_arguments": reconcile_arguments,
+            "native_inventory_arguments": inventory_arguments,
+        }
+    )
+
+
 def _configuration_setting(
     call: Call, deadline: Deadline, key: str,
 ) -> tuple[str, dict[str, Any]]:
@@ -2612,6 +3092,85 @@ def _work_replay(
     return PreparedJourney(dict(arguments), cleanup)
 
 
+def _native_effect(
+    name: str, fixture: dict[str, Any], call: Call, deadline: Deadline,
+) -> PreparedJourney:
+    arguments = fixture.get("native_effect_arguments", {}).get(name)
+    if not isinstance(arguments, dict):
+        raise JourneyError(f"shared native journey omitted arguments for {name}")
+
+    def cleanup(response: dict[str, Any]) -> str:
+        if name == "tracedecay_multi_root_scope_set_compare_and_swap":
+            scope_set = _scope_set(response, fixture["native_scope_set"]["scope_set_id"])
+            if scope_set["revision"] != fixture["native_scope_set"]["revision"] + 1:
+                raise JourneyError("scope-set CAS did not advance the expected revision")
+            read = call(
+                "tracedecay_multi_root_scope_set_read",
+                {"scope_set_id": scope_set["scope_set_id"], "format": "json"},
+                deadline("tracedecay_multi_root_scope_set_read"),
+            )
+            if _scope_set(read, scope_set["scope_set_id"])["digest"] != scope_set["digest"]:
+                raise JourneyError("scope-set CAS result was not durably readable")
+            return "CAS/read verified in disposable scope-set store"
+        if name == "tracedecay_approve_native_integration":
+            approval = _native_approval(response)
+            if approval["preview_id"] != arguments["preview_id"]:
+                raise JourneyError("native approval changed the selected preview identity")
+            return "preflight/approval/daemon-minted transaction identity verified"
+        if name == "tracedecay_apply_native_integration":
+            _native_receipt(response, arguments["transaction_id"])
+            status_arguments = {
+                "transaction_id": arguments["transaction_id"],
+                "format": "json",
+            }
+            status = call(
+                "tracedecay_native_integration_status",
+                status_arguments,
+                deadline("tracedecay_native_integration_status"),
+            )
+            if first_value(status, {"transaction_id"}) != arguments["transaction_id"]:
+                raise JourneyError("native apply status lost its transaction identity")
+            call(
+                "tracedecay_cancel_native_integration",
+                status_arguments,
+                deadline("tracedecay_cancel_native_integration"),
+            )
+            return "inventory/snapshot/preflight/approve/apply/status/cancel verified"
+        if name == "tracedecay_cancel_native_integration":
+            status = call(
+                "tracedecay_native_integration_status",
+                fixture["native_status_arguments"],
+                deadline("tracedecay_native_integration_status"),
+            )
+            if first_value(status, {"transaction_id"}) != arguments["transaction_id"]:
+                raise JourneyError("native cancellation lost its transaction status")
+            return "terminal apply/cancel/status verified"
+        if name == "tracedecay_worktree_cleanup_remove":
+            if first_value(response, {"state"}) not in {"removed", "already_removed"}:
+                raise JourneyError("worktree cleanup effect did not remove its confirmed target")
+            reconciled = call(
+                "tracedecay_worktree_cleanup_reconcile",
+                fixture["native_reconcile_arguments"],
+                deadline("tracedecay_worktree_cleanup_reconcile"),
+            )
+            if first_value(reconciled, {"state"}) != "removed":
+                raise JourneyError("worktree cleanup effect did not reconcile as removed")
+            _recreate_cleanup_worktree(fixture)
+            inventory = call(
+                "tracedecay_worktree_inventory",
+                fixture["native_inventory_arguments"],
+                deadline("tracedecay_worktree_inventory"),
+            )
+            snapshot = _inventory_snapshot(inventory)
+            target_id = arguments["target"]["worktree_id"]
+            if _inventory_entry(snapshot, target_id).get("presence") != "present":
+                raise JourneyError("recreated cleanup worktree was not present in inventory")
+            return "inspect/confirm/remove/reconcile/recreate/inventory verified"
+        raise JourneyError(f"no native effect journey for {name}")
+
+    return PreparedJourney(dict(arguments), cleanup, "contained")
+
+
 def prepare(
     name: str, client: Any, fixture: dict[str, str], deadline: Deadline, call: Call,
 ) -> PreparedJourney | None:
@@ -2631,6 +3190,10 @@ def prepare(
         )
     if name == "tracedecay_git_apply":
         return _git_apply(call, deadline)
+    if name in _NATIVE_EFFECTS:
+        return _native_effect(name, fixture, call, deadline)
+    if name in _NATIVE_EFFECTS:
+        return _native_effect(name, fixture, call, deadline)
     if name.startswith("tracedecay_workflow_"):
         prepared = fixture.get("workflow_effect_journey")
         if isinstance(prepared, PreparedJourney):
