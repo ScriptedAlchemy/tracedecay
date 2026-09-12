@@ -1,5 +1,7 @@
 //! Shared registered exact-SQL plumbing for every Work table.
 
+use std::time::Duration;
+
 use super::*;
 
 /// A nonterminal attempt is actionable only until a committed retry receipt
@@ -27,7 +29,6 @@ pub(crate) fn authority_params(authority: &WorkAuthority) -> [&str; 5] {
         authority.policy_digest().as_str(),
     ]
 }
-
 pub(crate) fn authority_params_owned(authority: &WorkAuthority) -> Vec<ExactSqlValue> {
     authority_params(authority)
         .into_iter()
@@ -87,8 +88,4 @@ pub(crate) fn exact_sql_integer(values: &[ExactSqlValue], index: usize) -> Optio
         ExactSqlValue::Integer(value) => Some(*value),
         _ => None,
     }
-}
-
-pub(crate) fn invalid_storage(message: &str) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(message.to_owned())
 }

@@ -11,6 +11,7 @@ use tracedecay_contracts::{
     HandoffOpenTargetError, HandoffOpenTargetPort, HandoffOpenTargetV1,
     investigation_owner_version_digest,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::administrative_effect::{administrative_authority, administrative_command_effect};
 use super::*;
@@ -38,26 +39,45 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
                 HandoffOpenTargetV1::Task {
                     task_id, version, ..
                 } => {
-                    let authority = WorkAuthority::new(
-                        context.scope().project_id.clone(),
-                        context.scope().repository_id.clone(),
-                        context.scope().worktree_id.clone(),
-                        context.actor().clone(),
-                        context.grant().digest.clone(),
+                    let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(
+                        std::collections::BTreeSet::from([
+                            tracedecay_contracts::WorkRelationScopeV1::Repository {
+                                project_id: context.scope().project_id.clone(),
+                                repository_id: context.scope().repository_id.clone(),
+                            },
+                        ]),
                     )
                     .map_err(|_| HandoffOpenTargetError::Unavailable)?;
-                    match tracedecay_contracts::WorkStoragePort::projection(
-                        &self.work, &authority, task_id,
-                    ) {
-                        Ok(projection) => Ok(projection.version() == *version),
-                        Err(tracedecay_contracts::WorkStorageError::NotFoundOrNotAuthorized) => {
-                            Ok(false)
+                    let binding = tracedecay_contracts::WorkProductBindingV1::new(
+                        CapabilityId::new("capability.work.views")
+                            .map_err(|_| HandoffOpenTargetError::Unavailable)?,
+                        UseCaseId::new("use-case.work.views")
+                            .map_err(|_| HandoffOpenTargetError::Unavailable)?,
+                    );
+                    let read = tracedecay_contracts::WorkProductReadServiceV1::new(
+                        self.work.clone(),
+                        self.work.clone(),
+                        binding,
+                    )
+                    .read_graph(
+                        context,
+                        tracedecay_contracts::WorkGraphReadRequestV1::current(
+                            selection,
+                            self.observed_at,
+                        ),
+                    );
+                    match read {
+                        Ok(tracedecay_contracts::WorkGraphReadV1::Current { snapshot, .. }) => {
+                            Ok(snapshot.graph().item(task_id).is_some()
+                                && snapshot.graph().version().get() == version.get())
                         }
-                        Err(
-                            tracedecay_contracts::WorkStorageError::VersionConflict
-                            | tracedecay_contracts::WorkStorageError::IdempotencyConflict
-                            | tracedecay_contracts::WorkStorageError::Unavailable,
-                        ) => Err(HandoffOpenTargetError::Unavailable),
+                        Err(tracedecay_contracts::WorkProductApplicationErrorV1::NotFoundOrNotAuthorized) => Ok(false),
+                        Ok(
+                            tracedecay_contracts::WorkGraphReadV1::AsOf { .. }
+                            | tracedecay_contracts::WorkGraphReadV1::Evolution { .. }
+                            | tracedecay_contracts::WorkGraphReadV1::Forensic { .. },
+                        )
+                        | Err(_) => Err(HandoffOpenTargetError::Unavailable),
                     }
                 }
                 HandoffOpenTargetV1::Investigation {

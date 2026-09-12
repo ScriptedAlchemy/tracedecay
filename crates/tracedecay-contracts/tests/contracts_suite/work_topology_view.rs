@@ -272,9 +272,8 @@ fn fixture(project: &str) -> Fixture {
     )
 }
 
-fn verified_binding()
--> impl FnOnce(&WorkAuthority) -> Result<WorkAttemptTopologyStateV1, ApplicationProblem> {
-    |_authority| {
+fn verified_binding() -> impl FnOnce() -> Result<WorkAttemptTopologyStateV1, ApplicationProblem> {
+    || {
         Ok(WorkAttemptTopologyStateV1::Verified(
             WorkAttemptTopologyBindingV1 {
                 generation: "generation.topology.pinned".to_owned(),
@@ -395,7 +394,7 @@ fn a_scope_without_any_work_is_the_typed_absent_view() {
             page_size: 10,
             cursor: None,
         },
-        |_authority| Ok(WorkAttemptTopologyStateV1::Absent),
+        || Ok(WorkAttemptTopologyStateV1::Absent),
     )
     .unwrap();
     assert_eq!(view, ExecutionTopologyViewV1::Absent);
@@ -416,7 +415,7 @@ fn an_invalid_resolved_policy_is_refused_before_any_read() {
             page_size: 10,
             cursor: None,
         },
-        |_authority| panic!("an invalid policy must refuse before the topology read"),
+        || panic!("an invalid policy must refuse before the topology read"),
     )
     .unwrap_err();
     assert!(matches!(problem, ApplicationProblem::Unavailable { .. }));
