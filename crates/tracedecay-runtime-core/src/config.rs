@@ -18,6 +18,11 @@ pub const USER_DATA_DIR_ENV: &str = "TRACEDECAY_DATA_DIR";
 /// Environment variable that pins the user-level global database path.
 pub const GLOBAL_DB_PATH_ENV: &str = "TRACEDECAY_GLOBAL_DB";
 
+/// Reads the `TRACEDECAY_<suffix>` environment variable.
+pub fn brand_env(suffix: &str) -> Option<String> {
+    std::env::var(format!("TRACEDECAY_{suffix}")).ok()
+}
+
 /// Project graph database filename inside a `.tracedecay/` data dir.
 pub const DB_FILENAME: &str = "tracedecay.db";
 
