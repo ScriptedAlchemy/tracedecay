@@ -130,9 +130,7 @@ pub(super) async fn retire_mutation_copies_in_transaction(
         }
         conn.execute_batch(&format!("DROP TABLE {retired_table}"))
             .await
-            .map_err(|error| {
-                migration_failure(format!("failed to drop {retired_table}"), error)
-            })?;
+            .map_err(|error| migration_failure(format!("failed to drop {retired_table}"), error))?;
     }
     Ok(())
 }
