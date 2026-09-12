@@ -125,7 +125,7 @@ impl HookOrchestrationTaskOwnerV1 {
                 continue;
             }
             let waker = Waker::noop();
-            let mut cx = Context::from_waker(&waker);
+            let mut cx = Context::from_waker(waker);
             match Pin::new(&mut task).poll(&mut cx) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(_)) | Poll::Pending => self.failed = true,
