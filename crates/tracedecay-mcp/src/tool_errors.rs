@@ -131,6 +131,7 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         "tool_dispatch_shutdown"
         | "mcp_dispatch_effect_journey_unverified"
         | "application_surface_unavailable" => Some("unavailable"),
+        "application_surface_invalid_request" => Some("invalid_request"),
         "application_surface_not_found_or_not_authorized" => Some("denied"),
         _ => None,
     }
@@ -336,5 +337,34 @@ pub fn serialize_response_line(resp: &JsonRpcResponse) -> String {
                 hardcoded_internal_error_response(&resp.id, &fallback_err.to_string())
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tracedecay_domain::errors::TraceDecayError;
+
+    use super::tool_error_response;
+
+    #[test]
+    fn application_surface_invalid_request_keeps_its_typed_wire_kind() {
+        let response = tool_error_response(
+            json!(7),
+            "tracedecay_configuration_get",
+            &TraceDecayError::project_route(
+                "application_surface_invalid_request",
+                false,
+                "configuration request rejected by the application surface",
+            ),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+
+        assert_eq!(wire["error"]["code"], -32602);
+        assert_eq!(wire["error"]["data"]["kind"], "invalid_request");
+        assert_eq!(
+            wire["error"]["data"]["code"],
+            "application_surface_invalid_request"
+        );
     }
 }
