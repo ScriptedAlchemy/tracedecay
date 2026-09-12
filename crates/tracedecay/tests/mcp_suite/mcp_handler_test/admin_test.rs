@@ -632,6 +632,10 @@ async fn active_project_tool_reports_resolved_store_metadata() {
 
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(
+        payload["project_id"].as_str(),
+        cg.store_layout().identity.project_id.as_deref()
+    );
+    assert_eq!(
         payload["project_root"].as_str(),
         Some(project_root.as_str())
     );
