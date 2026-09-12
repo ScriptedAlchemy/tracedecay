@@ -8377,6 +8377,117 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_currency_witness_refuses_a_stale_generation() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _) = mounted_core_query_worktree(&fixture, &store).await;
+    let stale = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let stale_generation = stale.generation().manifest().generation_id.clone();
+    let stale_content = stale.generation().snapshot().content_identity.clone();
+
+    fixture.edit("src/main.rs", "fn main() { changed(); }\n");
+    git(fixture.path(), &["commit", "-qam", "publish successor"]);
+    assert!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/main.rs"))
+            .await,
+        "the changed source is admitted to the retained worker"
+    );
+    let successor = wait_for_generation_change(&registry, fixture.path(), &stale_generation).await;
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree source fence");
+
+    assert!(
+        source_freshness
+            .source_currency_witness_for(&stale_generation, &stale_content)
+            .is_none(),
+        "a generation whose sealed content predates the freshness proof cannot obtain a witness"
+    );
+    assert!(
+        source_freshness
+            .source_currency_witness_for(
+                &successor,
+                &wait_for_live_complete_generation(&registry, fixture.path())
+                    .await
+                    .generation()
+                    .snapshot()
+                    .content_identity,
+            )
+            .is_some(),
+        "the exact generation proved by the freshness fence obtains a witness"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_read_during_reconcile_records_a_busy_follow_up() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let _ = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+    let receipts_before = registry.event_to_ready_receipts();
+    let owner_pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree source fence");
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the source proof");
+    }
+
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "an expired graph proof abstains while the owner pass is in flight"
+    );
+    drop(owner_pass);
+    drop(admission);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let receipts = registry.event_to_ready_receipts();
+            if receipts.len() > receipts_before.len()
+                && receipts
+                    .iter()
+                    .skip(receipts_before.len())
+                    .any(|receipt| receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("busy graph follow-up records a completed cadence receipt");
+    assert!(
+        registry
+            .event_to_ready_receipts()
+            .iter()
+            .skip(receipts_before.len())
+            .all(|receipt| receipt.trigger != CodeIndexCadenceTriggerV1::QueryAdmission),
+        "the graph wake owned by an in-flight reconcile is not query admission"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
     let store = TempDir::new().expect("store root");
@@ -13026,10 +13137,14 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         1,
         &scope,
     );
-    let expected = super::queries::hydrate_relation_records(&latest, &expected_keys)
-        .expect("hydrate all keys");
+    let expected = super::queries::hydrate_relation_records(
+        &latest,
+        &expected_keys,
+        &registry.relation_symbol_hydrations,
+    )
+    .expect("hydrate all keys");
     assert_eq!(expected.len(), CALLER_STAR);
-    let _ = super::queries::take_relation_symbol_hydrations();
+    let _ = registry.take_relation_symbol_hydrations();
 
     let operation = callable_code_operation(CallableCodeOperationKind::Callers).expect("operation");
     let context = application_context(&operation, repository, worktree);
@@ -13067,7 +13182,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         expected[..CALLER_PAGE as usize],
         "page 1 must match the pre-change (depth, node_id) order"
     );
-    let page1_hydrations = super::queries::take_relation_symbol_hydrations();
+    let page1_hydrations = registry.take_relation_symbol_hydrations();
     assert_eq!(
         page1_hydrations,
         u64::from(CALLER_PAGE),
@@ -13107,7 +13222,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
             .all(|item| !first_page.items.contains(item)),
         "page 2 must return a disjoint slice"
     );
-    let page2_hydrations = super::queries::take_relation_symbol_hydrations();
+    let page2_hydrations = registry.take_relation_symbol_hydrations();
     assert_eq!(
         page2_hydrations,
         u64::from(CALLER_PAGE),
@@ -13141,7 +13256,7 @@ async fn callers_page_hydrates_only_the_requested_slice() {
         collected.extend(page.items);
         cursor = page.next_cursor;
     }
-    let _ = super::queries::take_relation_symbol_hydrations();
+    let _ = registry.take_relation_symbol_hydrations();
     assert_eq!(
         collected, expected,
         "concatenated pages must equal the full (depth, occurrence) neighborhood"
@@ -13249,7 +13364,7 @@ async fn callers_candidate_cursor_continues_on_its_immutable_generation() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let _ = super::queries::take_relation_symbol_hydrations();
+    let _ = registry.take_relation_symbol_hydrations();
     let continuation = registry
         .callers(
             RetrievalPortContext {
@@ -13283,7 +13398,7 @@ async fn callers_candidate_cursor_continues_on_its_immutable_generation() {
         "page 2 must be the remaining generation-A caller"
     );
     assert_eq!(
-        super::queries::take_relation_symbol_hydrations(),
+        registry.take_relation_symbol_hydrations(),
         1,
         "the continuation must hydrate only its own slice"
     );

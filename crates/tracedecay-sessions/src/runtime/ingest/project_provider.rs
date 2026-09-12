@@ -112,15 +112,15 @@ fn codex_source_failure_saturates_pass(failure_count: usize, retryable: bool) ->
     retryable || failure_count >= MAX_CODEX_SOURCE_FAILURES_PER_PASS
 }
 
-pub(super) struct ProjectProviderRun<'a> {
-    pub(super) project_root: &'a Path,
-    pub(super) project_id: &'a ProjectId,
-    pub(super) facade: &'a dyn HostAdmission,
-    pub(super) scope: &'a ObservationScopeV1,
-    pub(super) candidate: SessionProvider,
-    pub(super) max_new_bytes: u64,
-    pub(super) cancellation: &'a ObservationCancellation,
-    pub(super) codex_discovery: Option<(&'a codex::CodexDiscoveryHub, &'a str)>,
+pub(in crate::runtime) struct ProjectProviderRun<'a> {
+    pub(in crate::runtime) project_root: &'a Path,
+    pub(in crate::runtime) project_id: &'a ProjectId,
+    pub(in crate::runtime) facade: &'a dyn HostAdmission,
+    pub(in crate::runtime) scope: &'a ObservationScopeV1,
+    pub(in crate::runtime) candidate: SessionProvider,
+    pub(in crate::runtime) max_new_bytes: u64,
+    pub(in crate::runtime) cancellation: &'a ObservationCancellation,
+    pub(in crate::runtime) codex_discovery: Option<(&'a codex::CodexDiscoveryHub, &'a str)>,
 }
 
 pub(super) struct ProjectProviderRunResult {
@@ -178,7 +178,7 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     #[hotpath::measure(label = "sessions.ingest.project.codex", future = true)]
-    async fn run_codex(self) -> ProviderRunOutcome {
+    pub(in crate::runtime) async fn run_codex(self) -> ProviderRunOutcome {
         let Some(source) = codex::CodexSource::new() else {
             return ProviderRunOutcome::skipped();
         };

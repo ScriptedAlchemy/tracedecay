@@ -5595,9 +5595,16 @@ impl SourceFreshnessFenceV1 {
     fn source_currency_witness_for(
         &self,
         generation_id: &CodeGenerationId,
+        snapshot_content_identity: &ContentDigest,
     ) -> Option<ServingSourceWitnessV1> {
         let state = self.snapshot();
-        if !state.verified_against_source || state.source_witness.is_none() {
+        if !state.verified_against_source
+            || !state.source_witness.as_ref().is_some_and(|witness| {
+                witness
+                    .content_manifest
+                    .describes_snapshot(snapshot_content_identity)
+            })
+        {
             return None;
         }
         Some(ServingSourceWitnessV1 {
@@ -7804,9 +7811,10 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn source_currency_witness_for(
         &self,
         generation_id: &CodeGenerationId,
+        snapshot_content_identity: &ContentDigest,
     ) -> Option<ServingSourceWitnessV1> {
         self.freshness_fence
-            .source_currency_witness_for(generation_id)
+            .source_currency_witness_for(generation_id, snapshot_content_identity)
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
@@ -8451,8 +8459,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 self.identity.head_tree(),
             )
         {
-            let captured = self
-                .capture_exact_git_tree_snapshot(
+            match self.capture_exact_git_tree_snapshot(
                     &git_tree_capture::ExactGitTreeSourceV1 {
                         reference: reference.clone(),
                         revision: revision.clone(),
@@ -8462,27 +8469,33 @@ impl CodeIndexWorktreeSchedulerV1 {
                         deadline: None,
                         cancellation: None,
                     },
-                )
-                .map_err(|reason| match reason {
-                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled => {
-                        cancelled_code_index_reconcile()
-                    }
-                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable => {
-                        CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable
-                    }
-                    _ => CodeIndexSchedulerErrorV1::Git(format!(
+                ) {
+                Ok(captured) => {
+                    *self
+                        .active_snapshot_changed_paths
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+                        captured.snapshot.content_identity.clone(),
+                        captured.changed_paths.clone(),
+                    ));
+                    return Ok(captured);
+                }
+                Err(
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                ) => {}
+                Err(
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled,
+                ) => return Err(cancelled_code_index_reconcile()),
+                Err(
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                ) => return Err(CodeIndexSchedulerErrorV1::SnapshotMemoryCapacityUnavailable),
+                Err(reason) => {
+                    return Err(CodeIndexSchedulerErrorV1::Git(format!(
                         "immutable HEAD-tree capture failed: {}",
                         reason.as_str()
-                    )),
-                })?;
-            *self
-                .active_snapshot_changed_paths
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
-                captured.snapshot.content_identity.clone(),
-                captured.changed_paths.clone(),
-            ));
-            return Ok(captured);
+                    )));
+                }
+            }
         }
         let source_revision = (self.ignored_source_admissions.is_empty()
             && classification.changes().is_empty())

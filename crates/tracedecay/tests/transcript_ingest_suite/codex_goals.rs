@@ -128,6 +128,16 @@ fn write_codex_rollout_with_workflow_lifecycle(
             }
         }),
         serde_json::json!({
+            "timestamp": "2026-01-04T00:00:10.100Z",
+            "type": "event_msg",
+            "payload": {"type": "task_completed", "turn_id": "turn-lookalike-completed"}
+        }),
+        serde_json::json!({
+            "timestamp": "2026-01-04T00:00:10.200Z",
+            "type": "event_msg",
+            "payload": {"type": "task_failed", "turn_id": "turn-lookalike-failed"}
+        }),
+        serde_json::json!({
             "timestamp": "2026-01-04T00:00:11.000Z",
             "type": "response_item",
             "payload": {
@@ -324,12 +334,21 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
         }),
         "a non-goal user response_item must stay an unsupported duplicate"
     );
-    assert!(
-        !blobs
-            .iter()
-            .any(|blob| blob.contains("task_completed") || blob.contains("task_failed")),
-        "lookalike task_completed/task_failed must not appear as lifecycle facts"
-    );
+    for lookalike in ["task_completed", "task_failed"] {
+        assert!(
+            blobs.iter().any(|blob| {
+                blob.contains(&format!("\"native_kind\":\"{lookalike}\""))
+                    && blob.contains("\"state\":\"unsupported\"")
+            }),
+            "fixture must admit {lookalike} as an unsupported lookalike"
+        );
+        assert!(
+            !blobs.iter().any(|blob| {
+                blob.contains("\"kind\":\"workflow_lifecycle\"") && blob.contains(lookalike)
+            }),
+            "lookalike {lookalike} must not appear as a lifecycle fact"
+        );
+    }
 
     let workflow_rows = codex_workflow_fact_rows(&runtime).await;
     assert!(

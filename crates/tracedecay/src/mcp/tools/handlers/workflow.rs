@@ -1125,7 +1125,7 @@ fn test_annotations_in_file<'a>(
                 symbol
                     .metadata
                     .as_ref()
-                    .is_some_and(|metadata| tracedecay_code_index::is_test_marker(metadata))
+                    .is_some_and(tracedecay_code_index::is_test_marker)
             })
             .map(|symbol| symbol.occurrence.clone())
             .collect::<HashSet<_>>();
