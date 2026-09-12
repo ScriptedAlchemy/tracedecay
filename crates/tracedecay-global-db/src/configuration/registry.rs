@@ -933,7 +933,7 @@ mod semantic_runtime_payload_tests {
             resources: SemanticResourceCeilings {
                 max_model_bytes: 700 * 1024 * 1024,
                 max_tokenizer_bytes: 64 * 1024 * 1024,
-                max_resident_bytes: 2 * 1024 * 1024 * 1024,
+                max_resident_bytes: Some(2 * 1024 * 1024 * 1024),
                 max_threads: 8,
                 max_concurrent_sessions: 4,
                 max_batch_size: 32,

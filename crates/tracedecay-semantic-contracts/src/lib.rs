@@ -9,6 +9,7 @@ pub use configuration::{
     DEFAULT_FASTEMBED_MODEL_ID, DEFAULT_SEMANTIC_RESIDENT_BYTES, MAX_SEMANTIC_RESIDENT_BYTES,
     MODEL2VEC_POTION_CODE_16M_V2_MODEL_ID, RerankCompatibilityPinsV1, SemanticConfig,
     SemanticFallbackReasonV1, SemanticProfileSelection, SemanticResourceCeilings,
+    semantic_resident_ceiling_is_valid,
 };
 pub use lifecycle::{
     RerankerArtifactLifecycleStatusV1, SemanticLifecycleVerifiedReadyEventV1,

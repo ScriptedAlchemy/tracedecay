@@ -548,7 +548,7 @@ impl DaemonInvocationState {
             .zip(semantic_lifecycle.clone())
             .zip(semantic_resources)
             .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
-            .map(|(((handle, lifecycle), resources), worktree_id)| {
+            .and_then(|(((handle, lifecycle), resources), worktree_id)| {
                 let graph = Arc::clone(&vector_graph);
                 tracedecay_application::semantic_runtime::production_saved_generation_schedule_hook(
                     tracedecay_application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
@@ -563,6 +563,19 @@ impl DaemonInvocationState {
                         fair_scheduler: self.semantic_projection_scheduler.clone(),
                     },
                 )
+                // Composition resolves the resident ceiling against this host
+                // before the runtime is offered, so this refusal means the
+                // worktree mounts with no semantic scheduling at all rather
+                // than with a fabricated memory budget.
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        event = "semantic_projection_schedule",
+                        outcome = "hook_unavailable",
+                        error = ?error,
+                        "semantic projection hook could not be built for this worktree"
+                    );
+                })
+                .ok()
             });
         self.code_index_schedulers
             .mount_worktree_with_graph_runtime(

@@ -208,7 +208,15 @@ mod tests {
     #[test]
     fn production_catalog_projections_select_distinct_backends() {
         let catalog = FastEmbedModelCatalogV1::production();
-        let resources = SemanticResourceCeilings::default();
+        // Composition resolves the resident ceiling against the host before a
+        // projection is built; this unit test pins the shipped default so it
+        // exercises backend selection rather than host derivation.
+        let resources = SemanticResourceCeilings {
+            max_resident_bytes: Some(
+                tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES,
+            ),
+            ..SemanticResourceCeilings::default()
+        };
         let projection = |model_id: &str| {
             AdmittedProjectionArtifactV1::lifecycle_projection(
                 catalog.get(model_id).expect("cataloged"),

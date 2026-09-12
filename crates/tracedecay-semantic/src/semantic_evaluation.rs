@@ -1745,7 +1745,7 @@ mod tests {
             SemanticResourceCeilings {
                 max_model_bytes: 1024,
                 max_tokenizer_bytes: 1024,
-                max_resident_bytes: 64 * 1024 * 1024,
+                max_resident_bytes: Some(64 * 1024 * 1024),
                 max_threads,
                 max_concurrent_sessions: 1,
                 max_batch_size: 8,
@@ -1930,7 +1930,7 @@ mod tests {
         let resources = SemanticResourceCeilings {
             max_model_bytes: 1024 * 1024 * 1024,
             max_tokenizer_bytes: 64 * 1024 * 1024,
-            max_resident_bytes: 4 * 1024 * 1024 * 1024,
+            max_resident_bytes: Some(4 * 1024 * 1024 * 1024),
             max_threads: 1,
             max_concurrent_sessions: 1,
             max_batch_size: 4,
@@ -1978,7 +1978,9 @@ mod tests {
             &chunks,
             documents(),
             SemanticEvaluationProjectionResourcesV1 {
-                memory_ceiling_bytes: resources.max_resident_bytes,
+                memory_ceiling_bytes: resources
+                    .resolved_max_resident_bytes()
+                    .expect("fixture resident ceiling"),
             },
             &cold_request,
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
@@ -2001,7 +2003,9 @@ mod tests {
             &chunks,
             documents(),
             SemanticEvaluationProjectionResourcesV1 {
-                memory_ceiling_bytes: resources.max_resident_bytes,
+                memory_ceiling_bytes: resources
+                    .resolved_max_resident_bytes()
+                    .expect("fixture resident ceiling"),
             },
             &warm_request,
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
@@ -2038,7 +2042,9 @@ mod tests {
             &chunks,
             documents(),
             SemanticEvaluationProjectionResourcesV1 {
-                memory_ceiling_bytes: resources.max_resident_bytes,
+                memory_ceiling_bytes: resources
+                    .resolved_max_resident_bytes()
+                    .expect("fixture resident ceiling"),
             },
             &second_request,
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,

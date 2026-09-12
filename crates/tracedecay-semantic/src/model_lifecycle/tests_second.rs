@@ -76,7 +76,7 @@
         let result = open_local_semantic_evaluation_lifecycle(
             lifecycle_root.path(),
             package.path(),
-            SemanticResourceCeilings::default(),
+            pinned_ceilings(),
             10,
         );
 
@@ -1236,7 +1236,7 @@
             crate::LoadedSemanticArtifactV1::from_lifecycle_projection(
                 &reopened,
                 &projection,
-                SemanticResourceCeilings::default(),
+                pinned_ceilings(),
             ),
             Err(crate::SemanticRuntimeScheduleFailureV1::Runtime)
         ));

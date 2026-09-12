@@ -266,6 +266,20 @@ fn resident_bytes_estimate_for(
         .clamp(1, resident_byte_ceiling.max(1))
 }
 
+/// The resident ceiling a composed configuration resolved against its host.
+///
+/// An unresolved ceiling is a typed refusal, not a number to invent: the
+/// reservation arithmetic above clamps into it, so substituting a default here
+/// would silently re-admit the sessions the host cannot hold.
+fn resolved_resident_ceiling(resources: SemanticResourceCeilings) -> Result<u64, EmbedError> {
+    resources.resolved_max_resident_bytes().map_err(|_| {
+        fastembed_failure(
+            RuntimeFailureKindV1::IncompatibleRuntime,
+            "the semantic resident ceiling was not resolved against this host",
+        )
+    })
+}
+
 fn lifecycle_execution_provider(backend: EmbeddingRuntimeFamilyV1) -> EmbeddingExecutionProviderV1 {
     #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     if backend == EmbeddingRuntimeFamilyV1::FastEmbedOrt {
@@ -597,6 +611,7 @@ impl AdmittedProjectionArtifactV1 {
         let model_member = member("model")?;
         let tokenizer = member("tokenizer")?;
         let config = member("config")?;
+        let resident_byte_ceiling = resolved_resident_ceiling(resources)?;
         let lifecycle_install = LifecycleInstallArtifactV1 {
             root: install_path.to_path_buf(),
             members: model.members.clone(),
@@ -636,12 +651,12 @@ impl AdmittedProjectionArtifactV1 {
                 ),
                 max_threads: resources.max_threads,
                 max_concurrent_sessions: resources.max_concurrent_sessions,
-                resident_byte_ceiling: resources.max_resident_bytes,
+                resident_byte_ceiling,
                 resident_bytes_estimate: resident_bytes_estimate_for(
                     model_member.length.saturating_add(tokenizer.length),
                     resources.max_batch_size,
                     resources.max_sequence_length,
-                    resources.max_resident_bytes,
+                    resident_byte_ceiling,
                 ),
                 load_deadline_ms: resources.load_deadline_ms,
             },
@@ -669,7 +684,7 @@ impl AdmittedProjectionArtifactV1 {
         let config = member("config")?;
         if model_member.length > resources.max_model_bytes
             || tokenizer.length > resources.max_tokenizer_bytes
-            || model_member.length > resources.max_resident_bytes
+            || model_member.length > resolved_resident_ceiling(resources)?
         {
             return Err(fastembed_failure(
                 RuntimeFailureKindV1::OutOfMemory,
@@ -2056,7 +2071,7 @@ pub(crate) mod lifecycle_test_support {
             SemanticResourceCeilings {
                 max_model_bytes,
                 max_tokenizer_bytes: 1024,
-                max_resident_bytes: max_model_bytes.max(4096),
+                max_resident_bytes: Some(max_model_bytes.max(4096)),
                 max_threads: 1,
                 max_concurrent_sessions: 1,
                 max_batch_size: 4,

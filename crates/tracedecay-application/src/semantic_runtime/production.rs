@@ -631,10 +631,7 @@ impl ProductionSemanticRuntimeV1 {
     > {
         let artifact = installed_artifact_member_bytes(&self.lifecycle)
             .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)?;
-        Ok(evaluation_target_resource_requirement(
-            self.resources,
-            artifact,
-        ))
+        evaluation_target_resource_requirement(self.resources, artifact)
     }
 
     /// Prepare one evaluator generation with authorities retained by the
@@ -672,7 +669,7 @@ impl ProductionSemanticRuntimeV1 {
                 request,
                 generation.chunks().chunks(),
                 embedding_documents(generation),
-                evaluation_projection_resources(execution),
+                evaluation_projection_resources(execution)?,
                 projection_batch_cache.as_ref(),
                 SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
                 Arc::clone(&cancellation),
@@ -742,7 +739,7 @@ impl ProductionSemanticRuntimeV1 {
                 request,
                 &chunks,
                 embedding_documents(generation),
-                evaluation_projection_resources(self.resources),
+                evaluation_projection_resources(self.resources)?,
                 current.projection_batch_cache.as_ref(),
                 SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
                 Arc::clone(&current.cancellation),
@@ -1318,7 +1315,7 @@ impl ProductionSemanticRuntimeV1 {
             request,
             &chunks,
             embedding_documents(generation),
-            evaluation_projection_resources(self.resources),
+            evaluation_projection_resources(self.resources)?,
             projection_batch_cache.as_ref(),
             SemanticEvaluationProjectionBatchCachePolicyV1::ReuseCompletedBatches,
             Arc::clone(cancellation),
@@ -1507,7 +1504,7 @@ impl ProductionSemanticRuntimeV1 {
             semantic_compatibility: lifecycle_verification.compatibility.clone(),
             vector_state_revision: verified.vector_state_revision,
             vector_generation_id: verified.vector_generation_id,
-            configured_resource_ceiling: configured_semantic_resource_ceiling(self.resources),
+            configured_resource_ceiling: configured_semantic_resource_ceiling(self.resources)?,
             lifecycle_verification,
         })
     }
@@ -2832,7 +2829,12 @@ fn configured_resource_ceiling_covers(
 ) -> bool {
     configured.max_model_bytes >= required.model_bytes
         && configured.max_tokenizer_bytes >= required.tokenizer_bytes
-        && configured.max_resident_bytes >= required.resident_bytes
+        // An unresolved resident ceiling covers nothing: composition resolves
+        // it against the host before this runtime exists, so `None` here means
+        // no ceiling was ever admitted, not an unbounded one.
+        && configured
+            .max_resident_bytes
+            .is_some_and(|ceiling| ceiling >= required.resident_bytes)
         && configured.max_threads >= required.threads
         && configured.max_concurrent_sessions >= required.max_concurrent_sessions
         && configured.max_batch_size >= required.batch_size
@@ -2842,35 +2844,52 @@ fn configured_resource_ceiling_covers(
 
 fn configured_semantic_resource_ceiling(
     configured: SemanticResourceCeilings,
-) -> crate::config::retrieval::SemanticResourceRequirementV1 {
-    crate::config::retrieval::SemanticResourceRequirementV1 {
+) -> Result<crate::config::retrieval::SemanticResourceRequirementV1, SemanticRuntimeBackendErrorV1>
+{
+    Ok(crate::config::retrieval::SemanticResourceRequirementV1 {
         model_bytes: configured.max_model_bytes,
         tokenizer_bytes: configured.max_tokenizer_bytes,
-        resident_bytes: configured.max_resident_bytes,
+        resident_bytes: resolved_resident_ceiling(configured)?,
         threads: configured.max_threads,
         max_concurrent_sessions: configured.max_concurrent_sessions,
         batch_size: configured.max_batch_size,
         sequence_length: configured.max_sequence_length,
         load_deadline_ms: configured.load_deadline_ms,
-    }
+    })
+}
+
+/// The resident ceiling composition resolved against this host.
+///
+/// Reading it before that resolution is a refusal rather than a substituted
+/// default: every requirement minted from it is compared against a measured
+/// evaluation report, so an invented ceiling would be admitted as evidence.
+fn resolved_resident_ceiling(
+    configured: SemanticResourceCeilings,
+) -> Result<u64, SemanticRuntimeBackendErrorV1> {
+    configured
+        .resolved_max_resident_bytes()
+        .map_err(|_| SemanticRuntimeBackendErrorV1::Unavailable)
 }
 
 fn evaluation_target_resource_requirement(
     configured: SemanticResourceCeilings,
     artifact: InstalledArtifactMemberBytesV1,
-) -> crate::config::retrieval::SemanticResourceRequirementV1 {
-    let mut requirement = configured_semantic_resource_ceiling(configured);
+) -> Result<crate::config::retrieval::SemanticResourceRequirementV1, SemanticRuntimeBackendErrorV1>
+{
+    let mut requirement = configured_semantic_resource_ceiling(configured)?;
     requirement.model_bytes = artifact.model;
     requirement.tokenizer_bytes = artifact.tokenizer;
-    requirement
+    Ok(requirement)
 }
 
 fn evaluation_projection_resources(
     configured: SemanticResourceCeilings,
-) -> SemanticEvaluationProjectionResourcesV1 {
-    SemanticEvaluationProjectionResourcesV1 {
-        memory_ceiling_bytes: configured.max_resident_bytes,
-    }
+) -> Result<SemanticEvaluationProjectionResourcesV1, SemanticRuntimeScheduleFailureV1> {
+    Ok(SemanticEvaluationProjectionResourcesV1 {
+        memory_ceiling_bytes: configured
+            .resolved_max_resident_bytes()
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?,
+    })
 }
 
 fn canonical_exact_flat_search_index_key()
@@ -3056,7 +3075,7 @@ fn accepted_semantic_resources(
     SemanticResourceCeilings {
         max_model_bytes: accepted.model_bytes,
         max_tokenizer_bytes: accepted.tokenizer_bytes,
-        max_resident_bytes: accepted.resident_bytes,
+        max_resident_bytes: Some(accepted.resident_bytes),
         max_threads: accepted.threads,
         max_concurrent_sessions: accepted.max_concurrent_sessions,
         max_batch_size: accepted.batch_size,
@@ -4432,9 +4451,13 @@ pub struct SavedGenerationScheduleHookParametersV1 {
 /// Artifact admission remains owned by the model lifecycle. Until a complete
 /// compatible artifact is available the background task fails closed without
 /// joining into exact/lexical/graph search.
+///
+/// The resident ceiling is resolved once here rather than per generation: it
+/// is a composition-time fact, and an unresolved one is a typed refusal to
+/// build the hook at all instead of a number invented per batch.
 pub fn production_saved_generation_schedule_hook(
     parameters: SavedGenerationScheduleHookParametersV1,
-) -> SavedCodeGenerationScheduleHookV1 {
+) -> Result<SavedCodeGenerationScheduleHookV1, SemanticRuntimeBackendErrorV1> {
     let SavedGenerationScheduleHookParametersV1 {
         project_root,
         code_index_store_root,
@@ -4446,6 +4469,7 @@ pub fn production_saved_generation_schedule_hook(
         document_composition,
         fair_scheduler,
     } = parameters;
+    let resident_ceiling_bytes = resolved_resident_ceiling(resources)?;
     let runtime = Arc::new(ProductionSemanticRuntimeV1::new_with_code_index_store_root(
         handle,
         graph,
@@ -4460,7 +4484,7 @@ pub fn production_saved_generation_schedule_hook(
         .insert(project_root.clone(), runtime.as_ref().clone());
     // Capture before the synchronous publication hook crosses into spawn_blocking.
     let dispatch_runtime = tokio::runtime::Handle::try_current().ok();
-    Arc::new(move |generation| {
+    Ok(Arc::new(move |generation| {
         if generation.snapshot().worktree.as_ref() != Some(&worktree_id) {
             return SavedGenerationScheduleOutcomeV1::ForeignWorktree;
         }
@@ -4485,7 +4509,7 @@ pub fn production_saved_generation_schedule_hook(
             worktree_id.clone(),
             generation.manifest().generation_id.clone(),
             queued_bytes,
-            resources.max_resident_bytes,
+            resident_ceiling_bytes,
         );
         let project_root = project_root.clone();
         fair_scheduler
@@ -4529,7 +4553,7 @@ pub fn production_saved_generation_schedule_hook(
             .map_or(SavedGenerationScheduleOutcomeV1::QueueRefused, |_| {
                 SavedGenerationScheduleOutcomeV1::Scheduled
             })
-    })
+    }))
 }
 
 fn fair_schedule_failure(
