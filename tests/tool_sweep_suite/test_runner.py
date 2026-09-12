@@ -440,6 +440,54 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         self.assertEqual(arguments["scope"], {"kind": "profile"})
         self.assertEqual(arguments["session"], {"id": "session.fixture"})
 
+    def test_work_readers_consume_the_shared_lifecycle_identities(self) -> None:
+        runner = load_runner()
+        fixture = {
+            "work_selection": {"selection": "profile_owned_no_git"},
+            "work_task_id": "task.fixture",
+            "work_run_id": "run.fixture",
+            "work_attempt_id": "attempt.fixture",
+            "work_initial_version": {"graph_version": 1},
+            "work_admitted_version": {"graph_version": 3},
+            "work_generate_arguments": {"task_id": "task.fixture"},
+            "work_status_arguments": {
+                "task_id": "task.fixture",
+                "run_id": "run.fixture",
+                "attempt_id": "attempt.fixture",
+            },
+            "work_prepare_create_arguments": {"change": {"change": "create_task"}},
+            "work_placement_arguments": {
+                "task_id": "task.fixture",
+                "run_id": "run.fixture",
+                "target": {"kind": "clean_in_place"},
+            },
+        }
+        placeholder = {"type": "object", "properties": {}, "required": []}
+
+        status = runner.materialize_tool_arguments(
+            {"name": "tracedecay_work_attempt_status", "inputSchema": placeholder}, fixture
+        )
+        compared = runner.materialize_tool_arguments(
+            {"name": "tracedecay_work_compare_proposal", "inputSchema": placeholder}, fixture
+        )
+        evidence = runner.materialize_tool_arguments(
+            {"name": "tracedecay_work_retrieve_evidence", "inputSchema": placeholder}, fixture
+        )
+        placement = runner.materialize_tool_arguments(
+            {"name": "tracedecay_work_placement_status", "inputSchema": placeholder}, fixture
+        )
+
+        self.assertEqual(status["attempt_id"], "attempt.fixture")
+        self.assertEqual(compared["old_version"], {"graph_version": 1})
+        self.assertEqual(compared["new_version"], {"graph_version": 3})
+        self.assertEqual(evidence["verified_version"], {"graph_version": 3})
+        self.assertEqual(evidence["temporal"], {"kind": "current"})
+        self.assertEqual(placement, {
+            "task_id": "task.fixture",
+            "run_id": "run.fixture",
+            "format": "json",
+        })
+
 
 class NegotiatedSurfaceTests(unittest.TestCase):
     def test_resources_and_prompts_are_exercised_from_live_discovery(self) -> None:
@@ -554,6 +602,32 @@ class MutationJourneyTests(unittest.TestCase):
 
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "tool_sweep.effect_journey_unavailable")
+
+    def test_work_mutation_replay_stays_bound_to_the_shared_attempt(self) -> None:
+        runner = load_runner()
+        fixture = {
+            "work_attempt_id": "attempt.fixture",
+            "work_status_arguments": {
+                "task_id": "task.fixture",
+                "run_id": "run.fixture",
+                "attempt_id": "attempt.fixture",
+            },
+            "work_effect_arguments": {
+                "tracedecay_work_create": {"mutation_id": "mutation.fixture"},
+            },
+        }
+
+        def call(tool, arguments, _deadline_ms):
+            self.assertEqual(tool, "tracedecay_work_attempt_status")
+            self.assertEqual(arguments, fixture["work_status_arguments"])
+            return self.response('{"identity":{"attempt_id":"attempt.fixture"}}')
+
+        prepared = runner.prepare_journey(
+            "tracedecay_work_create", object(), fixture, lambda _tool: 1_000, call
+        )
+        self.assertEqual(prepared.arguments, {"mutation_id": "mutation.fixture"})
+        note = prepared.cleanup(self.response('{"replayed":true}'))
+        self.assertIn("producer/effect/replay/status", note)
 
     def test_git_apply_consumes_preview_and_verifies_its_inverse(self) -> None:
         runner = load_runner()
@@ -1259,6 +1333,31 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 '{"outcome":"effect","value":{"payload":'
                 '{"result_revision_id":"configuration.fixture.restored"}}}'
             ),
+            "tracedecay_work_create": cls.response('{"replayed":false}'),
+            "tracedecay_work_generate_proposal": cls.response(
+                '{"proposal":{"id":"proposal.fixture"},'
+                '"verified_graph_version":{"graph_version":1}}'
+            ),
+            "tracedecay_work_accept_proposal": cls.response(
+                '{"replayed":false,"verified_graph_version":{"graph_version":2}}'
+            ),
+            "tracedecay_work_admit_execution": cls.response(
+                '{"mutation":{"replayed":false,"verified_graph_version":'
+                '{"graph_version":3}},"execution_snapshot":{"snapshot":"fixture"}}'
+            ),
+            "tracedecay_work_placement_preflight": cls.response('{"blockers":[]}'),
+            "tracedecay_work_admit_placement": cls.response(
+                '{"identity":{"task_id":"task.fixture","run_id":"run.fixture"}}'
+            ),
+            "tracedecay_work_start_attempt": cls.response(
+                '{"identity":{"attempt_id":"attempt.fixture"}}'
+            ),
+            "tracedecay_work_attempt_status": cls.response(
+                '{"identity":{"attempt_id":"attempt.fixture"}}'
+            ),
+            "tracedecay_work_cancel_attempt": cls.response(
+                '{"identity":{"attempt_id":"attempt.fixture"}}'
+            ),
         }
 
         class Client:
@@ -1270,6 +1369,28 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 self.calls.append((name, arguments))
                 if name == "tracedecay_by_qualified_name":
                     return self.qualified_name_responses.pop(0), 3
+                if name == "tracedecay_work_prepare_graph_mutation":
+                    change = arguments["change"]["change"]
+                    return cls.response(json.dumps({
+                        "request": {"fixture_mutation": change},
+                    })), 3
+                if name in {
+                    "tracedecay_work_admit_placement",
+                    "tracedecay_work_start_attempt",
+                    "tracedecay_work_attempt_status",
+                    "tracedecay_work_cancel_attempt",
+                }:
+                    response = json.loads(
+                        responses[name]["result"]["content"][0]["text"]
+                    )
+                    identity = response["identity"]
+                    identity.update({
+                        "task_id": arguments["task_id"],
+                        "run_id": arguments["run_id"],
+                    })
+                    if "attempt_id" in arguments:
+                        identity["attempt_id"] = arguments["attempt_id"]
+                    return cls.response(json.dumps(response)), 3
                 if (
                     name == "tracedecay_configuration_get"
                     and arguments["key"] == "diagnostics.prewarm.v1"
@@ -1300,6 +1421,16 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_configuration_unset",
             "tracedecay_configuration_list",
             "tracedecay_configuration_get",
+            "tracedecay_work_prepare_graph_mutation",
+            "tracedecay_work_create",
+            "tracedecay_work_generate_proposal",
+            "tracedecay_work_accept_proposal",
+            "tracedecay_work_admit_execution",
+            "tracedecay_work_placement_preflight",
+            "tracedecay_work_admit_placement",
+            "tracedecay_work_start_attempt",
+            "tracedecay_work_attempt_status",
+            "tracedecay_work_cancel_attempt",
         )
         return {
             name: runner.ToolPolicy(name, "available", "read", 1_000)
@@ -1321,6 +1452,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "session_id": "session.fixture",
             "lcm_message": "catalog sweep captured LCM message",
             "root": "/fixture/root",
+            "commit": "a" * 40,
         }
 
         runner.prime_fixture_values(client, fixture, self.policies(runner))
@@ -1353,6 +1485,11 @@ class FixturePrimingRetryTests(unittest.TestCase):
         )
         self.assertEqual(fixture["configuration_scalar_value"], {"kind": "boolean", "value": False})
         self.assertEqual(fixture["configuration_revision"], "configuration.fixture.restored")
+        self.assertEqual(fixture["work_admitted_version"], {"graph_version": 3})
+        self.assertEqual(
+            fixture["work_status_arguments"]["attempt_id"],
+            fixture["work_attempt_id"],
+        )
         self.assertEqual(
             fixture["configuration_rollback_target_revision"],
             "configuration.fixture.seeded",
@@ -1376,6 +1513,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
                     "session_id": "session.fixture",
                     "lcm_message": "catalog sweep captured LCM message",
                     "root": "/fixture/root",
+                    "commit": "a" * 40,
                 },
                 self.policies(runner),
             )
