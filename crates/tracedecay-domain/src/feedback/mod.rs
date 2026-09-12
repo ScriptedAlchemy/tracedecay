@@ -944,6 +944,7 @@ fn safe_diagnostic_code_description_uri(
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackDiagnosticProducerV1 {
+    CodeDiagnostic,
     GitHubReview,
     CiLocalization,
     Proximity,
@@ -1317,15 +1318,21 @@ impl FeedbackCycleResultV1 {
                     field: "feedback finding provider state",
                 });
             }
-            if let Some(projection) = finding.diagnostic_projection.as_ref()
-                && !self.advisory_provider_states.iter().any(|provider| {
-                    provider.producer == projection.producer
-                        && provider.state == finding.provider_state
-                })
-            {
-                return Err(DomainError::NonCanonical {
-                    field: "feedback advisory finding producer state",
-                });
+            if let Some(projection) = finding.diagnostic_projection.as_ref() {
+                let producer_state_is_represented = match projection.producer {
+                    FeedbackDiagnosticProducerV1::CodeDiagnostic => {
+                        self.provider_states.contains(&finding.provider_state)
+                    }
+                    _ => self.advisory_provider_states.iter().any(|provider| {
+                        provider.producer == projection.producer
+                            && provider.state == finding.provider_state
+                    }),
+                };
+                if !producer_state_is_represented {
+                    return Err(DomainError::NonCanonical {
+                        field: "feedback diagnostic finding producer state",
+                    });
+                }
             }
         }
         if self.findings.iter().enumerate().any(|(index, finding)| {
