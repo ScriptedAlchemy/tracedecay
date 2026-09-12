@@ -1046,6 +1046,24 @@ impl McpServer {
         }
     }
 
+    fn attach_missing_response_timing(response: &mut JsonRpcResponse, elapsed_us: Option<u64>) {
+        let Some(elapsed_us) = elapsed_us else {
+            return;
+        };
+        let Some(result) = response.result.as_mut().and_then(Value::as_object_mut) else {
+            return;
+        };
+        let meta = result.entry("_meta").or_insert_with(|| json!({}));
+        if meta.is_null() {
+            *meta = json!({});
+        }
+        let Some(meta) = meta.as_object_mut() else {
+            return;
+        };
+        meta.entry("duration_us")
+            .or_insert_with(|| json!(elapsed_us));
+    }
+
     fn response_token_count(result: &ToolResult) -> u64 {
         result
             .value
@@ -1525,11 +1543,31 @@ impl McpServer {
     }
 
     #[hotpath::measure(label = "mcp.server.tools_call", future = true)]
+    pub(crate) async fn handle_tools_call(
+        &self,
+        id: Value,
+        params: ToolCallParams<'_>,
+        timings_enabled: bool,
+        connection: &mut ConnectionRouteState,
+        pre_cancelled: bool,
+    ) -> JsonRpcResponse {
+        let started = timings_enabled.then(std::time::Instant::now);
+        let mut response = self
+            .handle_tools_call_inner(id, params, timings_enabled, connection, pre_cancelled)
+            .await;
+        Self::attach_missing_response_timing(
+            &mut response,
+            started.map(|started| started.elapsed().as_micros() as u64),
+        );
+        response
+    }
+
+    #[hotpath::skip]
     #[expect(
         clippy::too_many_lines,
         reason = "The response-gate lease and cancellation registrations are RAII-scoped to the frame and must span dispatch."
     )]
-    pub(crate) async fn handle_tools_call(
+    async fn handle_tools_call_inner(
         &self,
         id: Value,
         params: ToolCallParams<'_>,
@@ -1754,6 +1792,20 @@ impl McpServer {
 mod tool_call_preparation_tests {
     use super::*;
     use ::rmcp::model::CallToolRequestParams;
+
+    #[test]
+    fn shared_tool_boundary_fills_only_missing_timing_metadata() {
+        let mut missing = JsonRpcResponse::success(json!(1), json!({"content": []}));
+        McpServer::attach_missing_response_timing(&mut missing, Some(17));
+        assert_eq!(missing.result.unwrap()["_meta"]["duration_us"], 17);
+
+        let mut existing = JsonRpcResponse::success(
+            json!(2),
+            json!({"_meta": {"duration_us": 11}, "content": []}),
+        );
+        McpServer::attach_missing_response_timing(&mut existing, Some(29));
+        assert_eq!(existing.result.unwrap()["_meta"]["duration_us"], 11);
+    }
 
     fn arguments_object() -> serde_json::Map<String, Value> {
         json!({"query": "typed dispatch", "limit": 5})
