@@ -20,17 +20,17 @@ use crate::config::retrieval::RetrievalRuntimeCompatibilityV1;
 use crate::config::retrieval::{
     RetrievalCompatibilityPinsV1, SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
 };
-use crate::search_eval::semantic_native::{
+use crate::query::search_quality::semantic_native::{
     SemanticNativePendingReasonV1, SemanticNativeResourceProvenanceV1,
     SemanticNativeResourceSampleV1, SemanticNativeStageResultV1, SemanticProjectionCaseSampleV1,
     SemanticProjectionCaseV1,
 };
-use crate::search_eval::{
+use crate::query::search_quality::{
     CandidateOutputError, ProductionCandidateNativeExecutionAuthorityV1,
     ProductionCandidateNativeGenerationResourcesV1, ProductionCandidateNativeQueryContextV1,
     ProductionCandidateNativeQueryInputsV1, ProductionCandidateNativeResourceContextV1,
-    evaluate_default_activation_candidate,
 };
+use crate::search_eval::evaluate_default_activation_candidate;
 use tracedecay_application::semantic_runtime::{
     SemanticActivationCoordinationErrorV1, SemanticEvaluationAuthorityPublicationV1,
     SemanticEvaluationCurrentGenerationSnapshotV1, SemanticEvaluationProfileCandidateV1,
@@ -460,14 +460,13 @@ fn daemon_semantic_evaluation_candidate(
     vector: &PublishedVectorGenerationV1,
     resources: SemanticResourceRequirementV1,
 ) -> Result<SemanticEvaluationProfileCandidateV1, SemanticActivationCoordinationErrorV1> {
-    let material = crate::search_eval::load_default_evaluated_profile_material(
-        evaluated_profile_id,
-    )
-    .map_err(|_| {
-        SemanticActivationCoordinationErrorV1::RejectedDetail(
-            "semantic evaluation profile is not in the packaged workload".to_owned(),
-        )
-    })?;
+    let material =
+        crate::query::search_quality::load_default_evaluated_profile_material(evaluated_profile_id)
+            .map_err(|_| {
+                SemanticActivationCoordinationErrorV1::RejectedDetail(
+                    "semantic evaluation profile is not in the packaged workload".to_owned(),
+                )
+            })?;
     let embedding = vector.embedding_key().embedding_key();
     let runtime_compatibility_digest = canonical_sha256(&(
         "tracedecay.semantic-runtime-compatibility.v1",
@@ -577,7 +576,7 @@ fn daemon_semantic_evaluation_candidate(
 }
 
 fn evaluated_semantic_calibration_profile_id(
-    material: &crate::search_eval::DirectEvaluatedProfileMaterialV1,
+    material: &crate::query::search_quality::DirectEvaluatedProfileMaterialV1,
 ) -> Result<CalibrationProfileId, SemanticActivationCoordinationErrorV1> {
     material
         .profile
@@ -1486,7 +1485,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
                 };
                 let evaluated = hotpath::measure_block!(
                     "daemon.semantic.evaluation.snapshot.profile_material",
-                    crate::search_eval::load_default_evaluated_profile_material(
+                    crate::query::search_quality::load_default_evaluated_profile_material(
                         &self.candidate.evaluated_profile_id,
                     )
                 )
@@ -1528,7 +1527,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationSnapshotAuthor
     ) -> SemanticRuntimeFuture<
         'a,
         Result<
-            crate::search_eval::DirectActivationEvaluationV1,
+            crate::query::search_quality::DirectActivationEvaluationV1,
             SemanticActivationCoordinationErrorV1,
         >,
     > {
@@ -1571,7 +1570,7 @@ impl SemanticEvaluationSnapshotPortV1 for DaemonSemanticEvaluationPublicationAut
     ) -> SemanticRuntimeFuture<
         'a,
         Result<
-            crate::search_eval::DirectActivationEvaluationV1,
+            crate::query::search_quality::DirectActivationEvaluationV1,
             SemanticActivationCoordinationErrorV1,
         >,
     > {
@@ -1911,9 +1910,10 @@ mod lifecycle_tests {
 
     #[test]
     fn packaged_candidate_uses_its_evaluated_semantic_calibration() {
-        let material =
-            crate::search_eval::load_default_evaluated_profile_material("hybrid-conservative")
-                .expect("packaged semantic profile");
+        let material = crate::query::search_quality::load_default_evaluated_profile_material(
+            "hybrid-conservative",
+        )
+        .expect("packaged semantic profile");
         let evaluated = material
             .profile
             .calibrations
