@@ -250,6 +250,8 @@ fn resolve_cross_file_references<T>(files: &[T]) -> Vec<CanonicalRelationEdgeV1>
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
+    #[cfg(test)]
+    SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.set(resolutions.get() + 1));
     #[cfg(feature = "hotpath")]
     {
         hotpath::gauge!("code_index.seal.resolve.effective_workers").set(1);
@@ -317,6 +319,16 @@ where
         edges.dedup();
     });
     edges
+}
+
+#[cfg(test)]
+thread_local! {
+    static SEAL_REFERENCE_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_seal_reference_resolutions() -> usize {
+    SEAL_REFERENCE_RESOLUTIONS.with(|resolutions| resolutions.replace(0))
 }
 
 type ResolvedReferenceCacheV1<'a> =
