@@ -77,8 +77,22 @@ pub fn user_data_dir() -> Option<PathBuf> {
             PathBuf::from(path),
         )));
     }
-    let home = dirs::home_dir()?;
+    let home = home_dir()?;
     Some(canonicalize_data_dir(home.join(TRACEDECAY_DIR)))
+}
+
+/// Process home directory used when `TRACEDECAY_DATA_DIR` is unset.
+///
+/// Matches [`PinnedUserDataDir`]: `HOME` on Unix, `USERPROFILE` on Windows.
+/// Absence is `None`; callers map that into a typed configuration error.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    const HOME_ENV: &str = "USERPROFILE";
+    #[cfg(not(windows))]
+    const HOME_ENV: &str = "HOME";
+    std::env::var_os(HOME_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn global_db_path_override() -> Option<PathBuf> {
