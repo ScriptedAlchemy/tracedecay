@@ -493,6 +493,23 @@ fn unpublished_projection_is_a_typed_absent_head() {
 }
 
 #[test]
+fn single_selector_scope_resolution_stops_after_the_caller_bound() {
+    let projection = seeded_projection(2_400);
+    let runtime = publish(&projection);
+    let view = open_indexed(&runtime);
+    let filter = GitScopeFilter {
+        branch: Some("feature-3".to_owned()),
+        worktree: None,
+        commit: None,
+    };
+
+    let (ids, decodes) = decodes(|| view.session_ids_for_scope_bounded(&filter, 101));
+    let ids = ids.unwrap().unwrap();
+    assert_eq!(ids.len(), 101);
+    assert_eq!(decodes, 101);
+}
+
+#[test]
 fn legacy_head_is_fully_recoverable_but_serves_no_bounded_reads() {
     let projection = seeded_projection(24);
     let runtime = MemoryEvidenceGraphRuntime::default();

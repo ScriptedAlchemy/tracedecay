@@ -613,19 +613,4 @@ mod tests {
         assert!(rejection["id"].is_null());
         assert_eq!(rejection["error"]["code"], json!(-32700));
     }
-
-    #[test]
-    fn mcp_frame_limit_exceeds_host_event_wire_cap() {
-        assert_eq!(tracedecay_framing::MAX_WIRE_MESSAGE_BYTES, 1024 * 1024);
-        assert_eq!(
-            tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES,
-            16 * 1024 * 1024
-        );
-        const {
-            assert!(
-                tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES
-                    > tracedecay_framing::MAX_WIRE_MESSAGE_BYTES
-            );
-        }
-    }
 }

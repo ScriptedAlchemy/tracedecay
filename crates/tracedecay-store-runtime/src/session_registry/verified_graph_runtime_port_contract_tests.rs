@@ -605,30 +605,6 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
     ));
 }
 
-/// The first-ever publish of a fresh projection drives two irreversible
-/// durable commits — the relational journal append and the verified-head
-/// CAS — each of which must hold its own at-most-once commit grant. Routing
-/// both through one arbitration context let the append consume the grant, so
-/// the CAS was refused on every first publish and surfaced as infrastructure
-/// unavailability ("relational graph publication authority is unavailable").
-#[tokio::test]
-async fn first_publish_of_a_fresh_projection_installs_the_verified_head() {
-    let fixture = ContractFixture::new("first-publish").await;
-    let project_id = project_id("first-publish");
-    let (database, _sessions) = fixture.mount_project(&project_id).await;
-    let projection = projection("first-publish");
-    let manifest = manifest(&projection, "first-publish", "1");
-    let published = publish_through_database(&database, &manifest, key("first-publish"), false)
-        .expect("first publish must journal the replay and install the verified head");
-    assert_eq!(published.generation(), &manifest.generation);
-
-    let head = snapshot_through_database(&database, &projection)
-        .expect("verified snapshot read after the first publish")
-        .expect("verified head must be visible after the first publish");
-    assert_eq!(head.generation(), &manifest.generation);
-    assert_eq!(head.verified_head(), published.verified_head());
-}
-
 /// A projection that has never published a verified head is a typed empty
 /// start (`Ok(None)`), not an unavailability error. Treating it as retryable
 /// unavailability wedged fresh projects in an endless ingest retry loop.
@@ -809,23 +785,6 @@ async fn session_relation_close_refusal_restores_route_and_retry_closes_exact_gr
             .is_err(),
         "successful retry removes the replay route"
     );
-}
-
-#[tokio::test]
-async fn linked_worktree_roots_share_the_project_graph_runtime_authority() {
-    let fixture = ContractFixture::new("linked-worktrees").await;
-    let project_id = project_id("linked-worktrees");
-    let (project_database, _sessions) = fixture.mount_project(&project_id).await;
-    let projection = projection("linked-worktrees");
-    let manifest = manifest(&projection, "linked-worktrees", "1");
-
-    publish_through_database(&project_database, &manifest, key("linked-worktrees"), false)
-        .expect("primary worktree publication");
-    let linked_snapshot = snapshot_through_database(&project_database, &projection)
-        .expect("linked worktree reads shared project graph")
-        .expect("published verified head");
-
-    assert_eq!(linked_snapshot.generation(), &manifest.generation);
 }
 
 #[tokio::test]

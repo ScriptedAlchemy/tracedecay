@@ -140,7 +140,8 @@ export function App() {
   const channel = surfaceToChannel(surface);
   useEffect(() => { document.title = `TRACEDECAY · ${channel}`; }, [channel]);
   const isBrain = surface === "brain";
-  const isAtlas = isBrain && mode === 'snapshot';
+  const isSnapshotBrain = isBrain && mode === 'snapshot';
+  const isAtlas = isSnapshotBrain && new URLSearchParams(location.search).get("atlas") === "1";
   const slug = isBrain ? null : (surface as SurfaceSlug);
   const baseChrome = slug ? chromeFor(slug, new URLSearchParams(location.search).get("loom_source"), isPivotSurface(slug) && new URLSearchParams(location.search).has("loom_pivot"), mode) : null;
   const requestedCamera = ['facts','geometry','curation','oplog'].includes(surfaceState) ? surfaceState : new URLSearchParams(location.search).get('knowledge_camera');
@@ -281,18 +282,18 @@ export function App() {
               </div>
               <div className="reg-meta">
                 <div className="reg-line">
-                  {isAtlas ? `Git ${atlasData.revision.slice(0, 8)}` : view === "repo-zoom" ? "exported checkout registry" : "design fixture · registry field"}
+                  {isAtlas ? `Git ${atlasData.revision.slice(0, 8)}` : isSnapshotBrain ? "recorded profile registry" : view === "repo-zoom" ? "exported checkout registry" : "design fixture · registry field"}
                   <br />
-                  {isAtlas ? 'tracked structure · declared dependencies' : view === "repo-zoom" ? focused.name : "illustrative material study"}
+                  {isAtlas ? 'tracked structure · declared dependencies' : isSnapshotBrain ? "registered indexed projects only" : view === "repo-zoom" ? focused.name : "illustrative material study"}
                 </div>
                 <div className="reg-box">
                   <Corners />
-                  {isAtlas ? 'stable landmarks' : view === "repo-zoom" ? "checkout glyphs" : "indexed mass"}
+                  {isAtlas ? 'stable landmarks' : isSnapshotBrain ? "recorded indexed heads" : view === "repo-zoom" ? "checkout glyphs" : "indexed mass"}
                   <br />
-                  {isAtlas ? 'file containment' : view === "repo-zoom" ? "fixed categorical size" : "exported registry value"}
+                  {isAtlas ? 'file containment' : isSnapshotBrain ? "branch recency positions" : view === "repo-zoom" ? "fixed categorical size" : "exported registry value"}
                 </div>
                 <div className="reg-line bright">
-                  {isAtlas ? 'change is a separate layer' : view === "repo-zoom" ? "solid links = registered checkouts" : "brightness = recency"}
+                  {isAtlas ? 'change is a separate layer' : isSnapshotBrain ? "activity feed · empty" : view === "repo-zoom" ? "solid links = registered checkouts" : "brightness = recency"}
                 </div>
               </div>
             </header>
@@ -310,28 +311,28 @@ export function App() {
               labGrain={labGrain}
               setLabGrain={setLabGrain}
             />
-            {!isAtlas && view !== "repo-zoom" ? <Inspector view={view} project={focused} labScope={labScope} /> : null}
+            {!isSnapshotBrain && view !== "repo-zoom" ? <Inspector view={view} project={focused} labScope={labScope} /> : null}
             <footer className="status" tabIndex={0} aria-label="Snapshot status">
               <Corners />
               <div className="cell tone-quiet">
                 {ICONS.link}
                 <div className="stack">
                   <span className="lab">DATA</span>
-                  <span className="val">{mode === 'fixture' ? 'design fixture' : 'Git snapshot'}</span>
+                  <span className="val">{mode === 'fixture' ? 'design fixture' : isAtlas ? 'Git snapshot' : 'recorded profile'}</span>
                 </div>
               </div>
               <div className="cell tone-quiet">
                 {ICONS.wifi}
                 <div className="stack">
                   <span className="lab">FEED</span>
-                  <span className="val">{isAtlas ? 'recorded only' : view === "synapse" ? "sample frame" : "fixture"}</span>
+                  <span className="val">{isSnapshotBrain ? 'empty · 0 admitted events' : view === "synapse" ? "sample frame" : "fixture"}</span>
                 </div>
               </div>
               <div className="cell tone-ready">
                 {ICONS.graph}
                 <div className="stack">
                   <span className="lab">{isAtlas ? 'STRUCTURE' : 'REGISTRY'}</span>
-                  <span className="val">ready</span>
+                  <span className="val">{isSnapshotBrain && !isAtlas ? 'recorded only' : 'ready'}</span>
                 </div>
               </div>
               <div className="cell tone-scope">
@@ -341,7 +342,7 @@ export function App() {
                   <span className="val">{isAtlas ? 'tracedecay' : scopeVal}</span>
                 </div>
               </div>
-              <div className="stamp">{isAtlas ? `GIT ${atlasData.revision.slice(0,8)} / NO LIVE FEED` : 'DESIGN FIXTURE / NOT LIVE'}</div>
+              <div className="stamp">{isAtlas ? `GIT ${atlasData.revision.slice(0,8)} / NO LIVE FEED` : isSnapshotBrain ? 'RECORDED SNAPSHOT / READ ONLY' : 'DESIGN FIXTURE / NOT LIVE'}</div>
               {!isAtlas && <select
                 className="view-park"
                 aria-label="View"

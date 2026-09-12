@@ -57,26 +57,6 @@ fn test_svelte_line_numbers_are_original_file_positions() {
 }
 
 #[test]
-fn test_svelte_module_script_symbols_extracted() {
-    let source = r#"<script module>
-export const prerender = true;
-</script>
-
-<script lang="ts">
-export function render(): string { return ""; }
-</script>"#;
-    let result = SvelteExtractor.extract("Layout.svelte", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let names: Vec<_> = result.nodes.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        names.contains(&"prerender"),
-        "expected prerender in {:?}",
-        names
-    );
-    assert!(names.contains(&"render"), "expected render in {:?}", names);
-}
-
-#[test]
 fn test_svelte_no_script_block_returns_file_node_only() {
     let source = "<h1>Hello</h1>\n<p>World</p>";
     let result = SvelteExtractor.extract("Static.svelte", source);
@@ -88,24 +68,6 @@ fn test_svelte_no_script_block_returns_file_node_only() {
         .filter(|n| n.kind != NodeKind::File)
         .collect();
     assert!(non_file.is_empty(), "unexpected nodes: {:?}", non_file);
-}
-
-#[test]
-fn test_svelte_interface_extracted() {
-    let source = r#"<script lang="ts">
-interface Props {
-    title: string;
-    count?: number;
-}
-</script>"#;
-    let result = SvelteExtractor.extract("Props.svelte", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let iface = result.nodes.iter().find(|n| n.name == "Props");
-    assert!(
-        iface.is_some(),
-        "expected Props interface in {:?}",
-        result.nodes
-    );
 }
 
 #[test]

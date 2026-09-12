@@ -56,6 +56,8 @@
     inset 0 0 8px color-mix(in oklab, var(--signal-cyan) 14%, transparent);
   text-shadow: 0 0 8px color-mix(in oklab, var(--signal-cyan) 55%, transparent);
 }
+.kn-tabs button small { color: #71838e; font: 8px var(--font-mono); }
+.kn-tabs button.is-on small { color: var(--signal-cyan); }
 
 .kn-well {
   position: relative;
@@ -739,6 +741,10 @@
 
 /* Stable source subjects and explicit authored-claim cameras. */
 .kn-controls { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 5px 10px; }
+.kn-route-state { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; padding:6px 8px; border:1px solid #203944; background:#050b11; color:#7f96a2; font:8px var(--font-mono); letter-spacing:.06em; }
+.kn-route-state label { display:flex; align-items:center; gap:4px; }
+.kn-route-state input,.kn-route-state select { max-width:120px; border:1px solid #294752; background:#071019; color:#c2dbe3; font:10px var(--font-mono); padding:3px 4px; }
+.kn-route-state > span { color:var(--signal-cyan); overflow-wrap:anywhere; }
 .kn-mode { flex: 0 0 auto; max-width: 100%; box-sizing: border-box; padding: 5px 8px; border: 1px solid #314b57; font: 8px var(--font-display); letter-spacing: .13em; color: #8196a1; }
 .kn-mode.is-fixture { color: var(--activity-amber); border-color: color-mix(in oklab, var(--activity-amber) 45%, #31414a); }
 .kn-subject-map { flex: 1.2; }
@@ -751,9 +757,11 @@
 .kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-stage,
 .kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-stage > canvas { min-height: 0; }
 .kn-atlas-wrap > .repository-atlas[data-compact="true"] .atlas-caption { top: 10px; max-width: calc(100% - 20px); font-size: 8px; }
-.kn-map-label { position: absolute; z-index: 3; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 2px; max-width: 300px; padding: 6px 9px; background: rgba(4,10,16,.92); border: 1px solid #2a515f; pointer-events: none; }
+.kn-map-label { position: absolute; z-index: 3; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 2px; max-width: 300px; padding: 6px 9px; background: rgba(4,10,16,.92); border: 1px solid #2a515f; }
 .kn-map-label strong { color: var(--signal-cyan); font: 8px var(--font-display); letter-spacing: .13em; }
 .kn-map-label span { color: #7e929e; font: 9px var(--font-mono); }
+.kn-map-label button { border:1px solid #315968; background:#07131a; color:#b9e9f3; cursor:pointer; font:8px var(--font-mono); padding:4px 5px; text-align:left; }
+.kn-map-label button:focus-visible { outline:2px solid #d4fbff; outline-offset:2px; }
 .kn-empty-ledger { flex: 1; display: grid; place-content: center; justify-items: center; gap: 5px; color: #71838e; }
 .kn-empty-ledger strong { color: var(--activity-amber); font: 9px var(--font-display); letter-spacing: .14em; }
 .kn-empty-ledger span { font: 10px var(--font-mono); }

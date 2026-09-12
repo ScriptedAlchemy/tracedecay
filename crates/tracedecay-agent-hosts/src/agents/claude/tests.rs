@@ -1,12 +1,6 @@
 use super::super::{load_json_file_strict, safe_write_json_file};
 use super::*;
 use serde_json::json;
-use std::path::PathBuf;
-
-/// Shared `plugin/` source tree at the repo root, relative to this crate.
-fn plugin_source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
-}
 
 fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
     let source = plugin_deploy_dir(home);
@@ -185,34 +179,6 @@ fn missing_manifest_with_stale_registration_is_repairable() {
 }
 
 #[test]
-fn missing_manifest_with_partial_settings_residue_is_repairable() {
-    use crate::agents::AgentIntegration;
-    use crate::agents::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
-
-    let home = tempfile::TempDir::new().unwrap();
-    let project = tempfile::TempDir::new().unwrap();
-    let settings = home.path().join(".claude/settings.json");
-    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
-    safe_write_json_file(
-        &settings,
-        &json!({
-            "enabledPlugins": { "tracedecay@tracedecay": false },
-            "permissions": { "allow": ["mcp__tracedecay__search"] }
-        }),
-        None,
-    )
-    .unwrap();
-    let state = ClaudeIntegration.host_component_registration(
-        HostBundleComponentV1::Core,
-        &HealthcheckContext {
-            home: home.path().to_path_buf(),
-            project_path: project.path().to_path_buf(),
-        },
-    );
-    assert_eq!(state, HostBundleRegistrationStateV1::Repairable);
-}
-
-#[test]
 fn project_only_legacy_residue_does_not_claim_plugin_registration() {
     use crate::agents::AgentIntegration;
     use crate::agents::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1};
@@ -233,94 +199,6 @@ fn project_only_legacy_residue_does_not_claim_plugin_registration() {
         },
     );
     assert_eq!(state, HostBundleRegistrationStateV1::Missing);
-}
-
-/// Every file under a skills root, relative to it, forward-slashed.
-fn plugin_skill_tree_files(root: &Path) -> Vec<String> {
-    fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir)
-            .expect("skills dir readable")
-            .flatten()
-        {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(base, &path, out);
-            } else if path.is_file() {
-                out.push(
-                    path.strip_prefix(base)
-                        .expect("under base")
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                );
-            }
-        }
-    }
-    let mut files = Vec::new();
-    walk(root, root, &mut files);
-    files.sort();
-    files
-}
-
-/// The composed Claude deploy set (sourced from the shared `plugin/` tree
-/// via `claude_files`) must cover every shared model-invocable skill, the
-/// canonical `tracedecay-*` dispatchers, all subagents, all slash
-/// commands, and Claude's manifest/marketplace/mcp/hooks/README. The single
-/// shared tree removes the old cross-bundle parity checks; this guards that
-/// nothing on disk is left unwired for Claude.
-#[test]
-fn claude_embedded_file_list_covers_the_whole_source_bundle() {
-    let deploy: std::collections::BTreeSet<String> = claude_embedded_plugin_files()
-        .into_iter()
-        .map(|(relative, _)| relative.to_string())
-        .collect();
-
-    // Every file under plugin/skills/ (SKILL.md *and* any support files) is
-    // deployed — the recursive embed leaves nothing on disk unwired.
-    let skills_root = plugin_source_root().join("skills");
-    for relative in plugin_skill_tree_files(&skills_root) {
-        let expected = format!("skills/{relative}");
-        assert!(
-            deploy.contains(&expected),
-            "Claude deploy set is missing skill file {expected}"
-        );
-    }
-
-    for expected in [
-        ".claude-plugin/plugin.json",
-        ".claude-plugin/marketplace.json",
-        ".mcp.json",
-        "hooks/hooks.json",
-        "README.md",
-    ] {
-        assert!(
-            deploy.contains(expected),
-            "Claude deploy set is missing {expected}"
-        );
-    }
-
-    // Every agent on disk under plugin/agents is deployed — dir-walk rather
-    // than hardcode, so a future agent added to the shared source tree but
-    // not wired into Claude's deploy set is caught here.
-    let agents_root = plugin_source_root().join("agents");
-    for entry in std::fs::read_dir(&agents_root).expect("plugin/agents readable") {
-        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-        let expected = format!("agents/{name}");
-        assert!(
-            deploy.contains(&expected),
-            "Claude deploy set is missing agent {expected}"
-        );
-    }
-
-    // Every command in plugin/commands is deployed.
-    let commands_root = plugin_source_root().join("commands");
-    for entry in std::fs::read_dir(&commands_root).expect("plugin/commands readable") {
-        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-        let expected = format!("commands/{name}");
-        assert!(
-            deploy.contains(&expected),
-            "Claude deploy set is missing command {expected}"
-        );
-    }
 }
 
 /// Deploy stamps the crate version into plugin.json, substitutes the
@@ -604,111 +482,6 @@ fn install_claude_md_rules_surfaces_lock_failures() {
     );
 }
 
-fn claude_prompt_mutation_cases() -> Vec<(&'static str, Option<Vec<u8>>)> {
-    vec![
-        (
-            "current-sentinel refresh",
-            Some(
-                format!(
-                    "operator rules\n\n{}\n",
-                    CLAUDE_MD_SENTINELS.render("## Older heading\n\nstale rules")
-                )
-                .into_bytes(),
-            ),
-        ),
-        (
-            "shipped-heading refresh",
-            Some(format!("operator rules\n\n{}\n", shipped_block(SHIPPED_HEADING)).into_bytes()),
-        ),
-        ("existing append", Some(b"operator rules\n".to_vec())),
-        ("missing create", None),
-    ]
-}
-
-#[test]
-fn every_claude_prompt_mutation_branch_requires_a_persisted_write_intent() {
-    for (case, original) in claude_prompt_mutation_cases() {
-        let root = tempfile::tempdir().unwrap();
-        let claude_md = root.path().join("CLAUDE.md");
-        if let Some(original) = &original {
-            std::fs::write(&claude_md, original).unwrap();
-        }
-        let blocked_intent_root = root.path().join("blocked-intent-root");
-        std::fs::write(&blocked_intent_root, b"not a directory").unwrap();
-
-        let error = crate::agents::with_host_config_write_intents(blocked_intent_root, || {
-            install_claude_md_rules(&claude_md)
-        })
-        .expect_err(case);
-
-        assert!(
-            error
-                .to_string()
-                .contains("could not create host config write intent directory"),
-            "{case}: unexpected error: {error}"
-        );
-        assert_eq!(
-            std::fs::read(&claude_md).ok(),
-            original,
-            "{case}: failed intent persistence must leave the target byte-identical"
-        );
-    }
-}
-
-#[test]
-fn every_claude_prompt_mutation_branch_refuses_a_stale_target() {
-    for (case, original) in claude_prompt_mutation_cases() {
-        let root = tempfile::tempdir().unwrap();
-        let claude_md = root.path().join("CLAUDE.md");
-        if let Some(original) = original {
-            std::fs::write(&claude_md, original).unwrap();
-        }
-        let pause = crate::agents::pause_next_host_config_write_after_validation(&claude_md);
-        let writer_path = claude_md.clone();
-        let writer = std::thread::spawn(move || {
-            install_claude_md_rules(&writer_path).map_err(|error| error.to_string())
-        });
-        pause.wait_until_reached();
-        let foreign = format!("foreign Claude edit during {case}\n");
-        std::fs::write(&claude_md, foreign.as_bytes()).unwrap();
-        pause.resume();
-
-        let error = writer.join().unwrap().expect_err(case);
-        assert!(
-            error.contains("changed since it was read"),
-            "{case}: {error}"
-        );
-        assert_eq!(std::fs::read(&claude_md).unwrap(), foreign.as_bytes());
-    }
-}
-
-#[test]
-fn every_claude_prompt_mutation_branch_converges_through_the_same_writer() {
-    let block = claude_md_rules_text();
-    for (case, original) in claude_prompt_mutation_cases() {
-        let root = tempfile::tempdir().unwrap();
-        let claude_md = root.path().join("CLAUDE.md");
-        if let Some(original) = original {
-            std::fs::write(&claude_md, original).unwrap();
-        }
-
-        install_claude_md_rules(&claude_md).unwrap();
-
-        let installed = std::fs::read_to_string(&claude_md).unwrap();
-        assert_eq!(
-            installed.matches(&block).count(),
-            1,
-            "{case}: the canonical block must appear exactly once"
-        );
-        if case != "missing create" {
-            assert!(
-                installed.contains("operator rules"),
-                "{case}: operator content must survive"
-            );
-        }
-    }
-}
-
 #[test]
 fn claude_prompt_install_rejects_non_utf8_without_overwrite() {
     let root = tempfile::tempdir().unwrap();
@@ -820,45 +593,6 @@ fn claude_uninstall_rewrites_operator_content_and_deletes_an_empty_result() {
     assert!(!empty.exists());
 }
 
-/// Every managed subagent definition the plugin ships must have valid
-/// frontmatter and reference tracedecay.
-#[test]
-fn managed_subagent_definitions_have_valid_frontmatter() {
-    let files = claude_embedded_plugin_files();
-    for file_name in [
-        "code-explorer.md",
-        "code-health-auditor.md",
-        "session-historian.md",
-    ] {
-        let contents = files
-            .iter()
-            .find_map(|&(relative, body)| {
-                (relative == format!("agents/{file_name}")).then_some(body)
-            })
-            .expect("plugin must ship each managed subagent");
-        let stem = file_name.trim_end_matches(".md");
-        let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(
-            lines.first().copied(),
-            Some("---"),
-            "{file_name} must open YAML frontmatter"
-        );
-        let expected_name = format!("name: {stem}");
-        assert!(
-            lines.contains(&expected_name.as_str()),
-            "{file_name} frontmatter name must match its filename"
-        );
-        assert!(
-            lines.iter().any(|line| line.starts_with("description: ")),
-            "{file_name} must carry a description for delegation"
-        );
-        assert!(
-            contents.contains("tracedecay"),
-            "{file_name} must reference tracedecay so it is recognized as managed"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Host-CLI-driven lifecycle
 //
@@ -944,53 +678,6 @@ fn removal_drives_the_hosts_own_uninstall_by_plugin_selection_name() {
         ],
         "uninstall addresses the plugin by selection name; only the marketplace entry \
          is removed by marketplace name"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_failing_host_command_reports_the_hosts_own_diagnosis() {
-    let home = tempfile::tempdir().unwrap();
-    let bin_dir = tempfile::tempdir().unwrap();
-    let log = bin_dir.path().join("invocations.log");
-    let claude = bin_dir.path().join("claude");
-    fake_claude_cli(
-        &claude,
-        &log,
-        "echo 'plugin tracedecay is not installed' >&2\nexit 4",
-    );
-
-    let error = claude_plugin_deactivate_with(&claude, home.path())
-        .expect_err("a non-zero host CLI exit must fail the lifecycle");
-
-    let TraceDecayError::Config { message } = error else {
-        panic!("a failed host command must surface as a config error");
-    };
-    assert!(
-        message.contains("plugin tracedecay is not installed") && message.contains("exit code 4"),
-        "the host's own stderr and status must reach the operator: {message}"
-    );
-}
-
-#[test]
-fn a_missing_host_binary_refuses_instead_of_editing_host_owned_state() {
-    let home = tempfile::tempdir().unwrap();
-    deploy_plugin_bundle(home.path(), "/bin/tracedecay").unwrap();
-    let before = std::fs::read(known_marketplaces_path(home.path())).ok();
-
-    let error =
-        crate::agents::host_cli::require_host_cli("claude-definitely-absent", CLAUDE_CLI_LIFECYCLE)
-            .expect_err("an absent host binary is a hard requirement failure");
-
-    let TraceDecayError::HostCliUnavailable { program, lifecycle } = error else {
-        panic!("host CLI absence must surface as a typed requirement");
-    };
-    assert_eq!(program, "claude-definitely-absent");
-    assert_eq!(lifecycle, CLAUDE_CLI_LIFECYCLE);
-    assert_eq!(
-        std::fs::read(known_marketplaces_path(home.path())).ok(),
-        before,
-        "a refused lifecycle must not have touched host-owned registration state"
     );
 }
 

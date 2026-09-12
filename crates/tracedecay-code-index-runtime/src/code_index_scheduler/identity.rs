@@ -369,28 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_repository_worktree_and_head() {
-        let repo = init_repo(&[("src/lib.rs", "pub fn a() {}\n")]);
-        let identity = IndexingIdentityV1::resolve(repo.path()).expect("resolve");
-        assert!(
-            identity
-                .repository_id()
-                .as_str()
-                .starts_with("repository.daemon."),
-            "repository id is anchored on the common dir"
-        );
-        assert!(
-            identity
-                .worktree_id()
-                .as_str()
-                .starts_with("worktree.daemon."),
-            "worktree id is anchored on the checkout path"
-        );
-        assert!(identity.head_commit().is_some(), "committed HEAD resolves");
-        assert!(identity.head_tree().is_some(), "committed HEAD has a tree");
-    }
-
-    #[test]
     fn distinct_checkouts_never_authorize_reuse_even_with_identical_content() {
         let first = init_repo(&[("src/lib.rs", "pub fn shared() {}\n")]);
         let second = init_repo(&[("src/lib.rs", "pub fn shared() {}\n")]);

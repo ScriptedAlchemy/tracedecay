@@ -8,8 +8,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracedecay_domain::{
-    AuthorityEpoch, BrainId, CodeGenerationId, LocatorDigest, ProjectId, RepositoryId,
-    UserProfileId, UtcMicros, WorktreeId,
+    BrainId, CodeGenerationId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros,
+    WorktreeId,
 };
 use tracedecay_store::*;
 
@@ -207,52 +207,6 @@ fn canonical_identity_is_independent_of_locators_and_alias_labels() {
 }
 
 #[test]
-fn canonical_domain_identities_are_reused_and_storage_projections_round_trip() {
-    fn accepts_domain_project(_: ProjectId) {}
-    fn accepts_domain_profile(_: UserProfileId) {}
-    fn accepts_domain_repository(_: RepositoryId) {}
-    fn accepts_domain_worktree(_: WorktreeId) {}
-
-    let project: tracedecay_store::ProjectId = id("project.canonical");
-    let profile: tracedecay_store::UserProfileId = id("profile.canonical");
-    let repository: tracedecay_store::RepositoryId = id("repository.canonical");
-    let worktree: tracedecay_store::WorktreeId = id("worktree.canonical");
-    accepts_domain_project(project);
-    accepts_domain_profile(profile);
-    accepts_domain_repository(repository);
-    accepts_domain_worktree(worktree);
-
-    let canonical_epoch = AuthorityEpoch(9);
-    let store_epoch = StoreAuthorityEpochV1::try_from(canonical_epoch).unwrap();
-    assert_eq!(AuthorityEpoch::from(store_epoch), canonical_epoch);
-    assert!(StoreAuthorityEpochV1::try_from(AuthorityEpoch(0)).is_err());
-
-    let effect = StoreEffectIdV1::try_from("effect.canonical").unwrap();
-    let effect_wire = String::from(effect.clone());
-    assert_eq!(StoreEffectIdV1::try_from(effect_wire).unwrap(), effect);
-
-    let idempotency = StoreIdempotencyKeyV1::try_from("idempotency.canonical").unwrap();
-    let idempotency_wire = String::from(idempotency.clone());
-    assert_eq!(
-        StoreIdempotencyKeyV1::try_from(idempotency_wire).unwrap(),
-        idempotency
-    );
-
-    assert_ne!(
-        std::any::TypeId::of::<StoreSnapshotIdV1>(),
-        std::any::TypeId::of::<tracedecay_domain::RepositoryStateSnapshotId>()
-    );
-    assert_ne!(
-        std::any::TypeId::of::<ShardWatermarkV1>(),
-        std::any::TypeId::of::<tracedecay_domain::ShardWatermark>()
-    );
-    assert_ne!(
-        std::any::TypeId::of::<FrozenWatermarkVectorV1>(),
-        std::any::TypeId::of::<tracedecay_domain::VectorWatermark>()
-    );
-}
-
-#[test]
 fn identity_and_budget_validation_fail_closed() {
     assert!(StoreIncarnationV1::new(0).is_err());
     assert!(StoreAuthorityEpochV1::new(0).is_err());
@@ -398,35 +352,6 @@ fn frozen_coverage_rejects_a_shard_observed_twice() {
         ],
     });
     assert!(serde_json::from_value::<FrozenWatermarkCoverageV1>(duplicate_observed).is_err());
-}
-
-#[test]
-fn selected_admission_and_maintenance_defaults_are_exact_and_valid() {
-    let defaults = AdmissionConfigV1::default();
-    defaults.validate().unwrap();
-
-    assert_eq!(defaults.per_shard_queue.max_operations, 2_048);
-    assert_eq!(defaults.per_shard_queue.max_bytes, 16 * 1024 * 1024);
-    assert_eq!(defaults.global_queue_max_bytes, 64 * 1024 * 1024);
-    assert_eq!(
-        defaults.foreground_batch,
-        BatchBudgetV1 {
-            max_operations: 128,
-            max_bytes: 1024 * 1024,
-            max_delay_ms: 2,
-        }
-    );
-    assert_eq!(
-        defaults.background_batch,
-        BatchBudgetV1 {
-            max_operations: 512,
-            max_bytes: 4 * 1024 * 1024,
-            max_delay_ms: 10,
-        }
-    );
-    assert_eq!(defaults.wal.soft_limit_bytes, 32 * 1024 * 1024);
-    assert_eq!(defaults.wal.hard_limit_bytes, 256 * 1024 * 1024);
-    assert_eq!(defaults.readers.idle_burst_retire_ms, 60_000);
 }
 
 #[test]

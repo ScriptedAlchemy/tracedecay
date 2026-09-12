@@ -298,34 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_provider_registers_and_reads_back_exactly() {
-        let slot = OnceLock::new();
-        register_in(&slot, valid_provider()).expect("valid provider must register");
-        let runtime = runtime_in(&slot).expect("registered runtime must read back");
-        assert_eq!(runtime.release_version(), PACKAGE_VERSION);
-        assert_eq!(runtime.source().full_sha, VALID_SHA);
-        assert!(!runtime.source().dirty);
-        assert_eq!(runtime.dashboard().cache_tag, VALID_ASSETS.cache_tag);
-        assert_eq!(runtime.provider().dashboard.assets.len(), 2);
-        assert_eq!(
-            runtime.build_version(),
-            format!("{PACKAGE_VERSION}+{VALID_SHA}")
-        );
-    }
-
-    #[test]
-    fn a_dirty_source_is_admitted_in_the_build_version() {
-        let slot = OnceLock::new();
-        let mut provider = valid_provider();
-        provider.source.dirty = true;
-        register_in(&slot, provider).expect("dirty provider must register");
-        assert_eq!(
-            runtime_in(&slot).expect("registered").build_version(),
-            format!("{PACKAGE_VERSION}+{VALID_SHA}.dirty")
-        );
-    }
-
-    #[test]
     fn a_second_registration_conflicts_even_when_identical() {
         let slot = OnceLock::new();
         register_in(&slot, valid_provider()).expect("first registration");

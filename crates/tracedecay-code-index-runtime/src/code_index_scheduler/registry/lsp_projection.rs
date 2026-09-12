@@ -32,9 +32,21 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
             // Bracket the current-generation fence with the cheap Git identity
             // read. A concurrent checkout, commit, or publication then refuses
             // instead of pairing one generation with another HEAD.
-            let current = registry
-                .latest_complete_ready(&root)
+            let retained = registry
+                .latest_text_serving_for_root(&root)
                 .await
+                .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
+            let scope = tracedecay_contracts::ResolvedScope::new(
+                retained.metadata().manifest().project_id.clone(),
+                live_identity.repository_id().clone(),
+                live_identity.worktree_id().clone(),
+                live_identity.head_ref().cloned(),
+            )
+            .map_err(|_| LspRuntimeFailure::new("lsp-code-index-scope-unavailable"))?;
+            let current = registry
+                .latest_text_serving_freshness_for_scope(&scope)
+                .await
+                .map(|(current, _)| current)
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
             let confirmation_root = root.clone();
             let confirmed_identity = tokio::task::spawn_blocking(move || {
@@ -46,7 +58,7 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
             if confirmed_identity != live_identity {
                 return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
             }
-            let generation = &current.generation;
+            let generation = current.metadata();
             let snapshot = generation.snapshot();
             if live_identity.repository_id() != &snapshot.repository
                 || snapshot.worktree.as_ref() != Some(live_identity.worktree_id())

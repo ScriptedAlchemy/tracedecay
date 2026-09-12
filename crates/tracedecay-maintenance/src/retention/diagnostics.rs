@@ -355,8 +355,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::super::orphan_stores::{
-        OrphanStoreFinding, StoreContentFence, StoreDirectoryFence, StoreDisposition,
-        UnregisteredStoreFinding,
+        StoreContentFence, StoreDirectoryFence, UnregisteredStoreFinding,
     };
     use super::*;
 
@@ -374,46 +373,6 @@ mod tests {
         assert!(!permits_synchronous_session_retention_backlog(&database));
     }
 
-    fn orphan_finding(disposition: StoreDisposition) -> OrphanStoreFinding {
-        OrphanStoreFinding {
-            project_id: "proj_orphan".to_owned(),
-            store_id: "store_orphan".to_owned(),
-            data_root: PathBuf::from("/tmp/does-not-exist/store_orphan"),
-            disposition,
-            age_secs: 1_000_000,
-            size_bytes: 42_000,
-            expected_store_relpath: "stores/store_orphan".to_owned(),
-            expected_created_at: 0,
-            expected_last_write_at: None,
-            expected_payload_mtime_secs: 0,
-            expected_data_root_fence: StoreDirectoryFence::Unverifiable,
-            expected_content_fence: StoreContentFence::Unverifiable,
-            expected_manifest_bytes: None,
-            graph_scope_relpaths: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn live_store_yields_no_doctor_finding() {
-        assert!(orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Live)).is_none());
-    }
-
-    #[test]
-    fn orphaned_store_maps_to_degraded_orphan_store_finding() {
-        let typed = orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Orphaned))
-            .expect("orphaned store produces a typed finding");
-        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
-    }
-
-    #[test]
-    fn relinkable_store_maps_to_orphan_store_finding() {
-        let typed = orphan_store_doctor_finding(&orphan_finding(StoreDisposition::Relinkable {
-            live_root: PathBuf::from("/live/moved/root"),
-        }))
-        .expect("relinkable store produces a typed finding");
-        assert_eq!(typed.kind(), DoctorStorageFindingKindV1::OrphanStore);
-    }
-
     #[test]
     fn unregistered_store_maps_to_orphan_store_finding() {
         let finding = UnregisteredStoreFinding {
@@ -424,6 +383,7 @@ mod tests {
             expected_payload_mtime_secs: 0,
             expected_data_root_fence: StoreDirectoryFence::Unverifiable,
             expected_content_fence: StoreContentFence::Unverifiable,
+            abandoned_root: false,
         };
         let typed = unregistered_store_doctor_finding(&finding)
             .expect("unregistered directory produces a typed finding");

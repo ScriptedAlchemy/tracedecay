@@ -30,6 +30,7 @@ semantic-model2vec = ["tracedecay-semantic/semantic-model2vec"]
 # Mirrors the root crate's opt-in GPU execution-provider features.
 semantic-gpu-coreml = ["tracedecay-semantic/semantic-gpu-coreml"]
 semantic-gpu-cuda = ["tracedecay-semantic/semantic-gpu-cuda"]
+semantic-gpu-webgpu = ["tracedecay-semantic/semantic-gpu-webgpu"]
 # Exposes test-only helper surfaces to dependent crates' test builds without
 # enabling in-process transports. Forwards to tracedecay-sessions so the
 # re-exported wire test helpers (read_bounded_line, line_outcome_to_io) resolve
@@ -69,6 +70,9 @@ tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+# Grammar-free schema-evidence types only: native-integration analysis compares
+# retained schema facts and never links a tree-sitter bundle into this crate.
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
@@ -109,11 +113,6 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", feat
 [[bench]]
 name = "work_rollup"
 harness = false
-
-[[bench]]
-name = "work_readiness"
-harness = false
-required-features = ["test-helpers"]
 
 # Same dual-mode coverage as `work_rollup`; the commit sweep carries a
 # bounded `measure_block!` so the expected-label set is nonempty.

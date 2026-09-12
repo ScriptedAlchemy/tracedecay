@@ -10,7 +10,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_semantic::projector::{
-    PreparedVectorGenerationV1, ProjectedChunkVectorV1, VectorTombstoneV1, split_projection_request,
+    PreparedVectorGenerationV1, ProjectedChunkVectorV1, VectorTombstoneV1,
+    split_committed_projection_request,
 };
 use tracedecay_semantic_contracts::SemanticRuntimeScheduleFailureV1;
 
@@ -55,12 +56,11 @@ pub(super) async fn commit_evaluation_prepared_generation(
     canonical_chunks: &[Arc<CodeSearchChunkV1>],
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<(), SemanticRuntimeScheduleFailureV1> {
-    let pages = split_projection_request(
+    let pages = split_committed_projection_request(
         &prepared.request,
         canonical_chunks,
         tracedecay_store::MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH,
-        prepared.embedding_key.embedding_key().inference_batch_size as usize,
-        prepared.embedding_key.embedding_key().inference_batch_bytes as usize,
+        prepared.embedding_key.embedding_key(),
     )
     .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
     let mut checkpoint = None;
@@ -279,6 +279,7 @@ mod tests {
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "paging-fixture.v1".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
             dimensions: 1,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,
@@ -592,7 +593,7 @@ mod tests {
         };
 
         let embedding = embedding();
-        let added = (0..6)
+        let added = (0..24)
             .map(|ordinal| format!("chunk.added.{ordinal:02}"))
             .collect::<Vec<_>>();
         let added_specs = added
@@ -662,10 +663,15 @@ mod tests {
             .publish_generation(&unpaged_build)
             .expect("unpaged publication");
 
-        // Two encoder groups per page (inference batch size 8 from the
-        // fixture would keep everything on one page, so page by pairs).
-        let pages = split_projection_request(&prepared.request, &canonical_chunks, 2, 2, 1 << 20)
-            .expect("paged split");
+        // One encoder group per page, at the fixture key's own inference
+        // batch size, so 24 changes become three pages.
+        let pages = split_committed_projection_request(
+            &prepared.request,
+            &canonical_chunks,
+            8,
+            embedding.embedding_key(),
+        )
+        .expect("paged split");
         assert!(
             pages.len() > 1,
             "the fixture must actually split into multiple pages"

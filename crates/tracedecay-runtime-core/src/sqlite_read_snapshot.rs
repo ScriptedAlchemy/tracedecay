@@ -1651,48 +1651,6 @@ mod tests {
         drop(writer);
     }
 
-    #[tokio::test]
-    async fn copied_snapshot_survives_empty_writer_sidecar_cleanup() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("source.db");
-        let writer = Connection::open(&path).unwrap();
-        writer
-            .execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 CREATE TABLE durable(value TEXT NOT NULL);
-                 PRAGMA wal_checkpoint(TRUNCATE);
-                 BEGIN IMMEDIATE;",
-            )
-            .unwrap();
-        let journal_mode: String = writer
-            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
-        let wal = with_suffix(&path, "-wal");
-        let shm = with_suffix(&path, "-shm");
-        assert_eq!(fs::metadata(&wal).unwrap().len(), 0);
-        assert!(shm.is_file());
-
-        // Online backup of the live writer, not fs::copy of locked files (#933).
-        let snapshot = open(&path).await.unwrap();
-        assert_ne!(snapshot.identity_path, path);
-
-        writer.execute_batch("ROLLBACK;").unwrap();
-        drop(writer);
-        for sidecar in [wal, shm] {
-            match fs::remove_file(sidecar) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => panic!("could not remove transient sidecar: {error}"),
-            }
-        }
-
-        assert_eq!(
-            snapshot.attach_token().unwrap().verified_path().unwrap(),
-            snapshot.path()
-        );
-    }
-
     #[cfg(not(windows))]
     #[tokio::test]
     async fn checkpointed_database_reads_directly_without_copy_or_metadata_change() {

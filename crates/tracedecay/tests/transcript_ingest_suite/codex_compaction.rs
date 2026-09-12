@@ -2,6 +2,7 @@
 //! Transcript reads retain exact native evidence; only the PostCompact effect
 //! may turn that evidence or an app-server result into an LCM summary node.
 
+#[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::process::Stdio;
@@ -9,7 +10,7 @@ use std::process::Stdio;
 use tempfile::TempDir;
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
-use tracedecay_global_db::ParseOffset;
+#[cfg(unix)]
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
@@ -37,6 +38,7 @@ async fn registered_runtime(
     .unwrap()
 }
 
+#[cfg(unix)]
 fn write_codex_rollout_with_compaction(
     home: &std::path::Path,
     project: &std::path::Path,
@@ -269,25 +271,6 @@ done
     );
 }
 
-#[cfg(not(unix))]
-#[tokio::test]
-async fn codex_transcript_compaction_evidence_does_not_publish_outside_daemon_effect() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    write_codex_rollout_with_compaction(&home, &project, "codex-compact");
-    let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 4);
-    let status = runtime
-        .lcm_status_for_test("codex", Some("codex-compact"))
-        .await
-        .unwrap();
-    assert_eq!(status.summary_node_count, 0);
-}
 #[tokio::test]
 async fn repeated_codex_compactions_remain_native_evidence_until_daemon_effect() {
     let tmp = TempDir::new().unwrap();
@@ -358,184 +341,6 @@ async fn repeated_codex_compactions_remain_native_evidence_until_daemon_effect()
 
     let status = runtime
         .lcm_status_for_test("codex", Some("codex-repeat"))
-        .await
-        .unwrap();
-    assert_eq!(status.raw_message_count, 6);
-    assert_eq!(status.summary_node_count, 0);
-}
-
-#[tokio::test]
-async fn incremental_codex_compaction_ingest_never_bypasses_daemon_effect() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let dir = home.join(".codex/sessions/2026/01/01");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("rollout-2026-01-01T00-00-40-codex-incremental.jsonl");
-    let cwd = project.to_string_lossy();
-    let compact = |at: &str| {
-        serde_json::json!({
-            "timestamp": at,
-            "type": "compacted",
-            "payload": {
-                "message": "",
-                "replacement_history": [
-                    {"type": "compaction", "encrypted_content": "encrypted"}
-                ]
-            }
-        })
-    };
-    let first = [
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:40.000Z",
-            "type": "session_meta",
-            "payload": {"id": "codex-incremental", "cwd": cwd, "model": "gpt-5.5"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:41.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "First incremental prompt"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:42.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "First incremental reply"}
-        }),
-        compact("2026-01-01T00:00:43.000Z"),
-    ];
-    std::fs::write(
-        &path,
-        first
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n",
-    )
-    .unwrap();
-
-    let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 3);
-
-    let second = [
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:44.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Second incremental prompt"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:45.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "Second incremental reply"}
-        }),
-        compact("2026-01-01T00:00:46.000Z"),
-    ];
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    for line in second {
-        writeln!(file, "{line}").unwrap();
-    }
-
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 3);
-
-    let status = runtime
-        .lcm_status_for_test("codex", Some("codex-incremental"))
-        .await
-        .unwrap();
-    assert_eq!(status.raw_message_count, 6);
-    assert_eq!(status.summary_node_count, 0);
-}
-
-#[tokio::test]
-async fn replayed_codex_compaction_ingest_never_bypasses_daemon_effect() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let dir = home.join(".codex/sessions/2026/01/01");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("rollout-2026-01-01T00-00-45-codex-replay.jsonl");
-    let cwd = project.to_string_lossy();
-    let compact = |at: &str| {
-        serde_json::json!({
-            "timestamp": at,
-            "type": "compacted",
-            "payload": {
-                "message": "",
-                "replacement_history": [
-                    {"type": "compaction", "encrypted_content": "encrypted"}
-                ]
-            }
-        })
-    };
-    let lines = [
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:45.000Z",
-            "type": "session_meta",
-            "payload": {"id": "codex-replay", "cwd": cwd, "model": "gpt-5.5"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:46.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "First replay prompt"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:47.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "First replay reply"}
-        }),
-        compact("2026-01-01T00:00:48.000Z"),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:49.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Second replay prompt"}
-        }),
-        serde_json::json!({
-            "timestamp": "2026-01-01T00:00:50.000Z",
-            "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "Second replay reply"}
-        }),
-        compact("2026-01-01T00:00:51.000Z"),
-    ];
-    let contents = lines
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    std::fs::write(&path, contents).unwrap();
-
-    let runtime = registered_runtime(&home, &project).await;
-    let source = CodexSource::with_home(&home);
-    let path_str = path.to_string_lossy().to_string();
-    runtime
-        .set_project_parse_offset_for_test(
-            &path_str,
-            ParseOffset {
-                byte_offset: std::fs::metadata(&path).unwrap().len(),
-                mtime: 1,
-                file_id: 1,
-            },
-        )
-        .await
-        .unwrap();
-
-    let stats = runtime
-        .ingest_project_transcript_source_for_test(&source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.messages_upserted, 6);
-
-    let status = runtime
-        .lcm_status_for_test("codex", Some("codex-replay"))
         .await
         .unwrap();
     assert_eq!(status.raw_message_count, 6);

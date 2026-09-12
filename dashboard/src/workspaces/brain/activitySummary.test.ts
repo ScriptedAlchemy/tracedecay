@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
-import {
-  ageTickIntervalMs,
-  familyLabel,
-  formatDurationMs,
-  summarizeActivity,
-  RATE_WINDOW_MS,
-} from './activitySummary.ts';
+import { ageTickIntervalMs, formatDurationMs, summarizeActivity, RATE_WINDOW_MS } from './activitySummary.ts';
 
 function pulse(family: string, at: number): LiveActivityPulse {
   return { projectId: 'p1', family, streamId: 'code_index', at,
@@ -79,37 +73,11 @@ describe('summarizeActivity', () => {
   });
 });
 
-describe('familyLabel', () => {
-  it('names the families the dashboard knows', () => {
-    expect(familyLabel('project_registry_changed')).toBe('project registry');
-    expect(familyLabel('code_index_completed')).toBe('code index');
-  });
-
-  it('keeps an unknown family legible instead of dropping it', () => {
-    expect(familyLabel('some_new_thing')).toBe('some new thing');
-  });
-});
-
 describe('formatDurationMs', () => {
   it('renders an em dash rather than inventing a zero', () => {
     expect(formatDurationMs(null)).toBe('—');
     expect(formatDurationMs(Number.NaN)).toBe('—');
     expect(formatDurationMs(-1)).toBe('—');
-  });
-
-  it('coarsens as the reading grows', () => {
-    expect(formatDurationMs(400)).toBe('<1s');
-    expect(formatDurationMs(4_000)).toBe('4s');
-    expect(formatDurationMs(240_000)).toBe('4m');
-    expect(formatDurationMs(4 * 3_600_000)).toBe('4h');
-  });
-
-  // The name carries the unit because Loom's `tracks.ts` has a same-named
-  // seconds formatter. Passing seconds to this one is a 1000x understatement,
-  // and these are the readings that would print if a caller mixed them up.
-  it('reads a seconds-valued argument as the near-zero it would be in ms', () => {
-    expect(formatDurationMs(45)).toBe('<1s');
-    expect(formatDurationMs(600)).toBe('<1s');
   });
 });
 

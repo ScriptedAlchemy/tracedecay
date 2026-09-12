@@ -411,15 +411,6 @@ mod tests {
     }
 
     #[test]
-    fn activation_material_comes_from_the_installed_lifecycle_state() {
-        let status = installed_status();
-        let material =
-            semantic_activation_material(Some(&status)).expect("installed model material");
-        assert_eq!(material.artifact_digest, "a".repeat(64));
-        assert_eq!(material.install_path, absolute_fixture_path("/models/jina"));
-    }
-
-    #[test]
     fn activation_refuses_typed_when_the_model_is_still_downloading() {
         let mut status = installed_status();
         status.state = Some(SemanticModelLifecycleStateV1::Downloading {

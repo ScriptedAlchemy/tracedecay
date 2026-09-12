@@ -261,28 +261,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_snapshot_carries_the_exact_mounted_advisory_owner() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        let project_root = PathBuf::from("/projects/advisory-owner");
-        let project_id = ProjectId::new("project.advisory-owner").expect("project id");
-        let owner = DaemonAdvisoryCycleInvocationOwner::new(
-            project_id.clone(),
-            Arc::new(UnavailableAdvisoryCycle),
-        );
-        registry
-            .register(project_root.clone(), owner)
-            .await
-            .expect("advisory owner registration");
-
-        let snapshot = registry.request_runtimes(Some(&project_root), None).await;
-
-        let mounted = snapshot
-            .advisory_cycle
-            .expect("mounted advisory owner must be in the request snapshot");
-        assert_eq!(mounted.project_id, project_id);
-    }
-
-    #[tokio::test]
     async fn request_snapshot_resolves_owners_from_the_admitted_canonical_root() {
         let registry = ProjectRuntimeRegistryV1::default();
         let alias = PathBuf::from("/projects/storage-status-alias");

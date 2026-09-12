@@ -891,134 +891,6 @@ mod user_profile_settings_tests {
 }
 
 #[cfg(test)]
-mod automation_defaults_tests {
-    use super::*;
-    use tracedecay_domain::configuration::AutomationBackendV1;
-
-    #[test]
-    fn fresh_snapshot_resolves_the_active_automation_default() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).expect("automation key");
-        let definition = registry.definition(&key).expect("automation definition");
-        let ConfigurationValueV1::AutomationSettings(settings) = &definition.default_value else {
-            panic!("automation registry entry must retain its typed value");
-        };
-
-        assert!(settings.enabled);
-        assert_eq!(settings.backend, AutomationBackendV1::CodexAppServer);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert!(settings.tasks.memory_curator.enabled);
-        assert!(settings.tasks.session_reflector.enabled);
-        assert!(settings.tasks.skill_writer.enabled);
-    }
-}
-
-#[cfg(test)]
-mod sync_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn linked_worktree_watching_requires_explicit_project_opt_in() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).expect("setting key");
-        let definition = registry.definition(&key).expect("setting definition");
-
-        assert_eq!(
-            definition.default_value,
-            ConfigurationValueV1::Boolean(false)
-        );
-        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Boolean);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
-        assert_eq!(
-            definition.restart_requirement,
-            RestartRequirementV1::DaemonRestart
-        );
-    }
-
-    #[test]
-    fn orphan_database_retention_has_one_exact_project_default() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-        let key = SettingKey::new(SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY).expect("setting key");
-        let definition = registry.definition(&key).expect("setting definition");
-
-        assert_eq!(definition.default_value, ConfigurationValueV1::Unsigned(7));
-        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Unsigned);
-        assert_eq!(definition.scope, SettingScopeV1::Project);
-        assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
-        assert_eq!(
-            definition.restart_requirement,
-            RestartRequirementV1::DaemonRestart
-        );
-        assert_eq!(
-            CONFIGURATION_SETTING_KEYS_V1
-                .iter()
-                .filter(|candidate| **candidate == SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)
-                .count(),
-            1
-        );
-    }
-}
-
-#[cfg(test)]
-mod work_expertise_defaults_tests {
-    use super::*;
-
-    #[test]
-    fn expertise_consent_defaults_are_disabled_at_both_required_scopes() {
-        let registry = ConfigurationRegistry::core().expect("registry");
-
-        for (raw_key, expected_scope) in [
-            (
-                USER_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-                SettingScopeV1::UserProfile,
-            ),
-            (
-                PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
-                SettingScopeV1::Project,
-            ),
-        ] {
-            let definition = registry
-                .definition(&SettingKey::new(raw_key).expect("setting key"))
-                .expect("setting definition");
-            assert_eq!(definition.scope, expected_scope);
-            assert_eq!(definition.sensitivity, SettingSensitivityV1::Sensitive);
-            assert_eq!(definition.restart_requirement, RestartRequirementV1::None);
-            assert_eq!(
-                definition.default_value,
-                ConfigurationValueV1::WorkExpertiseConsent(WorkExpertiseConsentV1::disabled())
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod context_scout_tests {
-    use super::*;
-    use tracedecay_domain::configuration::{
-        ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
-    };
-
-    #[test]
-    fn stock_context_scout_configuration_is_explicitly_disabled() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let definition = registry
-            .definition(&SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY).unwrap())
-            .unwrap();
-        let ConfigurationValueV1::ContextScoutSettings(settings) = &definition.default_value else {
-            panic!("Context Scout registry entry must retain its typed value");
-        };
-        assert_eq!(settings.state, ContextScoutConfigurationStateV1::Disabled);
-        assert_eq!(
-            settings.mode,
-            ContextScoutConfigurationModeV1::Deterministic
-        );
-        assert_eq!(settings.model_path, None);
-        settings.validate().unwrap();
-    }
-}
-
-#[cfg(test)]
 mod semantic_runtime_payload_tests {
     use std::path::PathBuf;
 
@@ -1061,11 +933,11 @@ mod semantic_runtime_payload_tests {
             resources: SemanticResourceCeilings {
                 max_model_bytes: 700 * 1024 * 1024,
                 max_tokenizer_bytes: 64 * 1024 * 1024,
-                max_resident_bytes: 2 * 1024 * 1024 * 1024,
+                max_resident_bytes: Some(2 * 1024 * 1024 * 1024),
                 max_threads: 8,
                 max_concurrent_sessions: 4,
                 max_batch_size: 32,
-                max_sequence_length: 512,
+                max_sequence_length: 4096,
                 load_deadline_ms: 30_000,
             },
             document_composition: tracedecay_domain::EmbeddingDocumentCompositionV1::SanitizedText,

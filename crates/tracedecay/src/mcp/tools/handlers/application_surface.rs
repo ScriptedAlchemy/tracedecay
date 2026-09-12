@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tracedecay_contracts::{
-    ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, InvocationTarget,
-    RequestId, RetainedSurfaceOperation,
+    ApplicationOutcome, ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline,
+    InvocationTarget, RequestId, RetainedSurfaceOperation,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
@@ -171,7 +171,68 @@ pub(super) async fn handle_application_surface(
     }
     .map_err(application_surface_dispatch_error)?;
 
-    render_result(cg, result)
+    let served_stale = served_stale_code_graph_read(&result)?;
+    let mut rendered = render_result(cg, result)?;
+    if let Some(served) = served_stale.as_ref() {
+        super::append_code_graph_freshness(&mut rendered, served);
+    }
+    Ok(rendered)
+}
+
+fn served_stale_code_graph_read(
+    result: &ApplicationSurfaceInvocationResult,
+) -> Result<Option<super::ServedStaleCodeGraphReadV1>> {
+    if !matches!(
+        result.operation,
+        ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers
+            | ApplicationSurfaceOperation::CodeCallees
+    ) {
+        return Ok(None);
+    }
+    let Ok(envelope) = &result.result else {
+        return Ok(None);
+    };
+    let ApplicationOutcome::Evidence(evidence) = &envelope.outcome else {
+        return Ok(None);
+    };
+    Ok(served_stale_code_graph_temporal(
+        result.operation,
+        &evidence.temporal,
+    ))
+}
+
+fn served_stale_code_graph_temporal(
+    operation: ApplicationSurfaceOperation,
+    temporal: &tracedecay_contracts::TemporalState,
+) -> Option<super::ServedStaleCodeGraphReadV1> {
+    if !matches!(
+        operation,
+        ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers
+            | ApplicationSurfaceOperation::CodeCallees
+    ) {
+        return None;
+    }
+    let generation = temporal.source_generation.as_ref()?;
+    let Some(tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+        sealed_at,
+        rebuild_in_flight,
+    }) = temporal.code_graph_freshness
+    else {
+        return None;
+    };
+    Some(super::ServedStaleCodeGraphReadV1 {
+        generation: generation.as_str().to_owned(),
+        sealed_at,
+        rebuild_in_flight,
+    })
 }
 
 /// Map surface-resolution failures to typed reason codes so MCP clients see
@@ -313,14 +374,10 @@ fn render_canonical_markdown(
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
-    use tracedecay_contracts::{
-        ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, CancellationSignal,
-        Deadline, RequestId, ResultContractRef, SafeDiagnostic,
-    };
-    use tracedecay_domain::UtcMicros;
-    use tracedecay_tool_catalog::{BindingId, SchemaId};
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId, TemporalState};
+    use tracedecay_domain::{CodeGenerationId, UtcMicros};
 
-    use super::{complete_protocol_controls, render_canonical_markdown};
+    use super::{complete_protocol_controls, served_stale_code_graph_temporal};
     use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
     #[test]
@@ -388,33 +445,32 @@ mod tests {
     }
 
     #[test]
-    fn canonical_problem_markdown_matches_the_cli_contract() {
-        let result: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
-            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 3).unwrap(),
-            RequestId::new("request.mcp.golden").unwrap(),
-            ApplicationProblem::unavailable(
-                SafeDiagnostic::new(
-                    "daemon_unavailable",
-                    "The owning TraceDecay daemon is unavailable",
-                )
-                .unwrap(),
-            ),
+    fn stale_page_freshness_drives_the_legacy_trailer() {
+        let mut temporal = TemporalState::current(UtcMicros(20));
+        temporal.source_generation =
+            Some(CodeGenerationId::new("generation.symbol-page.stale.1").unwrap());
+        temporal.code_graph_freshness = Some(
+            tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
+                sealed_at: UtcMicros(10),
+                rebuild_in_flight: true,
+            },
+        );
+        let served = served_stale_code_graph_temporal(
+            ApplicationSurfaceOperation::CodeSymbolSearch,
+            &temporal,
         )
-        .expect("canonical problem fixture"));
-
-        let rendered = render_canonical_markdown(
-            "feedback_list",
-            &BindingId::new("binding.mcp.feedback-list.v1").unwrap(),
-            &result,
-        )
-        .unwrap();
-
-        assert!(rendered.starts_with("## feedback\\_list\n"));
-        assert!(rendered.contains("\n- Operation: `feedback_list`"));
-        assert!(rendered.contains("\n- Binding: `binding.mcp.feedback-list.v1`"));
-        assert!(rendered.contains("\n- Status: `problem`"));
-        assert!(rendered.contains("\n- Problem: `daemon_unavailable`"));
-        assert!(rendered.contains("\n- Retry: `after_delay`"));
-        assert!(!rendered.contains("### contract"));
+        .expect("stale page metadata");
+        let mut rendered = super::super::text_tool_result("{}");
+        super::super::append_code_graph_freshness(&mut rendered, &served);
+        let trailer = rendered
+            .value
+            .pointer("/content/1/text")
+            .and_then(Value::as_str)
+            .expect("legacy freshness trailer");
+        assert!(trailer.contains("code_graph_freshness: stale"), "{trailer}");
+        assert!(
+            trailer.contains("generation.symbol-page.stale.1"),
+            "{trailer}"
+        );
     }
 }

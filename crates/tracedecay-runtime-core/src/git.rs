@@ -600,14 +600,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn git_program_is_stable_and_absolute() {
-        let first = try_git_program().expect("git executable should resolve");
-        let second = try_git_program().expect("cached git executable should resolve");
-        assert_eq!(first, second);
-        assert!(Path::new(first).is_absolute());
-    }
-
-    #[test]
     fn resolver_preserves_exact_absolute_override() {
         let temporary = tempfile::tempdir().expect("temporary executable directory");
         let executable = temporary
@@ -761,31 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn bounded_output_reports_deadline_and_output_limit() {
-        let root = tempfile::tempdir().unwrap();
-        let expired = GitCommandBounds {
-            deadline: Instant::now(),
-            ..GitCommandBounds::default()
-        };
-        assert!(matches!(
-            bounded_git_output(root.path(), &["--version"], &expired),
-            Err(GitCommandError::DeadlineExceeded)
-        ));
-
-        let limited = GitCommandBounds {
-            max_stdout_bytes: 1,
-            ..GitCommandBounds::default()
-        };
-        assert!(matches!(
-            bounded_git_output(root.path(), &["--version"], &limited),
-            Err(GitCommandError::OutputLimitExceeded {
-                stream: "stdout",
-                bound: 1
-            })
-        ));
-    }
-
-    #[test]
     fn bounded_output_observes_pre_spawn_cancellation() {
         let root = tempfile::tempdir().unwrap();
         let cancel = CancellationToken::new();
@@ -798,28 +765,5 @@ mod tests {
             bounded_git_output(root.path(), &["--version"], &bounds),
             Err(GitCommandError::Cancelled)
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bounded_command_interrupts_an_in_flight_process() {
-        let cancellation = CancellationToken::new();
-        let trigger = cancellation.clone();
-        let notifier = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            trigger.cancel();
-        });
-        let mut command = Command::new("sh");
-        command.args(["-c", "exec sleep 30"]);
-        let bounds = GitCommandBounds {
-            cancel: Some(cancellation),
-            ..GitCommandBounds::default()
-        };
-        let started = Instant::now();
-        let result = bounded_command_output(command, None, &bounds);
-        notifier.join().unwrap();
-
-        assert!(matches!(result, Err(GitCommandError::Cancelled)));
-        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

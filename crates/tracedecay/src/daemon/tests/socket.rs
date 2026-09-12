@@ -1404,10 +1404,3 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
             == crate::test_support::host_admission::HostAdmissionTestRuntimeV1::canonical_project_key(&linked)
     }));
 }
-
-#[test]
-fn unsupported_daemon_transport_never_falls_back_to_local_sqlite() {
-    assert!(super::super::proxy_required_by_platform(false, false));
-    assert!(super::super::proxy_required_by_platform(false, true));
-    assert!(!super::super::proxy_required_by_platform(true, false));
-}

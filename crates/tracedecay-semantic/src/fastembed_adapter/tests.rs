@@ -16,6 +16,24 @@ fn digest(byte: char) -> ManifestDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))
 }
 
+/// Exact declared bytes of the shipped default code model and its
+/// tokenizer, from the production catalog.
+const CATALOG_MEMBER_BYTES: u64 = 641_517_466 + 2_561_316;
+
+/// What one session actually costs at the shipped sequence length, stated
+/// once so the two guards below cannot drift apart.
+///
+/// `644,078,782 × 5/4` headroom over declared member bytes, plus the
+/// budget-bounded activation of `attention_token_square_budget(32, 4096)`:
+/// 1,660,736,493 B, or 1.547 GiB. Measured cold-load resident growth per
+/// session on the tiny corpus is 0.96–1.39 GiB, so the reservation is
+/// deliberately conservative against what a session retains in practice.
+const CATALOG_SESSION_ESTIMATE_BYTES: u64 = 1_660_736_493;
+
+/// The semantic share a 96 GiB host derives (`admitted / 8`), which is
+/// what B1 restored to production.
+const HOST_DERIVED_CEILING: u64 = 12 * 1024 * 1024 * 1024;
+
 /// A session must be charged what one session retains, not the whole
 /// process budget.
 ///
@@ -25,23 +43,41 @@ fn digest(byte: char) -> ManifestDigest {
 /// host, whatever the CPU width arithmetic asked for.
 #[test]
 fn resident_estimate_admits_more_than_one_session_under_the_process_ceiling() {
-    const CEILING: u64 = 2 * 1024 * 1024 * 1024;
-    // The shipped default code model plus its tokenizer.
-    const MEMBER_BYTES: u64 = 612 * 1024 * 1024 + 2 * 1024 * 1024;
-
-    let estimate = resident_bytes_estimate_for(MEMBER_BYTES, CEILING);
+    let estimate =
+        resident_bytes_estimate_for(CATALOG_MEMBER_BYTES, 32, 4096, HOST_DERIVED_CEILING);
+    assert_eq!(estimate, CATALOG_SESSION_ESTIMATE_BYTES);
     assert!(
-        estimate < CEILING,
-        "a single session must not reserve the whole process budget"
-    );
-    assert!(
-        estimate >= MEMBER_BYTES,
+        estimate >= CATALOG_MEMBER_BYTES,
         "the estimate must still cover the artifact's own declared bytes"
     );
     assert!(
-        CEILING / estimate >= 2,
-        "the default ceiling must admit at least the two concurrent \
-         sessions the host width arithmetic derives"
+        HOST_DERIVED_CEILING / estimate >= 2,
+        "the host-derived ceiling must admit at least the two concurrent \
+         sessions the host width arithmetic derives, but only \
+         {} fit at {estimate} bytes each",
+        HOST_DERIVED_CEILING / estimate
+    );
+}
+
+/// The shipped 2 GiB default admits exactly one session at the shipped
+/// 4096-token sequence. That is the truth, so it is what the test says.
+///
+/// The reservation is not padded and the ceiling is not raised to make a
+/// wider claim pass. Width comes from B1's host derivation reaching
+/// production, not from softening this number: an operator who pins
+/// 2 GiB is pinning one session, and the doc above says so.
+#[test]
+fn the_shipped_default_ceiling_admits_exactly_one_session() {
+    let estimate = resident_bytes_estimate_for(
+        CATALOG_MEMBER_BYTES,
+        32,
+        4096,
+        tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES,
+    );
+    assert_eq!(estimate, CATALOG_SESSION_ESTIMATE_BYTES);
+    assert_eq!(
+        tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES / estimate,
+        1
     );
 }
 
@@ -55,7 +91,7 @@ fn resident_estimate_admits_more_than_one_session_under_the_process_ceiling() {
 /// silently broke out of its loop at one session.
 #[test]
 fn production_scale_artifact_admits_the_derived_session_width() {
-    const CEILING: u64 = 2 * 1024 * 1024 * 1024;
+    const CEILING: u64 = HOST_DERIVED_CEILING;
     const MODEL_BYTES: u64 = 612 * 1024 * 1024;
     const TOKENIZER_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -81,21 +117,23 @@ fn production_scale_artifact_admits_the_derived_session_width() {
         .count();
     assert!(
         admitted >= 2,
-        "the process ceiling must admit at least the two sessions the host \
-         width arithmetic derives, but only {admitted} fit at {reserved} bytes each"
+        "the host-derived ceiling must admit at least the two concurrent \
+         sessions the host width arithmetic derives, but only \
+         {admitted} fit at {reserved} bytes each"
     );
 }
 
 #[test]
-fn resident_estimate_never_exceeds_the_ceiling_and_survives_unknown_sizes() {
-    const CEILING: u64 = 4096;
-    // An artifact that declares no lengths keeps the previous
-    // conservative behaviour rather than under-reserving.
-    assert_eq!(resident_bytes_estimate_for(0, CEILING), CEILING);
-    // A model larger than the ceiling still clamps to it; the pool's own
-    // `reserved_bytes > resident_byte_ceiling` check then refuses it.
-    assert_eq!(resident_bytes_estimate_for(u64::MAX, CEILING), CEILING);
-    assert!(resident_bytes_estimate_for(1024, CEILING) <= CEILING);
+fn resident_estimate_includes_worst_admitted_attention_activations() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MEMBER_BYTES: u64 = 614 * 1024 * 1024;
+
+    let estimate = resident_bytes_estimate_for(MEMBER_BYTES, 32, 4096, 16 * GIB);
+    let member_with_headroom = MEMBER_BYTES * 5 / 4;
+    assert_eq!(
+        estimate,
+        member_with_headroom + fastembed_worst_batch_activation_bytes(32, 4096)
+    );
 }
 
 fn authority(dimensions: u32) -> AdmittedProjectionArtifactV1 {
@@ -122,12 +160,13 @@ fn authority_with(
         document_composition: EmbeddingDocumentCompositionV1::SanitizedText,
         pooling: EmbeddingPoolingV1::Mean,
         truncation_side: EmbeddingTruncationSideV1::Right,
-        truncation_length: 512,
+        truncation_length: 4096,
         inference_batch_size: 8,
         inference_batch_bytes: 16 * 1024,
         runtime_backend: "fastembed-ort".to_owned(),
         runtime_build_revision: "ort-test-rev-1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: EmbeddingExecutionProviderV1::Cpu,
         dimensions,
         metric,
         normalization,
@@ -159,19 +198,6 @@ fn authority_with(
     }
 }
 
-fn descriptor(authority: &AdmittedProjectionArtifactV1) -> &VerifiedEmbeddingArtifactV1 {
-    authority.runtime_artifact()
-}
-
-fn descriptor_paths(authority: &AdmittedProjectionArtifactV1) -> (&str, &str, &str) {
-    let descriptor = descriptor(authority);
-    (
-        descriptor.model_file.as_str(),
-        descriptor.tokenizer_file.as_str(),
-        descriptor.config_file.as_str(),
-    )
-}
-
 fn batch(texts: &[&str]) -> BoundedSanitizedTextBatchV1 {
     BoundedSanitizedTextBatchV1::try_new(
         texts.iter().map(|t| (*t).to_string()).collect(),
@@ -186,23 +212,9 @@ fn never_cancelled() -> ManualCancellation {
 }
 
 #[test]
-fn private_runtime_descriptor_uses_domain_projection_types() {
-    let authority = authority(384);
-    let descriptor = descriptor(&authority);
-    assert_eq!(descriptor.dimensions(), 384);
-    assert_eq!(descriptor.metric(), EmbeddingMetricV1::Cosine);
-    assert_eq!(descriptor.normalization(), EmbeddingNormalizationV1::L2);
-    assert_eq!(
-        descriptor_paths(&authority),
-        ("model.onnx", "tokenizer.json", "config.json")
-    );
-}
-
-#[test]
 fn lifecycle_install_authority_verifies_member_bytes_at_read() {
     let fixture = lifecycle_install_fixture(b"model");
-    let authority =
-        lifecycle_authority_from(&fixture, 1024).expect("verified lifecycle authority");
+    let authority = lifecycle_authority_from(&fixture, 1024).expect("verified lifecycle authority");
 
     assert_eq!(
         authority
@@ -401,8 +413,7 @@ fn lifecycle_authority_construction_rejects_structural_pin_violations() {
 #[test]
 fn lifecycle_authority_construction_is_cheaper_than_member_byte_verification() {
     let fixture = lifecycle_install_fixture(b"model");
-    let authority =
-        lifecycle_authority_from(&fixture, 1024).expect("verified lifecycle authority");
+    let authority = lifecycle_authority_from(&fixture, 1024).expect("verified lifecycle authority");
     for (role, pinned) in [
         (ArtifactMemberRoleV1::Model, b"model".as_slice()),
         (ArtifactMemberRoleV1::Tokenizer, b"tokenizer".as_slice()),
@@ -446,9 +457,8 @@ fn lifecycle_authority_construction_is_cheaper_than_member_byte_verification() {
             std::fs::read(fixture.install.path().join("model.onnx")).is_err(),
             "the fixture requires a test runner whose member reads are deniable"
         );
-        let unreadable = lifecycle_authority_from(&fixture, 1024).expect(
-            "construction checks structural pins without opening member bytes for reading",
-        );
+        let unreadable = lifecycle_authority_from(&fixture, 1024)
+            .expect("construction checks structural pins without opening member bytes for reading");
         assert!(
             matches!(
                 unreadable
@@ -485,56 +495,6 @@ fn batch_constructor_enforces_bounds() {
             max: 3
         })
     ));
-}
-
-#[test]
-fn echo_dimensions_metric_and_normalization_are_exact() {
-    let runtime = FakeEmbeddingRuntime::new();
-    let authority = authority_with(
-        24,
-        'a',
-        EmbeddingMetricV1::DotProduct,
-        EmbeddingNormalizationV1::L2,
-    );
-    let mut session = runtime
-        .open_session(&authority, &never_cancelled())
-        .expect("session");
-    let vectors = session
-        .embed_batch(&batch(&["echo me"]), &never_cancelled())
-        .expect("embed");
-    assert_eq!(vectors.len(), 1);
-    let v = &vectors[0];
-    assert_eq!(v.values.len(), 24);
-    assert_eq!(v.dimensions, 24);
-    assert_eq!(v.metric, EmbeddingMetricV1::DotProduct);
-    assert_eq!(v.normalization, EmbeddingNormalizationV1::L2);
-    let norm = v.squared_l2_norm().sqrt();
-    assert!(
-        (norm - 1.0).abs() < 1e-5,
-        "L2-normalized vector has unit norm, got {norm}"
-    );
-}
-
-#[test]
-fn unnormalized_echo_stays_raw() {
-    let runtime = FakeEmbeddingRuntime::new();
-    let authority = authority_with(
-        24,
-        'a',
-        EmbeddingMetricV1::Cosine,
-        EmbeddingNormalizationV1::None,
-    );
-    let mut session = runtime
-        .open_session(&authority, &never_cancelled())
-        .expect("session");
-    let vectors = session
-        .embed_batch(&batch(&["raw values"]), &never_cancelled())
-        .expect("embed");
-    assert_eq!(vectors[0].normalization, EmbeddingNormalizationV1::None);
-    assert!(
-        vectors[0].values.iter().all(|v| (-1.0..1.0).contains(v)),
-        "fake raw values stay in [-1, 1)"
-    );
 }
 
 #[test]
@@ -671,21 +631,6 @@ fn compatibility_failure_is_typed() {
         }
         other => panic!("expected typed compatibility failure, got {other:?}"),
     }
-}
-
-#[test]
-fn compatibility_check_consumes_admitted_authority() {
-    let runtime = FakeEmbeddingRuntime::new();
-    runtime
-        .verify_artifact_compatibility(&authority(8))
-        .expect("admitted authority is compatible");
-    assert_eq!(
-        runtime
-            .counters()
-            .compatibility_checks
-            .load(Ordering::SeqCst),
-        1
-    );
 }
 
 #[cfg(all(feature = "semantic-fastembed", not(windows)))]

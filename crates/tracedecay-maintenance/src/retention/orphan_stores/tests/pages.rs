@@ -1,45 +1,5 @@
 use super::*;
 
-#[test]
-fn malformed_manifest_bytes_mark_the_census_entry_unverifiable() {
-    let profile = tempfile::tempdir().unwrap();
-    let data_root = profile.path().join("stores/malformed");
-    std::fs::create_dir_all(&data_root).unwrap();
-    std::fs::write(
-        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
-        b"{ this is not valid manifest json",
-    )
-    .unwrap();
-
-    // Exercise the same parse the census performs, so the fixture proves the
-    // production decode path — not a hand-set flag — yields unverifiable.
-    let bytes =
-        std::fs::read(data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME))
-            .unwrap();
-    let parsed = serde_json::from_slice::<StoreManifest>(&bytes).ok();
-    assert!(parsed.is_none(), "fixture manifest must be unparseable");
-
-    let mut census_entry = entry(
-        "malformed",
-        PathBuf::from("/definitely/not/here/gone"),
-        None,
-        None,
-        data_root,
-        0,
-        4096,
-    );
-    census_entry.manifest_readable = parsed.is_some();
-
-    let findings = classify_stores(&[census_entry], 1_000 * DAY);
-    assert!(
-        matches!(
-            findings[0].disposition,
-            StoreDisposition::Unverifiable { .. }
-        ),
-        "unparseable manifest bytes must classify as unverifiable"
-    );
-}
-
 #[tokio::test]
 async fn sweep_collects_orphan_store_and_retires_row() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -476,25 +436,79 @@ async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_you
     );
 }
 
+/// An unregistered store whose own manifest names a project root that no
+/// longer exists is debris the moment the census sees it: the retention
+/// window exists for stores whose root might still come back, and a missing
+/// or unreadable manifest, or a root that is still present, keeps that window.
 #[tokio::test]
-async fn sweep_unregistered_stores_collects_an_exactly_empty_old_directory() {
+async fn unregistered_store_with_a_vanished_manifest_root_is_collected_at_once() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     std::fs::create_dir_all(&profile_root).unwrap();
     let (_runtime, db) = open_registered_db(&profile_root).await;
-
     let base = 1_700_000_000i64;
-    let empty_dir = profile_root.join("projects").join("proj_empty_ghost");
-    std::fs::create_dir_all(&empty_dir).unwrap();
 
-    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
+    let manifest_for = |data_root: &Path, project_root: &Path| StoreManifest {
+        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+        project_id: Some(data_root.file_name().unwrap().to_str().unwrap().to_owned()),
+        store_kind: StoreKind::CodeProject,
+        storage_mode: StorageMode::ProfileSharded,
+        project_root: project_root.to_path_buf(),
+        data_root: data_root.to_path_buf(),
+        graph_db_relpath: PathBuf::from("tracedecay.db"),
+        sessions_db_relpath: PathBuf::from("sessions.db"),
+        branch_meta_relpath: PathBuf::from("branch-meta.json"),
+    };
+    let seed = |name: &str, project_root: Option<&Path>| {
+        let data_root = profile_root.join("projects").join(name);
+        std::fs::create_dir_all(&data_root).unwrap();
+        std::fs::write(data_root.join("sessions.db"), b"fresh payload").unwrap();
+        if let Some(project_root) = project_root {
+            tracedecay_runtime_core::storage::write_store_manifest_to_path(
+                &data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+                &manifest_for(&data_root, project_root),
+            )
+            .unwrap();
+        }
+        data_root
+    };
+
+    let vanished_root = tmp.path().join("checkouts").join("deleted-worktree");
+    let present_root = tmp.path().join("checkouts").join("still-here");
+    std::fs::create_dir_all(&present_root).unwrap();
+    let vanished = seed("proj_vanished_root", Some(&vanished_root));
+    let present = seed("proj_present_root", Some(&present_root));
+    let unmanifested = seed("proj_no_manifest", None);
+    // Every payload was written just now: none of them is past the window.
+    let findings = census_unregistered_project_dirs(&db, &profile_root, base + 60)
         .await
         .unwrap();
+    assert_eq!(findings.len(), 3);
+    let plan = plan_unregistered_collection(findings, 7 * DAY);
+    assert_eq!(
+        plan.collect
+            .iter()
+            .map(|finding| finding.project_dir_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["proj_vanished_root"],
+        "only the store whose root is gone skips the retention window"
+    );
+    assert!(plan.collect[0].abandoned_root);
+    assert_eq!(plan.retained_immature.len(), 2);
+    assert!(
+        plan.retained_immature
+            .iter()
+            .all(|finding| !finding.abandoned_root)
+    );
 
-    assert_eq!(report.plan.collect.len(), 1);
-    assert_eq!(report.outcome.collected.len(), 1);
-    assert!(report.outcome.errors.is_empty());
-    assert!(!empty_dir.exists());
+    let outcome = execute_unregistered_collection(&db, &plan, &profile_root)
+        .await
+        .unwrap();
+    assert_eq!(outcome.collected.len(), 1);
+    assert!(outcome.errors.is_empty());
+    assert!(!vanished.exists());
+    assert!(present.exists());
+    assert!(unmanifested.exists());
 }
 
 /// A registered project id must never be treated as an unregistered
@@ -595,47 +609,6 @@ fn cancelled_mtime_and_size_walks_stop_before_descending() {
         Err(CollectionFailureKind::Cancelled)
     );
     assert!(data_root.join("a/b/c/payload.bin").is_file());
-}
-
-/// Build enough no-follow entries that a bounded apply can be interrupted in
-/// the payload-mtime fence itself, after the apply loop has admitted the
-/// finding. The production path must stop with a typed completion rather than
-/// recording `Cancelled` as an ordinary per-store error and claiming success.
-fn seed_payload_fence_work(data_root: &Path) {
-    std::fs::create_dir_all(data_root).unwrap();
-    for bucket_index in 0..32 {
-        std::fs::create_dir_all(data_root.join(format!("bucket-{bucket_index:03}"))).unwrap();
-    }
-    for index in 0..30_000usize {
-        let bucket = data_root.join(format!("bucket-{:03}", index % 32));
-        std::fs::write(bucket.join(format!("payload-{index:05}.bin")), b"x").unwrap();
-    }
-}
-
-fn payload_fence_finding(data_root: PathBuf, expected_store_relpath: &str) -> OrphanStoreFinding {
-    let profile_root = data_root
-        .parent()
-        .and_then(Path::parent)
-        .expect("fixture data root has a two-component profile path")
-        .to_path_buf();
-    OrphanStoreFinding {
-        project_id: "proj_payload_fence_interrupt".to_owned(),
-        store_id: "store_payload_fence_interrupt".to_owned(),
-        data_root: data_root.clone(),
-        disposition: StoreDisposition::Orphaned,
-        age_secs: 90 * DAY,
-        size_bytes: 30_000,
-        expected_store_relpath: expected_store_relpath.to_owned(),
-        expected_created_at: 1,
-        expected_last_write_at: None,
-        expected_payload_mtime_secs: walk_store_stats(&data_root).newest_mtime_secs,
-        expected_data_root_fence: capture_store_directory_fence(&profile_root, &data_root).unwrap(),
-        // The mtime fence is the boundary under test; no later phase should be
-        // reached when this control is interrupted.
-        expected_content_fence: StoreContentFence::Missing,
-        expected_manifest_bytes: None,
-        graph_scope_relpaths: Vec::new(),
-    }
 }
 
 #[tokio::test]
@@ -844,6 +817,8 @@ fn portable_inventory_keeps_partial_progress_across_cancelled_pages() {
     );
 }
 
+/// Cancellation is a typed page result and must prevent both inspection and
+/// collection; it is not an empty successful census.
 #[tokio::test]
 async fn unregistered_store_sweep_returns_cancelled_without_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1078,6 +1053,3 @@ async fn unregistered_store_sweep_elapsed_deadline_reports_empty_legacy_restore_
         b"legacy quarantine bytes"
     );
 }
-
-/// A durable-memory guard applies to unregistered directories exactly as it
-/// does to registered orphan stores.

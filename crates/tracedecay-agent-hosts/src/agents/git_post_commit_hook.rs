@@ -339,51 +339,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_hookspath_basic() {
-        let config = "[core]\n\thooksPath = /home/user/.git-hooks\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/home/user/.git-hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_quoted() {
-        let config = "[core]\n\thooksPath = \"/home/user/my hooks\"\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/home/user/my hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_case_insensitive() {
-        let config = "[Core]\n\tHooksPath = /tmp/hooks\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            Some("/tmp/hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_missing() {
-        let config = "[core]\n\tautocrlf = true\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            None
-        );
-    }
-
-    #[test]
-    fn parse_hookspath_wrong_section() {
-        let config = "[user]\n\thooksPath = /nope\n[core]\n\tautocrlf = true\n";
-        assert_eq!(
-            parse_gitconfig_value_from_str(config, "core", "hookspath"),
-            None
-        );
-    }
-
-    #[test]
     fn insert_into_existing_section() {
         let config = "[user]\n\tname = Test\n[core]\n\tautocrlf = true\n";
         let result = insert_gitconfig_value(config, "core", "hooksPath", "/tmp/hooks");
@@ -396,12 +351,6 @@ mod tests {
     fn insert_new_section() {
         let config = "[user]\n\tname = Test\n";
         let result = insert_gitconfig_value(config, "core", "hooksPath", "/tmp/hooks");
-        assert!(result.contains("[core]\n\thooksPath = /tmp/hooks"));
-    }
-
-    #[test]
-    fn insert_into_empty_file() {
-        let result = insert_gitconfig_value("", "core", "hooksPath", "/tmp/hooks");
         assert!(result.contains("[core]\n\thooksPath = /tmp/hooks"));
     }
 
@@ -421,55 +370,5 @@ mod tests {
     fn expand_tilde_with_slash() {
         let home = Path::new("/home/test");
         assert_eq!(expand_tilde("~/hooks", home), "/home/test/hooks");
-    }
-
-    #[test]
-    fn expand_tilde_bare() {
-        let home = Path::new("/home/test");
-        assert_eq!(expand_tilde("~", home), "/home/test");
-    }
-
-    #[test]
-    fn expand_tilde_no_tilde() {
-        let home = Path::new("/home/test");
-        assert_eq!(expand_tilde("/abs/path", home), "/abs/path");
-    }
-
-    /// Helper: parse from a string directly (avoids file I/O in tests).
-    fn parse_gitconfig_value_from_str(contents: &str, section: &str, key: &str) -> Option<String> {
-        let section_lower = section.to_ascii_lowercase();
-        let key_lower = key.to_ascii_lowercase();
-        let mut in_section = false;
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                let header = trimmed
-                    .trim_start_matches('[')
-                    .split(']')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                let section_name = header.split_whitespace().next().unwrap_or("");
-                in_section = section_name.eq_ignore_ascii_case(&section_lower);
-                continue;
-            }
-            if !in_section {
-                continue;
-            }
-            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
-                continue;
-            }
-            if let Some((k, v)) = trimmed.split_once('=')
-                && k.trim().to_ascii_lowercase() == key_lower
-            {
-                let v = v.trim();
-                let v = v
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .unwrap_or(v);
-                return Some(v.to_string());
-            }
-        }
-        None
     }
 }

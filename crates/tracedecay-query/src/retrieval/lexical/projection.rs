@@ -29,6 +29,7 @@ pub use artifact::{
     CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
     CodeLexicalImportMembershipWitnessV1, PreparedCodeLexicalArtifactBatchV1,
     PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
+    code_lexical_artifact_build_memory_budget_for,
 };
 #[cfg(feature = "search-eval")]
 pub use in_memory::{

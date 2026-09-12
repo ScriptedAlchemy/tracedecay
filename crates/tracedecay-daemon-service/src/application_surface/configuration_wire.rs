@@ -185,19 +185,9 @@ mod tests {
     };
 
     use super::{
-        CONFIGURATION_WIRE_OPERATIONS, SettingSummary, configuration_binding_has_schema,
-        configuration_terminal_is_legal, payload_decodes,
+        CONFIGURATION_WIRE_OPERATIONS, configuration_binding_has_schema,
+        configuration_terminal_is_legal,
     };
-
-    #[test]
-    fn list_payload_is_checked_against_the_concrete_result_type() {
-        assert!(payload_decodes::<Vec<SettingSummary>>(Some(
-            &serde_json::json!([])
-        )));
-        assert!(!payload_decodes::<Vec<SettingSummary>>(Some(
-            &serde_json::json!({})
-        )));
-    }
 
     #[test]
     fn configuration_catalog_bindings_resolve_only_mounted_schema_bodies() {

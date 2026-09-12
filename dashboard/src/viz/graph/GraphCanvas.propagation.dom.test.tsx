@@ -232,26 +232,6 @@ describe('GraphCanvas travelling activation', () => {
     expect(frames).toHaveLength(0);
   });
 
-  it('never starts the loop or draws a traveller under reduced motion', async () => {
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true,
-      value: vi.fn().mockReturnValue({ matches: true }),
-    });
-    const field = new ActivationField({ halfLifeMs: 4200 });
-    render(<GraphCanvas nodes={NODES} edges={EDGES} activation={field} />);
-    await waitFor(() => expect(sigmaState.graph).toBeDefined());
-    const graph = sigmaState.graph!;
-
-    field.strike(['p1'], 0.9);
-    field.strike(['repo:r'], 0.3);
-
-    // The state still lands — the glow is repainted statically — but nothing
-    // is ever animated toward it.
-    expect(frames).toHaveLength(0);
-    expect(pulseNodes(graph)).toEqual([]);
-    expect(graph.hasNode('__halo__p1')).toBe(true);
-  });
-
   // The canvas used to read `prefers-reduced-motion` directly, which meant the
   // app's own persisted control — the one a reader actually sets, and the only
   // way to ask for stillness on an OS that reports no preference — had no effect

@@ -236,7 +236,6 @@ pub use git::{
     NativeIntegrationApplySurfaceRequest, NativeIntegrationCancelDispositionV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationCancelSurfaceRequest,
     NativeIntegrationCancellationProjectionV1, NativeIntegrationContractError,
-    NativeIntegrationEvidenceRevisionsV1, NativeIntegrationEvidenceRevisionsWireV1,
     NativeIntegrationPort, NativeIntegrationPortError, NativeIntegrationPreflightOutcomeV1,
     NativeIntegrationPreflightRequestV1, NativeIntegrationPreflightSurfaceRequest,
     NativeIntegrationPreviewProjectionV1, NativeIntegrationReceiptProjectionV1,
@@ -553,7 +552,7 @@ pub use work_product::{
     WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
     WorkProductPortContextV1, WorkProductReadServiceV1, WorkProductRetryAdmissionV1,
     WorkProductRevisionPinsV1, WorkProductSelectionScopeV1, WorkProductSynthesisAdmissionV1,
-    WorkRelationScopeV1,
+    WorkRelationScopeV1, work_product_projection_generation,
 };
 pub use work_read::{
     MAX_WORK_PROJECTION_PAGE_SIZE, WorkProjectionApplicationError, WorkProjectionPortError,
@@ -611,7 +610,8 @@ pub use workflow_effect::{
 pub use workflow_fan_out_census::{
     WorkflowFanOutCensusBackfillPageV1, WorkflowFanOutCensusError, WorkflowFanOutCensusEvidenceV1,
     WorkflowFanOutCensusObservationV1, WorkflowFanOutCensusPersistOutcomeV1,
-    WorkflowFanOutCensusStoragePort, derive_workflow_fan_out_census,
+    WorkflowFanOutCensusStoragePort, WorkflowNonDuplicateAttemptsEvidenceV1,
+    derive_workflow_fan_out_census,
 };
 pub use workflow_provider::{
     WorkflowProviderPlacementError, WorkflowProviderPlacementService, WorkflowProviderRegistration,

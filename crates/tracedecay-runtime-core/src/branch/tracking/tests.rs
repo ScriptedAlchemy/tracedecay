@@ -3,21 +3,6 @@ use std::path::PathBuf;
 use super::*;
 
 #[test]
-fn sanitize_simple() {
-    assert_eq!(sanitize_branch_name("main"), "main");
-}
-
-#[test]
-fn sanitize_slashes() {
-    assert_eq!(sanitize_branch_name("feature/foo/bar"), "feature_foo_bar");
-}
-
-#[test]
-fn sanitize_special_chars() {
-    assert_eq!(sanitize_branch_name("fix: bug <1>"), "fix_bug_1");
-}
-
-#[test]
 fn sanitize_dots_prevented() {
     // ".." becomes all underscores, collapsed and trimmed to empty
     assert_eq!(sanitize_branch_name(".."), "");

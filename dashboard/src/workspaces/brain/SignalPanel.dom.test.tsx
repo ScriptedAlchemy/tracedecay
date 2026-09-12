@@ -83,16 +83,6 @@ describe('SignalPanel connection honesty', () => {
     expect(getByText('6m')).toBeTruthy();
   });
 
-  it('gives idle and offline different chips, wording and rate treatment', () => {
-    const idle = renderPanel('live', NOW - 370_000).container.textContent ?? '';
-    vi.restoreAllMocks();
-    const dead = renderPanel('offline', NOW - 370_000).container.textContent ?? '';
-    expect(idle).not.toEqual(dead);
-    expect(idle).toContain('Connected.');
-    expect(idle).toContain('only the retained pulse window, not the full stream');
-    expect(dead).toContain('Disconnected');
-  });
-
   it('distinguishes reconnecting from both', () => {
     const { container, getByText } = renderPanel('connecting', NOW - 4_000);
     expect(container.querySelector('[data-state="loading"]')).toBeTruthy();

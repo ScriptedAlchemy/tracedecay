@@ -150,6 +150,7 @@ fn distribution_local_evaluation_import_admits_verified_jina_without_network_or_
         .expect("production catalog must contain the default Jina model");
     let resources = SemanticResourceCeilings {
         max_sequence_length: model.max_length,
+        max_resident_bytes: Some(tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES),
         ..SemanticResourceCeilings::default()
     };
     let owner = open_local_semantic_evaluation_lifecycle(root.path(), &fixture, resources, 1)

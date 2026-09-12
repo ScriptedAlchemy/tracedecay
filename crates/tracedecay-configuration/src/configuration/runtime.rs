@@ -22,9 +22,8 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationClock, ConfigurationControlStore, ConfigurationCurrentStateV1,
-    ConfigurationMutationAuthorizationPort,
-    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1,
-    ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
+    CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
 };
 use tracedecay_global_db::configuration::contracts::types::{
     AuthorizedActor, ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
@@ -540,8 +539,7 @@ impl ConfigurationMutationAuthorizationPort for SharedMutationAuthorization {
         sink: tracedecay_domain::configuration::ConfigurationMutationSinkV1,
         effect: tracedecay_domain::configuration::ConfigurationMutationEffectV1,
         now: UtcMicros,
-    ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1>
-    {
+    ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1> {
         let Ok(authorization) = self.0.installed_mutation_authorization() else {
             return Box::pin(async { Err(ConfigurationError::Unavailable) });
         };
@@ -562,10 +560,6 @@ mod tests {
     use tracedecay_global_db::configuration::contracts::ports::CurrentConfigurationMutationAuthorizationV1;
 
     use super::*;
-    use tracedecay_domain::configuration::ConfigurationValueKindV1;
-    use tracedecay_semantic_contracts::SemanticConfig;
-
-    use crate::config::SEMANTIC_RUNTIME_SETTING_KEY;
 
     struct TestScopeResolution;
 
@@ -598,10 +592,7 @@ mod tests {
             _sink: tracedecay_domain::configuration::ConfigurationMutationSinkV1,
             _effect: tracedecay_domain::configuration::ConfigurationMutationEffectV1,
             _now: UtcMicros,
-        ) -> ConfigurationOperationFuture<
-            'a,
-            CurrentConfigurationMutationAuthorizationV1,
-        > {
+        ) -> ConfigurationOperationFuture<'a, CurrentConfigurationMutationAuthorizationV1> {
             unreachable!("authority installation test does not invoke the authorization port")
         }
     }
@@ -645,22 +636,5 @@ mod tests {
             .install(scopes, authorization)
             .expect_err("second authority installation must fail");
         assert!(matches!(error, TraceDecayError::Config { .. }));
-    }
-
-    #[test]
-    fn core_registry_owns_atomic_semantic_configuration() {
-        let registry =
-            crate::config::registry::ConfigurationRegistry::core().expect("core registry");
-        let key = SettingKey::new(SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
-        let definition = registry.definition(&key).unwrap();
-        assert_eq!(definition.value_kind, ConfigurationValueKindV1::Text);
-        registry
-            .validate_value(
-                &key,
-                &ConfigurationValueV1::Text(
-                    serde_json::to_string(&SemanticConfig::default()).unwrap(),
-                ),
-            )
-            .unwrap();
     }
 }

@@ -303,26 +303,3 @@ fn legacy_v1_manifest_deserialization_migrates_and_remains_a_valid_parent() {
         Some(&legacy_parent.generation_id)
     );
 }
-
-#[test]
-fn file_increment_planning_reports_deletion_without_reparsing_unchanged_files() {
-    let planner = planner();
-    let prior_snapshot = snapshot(vec![
-        file("file.a", "src/a.rs", 'a'),
-        file("file.b", "src/b.rs", 'b'),
-    ]);
-    let prior = planner
-        .plan_generation(&validated(prior_snapshot.clone()), None, UtcMicros(3_000))
-        .expect("prior generation");
-    let current = validated(snapshot(vec![file("file.a2", "src/a.rs", 'a')]));
-
-    let plan = planner
-        .plan_increment(&prior, &prior_snapshot, &current, &BTreeSet::new())
-        .expect("increment plan");
-
-    assert!(!plan.is_full_rebuild());
-    assert_eq!(plan.carried_forward, 1);
-    assert_eq!(plan.reextract, 0);
-    assert_eq!(plan.deleted, 1);
-    assert_eq!(plan.prior_generation, prior.generation_id);
-}

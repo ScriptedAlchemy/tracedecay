@@ -24,6 +24,7 @@ pub enum WorkflowCensusEvidenceReasonV1 {
     SharedAuthorityEvidenceUnavailable,
     IncompleteWorkflow,
     DuplicateAdjudicationUnavailable,
+    WorkTopologyUnavailable,
     ReadinessEvidenceUnavailable,
     InconsistentPinnedTopology,
 }

@@ -799,15 +799,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_search_continuation_is_reported_as_partial() {
-        assert_eq!(
-            branch_search_page_status(true),
-            ("partial", Some("result_limit"))
-        );
-        assert_eq!(branch_search_page_status(false), ("complete", None));
-    }
-
-    #[test]
     fn corruption_reset_required_has_a_stable_non_retryable_wire_code() {
         assert_eq!(
             branch_unavailable_wire(

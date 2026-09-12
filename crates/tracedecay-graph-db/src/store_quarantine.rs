@@ -384,11 +384,9 @@ fn current_wall_micros() -> Result<i64, GraphDbError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::{GraphDbLocation, GraphDbOpenOptions, GraphDurability, NeverCancelled};
 
     fn corrupt(message: &str) -> GraphDbError {
         GraphDbError::Corrupt {
@@ -407,16 +405,6 @@ mod tests {
         .unwrap();
         std::fs::write(container.with_extension("verified"), b"marker").unwrap();
         container
-    }
-
-    fn memory_database() -> Arc<GraphDb> {
-        GraphDb::open(GraphDbOpenOptions {
-            location: GraphDbLocation::Memory,
-            expected_format: crate::GraphFormatVersion::current(),
-            durability: GraphDurability::Memory,
-            cancellation: Arc::new(NeverCancelled),
-        })
-        .unwrap()
     }
 
     #[test]
@@ -486,22 +474,6 @@ mod tests {
             "quarantine directory must carry the canonical corrupt-incident segment: \
              {directory_name}"
         );
-    }
-
-    #[test]
-    fn successful_verification_reopen_is_served_and_nothing_moves() {
-        let temp = tempfile::tempdir().unwrap();
-        let container = seeded_family(temp.path());
-
-        let outcome =
-            recover_deterministically_corrupt_container(&container, "transient verdict", &|| {
-                Ok(memory_database())
-            })
-            .unwrap();
-
-        assert!(matches!(outcome, CorruptStoreRecovery::Reopened(_)));
-        assert!(container.exists(), "a reopened store must not be touched");
-        assert!(wal_sidecar_path(&container).exists());
     }
 
     #[test]

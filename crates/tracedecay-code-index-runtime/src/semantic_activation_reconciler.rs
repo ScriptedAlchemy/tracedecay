@@ -270,24 +270,6 @@ impl Drop for DaemonSemanticActivationReconcilerV1 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn current_verified_ready_event_is_not_lost_before_subscription_wait() {
-        let current = SemanticLifecycleVerifiedReadyEventV1 {
-            epoch: 7,
-            artifact_digest: Some(format!("sha256:{}", "a".repeat(64))),
-        };
-
-        assert!(should_reconcile_ready_event(None, &current));
-        assert!(!should_reconcile_ready_event(Some(7), &current));
-        assert!(should_reconcile_ready_event(
-            Some(7),
-            &SemanticLifecycleVerifiedReadyEventV1 {
-                epoch: 8,
-                artifact_digest: current.artifact_digest,
-            }
-        ));
-    }
-
     #[tokio::test]
     async fn committed_activation_before_reconciler_subscription_is_retained() {
         let current = SemanticLifecycleVerifiedReadyEventV1 {

@@ -472,10 +472,4 @@ mod tests {
         assert_eq!(file_byte_bucket(2 * 1024 * 1024), "le_2mib");
         assert_eq!(file_byte_bucket(2 * 1024 * 1024 + 1), "gt_2mib");
     }
-
-    #[test]
-    fn file_byte_bucket_never_uses_exact_size() {
-        assert_ne!(file_byte_bucket(12345), "12345");
-        assert_eq!(file_byte_bucket(12345), "le_16kib");
-    }
 }

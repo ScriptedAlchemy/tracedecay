@@ -6,9 +6,6 @@ use super::{
     config_skip_reason, current_timestamp, job_schedule_decision, job_task_key,
     load_run_ledger_task_summary, try_acquire_job_task_lock, validate_job,
 };
-#[cfg(test)]
-use super::{AutomationRunLedgerRecord, latest_terminal_job_record};
-
 /// Applies the configuration, canonical job-lock, and schedule gates before
 /// the daemon reserves an external effect. Every skip is recorded under a
 /// derived diagnostic identity, so observability never terminalizes an outer
@@ -222,19 +219,4 @@ pub(super) fn scheduler_skip_run_id(run_id: &str, reason: &str) -> Result<String
         "user_job_skip_{}",
         digest.as_str().trim_start_matches("sha256:")
     ))
-}
-
-/// Test-only anchor derivation. Production callers must NOT re-derive an
-/// anchor at diagnostic-append time: the anchor has to come from the same
-/// ledger snapshot that minted the occurrence identity (see
-/// [`evaluate_and_record_scheduler_skip`]). The daemon obtains it from
-/// `load_latest_scheduler_effectful_for_task_key` in the same read that mints
-/// the occurrence `run_id`.
-#[cfg(test)]
-pub(super) fn latest_effectful_scheduler_job_record<'a>(
-    records: &'a [AutomationRunLedgerRecord],
-    task_key: &str,
-) -> Result<Option<&'a AutomationRunLedgerRecord>> {
-    latest_terminal_job_record(records, task_key, Some(AutomationTrigger::Scheduler))
-        .map(|latest| latest.map(|(record, _)| record))
 }

@@ -256,20 +256,6 @@ async fn test_status_reports_scope_prefix() {
     close_test_graph(cg).await;
 }
 
-#[tokio::test]
-async fn test_status_no_scope_prefix() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(&cg, "tracedecay_status", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert!(
-        parsed.get("scope_prefix").is_none() || parsed["scope_prefix"].is_null(),
-        "status should not have scope_prefix when None"
-    );
-}
-
 /// `tracedecay_runtime` must surface process + DB telemetry so users hitting
 /// unexpected CPU/RAM can capture a structured snapshot without leaving the
 /// chat session. The process sample is served from the background cache, so

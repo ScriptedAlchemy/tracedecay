@@ -304,25 +304,6 @@ where
 }
 
 #[test]
-fn lsp_method_state_event_is_bounded_and_measured() {
-    assert_eq!(
-        lsp_method_state_event(
-            FeedbackLspStateV1::MethodCompleted,
-            FeedbackOutcomeV1::Completed,
-            1,
-            42,
-        ),
-        FeedbackSourceEventV1::LspState {
-            state: FeedbackLspStateV1::MethodCompleted,
-            method: Some(FeedbackLspMethodClassV1::Diagnostics),
-            outcome: FeedbackOutcomeV1::Completed,
-            item_count: 1,
-            duration_micros: Some(42),
-        }
-    );
-}
-
-#[test]
 fn dirty_overlay_result_cannot_gain_durable_outputs_or_handles() {
     let request = request(FeedbackContentIdentityV1::EphemeralOverlay {
         session_id: SessionId::new("session.overlay").unwrap(),

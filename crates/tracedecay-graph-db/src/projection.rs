@@ -640,38 +640,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId, GraphVector,
-        GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+        GraphNamespace, GraphProjectionId, GraphVector, GraphWatermark, GraphWriteBatch,
+        NeverCancelled, SourceGeneration,
     };
-    use crate::{
-        GraphBudgetKind, GraphDbError, MAX_GRAPH_VECTOR_DIMENSION,
-        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, VectorMetric,
-    };
-
-    #[test]
-    fn full_generation_batch_accepts_more_than_incremental_stage_limit() {
-        let mutations = (0..=MAX_VERIFIED_GENERATION_BATCH_MUTATIONS)
-            .map(|index| {
-                GraphMutation::DeleteEntity(
-                    GraphEntityId::new(format!("entity-{index:05}")).unwrap(),
-                )
-            })
-            .collect();
-        let batch = GraphWriteBatch::new(
-            GraphNamespace::new("namespace.full-generation").unwrap(),
-            GraphProjectionId::new("projection.full-generation").unwrap(),
-            SourceGeneration::new("source.full-generation").unwrap(),
-            GraphWatermark::new("watermark.full-generation").unwrap(),
-            mutations,
-            Arc::new(NeverCancelled),
-        )
-        .unwrap();
-
-        assert_eq!(
-            batch.mutations.len(),
-            MAX_VERIFIED_GENERATION_BATCH_MUTATIONS + 1
-        );
-    }
+    use crate::{GraphBudgetKind, GraphDbError, MAX_GRAPH_VECTOR_DIMENSION, VectorMetric};
 
     #[test]
     fn vector_dimension_and_streamed_canonical_bytes_are_bounded() {

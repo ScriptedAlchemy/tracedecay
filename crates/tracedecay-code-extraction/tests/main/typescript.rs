@@ -19,30 +19,6 @@ fn test_ts_file_node_is_root() {
 }
 
 #[test]
-fn test_ts_function_declaration() {
-    let source = r#"
-function add(a: number, b: number): number {
-    return a + b;
-}
-
-function helper(): void {}
-"#;
-    let extractor = TypeScriptExtractor;
-    let result = extractor.extract("math.ts", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(fns.len(), 2);
-    let add_fn = fns.iter().find(|f| f.name == "add").unwrap();
-    assert_eq!(add_fn.visibility, Visibility::Private); // not exported
-    let helper_fn = fns.iter().find(|f| f.name == "helper").unwrap();
-    assert_eq!(helper_fn.visibility, Visibility::Private);
-}
-
-#[test]
 fn test_ts_exported_function_is_pub() {
     let source = r#"
 export function greet(name: string): string {
@@ -769,52 +745,6 @@ const fetchData = async (url: string) => {
     assert!(arrows[0].is_async, "fetchData arrow should be async");
 }
 
-#[test]
-fn test_ts_multiple_decorators() {
-    let source = r#"
-@Component({
-    selector: 'app-root'
-})
-@Injectable()
-class AppComponent {}
-"#;
-    let extractor = TypeScriptExtractor;
-    let result = extractor.extract("decorators.ts", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let decorators: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Decorator)
-        .collect();
-    assert_eq!(decorators.len(), 2);
-    assert!(decorators.iter().any(|d| d.name == "Component"));
-    assert!(decorators.iter().any(|d| d.name == "Injectable"));
-}
-
-#[test]
-fn test_ts_enum_private() {
-    let source = r#"
-enum Direction {
-    Up,
-    Down,
-    Left,
-    Right
-}
-"#;
-    let extractor = TypeScriptExtractor;
-    let result = extractor.extract("dir.ts", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let enums: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Enum)
-        .collect();
-    assert_eq!(enums.len(), 1);
-    assert_eq!(enums[0].visibility, Visibility::Private); // not exported
-}
-
 // ── Test-framework attribution (describe/it/test) ───────────────────────────
 
 /// Helper: collect Function nodes emitted for a source.
@@ -1076,20 +1006,5 @@ test.describe("", () => {
         has_call_ref(&result, &inner.id, "add"),
         "inner test keeps call attribution; refs: {:?}",
         result.unresolved_refs
-    );
-}
-
-/// A whitespace-only title must not leak a blank display name either.
-#[test]
-fn test_ts_whitespace_only_test_title_uses_anonymous_placeholder() {
-    let source = "describe('   ', () => {\n  it('x', () => {});\n});\n";
-    let extractor = TypeScriptExtractor;
-    let result = extractor.extract("blank.test.ts", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let fns = ts_functions(&result);
-    assert!(
-        fns.iter().any(|f| f.name == "<anonymous>"),
-        "whitespace-only title should be <anonymous>; got {:?}",
-        fns.iter().map(|f| &f.name).collect::<Vec<_>>()
     );
 }

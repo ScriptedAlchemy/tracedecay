@@ -34,11 +34,12 @@ pub use github_ci_proximity::{
     ProximityCandidatesPortOutcomeV1, ProximityDedupeOutcomeV1, ProximityEvaluationRequestV1,
 };
 pub use ports::{
-    FeedbackCompletedPublicationReadPort, FeedbackCompletedPublicationV1, FeedbackCycleDedupePort,
-    FeedbackCycleDedupePublicationState, FeedbackCycleDedupeState, FeedbackDiagnosticsPort,
+    FeedbackCycleDedupePort, FeedbackCycleDedupeState, FeedbackDiagnosticsPort,
     FeedbackDiagnosticsRequest, FeedbackImpactPort, FeedbackImpactPortOutcome,
-    FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture, FeedbackRouteAdmission,
-    FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
+    FeedbackImpactRequest, FeedbackObservationPort, FeedbackPortFuture,
+    FeedbackPublicationReadPort, FeedbackPublicationRecordState, FeedbackPublicationV1,
+    FeedbackRouteAdmission, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
+    FeedbackRuntimeStateV1,
 };
 pub use read::{
     CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,

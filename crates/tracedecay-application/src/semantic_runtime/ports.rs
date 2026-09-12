@@ -6,8 +6,8 @@ use thiserror::Error;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
 use tracedecay_domain::{
-    FusionProfileId, ManifestDigest, RetrievalAnchorId, UtcMicros, VectorGenerationIdV1,
-    canonical_sha256,
+    EmbeddingExecutionProviderV1, FusionProfileId, ManifestDigest, RetrievalAnchorId, UtcMicros,
+    VectorGenerationIdV1, canonical_sha256,
 };
 use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
@@ -607,6 +607,8 @@ pub enum SemanticRuntimeRouteV1 {
 pub struct SemanticRuntimeStatusV1 {
     pub configuration: Option<SemanticConfigurationPinV1>,
     pub state: SemanticRuntimeStateV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_provider: Option<EmbeddingExecutionProviderV1>,
 }
 
 impl SemanticRuntimeStatusV1 {
@@ -617,7 +619,16 @@ impl SemanticRuntimeStatusV1 {
         Self {
             configuration,
             state,
+            execution_provider: None,
         }
+    }
+
+    pub fn with_execution_provider(
+        mut self,
+        execution_provider: Option<EmbeddingExecutionProviderV1>,
+    ) -> Self {
+        self.execution_provider = execution_provider;
+        self
     }
 
     pub fn validate(&self) -> Result<(), SemanticRuntimeContractErrorV1> {

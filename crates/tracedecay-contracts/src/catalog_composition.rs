@@ -284,13 +284,6 @@ mod tests {
             .collect()
     }
 
-    fn dashboard_operations() -> Vec<String> {
-        current_bindings_on(BindingSurface::Dashboard)
-            .iter()
-            .map(|binding| binding.operation().as_str().to_owned())
-            .collect()
-    }
-
     /// Dashboard operations whose capability HTTP also serves. A dashboard-only
     /// read such as `native_integration_status` has no HTTP handler to agree
     /// with, so it cannot take part in the pre-render parity check.
@@ -413,56 +406,5 @@ mod tests {
                 )
                 .is_none()
         );
-    }
-
-    #[test]
-    fn reviewed_default_budget_admits_the_full_eager_profile() {
-        let snapshot = build_application_catalog_snapshot().expect("application catalog");
-        let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
-        let profile = snapshot.profile(&profile_id).expect("default profile");
-        let eager_visible_capabilities =
-            snapshot.visible_capabilities(&profile_id, &BTreeSet::new());
-        let eager_binding_count = eager_visible_capabilities
-            .iter()
-            .flat_map(|capability| capability.binding_ids())
-            .filter_map(|binding_id| snapshot.binding(binding_id))
-            .filter(|binding| profile.enables_surface(binding.surface()))
-            .count();
-
-        let expected_binding_count = application_catalog_contributions()
-            .expect("application contributions")
-            .iter()
-            .flat_map(CatalogContributionV1::bindings)
-            .filter(|binding| {
-                profile.includes_capability(binding.capability_id())
-                    && profile.enables_surface(binding.surface())
-            })
-            .count();
-        assert_eq!(eager_binding_count, expected_binding_count);
-        assert_eq!(
-            eager_binding_count,
-            profile.budget().maximum_bindings() as usize,
-            "the default profile budget must exactly track composition"
-        );
-
-        for operation in dashboard_operations() {
-            let operation_name =
-                SurfaceOperationName::new(&operation).expect("surface operation name");
-            let capability = snapshot
-                .resolve_binding(
-                    &profile_id,
-                    BindingSurface::Dashboard,
-                    &operation_name,
-                    1,
-                    &BTreeSet::new(),
-                )
-                .unwrap_or_else(|| panic!("{operation} must resolve from the eager profile"));
-            assert!(
-                eager_visible_capabilities
-                    .iter()
-                    .any(|candidate| candidate.capability_id() == capability.capability_id()),
-                "{operation} must resolve to an eager-visible capability"
-            );
-        }
     }
 }

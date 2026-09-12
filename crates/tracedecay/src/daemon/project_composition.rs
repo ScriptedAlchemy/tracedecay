@@ -1832,6 +1832,32 @@ struct SemanticProjectRuntime {
     auto_download_enabled: bool,
 }
 
+/// This route's semantic ceilings with its resident ceiling resolved once
+/// against the host.
+///
+/// Whether the operator pinned a ceiling is a value on the setting, never an
+/// inference from which configuration layer won. The predicate this replaced
+/// asked whether `semantic.runtime.v1` was still Default-layer, but activation
+/// writes the whole composed setting at the Project layer, so after the first
+/// activation every route saw a Project-layer winner and passed the struct
+/// default back as though the operator had chosen it — which discarded the
+/// host derivation for the rest of the daemon's life.
+fn route_semantic_resources(
+    semantic_config: &tracedecay_semantic_contracts::SemanticConfig,
+    admitted_process_bytes: u64,
+) -> (
+    SemanticResourceCeilings,
+    tracedecay_semantic::embedding_parallelism::SemanticResidentCeilingV1,
+) {
+    let mut resources = semantic_config.resources;
+    let resident_ceiling = tracedecay_semantic::embedding_parallelism::effective_resident_ceiling(
+        admitted_process_bytes,
+        resources,
+    );
+    resources.max_resident_bytes = Some(resident_ceiling.bytes);
+    (resources, resident_ceiling)
+}
+
 /// Derive this route's semantic runtime handle and startup choices. The
 /// composition runtime can veto auto-download even when configuration allows
 /// it, so both inputs are consulted here rather than at the use site.
@@ -1841,7 +1867,10 @@ fn semantic_project_runtime(
     lifecycle: Arc<tracedecay_semantic::SemanticModelLifecycleOwnerV1>,
 ) -> Result<SemanticProjectRuntime> {
     let semantic_config = &runtime_configuration.config().semantic;
-    let semantic_resources = &semantic_config.resources;
+    let (semantic_resources, resident_ceiling) = route_semantic_resources(
+        semantic_config,
+        runtime.resident_memory_admission_limit_bytes(),
+    );
     // The configured ceiling still caps concurrency; this only narrows it to
     // what the serving reservation leaves room for and adds one slot so an
     // interactive query keeps a warm session while a rebuild holds the rest.
@@ -1850,10 +1879,10 @@ fn semantic_project_runtime(
             semantic_resources.max_threads,
             semantic_resources.max_concurrent_sessions,
         ),
-        usize::try_from(semantic_resources.max_resident_bytes / 4096)
+        usize::try_from(resident_ceiling.bytes / 4096)
             .unwrap_or(usize::MAX)
             .max(semantic_resources.max_batch_size as usize),
-        semantic_resources.max_resident_bytes,
+        resident_ceiling.bytes,
     )
     .map_err(|_| TraceDecayError::Config {
         message: "semantic runtime resource ceilings are invalid".to_owned(),
@@ -1861,7 +1890,7 @@ fn semantic_project_runtime(
     Ok(SemanticProjectRuntime {
         handle,
         lifecycle: Some(lifecycle),
-        resources: *semantic_resources,
+        resources: semantic_resources,
         document_composition: semantic_config.document_composition,
         auto_download_enabled: semantic_config.auto_download && runtime.semantic_auto_download(),
     })
@@ -2130,4 +2159,98 @@ async fn retire_failed_project_open_owner(
         Some(Arc::clone(route_registered)),
     )
     .await;
+}
+
+#[cfg(test)]
+mod semantic_resident_ceiling_tests {
+    use tracedecay_semantic::embedding_parallelism::SemanticResidentCeilingSourceV1;
+    use tracedecay_semantic_contracts::{
+        DEFAULT_FASTEMBED_MODEL_ID, DEFAULT_SEMANTIC_RESIDENT_BYTES, SemanticConfig,
+        SemanticProfileSelection,
+    };
+
+    use super::route_semantic_resources;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    /// `default_resident_ceiling_for` gives a 96 GiB host an eighth of its
+    /// admitted process memory.
+    const ADMITTED_PROCESS_BYTES: u64 = 96 * GIB;
+    const HOST_DERIVED_CEILING: u64 = 12 * GIB;
+
+    /// The `semantic.runtime.v1` bytes the activation journey writes at the
+    /// Project layer for an operator who never pinned a resident ceiling.
+    ///
+    /// `compose_activated_semantic_config` composes the accepted profile over
+    /// the *effective* configuration, which for such an operator is the
+    /// registry default, then `semantic_activation` serializes the whole
+    /// result as one Project-layer `Set`. Round-tripping through that text is
+    /// the load-bearing part: it is where a struct default would become
+    /// indistinguishable from an operator's choice.
+    fn activated_project_layer_setting() -> String {
+        let artifact_digest = "ab".repeat(32);
+        let activated = SemanticConfig {
+            selected_model: Some(DEFAULT_FASTEMBED_MODEL_ID.to_owned()),
+            active_profile: Some(SemanticProfileSelection {
+                profile_id: "hybrid-conservative".to_owned(),
+                accepted_profile_digest: tracedecay_domain::ManifestDigest::new(format!(
+                    "sha256:{artifact_digest}"
+                ))
+                .expect("accepted profile digest"),
+                artifact_digest,
+                artifact_path: if cfg!(windows) {
+                    std::path::PathBuf::from("C:\\models\\model.onnx")
+                } else {
+                    std::path::PathBuf::from("/models/model.onnx")
+                },
+            }),
+            ..SemanticConfig::default()
+        };
+        activated.validate().expect("activated semantic settings");
+        serde_json::to_string(&activated).expect("activated semantic runtime text")
+    }
+
+    /// Audit finding B1: the host-derived ceiling must survive activation.
+    ///
+    /// Before this, "the operator chose a ceiling" was inferred from the
+    /// winning provenance layer, and activation makes every route read a
+    /// Project-layer winner — so the struct default was handed back as an
+    /// operator choice and the derivation was discarded forever.
+    #[test]
+    fn a_project_layer_activation_write_keeps_the_host_derived_ceiling() {
+        let activated: SemanticConfig =
+            serde_json::from_str(&activated_project_layer_setting()).expect("activated settings");
+        assert_eq!(
+            activated.resources.max_resident_bytes, None,
+            "activation must not materialize a ceiling the operator never chose"
+        );
+
+        let (resources, ceiling) = route_semantic_resources(&activated, ADMITTED_PROCESS_BYTES);
+
+        assert_eq!(ceiling.source, SemanticResidentCeilingSourceV1::HostDerived);
+        assert_eq!(ceiling.bytes, HOST_DERIVED_CEILING);
+        assert_eq!(resources.max_resident_bytes, Some(HOST_DERIVED_CEILING));
+        assert_ne!(
+            ceiling.bytes, DEFAULT_SEMANTIC_RESIDENT_BYTES,
+            "the shipped 2 GiB struct default is not a host derivation"
+        );
+    }
+
+    /// The other half of the same contract: a ceiling the operator really did
+    /// pin is a value, and survives untouched on a host that would derive a
+    /// larger one.
+    #[test]
+    fn an_operator_pinned_ceiling_survives_the_host_derivation() {
+        let mut pinned: SemanticConfig =
+            serde_json::from_str(&activated_project_layer_setting()).expect("activated settings");
+        pinned.resources.max_resident_bytes = Some(3 * GIB);
+        pinned.validate().expect("pinned semantic settings");
+
+        let (resources, ceiling) = route_semantic_resources(&pinned, ADMITTED_PROCESS_BYTES);
+
+        assert_eq!(
+            ceiling.source,
+            SemanticResidentCeilingSourceV1::OperatorPinned
+        );
+        assert_eq!(resources.max_resident_bytes, Some(3 * GIB));
+    }
 }

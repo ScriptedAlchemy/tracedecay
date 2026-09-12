@@ -90,6 +90,7 @@ fn configured_model_evidence(marker: u8) -> ContextScoutEvidenceEnvelopeV1 {
                 requested_at: UtcMicros(1),
                 resolved_at: UtcMicros(2),
                 source_generation: Some(generation),
+                code_graph_freshness: None,
                 watermark_digest: Some(digest('e')),
                 freshness: FreshnessState::Current,
             },

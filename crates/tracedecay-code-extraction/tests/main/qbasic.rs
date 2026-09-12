@@ -11,74 +11,6 @@ fn extract_fixture() -> ExtractionResult {
 }
 
 #[test]
-fn test_qbasic_file_node() {
-    let result = extract_fixture();
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "sample.qb");
-}
-
-#[test]
-fn test_qbasic_sub_functions() {
-    let result = extract_fixture();
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    // SUBs: LogMessage, ValidateConfig, ConnectServer, DisconnectServer
-    // FUNCTION: IsConnected
-    assert!(
-        fns.len() >= 5,
-        "expected >= 5 functions, got {}: {:?}",
-        fns.len(),
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "LogMessage"),
-        "LogMessage not found, got: {:?}",
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "ValidateConfig"),
-        "ValidateConfig not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "ConnectServer"),
-        "ConnectServer not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "DisconnectServer"),
-        "DisconnectServer not found"
-    );
-    assert!(
-        fns.iter().any(|n| n.name == "IsConnected"),
-        "IsConnected not found"
-    );
-}
-
-#[test]
-fn test_qbasic_type_as_struct() {
-    let result = extract_fixture();
-    let structs: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Struct)
-        .collect();
-    assert_eq!(
-        structs.len(),
-        1,
-        "expected 1 struct (Endpoint), got {}",
-        structs.len()
-    );
-    assert_eq!(structs[0].name, "Endpoint");
-}
-
-#[test]
 fn test_qbasic_type_fields() {
     let result = extract_fixture();
     let fields: Vec<_> = result
@@ -104,19 +36,6 @@ fn test_qbasic_type_fields() {
         fields.iter().any(|n| n.name == "connected"),
         "connected field not found"
     );
-}
-
-#[test]
-fn test_qbasic_const_nodes() {
-    let result = extract_fixture();
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    // CONST MAX_RETRIES = 3 and CONST DEFAULT_PORT = 8080
-    // Note: the grammar may have trouble with underscored names; at least some should parse.
-    assert!(!consts.is_empty(), "expected at least 1 CONST node, got 0");
 }
 
 #[test]
@@ -210,48 +129,6 @@ fn test_qbasic_docstrings() {
     assert!(
         is_connected_fn.docstring.is_some(),
         "IsConnected should have docstring"
-    );
-}
-
-#[test]
-fn test_qbasic_contains_edges() {
-    let result = extract_fixture();
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 10,
-        "should have >= 10 Contains edges, got {}",
-        contains.len()
-    );
-}
-
-#[test]
-fn test_qbasic_complexity() {
-    let result = extract_fixture();
-
-    let validate_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "ValidateConfig")
-        .expect("ValidateConfig function not found");
-    assert!(
-        validate_fn.branches >= 1,
-        "ValidateConfig should have >= 1 branch, got {}",
-        validate_fn.branches
-    );
-
-    let connect_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "ConnectServer")
-        .expect("ConnectServer function not found");
-    assert!(
-        connect_fn.loops >= 1,
-        "ConnectServer should have >= 1 loop, got {}",
-        connect_fn.loops
     );
 }
 

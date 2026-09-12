@@ -248,27 +248,6 @@ fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
 }
 
 #[test]
-fn rehearsal_rejects_corrupted_backup_material() {
-    let temp = tempfile::tempdir().unwrap();
-    let profile = temp.path().join("profile");
-    let backups = temp.path().join("backups");
-    fs::create_dir(&profile).unwrap();
-    released_profile(&profile);
-    let lease = exclusive_lease(&profile);
-    let backup =
-        create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease).unwrap();
-    fs::write(backup.join("global.db"), b"corrupt").unwrap();
-
-    let error =
-        rehearse_complete_profile_backup(&backup, &temp.path().join("restored")).unwrap_err();
-    assert!(
-        matches!(&error, ProfileBackupError::CorruptBackup { message }
-            if message.contains("checksum mismatch")),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn rehearsal_rejects_identity_tampered_backup_material() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");

@@ -644,7 +644,11 @@ pub(super) async fn evaluate_native_profile(
                 assert!(measured.tokenizer_bytes < evaluation_limits.max_tokenizer_bytes);
                 assert!(measured.resident_bytes >= measured.model_bytes);
                 assert!(measured.resident_bytes >= measured.tokenizer_bytes);
-                assert!(measured.resident_bytes <= evaluation_limits.max_resident_bytes);
+                assert!(
+                    evaluation_limits
+                        .max_resident_bytes
+                        .is_none_or(|ceiling| measured.resident_bytes <= ceiling)
+                );
                 assert_eq!(measured.threads, evaluation_limits.max_threads);
                 assert_ne!(
                     measured.max_concurrent_sessions, 0,

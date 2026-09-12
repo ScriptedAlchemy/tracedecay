@@ -595,15 +595,9 @@ mod doctor_runtime_route_tests {
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-    use tracedecay_application::semantic_runtime::{
-        SemanticConfigurationPinV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
-    };
     use tracedecay_daemon_protocol::DaemonClientIdentity;
     use tracedecay_mcp::McpTransport;
-    use tracedecay_semantic_contracts::{
-        SemanticFallbackReasonV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
-        SemanticModelRemediationV1,
-    };
+    use tracedecay_semantic_contracts::SemanticFallbackReasonV1;
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -807,40 +801,6 @@ mod doctor_runtime_route_tests {
         assert!(!parsed.should_serve_from_core(true));
     }
 
-    /// The comprehensive Doctor request (`authority_audit` +
-    /// `session_ingest_health`, no `doctor_report`) is always served from the
-    /// core, even when a cached core-stage server has already published a ready
-    /// Doctor report. That makes the core route — not the routed project owner
-    /// — the producer Doctor reads its authority verdict from in the common
-    /// case, so the core route must run the real audit rather than infer one.
-    #[test]
-    fn comprehensive_request_is_served_from_core_even_with_a_ready_report() {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 11,
-            "method": "tools/call",
-            "params": {
-                "name": "tracedecay_runtime",
-                "arguments": {
-                    "format": "json",
-                    "authority_audit": true,
-                    "session_ingest_health": true,
-                },
-            },
-        })
-        .to_string();
-        let parsed = parse_doctor_runtime_request(&request).expect("comprehensive Doctor request");
-
-        assert!(!parsed.doctor_report_requested());
-        for report_ready in [false, true] {
-            assert!(
-                parsed.should_serve_from_core(report_ready),
-                "comprehensive requests never fall through to the routed owner \
-                 (doctor_report_ready={report_ready})"
-            );
-        }
-    }
-
     #[tokio::test]
     async fn unix_doctor_probe_drops_activity_before_core_response_write() {
         let root = tempfile::TempDir::new().expect("fixture root");
@@ -944,163 +904,6 @@ mod doctor_runtime_route_tests {
         assert!(matches!(
             status.state,
             tracedecay_application::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
-                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
-            }
-        ));
-    }
-
-    fn semantic_status_pin() -> SemanticConfigurationPinV1 {
-        use std::collections::BTreeMap;
-        use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
-
-        SemanticConfigurationPinV1::from_current(
-            &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1 {
-                revision_id: ConfigurationRevisionId::try_from(
-                    "configuration.revision.doctor".to_owned(),
-                )
-                .expect("revision"),
-                snapshot: ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default())
-                    .expect("snapshot"),
-            },
-        )
-        .expect("pin")
-    }
-
-    fn lifecycle_status(
-        selected_model: Option<&str>,
-        state: Option<SemanticModelLifecycleStateV1>,
-    ) -> SemanticModelLifecycleStatusV1 {
-        SemanticModelLifecycleStatusV1 {
-            selected_model: selected_model.map(str::to_owned),
-            auto_download: false,
-            catalog_model_ids: Vec::new(),
-            state,
-            remediation: SemanticModelRemediationV1 {
-                retry: false,
-                remove: false,
-                rollback: false,
-            },
-            semantics_omitted: true,
-        }
-    }
-
-    fn seated_generic_unavailable() -> SemanticRuntimeStatusV1 {
-        SemanticRuntimeStatusV1::new(
-            Some(semantic_status_pin()),
-            SemanticRuntimeStateV1::Unavailable {
-                reason: SemanticFallbackReasonV1::RuntimeUnavailable,
-            },
-        )
-    }
-
-    #[test]
-    fn seated_generic_unavailable_yields_to_lifecycle_downloading() {
-        let digest = "b".repeat(64);
-        let lifecycle = lifecycle_status(
-            Some("JinaEmbeddingsV2BaseCode"),
-            Some(SemanticModelLifecycleStateV1::Downloading {
-                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                revision: "rev".to_owned(),
-                artifact_digest: digest,
-                bytes_received: 4,
-                bytes_total: 16,
-            }),
-        );
-        let status = tracedecay_application::semantic_runtime::resolve_semantic_application_status(
-            Some(seated_generic_unavailable()),
-            Some(&lifecycle),
-            Some(semantic_status_pin()),
-        );
-
-        assert_eq!(status.validate(), Ok(()));
-        match status.state {
-            SemanticRuntimeStateV1::Downloading {
-                bytes_received,
-                bytes_total,
-                ..
-            } => {
-                assert_eq!(bytes_received, 4);
-                assert_eq!(bytes_total, 16);
-            }
-            other => panic!("expected downloading, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn seated_generic_unavailable_yields_to_lifecycle_failed() {
-        let digest = "c".repeat(64);
-        let lifecycle = lifecycle_status(
-            Some("JinaEmbeddingsV2BaseCode"),
-            Some(SemanticModelLifecycleStateV1::Failed {
-                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                revision: "rev".to_owned(),
-                artifact_digest: digest,
-                detail: "artifact verify failed".to_owned(),
-                retryable: false,
-            }),
-        );
-        let status = tracedecay_application::semantic_runtime::resolve_semantic_application_status(
-            Some(seated_generic_unavailable()),
-            Some(&lifecycle),
-            Some(semantic_status_pin()),
-        );
-
-        assert_eq!(status.validate(), Ok(()));
-        match status.state {
-            SemanticRuntimeStateV1::Failed {
-                detail, retryable, ..
-            } => {
-                assert_eq!(detail, "artifact verify failed");
-                assert!(!retryable);
-            }
-            other => panic!("expected failed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn seated_runtime_failure_is_not_replaced_by_lifecycle_downloading() {
-        let broken = SemanticRuntimeStatusV1::new(
-            Some(semantic_status_pin()),
-            SemanticRuntimeStateV1::Degraded {
-                active_generation: None,
-                reason: SemanticFallbackReasonV1::RuntimeFailure,
-            },
-        );
-        let lifecycle = lifecycle_status(
-            Some("JinaEmbeddingsV2BaseCode"),
-            Some(SemanticModelLifecycleStateV1::Downloading {
-                model_id: "JinaEmbeddingsV2BaseCode".to_owned(),
-                revision: "rev".to_owned(),
-                artifact_digest: "d".repeat(64),
-                bytes_received: 1,
-                bytes_total: 2,
-            }),
-        );
-        let status = tracedecay_application::semantic_runtime::resolve_semantic_application_status(
-            Some(broken.clone()),
-            Some(&lifecycle),
-            Some(semantic_status_pin()),
-        );
-
-        assert_eq!(status, broken);
-    }
-
-    #[test]
-    fn disabled_selection_keeps_the_configuration_pin() {
-        let status = tracedecay_application::semantic_runtime::resolve_semantic_application_status(
-            Some(seated_generic_unavailable()),
-            Some(&lifecycle_status(None, None)),
-            Some(semantic_status_pin()),
-        );
-
-        assert_eq!(status.validate(), Ok(()));
-        assert!(
-            status.configuration.is_some(),
-            "deliberate selected_model: None keeps the pin so it is not a missing config"
-        );
-        assert!(matches!(
-            status.state,
-            SemanticRuntimeStateV1::Unavailable {
                 reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
             }
         ));

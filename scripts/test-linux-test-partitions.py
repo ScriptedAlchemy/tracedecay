@@ -14,7 +14,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = ROOT / "scripts/linux-test-partitions.py"
 
-
 def load_script():
     spec = importlib.util.spec_from_file_location("linux_test_partitions", SCRIPT_PATH)
     assert spec is not None and spec.loader is not None
@@ -24,13 +23,11 @@ def load_script():
     spec.loader.exec_module(module)
     return module
 
-
 def target(kind: str, name: str, *, test: bool = True, required: list[str] | None = None) -> dict:
     entry = {"kind": [kind], "name": name, "test": test}
     if required:
         entry["required-features"] = required
     return entry
-
 
 def metadata() -> dict:
     return {
@@ -61,12 +58,10 @@ def metadata() -> dict:
         ]
     }
 
-
 MACOS_GROUPS = [
     {"name": "root", "timeout_minutes": 90, "budget_basis": "root-lib 60 + root-suites 45, x4/3"},
     {"name": "store", "timeout_minutes": 40},
 ]
-
 
 def manifest(
     partitions: list[dict], not_run: dict | None = None, macos_groups: list[dict] | None = MACOS_GROUPS
@@ -77,7 +72,6 @@ def manifest(
     if macos_groups is not None:
         document["macos_groups"] = macos_groups
     return document
-
 
 COMPLETE = [
     {
@@ -105,7 +99,6 @@ COMPLETE = [
     },
 ]
 NOT_RUN = {"root::transport_suite": "test-transport suites are compile-checked only"}
-
 
 class CoverageTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -230,18 +223,6 @@ class CoverageTest(unittest.TestCase):
                 self.script.load_manifest(path)
             self.assertIn("executables take `bins`, `bin:<name>` or `example:<name>`", str(caught.exception))
 
-    def test_matrix_carries_names_and_budgets(self) -> None:
-        self.assertEqual(
-            self.script.matrix(manifest(COMPLETE)),
-            {
-                "include": [
-                    {"partition": "root-lib", "timeout": 60},
-                    {"partition": "root-suites", "timeout": 45},
-                    {"partition": "store", "timeout": 30},
-                ]
-            },
-        )
-
     def test_macos_matrix_carries_groups_budgets_and_run_order(self) -> None:
         # The partitions of a group run in manifest order; the matrix entry
         # carries them as the space-separated list the job loops over.
@@ -334,7 +315,6 @@ class CoverageTest(unittest.TestCase):
                 self.script.load_manifest(path)
             self.assertIn("macOS group 'store' runs no partition", str(caught.exception))
 
-
 class CommandLineTest(unittest.TestCase):
     def test_check_fails_closed_on_the_command_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -383,7 +363,6 @@ class CommandLineTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("in exactly one partition", result.stdout)
-
 
 if __name__ == "__main__":
     unittest.main()

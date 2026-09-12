@@ -202,6 +202,11 @@ impl SymbolGraphCursorSnapshot {
     pub const fn code_generation_id(&self) -> &CodeGenerationId {
         &self.code_generation_id
     }
+
+    /// Whether two observations of this authority name the same served generation.
+    pub fn identifies_same_generation(&self, other: &Self) -> bool {
+        self.temporal == other.temporal && self.code_generation_id == other.code_generation_id
+    }
 }
 
 /// Supplies the authenticated query snapshot and its exact code generation.
@@ -309,7 +314,7 @@ where
                 // generation that is no longer being served, so the caller is told
                 // it is stale instead of being handed a page-set that silently
                 // spans two generations.
-                if snapshot != claim.snapshot {
+                if !snapshot.identifies_same_generation(&claim.snapshot) {
                     return Err(primitive_failure(
                         PrimitiveFailureKind::Stale,
                         "application.symbol-graph.generation-changed",

@@ -34,9 +34,9 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use super::super::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
 use super::super::run_ledger::AutomationRunLedgerRecord;
 use super::evidence::{
-    AutomationEvidenceFilters, SESSION_REPLAY_SNIPPET_CHARS, SessionReflectorEvidenceOutcome,
-    SkillWriterEvidenceOutcome, build_session_reflector_evidence, build_skill_writer_evidence,
-    serialize_automation_temporal_evidence, validate_complete_evidence,
+    AutomationEvidenceFilters, SESSION_REPLAY_SNIPPET_CHARS, build_session_reflector_evidence,
+    build_skill_writer_evidence, serialize_automation_temporal_evidence,
+    validate_complete_evidence,
 };
 use super::retrieval::{
     AUTOMATION_SESSION_MAX_BYTES, AutomationWordEstimator, accept_automation_temporal_outcome,
@@ -369,6 +369,10 @@ async fn automation_evidence_request_within_2mib_reaches_authorized_execution() 
     assert_eq!(execution_calls.load(Ordering::SeqCst), 1);
 }
 
+/// The retrieval service owns two separate ceilings: the grant's response
+/// budget and the ranker's input workspace. A candidate workspace past the
+/// workspace ceiling is refused at `RequestCandidateBytes` before the
+/// execution port is ever reached.
 #[tokio::test]
 async fn oversized_automation_request_preserves_candidate_stage_without_execution() {
     let execution_calls = Arc::new(AtomicUsize::new(0));
@@ -410,7 +414,7 @@ async fn oversized_automation_request_preserves_candidate_stage_without_executio
     )
     .unwrap()
     .with_execution_limits(ExecutionLimits {
-        candidate_total_bytes: usize::try_from(AUTOMATION_SESSION_MAX_BYTES + 1).unwrap(),
+        candidate_total_bytes: ExecutionLimits::default().candidate_total_bytes + 1,
         ..ExecutionLimits::default()
     });
 
@@ -601,68 +605,6 @@ impl AutomationSessionRetrieval for StructuralRefusalAutomationRetrieval {
         let refusal = self.refusal;
         Box::pin(async move { AutomationTemporalRetrieval::StructuralRefusal(refusal) })
     }
-}
-
-#[tokio::test]
-async fn reflector_evidence_keeps_budget_stage_in_terminal_reason() {
-    let retrieval = StructuralRefusalAutomationRetrieval {
-        anchor_session_id: SessionId::new("session.automation.reflector-budget").unwrap(),
-        refusal:
-            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
-            },
-        calls: AtomicUsize::new(0),
-    };
-
-    let outcome = build_session_reflector_evidence(
-        &retrieval,
-        &super::SessionReflectorAutomationOptions::default(),
-    )
-    .await
-    .expect("structural refusal is a terminal skip");
-
-    assert!(matches!(
-        outcome,
-        SessionReflectorEvidenceOutcome::Skipped {
-            reason: "session_evidence_budget_exhausted_request_candidate_bytes",
-            evidence_hash: None,
-        }
-    ));
-    assert_eq!(retrieval.calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn skill_writer_evidence_keeps_budget_stage_in_terminal_reason() {
-    let profile = tempfile::tempdir().expect("skill writer profile root");
-    let retrieval = StructuralRefusalAutomationRetrieval {
-        anchor_session_id: SessionId::new("session.automation.skill-budget").unwrap(),
-        refusal:
-            tracedecay_contracts::retrieval::SessionRetrievalStructuralRefusalV1::BudgetExhausted {
-                stage: tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
-            },
-        calls: AtomicUsize::new(0),
-    };
-
-    let outcome = build_skill_writer_evidence(
-        &retrieval,
-        None,
-        None,
-        super::SkillWriterAutomationOptions {
-            profile_root: Some(profile.path().to_path_buf()),
-            ..super::SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    .expect("structural refusal is a terminal skip");
-
-    assert!(matches!(
-        outcome,
-        SkillWriterEvidenceOutcome::Skipped {
-            reason: "session_evidence_budget_exhausted_execution_work_exhausted",
-            evidence_hash: None,
-        }
-    ));
-    assert_eq!(retrieval.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

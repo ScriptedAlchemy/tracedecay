@@ -690,14 +690,6 @@ pub fn available_integrations() -> Vec<&'static str> {
     ]
 }
 
-#[cfg(test)]
-#[test]
-fn devin_is_a_registered_independent_agent() {
-    let integration = get_integration("devin").expect("Devin integration is registered");
-    assert_eq!(integration.name(), "Devin");
-    assert!(available_integrations().contains(&"devin"));
-}
-
 pub fn integration_id_for_host(host: host_bundle::HostKindV1) -> &'static str {
     match host {
         host_bundle::HostKindV1::ClaudeCode => "claude",

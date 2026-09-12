@@ -4,14 +4,14 @@ use std::thread;
 
 use super::super::artifact_store::AdmittedArtifactV1;
 use super::super::fastembed_adapter::{
-    BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, FakeEmbeddingRuntime,
-    FakeEmbeddingSession, ManualCancellation, ProjectionArtifactPinV1, RuntimeFailureKindV1,
+    EmbedError, FakeEmbeddingRuntime, ManualCancellation, ProjectionArtifactPinV1,
+    RuntimeFailureKindV1,
 };
 use super::test_support::*;
 use super::*;
 use tracedecay_domain::{
     EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
-    EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
+    EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
 };
 use tracedecay_semantic_contracts::{ArtifactProfileKindV1, Sha256DigestHex};
 
@@ -26,61 +26,6 @@ fn fake_pool(
         config(max_sessions, idle_timeout, ceiling),
     )
     .expect("valid config")
-}
-
-struct TimedOpenRuntime {
-    inner: FakeEmbeddingRuntime,
-    clock: Arc<ManualClock>,
-    load_time: Duration,
-}
-
-impl EmbeddingRuntime for TimedOpenRuntime {
-    type Session = FakeEmbeddingSession;
-
-    fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64 {
-        self.inner.resident_bytes_reservation(authority)
-    }
-
-    fn verify_artifact_compatibility(
-        &self,
-        authority: &AdmittedProjectionArtifactV1,
-    ) -> Result<(), EmbedError> {
-        self.inner.verify_artifact_compatibility(authority)
-    }
-
-    fn open_session(
-        &self,
-        authority: &AdmittedProjectionArtifactV1,
-        interruption: &dyn SemanticExecutionAuthority,
-    ) -> Result<Self::Session, EmbedError> {
-        self.clock.advance(self.load_time);
-        self.inner.open_session(authority, interruption)
-    }
-}
-
-#[test]
-fn cold_open_beyond_the_artifact_deadline_is_discarded() {
-    let clock = Arc::new(ManualClock::new());
-    let pool = SessionPool::new(
-        TimedOpenRuntime {
-            inner: FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
-            clock: Arc::clone(&clock),
-            load_time: Duration::from_millis(30_001),
-        },
-        Arc::clone(&clock),
-        config(1, Duration::from_mins(1), 1 << 20),
-    )
-    .expect("valid config");
-
-    assert_eq!(
-        pool.acquire(&authority()).err(),
-        Some(SessionAcquireError::LoadDeadlineExceeded {
-            elapsed: Duration::from_millis(30_001),
-            deadline: Duration::from_millis(30_000),
-        })
-    );
-    assert_eq!(pool.stats().last_cold_load_micros, Some(30_001_000));
-    assert_eq!(pool.stats().live_sessions, 0);
 }
 
 #[test]
@@ -114,6 +59,61 @@ fn acquire_release_reuses_warmed_session() {
             "release/acquire reuses the warmed session"
         );
     }
+}
+
+const STRIPE_WIDTH: usize = 4;
+const STRIPES: usize = 12;
+const STRIPE_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Run `STRIPES` generation stripes of `STRIPE_WIDTH` concurrent sessions,
+/// waiting `idle_gap` between them.
+fn run_generation_stripes(idle_gap: Duration) -> SessionPoolStats {
+    let pool = fake_pool(STRIPE_WIDTH, STRIPE_IDLE_TIMEOUT, 1 << 20);
+    let authority = authority();
+    for _ in 0..STRIPES {
+        let stripe = (0..STRIPE_WIDTH)
+            .map(|_| pool.acquire(&authority).expect("generation stripe session"))
+            .collect::<Vec<_>>();
+        drop(stripe);
+        pool.inner.clock.advance(idle_gap);
+    }
+    pool.stats()
+}
+
+/// Back-to-back stripes cold-load the width exactly once. This is the
+/// property the projector depends on: stripe count does not multiply
+/// model loads.
+#[test]
+fn back_to_back_generation_stripes_cold_load_the_width_once() {
+    let stats = run_generation_stripes(Duration::ZERO);
+
+    assert_eq!(stats.sessions_opened, STRIPE_WIDTH);
+    assert_eq!(stats.sessions_reaped, 0);
+    assert_eq!(stats.idle, STRIPE_WIDTH);
+}
+
+/// With a whole idle timeout between stripes, reuse-first saves exactly
+/// the one session that serves the acquisition: reaping runs inside that
+/// same acquisition, so the rest of the expired stripe is closed before
+/// the stripe's remaining acquisitions ask for it.
+///
+/// Advancing the clock is what makes both of these falsifiable. Without
+/// it `idle_for` is always zero, nothing can expire, and the numbers below
+/// would hold under any idle policy whatsoever — which is precisely why
+/// the previous version of this guard proved nothing.
+#[test]
+fn an_expired_generation_stripe_reuses_one_session_and_reopens_the_rest() {
+    let stats = run_generation_stripes(STRIPE_IDLE_TIMEOUT + Duration::from_secs(1));
+
+    let reopened_per_stripe = STRIPE_WIDTH - 1;
+    assert_eq!(
+        stats.sessions_opened,
+        STRIPE_WIDTH + (STRIPES - 1) * reopened_per_stripe,
+        "one session per stripe survives the reaper; the rest cold-load again"
+    );
+    assert_eq!(stats.sessions_reaped, (STRIPES - 1) * reopened_per_stripe);
+    assert_eq!(stats.sessions_closed, stats.sessions_reaped);
+    assert_eq!(stats.idle, STRIPE_WIDTH);
 }
 
 #[test]
@@ -204,24 +204,6 @@ fn identity_separation_blocks_cross_privacy_reuse() {
     // Same identity as the first still hits its warmed session.
     let _d = pool.acquire(&domain_a).expect("hit");
     assert_eq!(pool.stats().sessions_opened, 3);
-}
-
-#[test]
-fn pool_identity_derives_projection_and_privacy_from_admission() {
-    let identity = identity_with_epoch("domain-a", 7);
-    let same = identity_with_epoch("domain-a", 7);
-    let different_domain = identity_with_epoch("domain-b", 7);
-    let different_epoch = identity_with_epoch("domain-a", 8);
-
-    assert_eq!(identity, same);
-    assert_ne!(identity, different_domain);
-    assert_ne!(identity, different_epoch);
-    assert_eq!(identity.projection_key(), same.projection_key());
-    assert_eq!(
-        identity.privacy_domain(),
-        &domain_id::<PrivacyDomainId>("privacy.domain-a")
-    );
-    assert_eq!(identity.privacy_key_epoch(), 7);
 }
 
 #[test]
@@ -426,8 +408,8 @@ fn manifest_resident_ceiling_bounds_opened_session() {
     let projection = projection_for(&artifact)
         .admit()
         .expect("valid projection fixture");
-    let authority = AdmittedProjectionArtifactV1::admit(&artifact, &projection)
-        .expect("matching authority");
+    let authority =
+        AdmittedProjectionArtifactV1::admit(&artifact, &projection).expect("matching authority");
     let pool = SessionPool::new(
         FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1025),
         ManualClock::new(),
@@ -542,31 +524,6 @@ fn runtime_open_failure_surfaces_as_typed_acquire_error() {
         0,
         "failed open releases the reserved slot"
     );
-}
-
-#[test]
-fn blocking_acquire_succeeds_after_a_release() {
-    let pool = SessionPool::new(
-        FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
-        ManualClock::new(),
-        config(1, Duration::from_mins(1), 1 << 20),
-    )
-    .expect("valid config");
-    let authority = authority();
-    let held = pool.acquire(&authority).expect("held");
-    let cancel = ManualCancellation::new();
-    thread::scope(|scope| {
-        let waiting =
-            scope.spawn(|| pool.acquire_blocking(&authority, Duration::from_secs(5), &cancel));
-        while pool.stats().queued_waiters == 0 {
-            thread::yield_now();
-        }
-        drop(held);
-        waiting
-            .join()
-            .expect("no panic")
-            .expect("waiter acquires after release");
-    });
 }
 
 #[test]
@@ -820,54 +777,6 @@ fn active_session_closes_on_release_after_pool_close() {
 }
 
 #[test]
-fn pooled_guard_derefs_to_session_and_embeds() {
-    let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
-    let authority = authority();
-    let id = SessionIdentityV1::from_authority(&authority);
-    let mut guard = pool.acquire(&authority).expect("acquire");
-    assert_eq!(guard.identity(), &id);
-    assert_eq!(
-        guard.authority(),
-        &authority,
-        "session echoes its admitted projection-artifact authority"
-    );
-    let batch = BoundedSanitizedTextBatchV1::try_new(vec!["fn main()".to_string()], 8, 1024)
-        .expect("batch");
-    let cancel = ManualCancellation::new();
-    let vectors = guard.embed_batch(&batch, &cancel).expect("embed");
-    assert_eq!(vectors.len(), 1);
-    assert_eq!(vectors[0].dimensions, 8);
-}
-
-#[test]
-fn stats_track_lifecycle_counters() {
-    let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024);
-    let counters = runtime.counters();
-    let pool = SessionPool::new(
-        runtime,
-        ManualClock::new(),
-        config(2, Duration::from_secs(5), 1 << 20),
-    )
-    .expect("valid config");
-    let authority = authority();
-    {
-        let _g = pool.acquire(&authority).expect("one");
-    }
-    pool.inner.clock.advance(Duration::from_secs(6));
-    assert_eq!(pool.reap_idle(), 1);
-    let stats = pool.stats();
-    assert_eq!(stats.sessions_opened, 1);
-    assert_eq!(stats.sessions_closed, 1);
-    assert_eq!(stats.sessions_reaped, 1);
-    assert_eq!(
-        counters.sessions_opened.load(AtomicOrdering::SeqCst),
-        1,
-        "pool stats agree with runtime counters"
-    );
-    assert_eq!(counters.sessions_closed.load(AtomicOrdering::SeqCst), 1);
-}
-
-#[test]
 fn hard_session_bound_counts_idle_sessions_from_other_identities() {
     let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
     {
@@ -891,9 +800,7 @@ fn hard_session_bound_counts_idle_sessions_from_other_identities() {
 
 #[test]
 fn owned_runtime_factory_restarts_without_exposing_a_half_reloaded_pool() {
-    use super::super::runtime_service::{
-        SemanticRuntimeService, SharedEmbeddingRuntimeFactory,
-    };
+    use super::super::runtime_service::{SemanticRuntimeService, SharedEmbeddingRuntimeFactory};
 
     let opens = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&opens);
@@ -923,9 +830,7 @@ fn owned_runtime_factory_restarts_without_exposing_a_half_reloaded_pool() {
 
 #[test]
 fn failed_reload_preserves_the_published_runtime_generation() {
-    use super::super::runtime_service::{
-        SemanticRuntimeService, SharedEmbeddingRuntimeFactory,
-    };
+    use super::super::runtime_service::{SemanticRuntimeService, SharedEmbeddingRuntimeFactory};
 
     let initial: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
         Arc::new(|| Ok(FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024)));

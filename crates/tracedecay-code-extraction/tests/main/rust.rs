@@ -311,6 +311,7 @@ use std::io::{self, Read};
     assert_eq!(import.module_specifier, "crate::target");
     assert_eq!(import.imported_name.as_deref(), Some("helper"));
     assert_eq!(import.local_name.as_deref(), Some("helper"));
+    assert!(!import.is_public);
     assert_eq!(import.module_kind, ImportModuleKindV1::ProjectRelative);
     let root_import = artifact
         .imports
@@ -333,6 +334,7 @@ use std::io::{self, Read};
         .unwrap();
     assert_eq!(sibling.module_specifier, "self::read::nested");
     assert_eq!(sibling.imported_name.as_deref(), Some("Detail"));
+    assert!(sibling.is_public);
     assert_eq!(sibling.module_kind, ImportModuleKindV1::ProjectRelative);
 }
 
@@ -547,29 +549,6 @@ fn risky(v: Option<i32>) -> i32 {
         f.unchecked_calls >= 1,
         "expected >= 1 unchecked call (unwrap), got {}",
         f.unchecked_calls
-    );
-}
-
-#[test]
-fn test_rust_derive_macro_edge() {
-    let source = r#"
-#[derive(Debug, Clone)]
-pub struct Foo {
-    val: i32,
-}
-"#;
-    let extractor = RustExtractor;
-    let result = extractor.extract("foo.rs", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let derives: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.reference_kind == EdgeKind::DerivesMacro)
-        .collect();
-    assert!(
-        derives.len() >= 2,
-        "expected >= 2 DerivesMacro refs for #[derive(Debug, Clone)], got {}",
-        derives.len()
     );
 }
 

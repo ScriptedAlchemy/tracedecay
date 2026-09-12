@@ -4,9 +4,8 @@ use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     BindingId, CatalogContributionInputV1, CatalogContributionV1, CodecBindingKey, ContributionId,
     ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableSchemaAuthority, ExecutableUnavailableDispositionV1, ExecutionOwnerV1, OperationId,
-    RouteExposureV1, SchemaBodyAuthorityV1, SdkExecutableBindingV1, SdkTransportBindingV1,
-    ServiceId, SurfaceOperationName,
+    ExecutableSchemaAuthority, ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1,
+    SchemaBodyAuthorityV1, ServiceId,
 };
 
 use common::{capability_id, profile_id, read_manifest, schema, use_case_id};
@@ -78,32 +77,6 @@ fn schema_bodies_are_derived_from_rust_type_authority() {
         typed_schema::<ReadRequest>(binding.request_schema().schema_ref().clone())
             .unwrap()
             .digest()
-    );
-}
-
-#[test]
-fn schema_body_retains_the_concrete_rust_type_path_for_generic_roots() {
-    let nullable = SchemaBodyAuthorityV1::for_type_at_path::<Option<ReadResult>>(
-        schema("schema.source.read.nullable-result"),
-        "core::option::Option<executable_binding_contract::ReadResult>",
-    )
-    .expect("nullable schema authority");
-    let list = SchemaBodyAuthorityV1::for_type_at_path::<Vec<ReadResult>>(
-        schema("schema.source.read.result-list"),
-        "alloc::vec::Vec<executable_binding_contract::ReadResult>",
-    )
-    .expect("list schema authority");
-
-    let nullable = serde_json::to_value(nullable).expect("serializable nullable authority");
-    let list = serde_json::to_value(list).expect("serializable list authority");
-
-    assert_eq!(
-        nullable["rust_type_path"],
-        "core::option::Option<executable_binding_contract::ReadResult>"
-    );
-    assert_eq!(
-        list["rust_type_path"],
-        "alloc::vec::Vec<executable_binding_contract::ReadResult>"
     );
 }
 
@@ -289,37 +262,6 @@ fn manifest_schema_or_route_mismatch_is_rejected() {
 }
 
 #[test]
-fn daemon_owned_binding_retains_its_service_owner() {
-    let manifest = read_manifest(
-        capability_id("capability.source.read"),
-        use_case_id("use-case.source.read"),
-        schema("schema.source.read.request"),
-        schema("schema.source.read.result"),
-        Vec::new(),
-        vec![profile_id("profile.default")],
-    );
-    let request = typed_schema::<ReadRequest>(manifest.request_schema().clone()).unwrap();
-    let result = typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap();
-    let binding = ExecutableBindingV1::daemon_owned(
-        &manifest,
-        OperationId::new("operation.source.read").unwrap(),
-        ServiceId::new("service.daemon").unwrap(),
-        request,
-        result,
-        CodecBindingKey::new("codec.source-read.json.v1").unwrap(),
-        RouteExposureV1::Internal,
-    )
-    .unwrap();
-
-    assert!(matches!(
-        binding.owner(),
-        ExecutionOwnerV1::DaemonOwned { service_id }
-            if service_id.as_str() == "service.daemon"
-    ));
-    assert_eq!(binding.owner().service_id().as_str(), "service.daemon");
-}
-
-#[test]
 fn unavailable_disposition_cannot_carry_an_executable_binding() {
     let unavailable = ExecutableBindingAvailabilityV1::Unavailable {
         operation_id: OperationId::new("operation.source.read").unwrap(),
@@ -349,48 +291,4 @@ fn executable_registry_rejects_duplicate_operation_ids() {
         }])
         .unwrap();
     assert!(registry.get(&operation_id).is_some());
-}
-
-#[test]
-fn sdk_binding_keeps_the_named_mcp_transport_without_inventing_an_http_route() {
-    let manifest = read_manifest(
-        capability_id("capability.source.read"),
-        use_case_id("use-case.source.read"),
-        schema("schema.source.read.request"),
-        schema("schema.source.read.result"),
-        vec![BindingId::new("binding.mcp.source-read").unwrap()],
-        vec![profile_id("profile.default")],
-    );
-    let executable = ExecutableBindingV1::daemon_owned(
-        &manifest,
-        OperationId::new("operation.source.read").unwrap(),
-        ServiceId::new("service.source-read").unwrap(),
-        typed_schema::<ReadRequest>(manifest.request_schema().clone()).unwrap(),
-        typed_schema::<ReadResult>(manifest.result_schema().clone()).unwrap(),
-        CodecBindingKey::new("codec.source-read.json.v1").unwrap(),
-        RouteExposureV1::Internal,
-    )
-    .unwrap();
-
-    let binding = SdkExecutableBindingV1::new(
-        executable,
-        BindingId::new("binding.mcp.source-read").unwrap(),
-        SurfaceOperationName::new("source_read").unwrap(),
-        SdkTransportBindingV1::McpTool {
-            tool_name: "tracedecay_source_read".to_owned(),
-        },
-    )
-    .unwrap();
-
-    assert_eq!(binding.sdk_method().as_str(), "source_read");
-    assert_eq!(binding.binding_id().as_str(), "binding.mcp.source-read");
-    assert!(matches!(
-        binding.transport(),
-        SdkTransportBindingV1::McpTool { tool_name }
-            if tool_name == "tracedecay_source_read"
-    ));
-    assert!(matches!(
-        binding.executable().exposure(),
-        RouteExposureV1::Internal
-    ));
 }

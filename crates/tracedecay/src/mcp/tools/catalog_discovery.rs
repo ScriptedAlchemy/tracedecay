@@ -670,45 +670,4 @@ mod tests {
             );
         });
     }
-
-    #[test]
-    #[ignore = "measurement harness: timing evidence for #824, not an assertion"]
-    fn measure_warm_cached_discovery_against_fresh_compose() {
-        let (profile, authority, scope) = default_discovery_inputs();
-        let mode = ToolRegistryMode::HostAvailable;
-        let budget = explore_call_budget(0);
-        let _ =
-            catalog_discovery_tools_list_payload(None, budget, &profile, &authority, &scope, mode)
-                .expect("warm cache");
-        let mut cached = Vec::with_capacity(25);
-        for _ in 0..25 {
-            let started = std::time::Instant::now();
-            let _ = catalog_discovery_tools_list_payload(
-                None, budget, &profile, &authority, &scope, mode,
-            )
-            .expect("cached serve");
-            cached.push(started.elapsed());
-        }
-        let mut fresh = Vec::with_capacity(25);
-        for _ in 0..25 {
-            let started = std::time::Instant::now();
-            let _ = freshly_composed_tools_list_payload(
-                None, budget, &profile, &authority, &scope, mode,
-            )
-            .expect("fresh compose");
-            fresh.push(started.elapsed());
-        }
-        cached.sort();
-        fresh.sort();
-        let report = format!(
-            "MEASURE #824 tools/list n=25 cached_p50={:?} cached_p95={:?} fresh_p50={:?} fresh_p95={:?}",
-            cached[12], cached[23], fresh[12], fresh[23]
-        );
-        println!("{report}");
-        std::fs::write(
-            std::env::temp_dir().join("td-mcp-824-measure.txt"),
-            report.as_bytes(),
-        )
-        .expect("write #824 measurement");
-    }
 }

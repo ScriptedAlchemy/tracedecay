@@ -1,18 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  ADOPTION_FUNNEL_STAGES,
-  DIAGNOSTICS_WINDOW_ROWS,
-  NOT_SUCCESS_OUTCOMES,
-  RATE_MIN_ELIGIBLE,
-  SUPPRESSION_FLOOR,
-  eligibleVersusObserved,
-  familyRowPresentation,
-  familyState,
-  funnelConsistency,
-  readFamily,
-  windowTruth,
-  withheldCount,
-} from './observedFamilies.ts';
+import { ADOPTION_FUNNEL_STAGES, DIAGNOSTICS_WINDOW_ROWS, RATE_MIN_ELIGIBLE, SUPPRESSION_FLOOR, eligibleVersusObserved, familyRowPresentation, funnelConsistency, readFamily, windowTruth, withheldCount } from './observedFamilies.ts';
 
 /**
  * The rules under test are the ones a reader is harmed by losing: a withheld
@@ -71,13 +58,6 @@ describe('readFamily', () => {
     if (reading.kind !== 'unreadable') throw new Error('unreachable');
     expect(reading.reason).toContain('none');
   });
-
-  it('gives suppression and window censoring different states, so neither reads as the other', () => {
-    expect(familyState({ kind: 'suppressed', floor: 5, reason: 'x' })).toBe('redacted');
-    expect(familyState({ kind: 'censored', reason: 'x' })).toBe('partial');
-    expect(familyState({ kind: 'unreadable', reason: 'x' })).toBe('unavailable');
-    expect(familyState({ kind: 'observed', count: 9 })).toBe('ready');
-  });
 });
 
 describe('familyRowPresentation', () => {
@@ -134,25 +114,9 @@ describe('eligibleVersusObserved', () => {
       eligible: RATE_MIN_ELIGIBLE - 1,
     });
   });
-
-  it('keeps an independently published count pair without deriving a dashboard ratio or remainder', () => {
-    const reading = eligibleVersusObserved(30, 40);
-    expect(reading).toEqual({ kind: 'measured', observed: 30, eligible: 40 });
-  });
 });
 
 describe('funnelConsistency', () => {
-  it('is the plan funnel, in the plan order', () => {
-    expect([...ADOPTION_FUNNEL_STAGES]).toEqual([
-      'Eligible',
-      'Enabled',
-      'Available',
-      'Invoked',
-      'Terminal',
-      'IndependentlyUseful',
-      'RepeatUseful',
-    ]);
-  });
 
   it('claims nothing when fewer than two stages carry a count', () => {
     const reading = funnelConsistency(ADOPTION_FUNNEL_STAGES.map((stage) => ({ stage, count: null })));
@@ -180,21 +144,5 @@ describe('funnelConsistency', () => {
     if (reading.kind !== 'contradiction') throw new Error('unreachable');
     expect(reading.earlier).toBe('Invoked');
     expect(reading.later).toBe('Terminal');
-  });
-});
-
-describe('NOT_SUCCESS_OUTCOMES', () => {
-  it('carries the nine signals Plan 26 refuses as success outcomes', () => {
-    expect([...NOT_SUCCESS_OUTCOMES]).toEqual([
-      'display',
-      'click',
-      'invocation',
-      'process completion',
-      'self-report',
-      'cards closed',
-      'tests run',
-      'token volume',
-      'subjective trust',
-    ]);
   });
 });

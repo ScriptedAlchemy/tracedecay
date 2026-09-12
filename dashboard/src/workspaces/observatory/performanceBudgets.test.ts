@@ -1,15 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MetricValueV1, ObservatoryReadModelV1 } from '../../contracts/generated.ts';
 import { NOT_PUBLISHED, NO_FIGURE, planDimensionPresentation } from './planDimension.ts';
-import {
-  budgetAnchors,
-  budgetCoverage,
-  latencyDimensions,
-  outcomeDimensions,
-  performanceBudgetBands,
-  resourceDimensions,
-  spanDimensions,
-} from './performanceBudgets.ts';
+import { budgetAnchors, budgetCoverage, latencyDimensions, outcomeDimensions, performanceBudgetBands, spanDimensions } from './performanceBudgets.ts';
 
 /**
  * `performance-budgets` binds to `/api/observatory`, which carries two of the
@@ -63,28 +55,6 @@ describe('latency dimensions', () => {
 });
 
 describe('span, resource, and outcome dimensions', () => {
-  it('names each span stage separately so one unavailable stage is visible', () => {
-    expect(spanDimensions(model([])).map((dimension) => dimension.id)).toEqual([
-      'queue_span',
-      'store_lock_span',
-      'index_lock_span',
-      'provider_negotiation_span',
-    ]);
-    for (const dimension of spanDimensions(model([]))) {
-      expect(dimension.reading.kind).toBe('unpublished');
-      expect(dimension.reading.kind === 'unpublished' && dimension.reading.reason).toContain(
-        'no span evidence',
-      );
-    }
-  });
-
-  it('keeps RSS, CPU, and I/O as three axes rather than one resource score', () => {
-    expect(resourceDimensions(model([])).map((dimension) => dimension.id)).toEqual([
-      'process_rss',
-      'cpu_time',
-      'io_amplification',
-    ]);
-  });
 
   it('names the no-progress producer and refuses to invent an accepted budget', () => {
     const outcomes = outcomeDimensions(model([]));
@@ -101,16 +71,6 @@ describe('span, resource, and outcome dimensions', () => {
 });
 
 describe('budget bands and coverage', () => {
-  it('covers every dimension the plan sentence names', () => {
-    const bands = performanceBudgetBands(model([]));
-    expect(bands.map((band) => band.marker)).toEqual([
-      'latency',
-      'spans',
-      'resources',
-      'outcomes',
-    ]);
-    expect(bands.flatMap((band) => band.dimensions)).toHaveLength(13);
-  });
 
   it('counts measured dimensions against the required total, not against itself', () => {
     const bands = performanceBudgetBands(

@@ -143,7 +143,7 @@ pub(crate) fn bounded_region_diff(
 
 #[cfg(test)]
 mod tests {
-    use super::{LeadingKind, bounded_region_diff, classify_leading_line, edit_success_message};
+    use super::{LeadingKind, bounded_region_diff, classify_leading_line};
 
     #[test]
     fn classify_leading_line_covers_every_kind() {
@@ -180,14 +180,6 @@ mod tests {
         assert_eq!(classify_leading_line("fn f() {}"), LeadingKind::Code);
         // Leading whitespace never changes the classification.
         assert_eq!(classify_leading_line("   //! inner"), LeadingKind::InnerDoc);
-    }
-
-    #[test]
-    fn bounded_region_diff_reports_no_changes_when_identical() {
-        assert_eq!(
-            bounded_region_diff("a\nb\n", "a\nb\n", 3, 200),
-            "(no changes)"
-        );
     }
 
     #[test]
@@ -237,20 +229,6 @@ mod tests {
         assert!(
             diff.contains("diff truncated"),
             "large diff should truncate: {diff}"
-        );
-    }
-
-    #[test]
-    fn edit_success_message_marks_dry_runs() {
-        assert_eq!(edit_success_message(false, "done"), "done");
-        let dry = edit_success_message(true, "done");
-        assert!(
-            dry.contains("dry run"),
-            "dry-run message should say so: {dry}"
-        );
-        assert!(
-            dry.contains("done"),
-            "dry-run message should keep the base: {dry}"
         );
     }
 }

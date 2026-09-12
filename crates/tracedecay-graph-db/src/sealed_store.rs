@@ -326,6 +326,153 @@ fn sealed_generation_directory(root: &Path, physical_namespace: &GraphNamespace)
     root.join(name)
 }
 
+/// Byte census of a store's sealed root, split by what serves and what does
+/// not. The Doctor storage finding reports the two dead classes; a count in
+/// either means bytes nothing reads are sitting next to the live store.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SealedStoreCensusV1 {
+    /// Sealed generations whose `generation` is a verified head.
+    pub head_count: u64,
+    pub head_bytes: u64,
+    /// Sealed generations no verified head names: superseded artifacts whose
+    /// retirement has not run since the last publication.
+    pub superseded_count: u64,
+    pub superseded_bytes: u64,
+    /// `.staging-*` directories left by seals that never installed.
+    pub abandoned_staging_count: u64,
+    pub abandoned_staging_bytes: u64,
+    /// Entries that are neither a readable sealed receipt nor staging: an
+    /// unrecognized layout is reported, never silently classed as dead.
+    pub unrecognized_count: u64,
+}
+
+/// Measure the sealed root beside `database_path` against the generation ids
+/// of the store's current verified heads (as journaled: `<projection>:<digest>`).
+///
+/// Metadata only: every entry is one receipt read plus a directory size walk,
+/// never a container open. An unreadable receipt counts as unrecognized so the
+/// census stays truthful when a receipt is mid-write or corrupt.
+pub fn census_sealed_store(
+    database_path: &Path,
+    head_generations: &std::collections::BTreeSet<String>,
+) -> std::io::Result<SealedStoreCensusV1> {
+    let root = sealed_store_root(database_path);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SealedStoreCensusV1::default());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut census = SealedStoreCensusV1::default();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            census.unrecognized_count += 1;
+            continue;
+        }
+        let path = entry.path();
+        let bytes = directory_bytes(&path)?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(".staging-"))
+        {
+            census.abandoned_staging_count += 1;
+            census.abandoned_staging_bytes += bytes;
+            continue;
+        }
+        let receipt = std::fs::read(path.join(SEALED_STORE_RECEIPT_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(&bytes).ok());
+        let Some(receipt) = receipt else {
+            census.unrecognized_count += 1;
+            continue;
+        };
+        if head_generations.contains(&receipt.generation) {
+            census.head_count += 1;
+            census.head_bytes += bytes;
+        } else {
+            census.superseded_count += 1;
+            census.superseded_bytes += bytes;
+        }
+    }
+    Ok(census)
+}
+
+fn directory_bytes(directory: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Removes every `.staging-*` directory a seal left behind under the store's
+/// sealed root.
+///
+/// A seal builds into `.staging-<digest>` and installs by rename, so a staging
+/// directory that survives to the next open of the same store belongs to a
+/// build the process never finished — a crash, a kill, or an OOM between
+/// container write and rename. Nothing reads it and the next seal of that
+/// generation starts over, so on the live profile these accumulated to 7.4 GB
+/// under one store. Run at open: the exclusive store lock means no seal of
+/// this store is in flight.
+pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
+    let root = sealed_store_root(database_path);
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(
+                event = "sealed_staging_sweep_unreadable",
+                root = %root.display(),
+                error = %error,
+                "sealed store root could not be enumerated; abandoned staging stays"
+            );
+            return;
+        }
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(".staging-") {
+            continue;
+        }
+        let path = entry.path();
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                event = "sealed_staging_sweep_failed",
+                path = %path.display(),
+                error = %error,
+                "abandoned sealed staging directory could not be removed"
+            ),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            event = "sealed_staging_swept",
+            root = %root.display(),
+            removed,
+            "removed abandoned sealed staging directories left by interrupted seals"
+        );
+    }
+}
+
 fn remove_sealed_directory(directory: &Path) {
     match std::fs::remove_dir_all(directory) {
         Ok(()) => {}
@@ -1040,7 +1187,10 @@ fn build_or_open_sealed_store(
             return Err(sealed_store_io_failure("artifact install failed", error));
         }
     }
-    match open_sealed_store(&directory, identity, expected) {
+    match hotpath::measure_block!(
+        "code_index.seal.verify",
+        open_sealed_store(&directory, identity, expected)
+    ) {
         // When this call enumerated the staging database's rows into the
         // copy and the reopen digest matched the authority's expectation,
         // together that is the staging container's own proof, sized by the
@@ -1079,18 +1229,27 @@ fn build_sealed_container(
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(usize, usize), GraphDbError> {
+    hotpath::gauge!("code_index.seal.encode.effective_workers").set(1);
     let physical_namespace = identity.physical_namespace()?;
     let mut sealed = SealedCompactRows::new();
-    let (entity_count, relation_count, dependency_namespaces_written) = match rows {
-        SealedRowSource::Staging(source) => {
-            push_staged_rows(source, identity, &physical_namespace, &mut sealed, check)?
-        }
-        SealedRowSource::Manifest(manifest) => {
-            let counts =
-                push_manifest_rows(manifest, identity, &physical_namespace, &mut sealed, check)?;
-            (counts.0, counts.1, BTreeMap::new())
-        }
-    };
+    let (entity_count, relation_count, dependency_namespaces_written) =
+        hotpath::measure_block!("code_index.seal.encode", {
+            match rows {
+                SealedRowSource::Staging(source) => {
+                    push_staged_rows(source, identity, &physical_namespace, &mut sealed, check)
+                }
+                SealedRowSource::Manifest(manifest) => {
+                    let counts = push_manifest_rows(
+                        manifest,
+                        identity,
+                        &physical_namespace,
+                        &mut sealed,
+                        check,
+                    )?;
+                    Ok((counts.0, counts.1, BTreeMap::new()))
+                }
+            }
+        })?;
 
     // Finalization: one projection commit per written namespace, in
     // namespace order, then the format marker at the final sequence. The
@@ -1121,7 +1280,10 @@ fn build_sealed_container(
     )?;
     sealed.push_format_marker(sequence)?;
     check()?;
-    sealed.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))?;
+    hotpath::measure_block!(
+        "code_index.seal.write",
+        sealed.write_container(&staging.join(SEALED_STORE_DATABASE_FILE))
+    )?;
     Ok((entity_count, relation_count))
 }
 

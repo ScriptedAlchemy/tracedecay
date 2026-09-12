@@ -68,7 +68,7 @@ fn sample_manifest() -> ModelArtifactManifestV1 {
             pooling: EmbeddingPoolingV1::Mean,
             truncation: TruncationPolicyV1 {
                 side: EmbeddingTruncationSideV1::Right,
-                max_length: 512,
+                max_length: 4096,
             },
             precision: EmbeddingPrecisionV1::Fp32,
             runtime: RuntimeCompatibilityV1 {
@@ -86,7 +86,7 @@ fn sample_manifest() -> ModelArtifactManifestV1 {
                 max_resident_bytes: 100,
                 max_threads: 4,
                 max_batch_size: 32,
-                max_sequence_length: 512,
+                max_sequence_length: 4096,
                 load_deadline_ms: 30_000,
             },
             upstream: UpstreamSourceV1 {
@@ -134,9 +134,53 @@ fn semantic_config_serialization_preserves_contract_field_order() {
     );
 }
 
+/// Audit finding B1: "the operator pinned a resident ceiling" has to be a
+/// value on the setting. Activation rewrites the whole composed setting at the
+/// Project layer, so nothing about how the value was written can carry that
+/// intent — only the value itself can.
+#[test]
+fn an_unpinned_resident_ceiling_round_trips_as_a_value() {
+    let encoded = serde_json::to_string(&SemanticConfig::default()).expect("configuration JSON");
+    assert!(
+        encoded.contains(r#""max_resident_bytes":null"#),
+        "the shipped default pins no ceiling: {encoded}"
+    );
+
+    let reread: SemanticConfig = serde_json::from_str(&encoded).expect("re-read configuration");
+    assert_eq!(reread.resources.max_resident_bytes, None);
+    reread
+        .validate()
+        .expect("an unpinned resident ceiling is valid configuration");
+    assert!(
+        reread.resources.resolved_max_resident_bytes().is_err(),
+        "an unresolved ceiling is a typed failure, never a substituted default"
+    );
+}
+
+/// A ceiling the operator did pin is still validated against the model and
+/// tokenizer ceilings it must hold at once.
+#[test]
+fn a_pinned_resident_ceiling_below_the_model_ceiling_is_rejected() {
+    let mut config = SemanticConfig::default();
+    config.resources.max_resident_bytes = Some(config.resources.max_model_bytes);
+    config
+        .validate()
+        .expect("a ceiling exactly at the model ceiling holds the model");
+    assert_eq!(
+        config.resources.resolved_max_resident_bytes().ok(),
+        Some(config.resources.max_model_bytes)
+    );
+
+    config.resources.max_resident_bytes = Some(config.resources.max_model_bytes - 1);
+    assert!(config.validate().is_err());
+
+    config.resources.max_resident_bytes = Some(0);
+    assert!(config.validate().is_err());
+}
+
 #[test]
 fn semantic_config_without_a_document_composition_selects_sanitized_text() {
-    let legacy = r#"{"selected_model":"JinaEmbeddingsV2BaseCode","auto_download":true,"active_profile":null,"rollback_profile":null,"resources":{"max_model_bytes":734003200,"max_tokenizer_bytes":67108864,"max_resident_bytes":2147483648,"max_threads":4,"max_concurrent_sessions":16,"max_batch_size":32,"max_sequence_length":512,"load_deadline_ms":30000}}"#;
+    let legacy = r#"{"selected_model":"JinaEmbeddingsV2BaseCode","auto_download":true,"active_profile":null,"rollback_profile":null,"resources":{"max_model_bytes":734003200,"max_tokenizer_bytes":67108864,"max_resident_bytes":2147483648,"max_threads":4,"max_concurrent_sessions":16,"max_batch_size":32,"max_sequence_length":4096,"load_deadline_ms":30000}}"#;
     let config: SemanticConfig = serde_json::from_str(legacy).expect("persisted configuration");
     assert_eq!(
         config.document_composition,
@@ -240,13 +284,14 @@ fn runtime_projection_preserves_nested_tags_and_snake_case_reasons() {
         },
         degraded_reason: Some(SemanticFallbackReasonV1::ArtifactUnavailable),
         prior_generation: None,
+        execution_provider: None,
     };
     assert_eq!(
         serde_json::to_string(&projection).expect("runtime status JSON"),
         concat!(
             r#"{"status":{"state":"failed","reason":{"artifact_detail":"missing"},"#,
             r#""prior_generation":null},"degraded_reason":"artifact_unavailable","#,
-            r#""prior_generation":null}"#
+            r#""prior_generation":null,"execution_provider":null}"#
         )
     );
 }
@@ -279,12 +324,12 @@ fn manifest_canonical_bytes_are_exact_and_digest_the_same_bytes() {
             r#"{{"role":"tokenizer","path":"tokenizer.json","digest":"{b}","byte_length":5}},"#,
             r#"{{"role":"config","path":"config.json","digest":"{c}","byte_length":2}}],"#,
             r#""dimensions":384,"metric":"cosine","normalization":"l2","pooling":"mean","#,
-            r#""truncation":{{"side":"right","max_length":512}},"precision":"fp32","#,
+            r#""truncation":{{"side":"right","max_length":4096}},"precision":"fp32","#,
             r#""runtime":{{"runtime":"fastembed-ort","build_revision":"ort-fixture","#,
             r#""platforms":[{{"os":"linux","arch":"x86_64"}}]}},"device":"cpu","#,
             r#""resource_ceiling":{{"max_model_bytes":20,"max_tokenizer_bytes":10,"#,
             r#""max_resident_bytes":100,"max_threads":4,"max_batch_size":32,"#,
-            r#""max_sequence_length":512,"load_deadline_ms":30000}},"#,
+            r#""max_sequence_length":4096,"load_deadline_ms":30000}},"#,
             r#""upstream":{{"name":"fixture/model","version":"1","#,
             r#""revision":"immutable-revision"}}}}}}"#
         ),

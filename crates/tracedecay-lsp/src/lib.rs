@@ -47,6 +47,7 @@ mod session;
 mod workspace;
 mod workspace_diagnostics;
 
+pub use analyzer::broker::DiagnosticSeverity;
 pub use bridge::{
     AsyncContentLengthError, BridgeDirection, BridgePumpOutcome, ContentLengthCodec,
     ContentLengthCodecError, ContentLengthStdioError, ContentLengthStdioTransport,
@@ -63,7 +64,6 @@ pub use compile_diagnostics::{
     Diagnostic, DiagnosticsCache, Driver, Scope, is_rust_diagnostics_cold, run_all,
     rust_diagnostics_target_dir, spawn_rust_diagnostics_prewarm,
 };
-pub use analyzer::broker::DiagnosticSeverity;
 pub use context::{
     CanonicalContextProjectionAuthority, ContextCoverage, ContextExpansionEnvelope,
     ContextExpansionOutcome, ContextExpansionRequest, ContextExpansionScope, ContextFreshness,
@@ -77,8 +77,8 @@ pub use context::{
     TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_CONTEXT_REVISION, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 pub use diagnostics::{
-    DiagnosticMerge, DiagnosticSource, DocumentDiagnosticReport,
-    GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
+    DiagnosticMerge, DiagnosticSource, DocumentDiagnosticReport, GatewayDiagnostic,
+    GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
     GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
     GatewayDiagnosticRelatedInformation, LspPosition, LspRange, MAX_DIAGNOSTIC_MESSAGE_BYTES,
     MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,

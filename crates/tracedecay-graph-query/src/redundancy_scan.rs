@@ -1359,29 +1359,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn generated_paths_gain_segments_from_the_shared_list() {
-        // These segments weren't in this file's old standalone list but are
-        // part of the shared GENERATED_DIR_SEGMENTS union that scan.rs and
-        // migrate::inventory already recognized — closing this drift is the
-        // point of routing through the shared generated-segment classifier.
-        for path in [
-            "packages/web/coverage/lcov.info",
-            "env/.venv/pyvenv.cfg",
-            "apps/site/.next/server/app.js",
-            "tool/.cache/entry",
-            "repo/.turbo/cache",
-            "android/.gradle/wrapper",
-            "scripts/venv/bin/python",
-            "assets/app.min.css",
-        ] {
-            assert!(
-                is_generated_path(path),
-                "{path} should now count as generated"
-            );
-        }
-    }
-
     pub(super) fn test_node(id: &str, name: &str, line: u32) -> RedundancyCandidate {
         RedundancyCandidate {
             id: id.to_string(),

@@ -46,6 +46,12 @@ export const handlers = [
     const url = new URL(request.url);
     return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
   }),
+  // The Agents token frontier is the same POST-read wrapper, scoped to the
+  // one mounted list route so an unmodelled handoff command still fails loudly.
+  http.post('*/api/application/handoff/list-task', ({ request }) => {
+    const url = new URL(request.url);
+    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
+  }),
 ];
 
 /* ==========================================================================

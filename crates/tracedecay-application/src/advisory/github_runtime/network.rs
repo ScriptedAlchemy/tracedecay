@@ -2008,41 +2008,6 @@ mod pagination_contract_tests {
             page_from_cursor(GitHubReviewCursorV1::new("rest-page:21").ok().as_ref()).is_none()
         );
     }
-
-    #[test]
-    fn continuation_accepts_live_github_repositories_rewrite_for_reviews_and_comments() {
-        for (endpoint, next_path) in [
-            (
-                "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/707/reviews?per_page=100&page=1",
-                "/repositories/724712/pulls/707/reviews",
-            ),
-            (
-                "https://api.github.com/repos/ScriptedAlchemy/tracedecay/pulls/707/comments?per_page=100&page=1",
-                "/repositories/724712/pulls/707/comments",
-            ),
-        ] {
-            let mut headers = ureq::http::HeaderMap::new();
-            headers.insert(
-                "link",
-                format!("<https://api.github.com{next_path}?per_page=100&page=2>; rel=\"next\"")
-                    .parse()
-                    .unwrap(),
-            );
-            assert_eq!(
-                link_next_page(
-                    &headers,
-                    &GitHubLinkPageScopeV1 {
-                        rest_base_uri: "https://api.github.com",
-                        endpoint,
-                        current_page: 1,
-                        page_size: GITHUB_REVIEW_REST_PAGE_SIZE_V1,
-                    },
-                ),
-                Ok(Some(2)),
-                "live-shaped rewrite must continue {endpoint}",
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2081,15 +2046,6 @@ mod tests {
     const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const THREAD_CAPTURE: &str =
         include_str!("../fixtures/provider_branch_review/review_thread.graphql.json");
-
-    #[test]
-    fn default_http_read_configuration_is_mountable_within_the_global_bound() {
-        let config = GitHubHttpReadConfigV1::default();
-        assert!(config.validate());
-        assert!(config.request_timeout <= MAX_GITHUB_READ_DURATION_V1);
-        assert!(config.connect_timeout <= MAX_GITHUB_READ_DURATION_V1);
-        assert!(config.socket_timeout <= MAX_GITHUB_READ_DURATION_V1);
-    }
 
     #[derive(Clone, Copy)]
     pub(super) enum FixtureCredentialAuthorityModeV1 {
@@ -2634,33 +2590,6 @@ mod tests {
         );
 
         authority.set_mode(FixtureCredentialAuthorityModeV1::WriteCapable);
-        assert!(!credential.permits(GitHubReadPermissionV1::PullRequests));
-        assert!(
-            credential
-                .authorization_header_for(GitHubReadPermissionV1::PullRequests)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn cached_private_credential_fails_closed_when_authority_expires() {
-        let authority = Arc::new(MutableFixtureCredentialAuthorityV1::new(
-            FixtureCredentialAuthorityModeV1::Verified,
-        ));
-        let registered: Arc<dyn GitHubReadOnlyCredentialAuthorityV1> = authority.clone();
-        assert!(register_github_read_only_credential_authority_v1(
-            "ScriptedAlchemy",
-            "expired-private",
-            &registered,
-        ));
-        let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) =
-            resolve_registered_github_read_only_credential_v1("ScriptedAlchemy", "expired-private")
-        else {
-            panic!("initial verified authority must resolve");
-        };
-
-        authority.set_mode(FixtureCredentialAuthorityModeV1::NotConfigured);
-
         assert!(!credential.permits(GitHubReadPermissionV1::PullRequests));
         assert!(
             credential

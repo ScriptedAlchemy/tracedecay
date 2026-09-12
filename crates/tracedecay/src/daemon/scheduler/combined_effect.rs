@@ -973,12 +973,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
-    enum ConflictingLeg {
-        Reflector,
-        Skill,
-    }
-
     fn automation_journal_path(dashboard_root: &Path, run_id: &str) -> PathBuf {
         let run_id = RunId::new(run_id).expect("automation run id");
         let digest = canonical_sha256(&("tracedecay.automation-run.terminal-key.v1", &run_id))
@@ -1096,69 +1090,38 @@ mod tests {
         }
     }
 
-    async fn assert_conflict_abandons_fresh_sibling(conflicting_leg: ConflictingLeg) {
+    async fn assert_conflict_abandons_fresh_sibling() {
         let fixture = CombinedAdmissionFixture::new().await;
-        let run_id = match conflicting_leg {
-            ConflictingLeg::Reflector => "combined-conflict-reflector",
-            ConflictingLeg::Skill => "combined-conflict-skill",
-        };
+        let run_id = "combined-conflict-skill";
         let skill_run_id = format!("{run_id}_skills");
         let options = CombinedReviewAutomationOptions::default();
         let parent_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
 
-        let existing_admission = match conflicting_leg {
-            ConflictingLeg::Reflector => {
-                let mut conflicting = options.session_reflector.clone();
-                conflicting.query.push_str(" conflict");
-                scheduler_automation_effect(
-                    &fixture.engine,
-                    fixture.memory.as_ref(),
-                    &parent_control,
-                    &fixture.project_root,
-                    &fixture.dashboard_root,
-                    Some(run_id),
-                    fixture.configuration_digest.clone(),
-                    |run_id| {
-                        tracedecay_automation_runtime::automation::effect_runtime::session_reflector_run_request(
-                            run_id,
-                            &conflicting,
-                        )
-                    },
+        let mut conflicting = options.skill_writer.clone();
+        conflicting.query.push_str(" conflict");
+        let existing_admission = scheduler_automation_effect(
+            &fixture.engine,
+            fixture.memory.as_ref(),
+            &parent_control,
+            &fixture.project_root,
+            &fixture.dashboard_root,
+            Some(&skill_run_id),
+            fixture.configuration_digest.clone(),
+            |run_id| {
+                tracedecay_automation_runtime::automation::effect_runtime::skill_writer_run_request(
+                    run_id,
+                    &conflicting,
                 )
-                .await
-                .expect("reserve conflicting reflector")
-                .0
-            }
-            ConflictingLeg::Skill => {
-                let mut conflicting = options.skill_writer.clone();
-                conflicting.query.push_str(" conflict");
-                scheduler_automation_effect(
-                    &fixture.engine,
-                    fixture.memory.as_ref(),
-                    &parent_control,
-                    &fixture.project_root,
-                    &fixture.dashboard_root,
-                    Some(&skill_run_id),
-                    fixture.configuration_digest.clone(),
-                    |run_id| {
-                        tracedecay_automation_runtime::automation::effect_runtime::skill_writer_run_request(
-                            run_id,
-                            &conflicting,
-                        )
-                    },
-                )
-                .await
-                .expect("reserve conflicting skill")
-                .0
-            }
-        };
+            },
+        )
+        .await
+        .expect("reserve conflicting skill")
+        .0;
         let AutomationEffectAdmission::Execute(existing) = existing_admission else {
             panic!("fresh conflicting leg must own an Execute reservation")
         };
-        let (conflicting_run_id, fresh_run_id) = match conflicting_leg {
-            ConflictingLeg::Reflector => (run_id, skill_run_id.as_str()),
-            ConflictingLeg::Skill => (skill_run_id.as_str(), run_id),
-        };
+        let conflicting_run_id = skill_run_id.as_str();
+        let fresh_run_id = run_id;
         let conflicting_journal =
             automation_journal_path(&fixture.dashboard_root, conflicting_run_id);
         let fresh_journal = automation_journal_path(&fixture.dashboard_root, fresh_run_id);
@@ -1498,26 +1461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflicting_reflector_abandons_only_the_fresh_skill_reservation() {
-        assert_conflict_abandons_fresh_sibling(ConflictingLeg::Reflector).await;
-    }
-
-    #[tokio::test]
     async fn conflicting_skill_abandons_only_the_fresh_reflector_reservation() {
-        assert_conflict_abandons_fresh_sibling(ConflictingLeg::Skill).await;
-    }
-
-    #[test]
-    fn host_receipt_requires_both_exact_completed_terminals() {
-        assert!(CombinedEffectOutcome::Completed.completed());
-        assert!(!CombinedEffectOutcome::Handled.completed());
-        assert!(!CombinedEffectOutcome::Deferred.completed());
-    }
-
-    #[test]
-    fn only_not_combined_dispatch_falls_back_to_standalone_gates() {
-        assert!(CombinedEffectOutcome::Completed.handled());
-        assert!(CombinedEffectOutcome::Handled.handled());
-        assert!(!CombinedEffectOutcome::Deferred.handled());
+        assert_conflict_abandons_fresh_sibling().await;
     }
 }

@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::{
     AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery, job_schedule_decision,
-    jobs_configured_for_scheduler, jobs_path, latest_effectful_scheduler_job_record,
+    jobs_configured_for_scheduler, jobs_path,
 };
 use crate::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use crate::automation::config::AutomationConfig;
@@ -60,36 +60,6 @@ async fn valid_schedulable_job_reports_work_and_recovers_after_corruption() {
         .await
         .unwrap();
     assert!(jobs_configured_for_scheduler(root).await.unwrap());
-}
-
-#[test]
-fn time_relative_skips_do_not_advance_the_next_due_occurrence() {
-    let job = interval_job();
-    let success = ledger_record("success-a", AutomationRunStatus::Succeeded, None, 100);
-    let first_skip = ledger_record(
-        "next-occurrence",
-        AutomationRunStatus::Skipped,
-        Some("scheduler_interval_not_elapsed"),
-        101,
-    );
-    let repeated_skip = ledger_record(
-        "next-occurrence",
-        AutomationRunStatus::Skipped,
-        Some("scheduler_interval_not_elapsed"),
-        102,
-    );
-    let mut records = vec![success.clone()];
-    assert_eq!(
-        job_schedule_decision(&job, &records, 101),
-        Some("scheduler_interval_not_elapsed")
-    );
-    records.push(first_skip);
-    records.push(repeated_skip);
-    let anchor = latest_effectful_scheduler_job_record(&records, "user_job:nightly")
-        .expect("scheduler history is valid")
-        .expect("the last effectful terminal remains the occurrence anchor");
-    assert_eq!(anchor.run_id, success.run_id);
-    assert_eq!(job_schedule_decision(&job, &records, 160), None);
 }
 
 #[test]

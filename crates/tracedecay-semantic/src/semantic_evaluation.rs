@@ -3,8 +3,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use tracedecay_code_index::embedding_document::{EmbeddingDocumentComposerV1, EmbeddingDocumentV1};
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, CodeSearchChunkV1, EmbeddingProjectionKeyV1,
-    ProjectionBatchRequestV1,
+    AdmittedEmbeddingProjectionKeyV1, CodeSearchChunkV1, EmbeddingExecutionProviderV1,
+    EmbeddingProjectionKeyV1, ProjectionBatchRequestV1,
 };
 use tracedecay_query::retrieval::ports::{RetrievalExecutionControl, RetrievalPortError};
 use tracedecay_query::retrieval::semantic::{
@@ -232,6 +232,7 @@ struct SemanticEvaluationProjectionBatchCacheKeyV1 {
     /// FastEmbed's intra-op width can change floating-point numerics even
     /// with an otherwise identical admitted projection and tensor input.
     max_threads: u32,
+    execution_provider: EmbeddingExecutionProviderV1,
     group_len: usize,
     tensor_batch_size: u32,
     tensor_dimensions: u32,
@@ -671,6 +672,7 @@ struct CachedSemanticEvaluationChunkEncoderV1<'a, E> {
     inner: E,
     admitted_projection: AdmittedEmbeddingProjectionKeyV1,
     max_threads: u32,
+    execution_provider: EmbeddingExecutionProviderV1,
     cache: &'a SemanticEvaluationProjectionBatchCacheV1,
     cache_policy: SemanticEvaluationProjectionBatchCachePolicyV1,
     request_id: u64,
@@ -692,6 +694,7 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
             admitted_projection: artifact_authority.projection().clone(),
             max_threads: u32::try_from(artifact_authority.embedding_execution_plan().intra_threads)
                 .unwrap_or(u32::MAX),
+            execution_provider: artifact_authority.execution_provider(),
             request_id: cache.request_id,
             cache,
             cache_policy,
@@ -738,11 +741,28 @@ impl<'a, E> CachedSemanticEvaluationChunkEncoderV1<'a, E> {
         Ok(Arc::new(SemanticEvaluationProjectionBatchCacheKeyV1 {
             admitted_projection: self.admitted_projection.clone(),
             max_threads: self.max_threads,
+            execution_provider: self.execution_provider,
             group_len: chunks.len(),
             tensor_batch_size: embedding_key.inference_batch_size,
             tensor_dimensions: embedding_key.dimensions,
             ordered_documents,
         }))
+    }
+}
+
+impl<E> crate::projector::CanonicalChunkTokenLengthsV1
+    for CachedSemanticEvaluationChunkEncoderV1<'_, E>
+where
+    E: CanonicalChunkVectorEncoderV1,
+{
+    /// The cache stores vectors, not lengths, so this is the wrapped
+    /// encoder's own tokenizer either way.
+    fn document_token_lengths(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        self.inner.document_token_lengths(key, chunks)
     }
 }
 
@@ -1123,6 +1143,30 @@ fn schedule_interruption(
 struct CancelAfterFirstModelBatchV1 {
     inner: RuntimeChunkVectorEncoderV1<ProductionEmbeddingRuntime>,
     progress: Arc<SemanticRuntimeScheduleCancellationV1>,
+}
+
+/// Fixture tokenizer: one token per whitespace-separated word, capped at the
+/// admitted truncation length. The double has no model; grouping only needs a
+/// length that varies with the document and can be predicted from a fixture.
+impl super::projector::CanonicalChunkTokenLengthsV1 for CancelAfterFirstModelBatchV1 {
+    fn document_token_lengths(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<usize>, String> {
+        let truncation_length = key.truncation_length as usize;
+        Ok(chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .sanitized_text
+                    .as_str()
+                    .split_whitespace()
+                    .count()
+                    .clamp(1, truncation_length)
+            })
+            .collect())
+    }
 }
 
 impl super::projector::CanonicalChunkVectorEncoderV1 for CancelAfterFirstModelBatchV1 {

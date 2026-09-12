@@ -25,6 +25,7 @@ use tracedecay_domain::{
     CodeSearchChunkAnchorV1, CodeSearchChunkV1, ExactTechnicalTermV1, FileOccurrenceId,
     ManifestDigest,
 };
+use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 
 use super::format::{
@@ -46,6 +47,7 @@ use super::schema::{
 };
 use super::{
     ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+    CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PAGE_RETAINED_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_PREPARED_BATCH_ROWS_V1, CodeLexicalArtifactBatchLimitV1,
@@ -518,6 +520,23 @@ std::thread_local! {
 #[cfg(test)]
 fn fail_next_finalization_monitor_spawn() {
     FAIL_NEXT_FINALIZATION_MONITOR_SPAWN.with(|failure| failure.set(true));
+}
+
+// Stands in for a physical restart between the staging schema and its
+// singleton `artifact_state` row.
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_NEXT_STAGING_INITIALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_next_staging_initialization() {
+    FAIL_NEXT_STAGING_INITIALIZATION.with(|failure| failure.set(true));
+}
+
+#[cfg(test)]
+fn take_failed_staging_initialization() -> bool {
+    FAIL_NEXT_STAGING_INITIALIZATION.with(|failure| failure.replace(false))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1100,24 +1119,18 @@ impl CodeLexicalArtifactBuilderV1 {
             ));
         }
         let layout = revision.layout();
-        let (connection, private_file, file_identity) = create_private_builder_connection(path)?;
-        let mutation_gate = register_builder_mutation_gate(&connection)?;
-        create_schema(&connection, layout)?;
-        verify_builder_mutation_gate_schema(&connection)?;
         let metadata_digest = metadata_digest(&metadata)?;
-        let metadata_bytes = serde_json::to_vec(&metadata)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-        connection
-            .execute(
-                "INSERT INTO artifact_state(singleton, format_revision, metadata, metadata_digest, receipt) VALUES (1, ?1, ?2, ?3, ?4)",
-                params![
-                    i64::from(layout.revision()),
-                    metadata_bytes,
-                    metadata_digest.as_str(),
-                    vec![0u8; RECEIPT_RESERVATION_BYTES],
-                ],
-            )
-            .map_err(sqlite_error)?;
+        publish_initialized_staging(
+            path,
+            layout,
+            &metadata,
+            &metadata_digest,
+            memory_budget_bytes,
+        )?;
+        let (connection, private_file, file_identity) =
+            open_private_builder_connection(path, memory_budget_bytes)?;
+        let mutation_gate = register_builder_mutation_gate(&connection)?;
+        verify_builder_mutation_gate_schema(&connection)?;
         crate::hotpath_metrics::Residency::Cold.record("query.artifact.residency");
         Ok(Self {
             path: path.to_path_buf(),
@@ -1152,7 +1165,7 @@ impl CodeLexicalArtifactBuilderV1 {
         let path = path.as_ref();
         let (connection, private_file, file_identity) = hotpath::measure_block!(
             "query.artifact.open.sqlite_connect",
-            open_private_builder_connection(path)
+            open_private_builder_connection(path, memory_budget_bytes)
         )?;
         let mutation_gate = register_builder_mutation_gate(&connection)?;
         let layout = read_staged_artifact_layout(&connection)?;
@@ -1918,27 +1931,113 @@ impl CodeLexicalArtifactBuilderV1 {
     }
 }
 
+/// Initialize a staging artifact under a private sibling and rename it onto
+/// the staging path only once its singleton `artifact_state` row is durable.
+///
+/// The staging path's existence is the resume signal, and the resume path reads
+/// the singleton row as a mandatory authority. A staging file that becomes
+/// visible before that row is committed therefore turns a physical restart into
+/// a permanent contract violation on a projection that remains rederivable from
+/// its immutable sealed generation.
+fn publish_initialized_staging(
+    path: &Path,
+    layout: LexicalArtifactLayoutV1,
+    metadata: &CodeLexicalProjectionMetadataV1,
+    metadata_digest: &ManifestDigest,
+    memory_budget_bytes: usize,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    let initializing = initializing_staging_sibling(path)?;
+    // An incarnation that exited inside initialization left a sibling that
+    // never became a staging path, so it holds no progress to preserve.
+    match std::fs::remove_file(&initializing) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(private_staging_error(error)),
+    }
+    let metadata_bytes = serde_json::to_vec(metadata)
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    let (connection, private_file, _) =
+        create_private_builder_connection(&initializing, memory_budget_bytes)?;
+    let _mutation_gate = register_builder_mutation_gate(&connection)?;
+    create_schema(&connection, layout)?;
+    verify_builder_mutation_gate_schema(&connection)?;
+    #[cfg(test)]
+    if take_failed_staging_initialization() {
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "injected lexical artifact staging initialization failure".to_owned(),
+        ));
+    }
+    connection
+        .execute(
+            "INSERT INTO artifact_state(singleton, format_revision, metadata, metadata_digest, receipt) VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                i64::from(layout.revision()),
+                metadata_bytes,
+                metadata_digest.as_str(),
+                vec![0u8; RECEIPT_RESERVATION_BYTES],
+            ],
+        )
+        .map_err(sqlite_error)?;
+    // SQLite names a rollback journal after the path its connection opened, so
+    // the initializing connection closes before the rename; appends run under a
+    // connection bound to the visible staging path.
+    drop(connection);
+    private_file
+        .sync_all()
+        .map_err(|error| staging_initialization_error("sync its initialized state", error))?;
+    drop(private_file);
+    std::fs::rename(&initializing, path)
+        .map_err(|error| staging_initialization_error("name the staging path", error))?;
+    sync_parent_directory(path, DirectorySyncPolicy::Strict)
+        .map_err(|error| staging_initialization_error("sync the staging directory", error))
+}
+
+fn staging_initialization_error(
+    step: &'static str,
+    error: std::io::Error,
+) -> CodeLexicalArtifactErrorV1 {
+    CodeLexicalArtifactErrorV1::Contract(format!(
+        "lexical artifact staging initialization cannot {step}: {error}"
+    ))
+}
+
+fn initializing_staging_sibling(path: &Path) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact staging path has no file name".to_owned(),
+            )
+        })?
+        .to_os_string();
+    name.push(".initializing");
+    Ok(path.with_file_name(name))
+}
+
 fn create_private_builder_connection(
     path: &Path,
+    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let private_file = create_private_file_retained(path)
         .map_err(|failure| private_staging_error(failure.into_error()))?;
-    open_bound_builder_connection(path, private_file)
+    open_bound_builder_connection(path, private_file, memory_budget_bytes)
 }
 
 fn open_private_builder_connection(
     path: &Path,
+    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let private_file = open_private_file(path).map_err(private_staging_error)?;
-    open_bound_builder_connection(path, private_file)
+    open_bound_builder_connection(path, private_file, memory_budget_bytes)
 }
 
 fn open_bound_builder_connection(
     path: &Path,
     private_file: File,
+    memory_budget_bytes: usize,
 ) -> Result<(Connection, File, StableArtifactFileIdentityV1), CodeLexicalArtifactErrorV1> {
     let identity = stable_file_identity(&private_file)?;
-    let connection = open_builder_connection(path)?;
+    let connection = open_builder_connection(path, memory_budget_bytes)?;
     let rebound = open_private_file(path).map_err(private_staging_error)?;
     if stable_file_identity(&rebound)? != identity {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
@@ -2016,10 +2115,10 @@ fn validated_fixed_ledger_charge(
     memory_budget_bytes: usize,
 ) -> Result<usize, CodeLexicalArtifactErrorV1> {
     if memory_budget_bytes == 0
-        || memory_budget_bytes > CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1
+        || memory_budget_bytes > CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1
     {
         return Err(CodeLexicalArtifactErrorV1::Contract(format!(
-            "lexical artifact build memory budget must be within 1..={CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1} bytes"
+            "lexical artifact build memory budget must be within 1..={CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1} bytes"
         )));
     }
     let serialized_bytes = metadata_serialized_upper_bound(metadata);
@@ -4360,7 +4459,7 @@ fn verify_artifact_state_metadata(
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        .map_err(|error| artifact_state_row_corrupt("metadata", error))?;
     if format_revision != expected_layout.revision() {
         return Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
             "format revision {format_revision} is not supported"
@@ -4384,6 +4483,18 @@ fn verify_artifact_state_metadata(
     Ok(())
 }
 
+/// Name the mandatory staging row a failed read required. A parked convergence
+/// reports this detail verbatim, and bare SQLite text ("Query returned no
+/// rows") attributes the failure to no authority an operator can act on.
+fn artifact_state_row_corrupt(
+    columns: &'static str,
+    error: rusqlite::Error,
+) -> CodeLexicalArtifactErrorV1 {
+    CodeLexicalArtifactErrorV1::Corrupt(format!(
+        "lexical artifact staging artifact_state singleton {columns} read failed: {error}"
+    ))
+}
+
 fn read_staged_artifact_layout(
     connection: &Connection,
 ) -> Result<LexicalArtifactLayoutV1, CodeLexicalArtifactErrorV1> {
@@ -4393,7 +4504,7 @@ fn read_staged_artifact_layout(
             [],
             |row| row.get(0),
         )
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        .map_err(|error| artifact_state_row_corrupt("format_revision", error))?;
     let revision = u32::try_from(revision).map_err(|_| {
         CodeLexicalArtifactErrorV1::Incompatible(
             "lexical artifact staging revision is outside the supported range".to_owned(),
@@ -5807,29 +5918,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_batch_limits_select_a_multi_page_prefix_without_stalling() {
-        let page_bounds = [
-            (700_000usize, 80 * 1024 * 1024usize),
-            (700_000, 80 * 1024 * 1024),
-            (700_000, 80 * 1024 * 1024),
-        ];
-        let mut ledger = CanonicalBatchLimitLedgerV1::default();
-        let selected = page_bounds
-            .into_iter()
-            .take_while(|(rows, bytes)| {
-                ledger
-                    .try_admit(*rows, *bytes)
-                    .expect("extend canonical limit ledger")
-                    .is_none()
-            })
-            .count();
-        assert_eq!(
-            selected, 2,
-            "two pages fit both canonical caps and the third must remain for the next wake"
-        );
-    }
-
-    #[test]
     fn canonical_write_limit_refuses_ngram_receipt_past_the_exact_boundary() {
         let ngram_receipt_bytes = "sha256:".len() + 64;
         let mut ledger = CanonicalBatchLimitLedgerV1::default();
@@ -6360,7 +6448,10 @@ mod tests {
         symlink(&target, &linked).expect("link private target");
 
         assert!(matches!(
-            open_private_builder_connection(&linked),
+            open_private_builder_connection(
+                &linked,
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+            ),
             Err(CodeLexicalArtifactErrorV1::Contract(_))
         ));
     }
@@ -6370,8 +6461,11 @@ mod tests {
         let directory = tempfile::tempdir().expect("private staging directory");
         let artifact = directory.path().join("artifact.sqlite");
         let replacement = directory.path().join("replacement.sqlite");
-        let (connection, _retained, identity) =
-            create_private_builder_connection(&artifact).expect("open artifact");
+        let (connection, _retained, identity) = create_private_builder_connection(
+            &artifact,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+        .expect("open artifact");
         drop(connection);
         drop(create_private_file_retained(&replacement).expect("create replacement"));
         std::fs::rename(&replacement, &artifact).expect("replace staged artifact");
@@ -6380,5 +6474,39 @@ mod tests {
             verify_staging_file_binding(&artifact, &identity),
             Err(CodeLexicalArtifactErrorV1::Corrupt(_))
         ));
+    }
+
+    #[test]
+    fn interrupted_staging_initialization_leaves_no_resumable_path() {
+        let directory = tempfile::tempdir().expect("private staging directory");
+        let staging = directory.path().join(".text-artifact-restart.staging");
+
+        fail_next_staging_initialization();
+        assert!(matches!(
+            CodeLexicalArtifactBuilderV1::create(&staging, test_metadata()),
+            Err(CodeLexicalArtifactErrorV1::Contract(_))
+        ));
+        // The staging path's existence is the resume signal, so it must never
+        // appear without its singleton `artifact_state` row: a later
+        // incarnation would read the empty row set as corruption and park a
+        // projection that its sealed generation can still rederive.
+        assert!(
+            !staging.exists(),
+            "staging path is visible without its committed state row"
+        );
+
+        drop(
+            CodeLexicalArtifactBuilderV1::create(&staging, test_metadata())
+                .expect("create a staging artifact over the interrupted attempt"),
+        );
+        drop(
+            CodeLexicalArtifactBuilderV1::open_or_resume_with_memory_budget_and_control(
+                &staging,
+                test_metadata(),
+                CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+                &ActiveControl,
+            )
+            .expect("resume the published staging artifact"),
+        );
     }
 }

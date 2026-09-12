@@ -24,15 +24,19 @@ use zeroize::Zeroizing;
 use self::context::{
     CompactContext, ContextBudget, ContextError, TemporalContextFrames, VersionedTokenEstimator,
 };
-use self::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
+use self::cursor::{
+    CursorError, CursorPosition, StableSortKey, encode_cursor_position, verify_cursor_position,
+};
 use self::hydration::{HydrationBatch, HydrationError, TemporalHydrationPort};
 use self::ports::{
-    CandidateReadState, PageLimits, PageStatus, SessionCursorAuthenticator,
-    TemporalExecutionSnapshot, TemporalPortError, TemporalReadPort, TemporalRecord,
-    TemporalRecordBatch, TemporalRecordReadState, TemporalRetrievalScope, pull_candidate_page,
-    pull_temporal_record_page,
+    CandidateReadState, ExecutionLimits, PageKey, PageLimits, PageStatus,
+    SessionCursorAuthenticator, TemporalExecutionSnapshot, TemporalPortError, TemporalReadPort,
+    TemporalRecord, TemporalRecordBatch, TemporalRecordReadState, TemporalRetrievalScope,
+    pull_candidate_page, pull_temporal_record_page,
 };
-use self::ranking::{DiversityLimits, RankedCandidate, RankingError, rank_candidates};
+use self::ranking::{
+    DiversityLimits, RankedCandidate, RankingCandidate, RankingError, rank_candidates,
+};
 use self::resolution::resolver::resolve_temporal_controlled;
 use self::resolution::summary::{
     SummaryLineageEligibility, SummaryLineageRejection, SummaryOmission, SummarySourceState,
@@ -309,6 +313,68 @@ pub async fn execute_temporal_kernel(
 /// Hotpath names are static crate stages. Candidate-page and record-page
 /// ports are left unmeasured so storage/query crates own those spans.
 #[hotpath::measure(future = true, label = "temporal.candidates.export")]
+/// Read one bounded candidate cohort window, resuming past `resume`'s keyset.
+///
+/// The window is the unit a cursor can rank inside: scores are cohort-relative,
+/// so a ranked position is only meaningful against the same window. Filling the
+/// window while storage still holds rows is a continuation — the returned key
+/// is where the next window starts — not exhausted coverage.
+///
+/// An empty query is a scope browse — the authorized scope's records in
+/// temporal order — never a zero-clause (structurally empty) plan. Text queries
+/// rank through the lexical/phrase/entity channels instead.
+async fn read_candidate_window(
+    read_port: &impl TemporalReadPort,
+    snapshot: &TemporalExecutionSnapshot,
+    request: &TemporalKernelRequest,
+    limits: ExecutionLimits,
+    resume: &CursorPosition,
+) -> Result<(Vec<RankingCandidate>, Option<String>), TemporalKernelError> {
+    let plan = hotpath::measure_block!("temporal_query.candidates.plan", {
+        plan_temporal_candidates(
+            &request.query,
+            request.direct_anchor.as_ref(),
+            snapshot.request().semantic_filter().goals,
+        )
+    });
+    let candidate_limits = PageLimits::new(
+        limits.candidate_limit,
+        limits.candidate_total_bytes,
+        limits.candidate_item_bytes,
+        limits.candidate_limit.min(64),
+    )
+    .map_err(map_port_error)?;
+    let mut state = CandidateReadState::resumed(
+        candidate_limits,
+        resume.candidate_keyset.clone().map(PageKey::new),
+    );
+    let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
+    let mut next_window_keyset = None;
+    hotpath::measure_block!("temporal_query.candidates.generate", {
+        loop {
+            let page = pull_candidate_page(read_port, snapshot, &plan, &mut state)
+                .await
+                .map_err(map_port_error)?;
+            let status = page.status();
+            candidates.extend(page.into_items());
+            if status == PageStatus::Complete {
+                break;
+            }
+            if state.is_exhausted() {
+                next_window_keyset = state.keyset().map(|keyset| keyset.as_str().to_owned());
+                break;
+            }
+        }
+    });
+    if state.is_exhausted() && next_window_keyset.is_none() {
+        return Err(map_port_error(TemporalPortError::Read {
+            operation: "bound candidate cohort window",
+            message: "producer omitted the continuation key".to_string(),
+        }));
+    }
+    Ok((candidates, next_window_keyset))
+}
+
 pub async fn execute_temporal_candidate_export(
     request: &TemporalKernelRequest,
     read_port: &impl TemporalReadPort,
@@ -317,7 +383,7 @@ pub async fn execute_temporal_candidate_export(
     if request.limit == 0 {
         return Err(TemporalKernelError::InvalidLimit);
     }
-    let mut snapshot = request.snapshot.clone();
+    let snapshot = request.snapshot.clone();
     if let Err(error) = hotpath::measure_block!(
         "temporal_query.participant_manifest.validate",
         snapshot.participant_manifest().validate()
@@ -347,68 +413,23 @@ pub async fn execute_temporal_candidate_export(
     }
 
     check_control(&snapshot)?;
-    // Authenticate and route cursors before storage work. A cohort mismatch is
-    // the one binding that cannot be decided until ordinary (non-prepared)
-    // session reads have produced their bounded cohort.
-    let preflight_after = request
+    // Authenticate and route the cursor before any storage work: its keyset
+    // half selects the candidate window this execution reads, so the read
+    // cannot start until the position is known to be authentic and bound to
+    // this snapshot.
+    let resume = request
         .cursor
         .as_deref()
-        .map(
-            |cursor| match verify_cursor(cursor, &snapshot, authenticator) {
-                Ok(sort_key) => Ok(Some(sort_key)),
-                Err(CursorError::CandidateCohortMismatch) => Ok(None),
-                Err(error) => Err(error),
-            },
-        )
+        .map(|cursor| verify_cursor_position(cursor, &snapshot, authenticator))
         .transpose()?
-        .flatten();
-    // An empty query is a scope browse — the authorized scope's records in
-    // temporal order — never a zero-clause (structurally empty) plan. Text
-    // queries rank through the lexical/phrase/entity channels instead.
-    let candidates = if let Some(prepared) = snapshot.prepared_candidate_cohort() {
-        prepared.candidates().to_vec()
-    } else {
-        let plan = hotpath::measure_block!("temporal_query.candidates.plan", {
-            plan_temporal_candidates(
-                &request.query,
-                request.direct_anchor.as_ref(),
-                snapshot.request().semantic_filter().goals,
-            )
-        });
-        let candidate_page_items = limits.candidate_limit.min(64);
-        let candidate_limits = PageLimits::new(
-            limits.candidate_limit,
-            limits.candidate_total_bytes,
-            limits.candidate_item_bytes,
-            candidate_page_items,
-        )
-        .map_err(map_port_error)?;
-        let mut candidate_state = CandidateReadState::new(candidate_limits);
-        let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
-        hotpath::measure_block!("temporal_query.candidates.generate", {
-            loop {
-                let page = pull_candidate_page(read_port, &snapshot, &plan, &mut candidate_state)
-                    .await
-                    .map_err(map_port_error)?;
-                let status = page.status();
-                candidates.extend(page.into_items());
-                if status == PageStatus::Complete {
-                    break;
-                }
-            }
-        });
-        snapshot = snapshot
-            .with_observed_candidate_cohort(&candidates)
-            .map_err(map_port_error)?;
-        candidates
+        .unwrap_or_default();
+    let (candidates, next_window_keyset) = match snapshot.prepared_candidate_cohort() {
+        Some(prepared) => (prepared.candidates().to_vec(), None),
+        None => read_candidate_window(read_port, &snapshot, request, limits, &resume).await?,
     };
     hotpath::gauge!("temporal_query.candidates.generated").set(candidates.len());
 
-    let after = match (preflight_after, request.cursor.as_deref()) {
-        (Some(sort_key), _) => Some(sort_key),
-        (None, Some(cursor)) => Some(verify_cursor(cursor, &snapshot, authenticator)?),
-        (None, None) => None,
-    };
+    let after = resume.last_sort_key.clone();
     check_control(&snapshot)?;
 
     let record_page_items = limits.record_limit.min(64);
@@ -556,20 +577,29 @@ pub async fn execute_temporal_candidate_export(
     ranked.retain(|candidate| deduplicated_anchors.insert(candidate.anchor_id.clone()));
     hotpath::gauge!("temporal_query.candidates.deduped").set(ranked.len());
 
-    let has_more = ranked.len() > request.limit;
+    // Two independent reasons to continue: this window still ranks rows past
+    // the page, or the window itself was bounded and storage holds more. The
+    // first keeps the keyset and advances the ranked key; the second advances
+    // the keyset and restarts the ranked walk in the next window.
+    let window_has_more = ranked.len() > request.limit;
     let capped = u64::try_from(ranked.len().saturating_sub(request.limit))
         .map_err(|_| TemporalKernelError::BudgetExceeded)?;
     ranked.truncate(request.limit);
     hotpath::gauge!("temporal_query.candidates.paged").set(ranked.len());
-    let next_cursor = if has_more {
-        ranked
-            .last()
-            .map(stable_sort_key)
-            .map(|sort_key| encode_cursor(&snapshot, &sort_key, authenticator))
-            .transpose()?
+    let next_position = if window_has_more {
+        ranked.last().map(|candidate| CursorPosition {
+            candidate_keyset: resume.candidate_keyset.clone(),
+            last_sort_key: Some(stable_sort_key(candidate)),
+        })
     } else {
-        None
+        next_window_keyset.map(|keyset| CursorPosition {
+            candidate_keyset: Some(keyset),
+            last_sort_key: None,
+        })
     };
+    let next_cursor = next_position
+        .map(|position| encode_cursor_position(&snapshot, &position, authenticator))
+        .transpose()?;
 
     Ok(TemporalCandidateExport {
         snapshot,

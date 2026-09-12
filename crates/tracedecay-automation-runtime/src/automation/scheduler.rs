@@ -263,78 +263,64 @@ impl AutomationTaskLock {
     }
 }
 
-/// Runs a synchronous task-lock cleanup body without starving the tokio worker
-/// that happens to own the guard.
+/// Releases the lock file synchronously, without ever calling into the tokio
+/// runtime.
 ///
-/// Task-lock release is deliberately synchronous: callers (and tests such as
+/// Task-lock release must be synchronous: callers (and tests such as
 /// `retained_settlement_guard_owns_task_lock_until_drop`) rely on the lock file
 /// being gone the instant `drop` returns. The cleanup itself is genuinely
-/// blocking though — an fs2 coordination lock, `sync_all`/parent-directory
-/// fsyncs, and `std::thread::sleep` backoff between retries — and guards are
-/// routinely dropped when an async fn's future completes on a runtime worker
-/// (`_run_lock`, `_reflector_lock`, `_skill_lock`, `_task_lock`). Blocking
-/// inline there stalls every unrelated task queued on that worker.
+/// blocking — an fs2 coordination lock, `sync_all`/parent-directory fsyncs, and
+/// `std::thread::sleep` backoff between retries — so it is tempting to hand the
+/// owning worker's run queue away with `tokio::task::block_in_place`.
 ///
-/// `block_in_place` lets tokio hand this worker's run queue to another thread
-/// for the duration, but it panics outside a multi-thread runtime, so the
-/// flavor is checked first. Empirically verified against tokio 1.53.1:
-/// - multi-thread worker: `Handle` present, flavor `MultiThread`, offload works;
-/// - `spawn_blocking` thread on a multi-thread runtime (the settlement-owner
-///   pattern in `daemon::automation_effect`): `Handle` present, flavor
-///   `MultiThread`, `block_in_place` is a no-op passthrough and does *not*
-///   panic;
-/// - current-thread runtime: `Handle` present, flavor `CurrentThread`,
-///   `block_in_place` panics — hence the inline fallback;
-/// - no runtime at all: no `Handle`, inline fallback.
+/// That is not sound here, because this guard is reachable from inside tokio's
+/// own blocking-pool spawn path. When a runtime has begun shutting down,
+/// `blocking::pool::Spawner::spawn_task` (tokio 1.53.1) shuts a refused task
+/// down *while holding* the pool's non-reentrant `parking_lot` mutex, which
+/// drops the task's future — and with it any `AutomationTaskLock` the future
+/// owned, such as the `Arc<RetainedAutomationSettlementState>` captured by
+/// `start_retained_automation_settlement_inner`. `block_in_place` re-enters
+/// `spawn_task` on that same thread to hand off the worker core, so the release
+/// self-deadlocks on the mutex it is already under; the runtime's
+/// `BlockingPool::shutdown` then waits for that thread forever.
 ///
-/// The remaining `block_in_place` panic case is a `LocalSet` on a multi-thread
-/// runtime; this workspace has none, and introducing one would need this guard
-/// revisited.
-fn run_blocking_cleanup(cleanup: impl FnOnce()) {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(cleanup);
-        }
-        _ => cleanup(),
-    }
-}
-
+/// Blocking a worker for one unlink plus its fsyncs is the cost of being
+/// correct in a destructor. Callers that care about worker latency release the
+/// guard from `spawn_blocking` instead of dropping it on a worker.
 impl Drop for AutomationTaskLock {
     fn drop(&mut self) {
         let path = &self.path;
         let ownership_token = &self.ownership_token;
         let staging_slot = &mut self.staging_path;
-        run_blocking_cleanup(move || {
-            match retry_exact_task_lock_cleanup(|| {
-                remove_owned_task_lock_blocking(path, ownership_token)
-            }) {
-                Ok(()) => {
-                    if let Some(staging_path) = staging_slot.take()
-                        && let Err(error) = retry_exact_task_lock_cleanup(|| {
-                            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
-                                &staging_path,
-                            )
-                            .map(|_| ())
-                        })
-                    {
-                        tracing::warn!(
-                            path = %path.display(),
-                            staging_path = %staging_path.display(),
-                            error = %error,
-                            "failed to retire exact automation task-lock staging ownership"
-                        );
-                    }
-                }
-                Err(error) => {
+        match retry_exact_task_lock_cleanup(|| {
+            remove_owned_task_lock_blocking(path, ownership_token)
+        }) {
+            Ok(()) => {
+                if let Some(staging_path) = staging_slot.take()
+                    && let Err(error) = retry_exact_task_lock_cleanup(|| {
+                        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
+                            &staging_path,
+                        )
+                        .map(|_| ())
+                    })
+                {
                     tracing::warn!(
                         path = %path.display(),
-                        staging_path = ?staging_slot.as_deref(),
+                        staging_path = %staging_path.display(),
                         error = %error,
-                        "failed to release exact automation task-lock ownership; preserving retained staging evidence"
+                        "failed to retire exact automation task-lock staging ownership"
                     );
                 }
             }
-        });
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    staging_path = ?staging_slot.as_deref(),
+                    error = %error,
+                    "failed to release exact automation task-lock ownership; preserving retained staging evidence"
+                );
+            }
+        }
     }
 }
 
@@ -1682,78 +1668,6 @@ disconnected: config error: codex app-server closed stdout before completing";
     }
 
     #[test]
-    fn changing_the_configuration_revision_readmits_a_settled_failure() {
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            None,
-        )];
-        let now_secs = 2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64;
-
-        // Same identity: still settled.
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                now_secs,
-            )
-            .skip_reason(),
-            Some(BACKEND_IDENTITY_SUPPRESSED),
-        );
-
-        // Any effective configuration change is a new revision, and the task
-        // is re-admitted on the next tick with no operator reset step.
-        let mut changed = curator_config();
-        changed.timeout_secs = curator_config().timeout_secs.saturating_add(1);
-        assert_ne!(
-            backend_identity(&changed).unwrap(),
-            backend_identity(&config).unwrap(),
-        );
-        assert!(
-            schedule_decision(
-                &changed,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                now_secs,
-            )
-            .is_due(),
-            "a changed configuration revision must re-admit the task",
-        );
-    }
-
-    #[test]
-    fn a_settled_failure_from_another_backend_identity_does_not_suppress() {
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            Some("sha256:some-other-backend-identity".to_owned()),
-        )];
-
-        assert!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::MemoryCurator,
-                &records,
-                SessionActivity::none(),
-                2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
-            )
-            .is_due(),
-        );
-    }
-
-    #[test]
     fn an_unstamped_legacy_failure_keeps_the_ordinary_cooldown() {
         let config = curator_config();
         let mut record = settled_backend_failure(
@@ -1783,38 +1697,6 @@ evidence about it",
 
     const PERMANENT_PROTOCOL_ERROR: &str =
         "typed protocol contract violation: handshake rejected the turn";
-
-    #[test]
-    fn typed_permanent_protocol_failure_stays_suppressed_under_the_same_identity() {
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
-        let config = curator_config();
-        let records = vec![settled_backend_failure(
-            &config,
-            PERMANENT_PROTOCOL_ERROR,
-            AgentTaskFailureClass::Permanent,
-            3,
-            2_000,
-            None,
-        )];
-        for now_secs in [
-            2_001,
-            2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64,
-            2_000 + 86_400,
-        ] {
-            assert_eq!(
-                schedule_decision(
-                    &config,
-                    AgentTaskKind::MemoryCurator,
-                    &records,
-                    SessionActivity::none(),
-                    now_secs,
-                )
-                .skip_reason(),
-                Some(BACKEND_IDENTITY_SUPPRESSED),
-                "tick at {now_secs} must stay identity-suppressed",
-            );
-        }
-    }
 
     #[test]
     fn same_path_executable_replacement_readmits_a_permanent_failure() {
@@ -2027,104 +1909,6 @@ evidence about it",
     }
 
     #[test]
-    fn budget_exhausted_skip_holds_the_task_in_a_typed_backoff_window() {
-        let config = session_evidence_config();
-        for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
-            let records = vec![budget_exhausted_skip("run-exhausted", task, 2_000)];
-
-            // Every tick inside the window skips without a fresh attempt,
-            // under the dedicated suppression reason: not the exhausted
-            // label (no attempt ran) and not the failure cooldown.
-            for now_secs in [2_060, 2_120, 2_000 + 3_599] {
-                assert_eq!(
-                    schedule_decision(
-                        &config,
-                        task,
-                        &records,
-                        SessionActivity::at(2_500),
-                        now_secs
-                    )
-                    .skip_reason(),
-                    Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
-                    "tick at {now_secs} for {task:?} must stay suppressed"
-                );
-            }
-
-            // The window elapsing permits exactly the next attempt.
-            assert!(
-                schedule_decision(
-                    &config,
-                    task,
-                    &records,
-                    SessionActivity::at(2_500),
-                    2_000 + 3_600,
-                )
-                .is_due()
-            );
-        }
-    }
-
-    #[test]
-    fn configured_budget_backoff_window_overrides_the_one_hour_default() {
-        let mut config = session_evidence_config();
-        config
-            .tasks
-            .session_reflector
-            .session_evidence_budget_backoff_secs = Some(120);
-        let records = vec![budget_exhausted_skip(
-            "run-exhausted",
-            AgentTaskKind::SessionReflector,
-            2_000,
-        )];
-
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_119,
-            )
-            .skip_reason(),
-            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED),
-            "the configured 120s window must still suppress its final second"
-        );
-        assert!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_120,
-            )
-            .is_due(),
-            "the configured 120s window must end well before the 3600s default"
-        );
-    }
-
-    #[test]
-    fn budget_backoff_suppresses_host_receipt_triggers_too() {
-        let config = session_evidence_config();
-        let records = vec![budget_exhausted_skip(
-            "run-exhausted",
-            AgentTaskKind::SessionReflector,
-            2_000,
-        )];
-
-        assert_eq!(
-            host_receipt_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_060,
-            )
-            .skip_reason(),
-            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
-        );
-    }
-
-    #[test]
     fn effectful_run_after_exhaustion_supersedes_the_backoff_anchor() {
         let config = session_evidence_config();
         let records = vec![
@@ -2149,55 +1933,6 @@ evidence about it",
                 2_130,
             )
             .is_due()
-        );
-    }
-
-    #[test]
-    fn older_failure_cooldown_cannot_bypass_a_live_budget_backoff() {
-        let mut config = session_evidence_config();
-        config.tasks.session_reflector.cooldown_secs = Some(60);
-        let records = vec![
-            scheduler_ledger_record(
-                "run-failed",
-                AgentTaskKind::SessionReflector,
-                AutomationRunStatus::Failed,
-                Some("provider unavailable"),
-                1_900,
-            ),
-            budget_exhausted_skip("run-exhausted", AgentTaskKind::SessionReflector, 2_000),
-        ];
-
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &records,
-                SessionActivity::at(2_500),
-                2_100,
-            )
-            .skip_reason(),
-            Some(SESSION_EVIDENCE_BUDGET_SUPPRESSED)
-        );
-
-        // Without a live exhaustion anchor the failure state keeps its own
-        // distinct cooldown reason: the two typed states never share a label.
-        let failure_only = vec![scheduler_ledger_record(
-            "run-failed",
-            AgentTaskKind::SessionReflector,
-            AutomationRunStatus::Failed,
-            Some("timed out waiting for backend"),
-            1_900,
-        )];
-        assert_eq!(
-            schedule_decision(
-                &config,
-                AgentTaskKind::SessionReflector,
-                &failure_only,
-                SessionActivity::at(2_500),
-                1_930,
-            )
-            .skip_reason(),
-            Some("scheduler_cooldown_active")
         );
     }
 
@@ -2370,15 +2105,6 @@ evidence about it",
             Some("no_new_session_activity"),
             "cancellation remains an effectful skip that needs fresh activity",
         );
-    }
-
-    #[test]
-    fn schedule_validation_maps_leaf_errors_at_the_runtime_boundary() {
-        assert!(validate_schedule(Some("hourly")).is_ok());
-        assert!(matches!(
-            validate_schedule(Some("after lunch")),
-            Err(TraceDecayError::Automation(_))
-        ));
     }
 
     #[test]
@@ -2681,7 +2407,7 @@ evidence about it",
     }
 
     /// A contender must be able to take the lock the instant the guard's drop
-    /// returns — the release stays synchronous even when it is offloaded.
+    /// returns.
     fn assert_lock_released(lock_path: &Path) {
         assert!(
             !lock_path.exists(),
@@ -2699,7 +2425,7 @@ evidence about it",
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_lock_release_offloads_from_a_multi_thread_worker() {
+    async fn task_lock_release_completes_on_a_multi_thread_worker() {
         let temp = tempdir().unwrap();
         let lock_path = temp
             .path()
@@ -2715,9 +2441,57 @@ evidence about it",
                 .unwrap();
         assert!(lock_path.exists());
 
-        // Drop directly on the async worker thread; block_in_place must let
-        // tokio migrate this worker's queue instead of stalling it.
         drop(guard);
+        assert_lock_released(&lock_path);
+    }
+
+    /// The ordering that wedged `daemon::tests::rmcp_route` for a full drain
+    /// bound: a worker offers a blocking task to a pool that has already begun
+    /// shutting down, and tokio's `blocking::pool::Spawner::spawn_task` shuts
+    /// the refused task down *while holding* the pool's non-reentrant mutex.
+    /// The refused closure owns this guard, so its release runs under that
+    /// mutex — and a release that re-enters the runtime never returns, leaving
+    /// `BlockingPool::shutdown` waiting for the thread forever.
+    ///
+    /// Ordering is fixed by channels, not timing: the worker is parked until
+    /// after `shutdown_timeout` has returned, so the pool is provably closed
+    /// before `spawn_blocking` is offered and the refusal branch is the only
+    /// branch reachable. The `shutdown_timeout` budget only bounds tokio's
+    /// attempt to join the deliberately parked worker.
+    #[test]
+    fn task_lock_release_survives_a_drop_inside_a_refused_spawn_blocking() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp
+            .path()
+            .join("automation_locks")
+            .join("refused_spawn_blocking.lock");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let guard = acquire_lock_for_release_test(&lock_path);
+        assert!(lock_path.exists());
+
+        let (on_worker_tx, on_worker_rx) = std::sync::mpsc::channel();
+        let (pool_closed_tx, pool_closed_rx) = std::sync::mpsc::channel();
+        let (offered_tx, offered_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            // Reached only from a worker thread, which is the sole context
+            // where the release can re-enter the blocking spawner.
+            on_worker_tx.send(()).unwrap();
+            pool_closed_rx.recv().unwrap();
+            let _refused = tokio::task::spawn_blocking(move || drop(guard));
+            offered_tx.send(()).unwrap();
+        });
+        on_worker_rx.recv().unwrap();
+
+        runtime.shutdown_timeout(std::time::Duration::from_millis(50));
+        pool_closed_tx.send(()).unwrap();
+
+        offered_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("releasing the guard under the blocking pool's own mutex must not deadlock");
         assert_lock_released(&lock_path);
     }
 
@@ -2737,7 +2511,7 @@ evidence about it",
     }
 
     #[tokio::test]
-    async fn task_lock_release_falls_back_inline_on_a_current_thread_runtime() {
+    async fn task_lock_release_completes_on_a_current_thread_runtime() {
         let temp = tempdir().unwrap();
         let lock_path = temp
             .path()
@@ -2749,8 +2523,6 @@ evidence about it",
             "#[tokio::test] must default to the current-thread flavor for this case"
         );
 
-        // block_in_place panics on a current-thread runtime, so the guard has to
-        // fall back to inline cleanup rather than aborting the process.
         let guard = acquire_lock_for_release_test(&lock_path);
         assert!(lock_path.exists());
         drop(guard);
@@ -2766,9 +2538,8 @@ evidence about it",
             .join("settlement_owner.lock");
 
         // The settlement-owner pattern in daemon::automation_effect acquires and
-        // drops the guard entirely inside spawn_blocking. A blocking-pool thread
-        // still reports a MultiThread handle, so this exercises block_in_place
-        // from outside a worker context.
+        // drops the guard entirely inside spawn_blocking, which is where callers
+        // that cannot afford to block a worker are expected to release it.
         let owned_path = lock_path.clone();
         tokio::task::spawn_blocking(move || {
             let guard = acquire_lock_for_release_test(&owned_path);

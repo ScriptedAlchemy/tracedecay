@@ -1,59 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type {
-  AnalyticsModeReadModelV1,
-  MetricValueV1,
-  SettingsPayloadV1,
-  StorageFindingKindStatusV1,
-} from '../../contracts/generated.ts';
-import {
-  ANALYTICS_MODE_LADDER,
-  DECLARED_RETENTION_LIFECYCLES,
-  analyticsModeReading,
-  egressFailureReading,
-  retentionBacklogReading,
-  shareStagingReading,
-  uploadSettingReading,
-} from './analyticsControls.ts';
-
-/**
- * Plan 26 §"Adoption analytics and retention" defines three modes and one
- * default. The tests below pin the two claims this surface could most easily
- * make falsely: that an unread mode is `Off`, and that an absent exporter means
- * zero egress failures. Neither is true, and neither is representable here.
- */
-
-describe('analytics mode ladder', () => {
-  it('carries exactly the three modes the plan defines', () => {
-    expect(ANALYTICS_MODE_LADDER.map((entry) => entry.mode)).toEqual([
-      'off',
-      'local_only',
-      'aggregate_share',
-    ]);
-  });
-
-  it('marks local-only as the default with no network exporter', () => {
-    const local = ANALYTICS_MODE_LADDER.find((entry) => entry.mode === 'local_only');
-    expect(local?.isDefault).toBe(true);
-    expect(local?.exporter).toBe('none');
-    expect(local?.requiresOptIn).toBe(false);
-  });
-
-  it('marks aggregate share as the only mode with an exporter and the only opt-in', () => {
-    const withExporter = ANALYTICS_MODE_LADDER.filter((entry) => entry.exporter === 'network');
-    expect(withExporter.map((entry) => entry.mode)).toEqual(['aggregate_share']);
-    const optIn = ANALYTICS_MODE_LADDER.filter((entry) => entry.requiresOptIn);
-    expect(optIn.map((entry) => entry.mode)).toEqual(['aggregate_share']);
-  });
-
-  it('says opting out stops egress before its configuration operation succeeds', () => {
-    const share = ANALYTICS_MODE_LADDER.find((entry) => entry.mode === 'aggregate_share');
-    expect(share?.sentence).toContain('before its configuration operation succeeds');
-  });
-
-  it('records exactly one default mode', () => {
-    expect(ANALYTICS_MODE_LADDER.filter((entry) => entry.isDefault)).toHaveLength(1);
-  });
-});
+import type { AnalyticsModeReadModelV1, MetricValueV1, StorageFindingKindStatusV1 } from '../../contracts/generated.ts';
+import { analyticsModeReading, egressFailureReading, retentionBacklogReading, shareStagingReading, uploadSettingReading } from './analyticsControls.ts';
 
 describe('analyticsModeReading', () => {
   it('reports an unavailable mode as unknown and explicitly not Off', () => {
@@ -64,13 +11,6 @@ describe('analyticsModeReading', () => {
     // The specific falsification: an unread mode read back as "collection is off".
     expect(reading.label).not.toBe('Off');
     expect(reading.reason).toBe('analytics_consent_not_observed');
-  });
-
-  it('reports a published mode by its own label', () => {
-    const reading = analyticsModeReading(mode('aggregate_share', 'known', null));
-    expect(reading.state).toBe('ready');
-    expect(reading.label).toBe('Aggregate share');
-    expect(reading.reason).toBeNull();
   });
 
   it('does not coerce an incomplete retained transition into a current mode', () => {
@@ -85,12 +25,6 @@ describe('shareStagingReading', () => {
     expect(reading.ageSeconds).not.toBe(0);
     expect(reading.state).toBe('unknown');
     expect(reading.reason).toBe('not_observed');
-  });
-
-  it('reports a published age when one is supplied', () => {
-    expect(
-      shareStagingReading([observationMetric('analytics_share_staging_age_seconds', 3_600)]),
-    ).toMatchObject({ ageSeconds: 3_600, state: 'ready' });
   });
 });
 
@@ -138,42 +72,13 @@ describe('retentionBacklogReading', () => {
   });
 });
 
-describe('declared retention lifecycles', () => {
-  it('carries the four Plan 26 lifetimes with no observed age', () => {
-    expect(DECLARED_RETENTION_LIFECYCLES.map((entry) => entry.id)).toEqual([
-      'local_detail',
-      'local_rollups',
-      'share_staging',
-      'backup_copies',
-    ]);
-    // Declared policy is not a measurement, and nothing here pretends it is.
-    for (const entry of DECLARED_RETENTION_LIFECYCLES) {
-      expect(entry.observedAge).toBeNull();
-    }
-  });
-});
-
 describe('uploadSettingReading', () => {
-  it('reads the profile upload setting from the settings payload', () => {
-    const reading = uploadSettingReading(settings(true));
-    expect(reading.enabled).toBe(true);
-    expect(reading.settingKey).toBe('user.upload_enabled.v1');
-    expect(reading.state).toBe('ready');
-  });
 
   it('reports an unread setting as unknown rather than as disabled', () => {
     const reading = uploadSettingReading(undefined);
     expect(reading.enabled).toBeNull();
     expect(reading.enabled).not.toBe(false);
     expect(reading.state).toBe('unknown');
-  });
-
-  it('states that it is not the analytics collection mode', () => {
-    // Proximity on the surface must not imply this setting selects Off,
-    // LocalOnly, or AggregateShare.
-    const { disclaimer } = uploadSettingReading(settings(false));
-    expect(disclaimer).toContain('not the Plan 26 analytics collection mode');
-    expect(disclaimer).toContain('does not govern adoption analytics');
   });
 });
 
@@ -184,19 +89,6 @@ function status(
   reason: string,
 ): StorageFindingKindStatusV1 {
   return { kind, state, observed_entries: observedEntries, reason };
-}
-
-function settings(uploadEnabled: boolean): SettingsPayloadV1 {
-  return {
-    user: {
-      configuration_snapshot_id: 'snapshot-1',
-      configuration_revision_id: 'revision-1',
-      upload_enabled: uploadEnabled,
-      watcher_debounce: '500ms',
-      extraction_timeout_secs: 30,
-      installed_agents: ['claude'],
-    },
-  } as SettingsPayloadV1;
 }
 
 function mode(

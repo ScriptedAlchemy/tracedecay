@@ -1,8 +1,8 @@
 use tracedecay_code_extraction::incremental::{ParseCompleteness, ParseDocumentIdentity};
 use tracedecay_code_extraction::{
-    ExtractionArtifactV1, LanguageExtractor as ParserLanguageExtractor,
+    ExtractionArtifactV1, LanguageExtractor as ParserLanguageExtractor, SchemaEvidenceIssueV1,
 };
-use tracedecay_domain::SanitizedCodeFileV1;
+use tracedecay_domain::{ExtractorRevision, SanitizedCodeFileV1};
 
 use crate::retained_parse::SharedRetainedParsePool;
 
@@ -15,6 +15,7 @@ pub(super) fn parse_for_indexing(
     file: &SanitizedCodeFileV1,
     captured: &CodeIndexCapturedFileV1,
     parser: &dyn ParserLanguageExtractor,
+    extractor_revision: &ExtractorRevision,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(ExtractionArtifactV1, usize), CodeIndexProductionErrorV1> {
     let language = file.language.as_ref().ok_or_else(|| {
@@ -34,19 +35,24 @@ pub(super) fn parse_for_indexing(
             .min(crate::extract::MAX_EXTRACTION_SOURCE_BYTES),
     );
     let admitted = || !control.is_cancelled() && !control.is_deadline_exceeded();
-    let (report, mut extraction) = retained_parses.parse_and_extract_artifact_with_control(
-        identity,
-        language.as_str(),
-        &source[..parsed_len],
-        parser,
-        Some(&admitted),
-    )?;
+    let (report, mut extraction) = retained_parses
+        .parse_and_extract_artifact_for_revision_with_control(
+            identity,
+            language.as_str(),
+            &source[..parsed_len],
+            parser,
+            extractor_revision,
+            Some(&admitted),
+        )?;
     if let ParseCompleteness::Partial { reasons } = report.completeness {
         extraction
             .artifact
             .result
             .errors
             .push(format!("retained parse incomplete: {reasons:?}"));
+        if let Some(evidence) = &mut extraction.artifact.schema_evidence {
+            evidence.mark_partial(SchemaEvidenceIssueV1::ParseError);
+        }
     }
     Ok((extraction.artifact, parsed_len))
 }

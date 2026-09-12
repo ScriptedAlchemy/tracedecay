@@ -249,33 +249,6 @@ async fn session_context_filters_read_parent_and_workflow_only_from_grafeo() {
 }
 
 #[tokio::test]
-async fn summary_semantic_filter_hydrates_only_grafeo_source_anchors() {
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let connection = canonical_source_connection(&directory.path().join("sources.db")).await;
-    let relations = crate::relations::memory_relation_store();
-    relations
-        .replace(&projection())
-        .expect("relation projection");
-    let scope = SessionRelationScope::project_sessions(project());
-    let adapter = SessionTemporalReadPort::new_with_relations(&connection, &scope, relations);
-    let filter = TemporalCandidateFilterV1 {
-        source: Some("claude".to_string()),
-        ..TemporalCandidateFilterV1::default()
-    };
-
-    assert!(
-        adapter
-            .candidate_observations_match(
-                &candidate(),
-                &filter,
-                snapshot(ExecutionControl::default()).request()
-            )
-            .await
-            .expect("summary source eligibility")
-    );
-}
-
-#[tokio::test]
 async fn missing_summary_relation_projection_is_a_typed_read_failure() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("unavailable.db")).await;

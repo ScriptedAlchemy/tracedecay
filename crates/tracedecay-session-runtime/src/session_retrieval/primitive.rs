@@ -287,6 +287,7 @@ fn terminal_evidence(
             requested_at: finished_at,
             resolved_at: finished_at,
             source_generation: None,
+            code_graph_freshness: None,
             watermark_digest: None,
             freshness: if reason == OmissionReason::Stale {
                 FreshnessState::Stale
@@ -331,6 +332,7 @@ fn temporal_state(
         requested_at: finished_at,
         resolved_at: finished_at,
         source_generation: None,
+        code_graph_freshness: None,
         watermark_digest: None,
         freshness: match freshness {
             SessionDataFreshness::Fresh => FreshnessState::Current,

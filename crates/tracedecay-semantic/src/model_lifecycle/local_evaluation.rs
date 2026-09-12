@@ -142,7 +142,9 @@ fn catalog_artifact_manifest(
                 }],
             },
             device: DeviceClassV1::Cpu,
-            resource_ceiling: resources.into(),
+            resource_ceiling: resources
+                .try_into()
+                .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?,
             upstream: UpstreamSourceV1 {
                 name: model.model_code.clone(),
                 version: model.source.revision.clone(),

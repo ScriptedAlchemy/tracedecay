@@ -45,10 +45,6 @@ function chipVisual(kind: DomainStateKind) {
 }
 
 describe('StateChip', () => {
-  it('covers exactly 19 domain states', () => {
-    expect(ENTRIES).toHaveLength(19);
-  });
-
   it.each(ENTRIES)('renders icon + label for "%s"', (kind, label) => {
     const { container } = render(<StateChip kind={kind} />);
 

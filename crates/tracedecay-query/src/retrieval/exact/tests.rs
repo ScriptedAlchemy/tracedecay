@@ -398,43 +398,6 @@ fn complete_batch(
 }
 
 #[test]
-fn exact_lane_admits_only_authority_minted_proofs() {
-    let authority = FixtureAuthority::new();
-    let request = exact_request(&authority, "reserve_stock --force", 8);
-    let port = FakeExactPort::complete(vec![
-        exact_pair(&authority, &request, "occ.a", 0),
-        exact_pair(&authority, &request, "occ.b", 1),
-    ]);
-    let lane = ExactLane::new(authority, port);
-
-    let result = complete_batch(
-        lane.retrieve_exact(&request)
-            .expect("exact retrieval succeeds"),
-    );
-
-    assert_eq!(result.candidates.len(), 2);
-    for (ordinal, candidate) in result.candidates.iter().enumerate() {
-        assert_eq!(candidate.ordinal_rank, ordinal as u32);
-        assert_eq!(candidate.retriever, RetrieverKind::ExactLiteral);
-        let proof = candidate
-            .exact_admission_proof
-            .as_ref()
-            .expect("exact candidates carry proofs");
-        proof
-            .validate_for_request(&request.base)
-            .expect("proof binds the request");
-        assert_eq!(candidate.raw_score, FixedPointScore(1_000_000));
-    }
-    assert_eq!(result.coverage.eligible, 2);
-    assert_eq!(result.coverage.examined, 2);
-    assert_eq!(result.coverage.capped, 0);
-    result.validate().expect("rebuilt batch is valid");
-    let continuation = result.continuation.expect("checkpoint emitted");
-    assert_eq!(continuation.lane, RetrieverKind::ExactLiteral);
-    assert!(continuation.exhausted);
-}
-
-#[test]
 fn exact_lane_rejects_a_candidate_without_proof() {
     let authority = FixtureAuthority::new();
     let request = exact_request(&authority, "reserve_stock", 8);

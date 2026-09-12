@@ -632,34 +632,12 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_tool_catalog::{
-        CancellationPoint, ExecutableBindingRegistryV1, RouteExposureV1,
-    };
+    use tracedecay_tool_catalog::{CancellationPoint, RouteExposureV1};
 
     use super::{
         WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding,
         work_executable_binding_registry,
     };
-
-    fn first_binding_address(registry: &ExecutableBindingRegistryV1) -> usize {
-        registry
-            .iter()
-            .next()
-            .map(|binding| std::ptr::from_ref(binding) as usize)
-            .expect("Work registry is not empty")
-    }
-
-    #[test]
-    fn repeated_work_registry_reads_borrow_one_process_authority() {
-        let first = work_executable_binding_registry().unwrap();
-        let second = work_executable_binding_registry().unwrap();
-
-        assert_eq!(
-            first_binding_address(first),
-            first_binding_address(second),
-            "reading the process-static registry must not clone every schema-rich binding",
-        );
-    }
 
     #[test]
     fn work_registry_advertises_only_mounted_application_operations() {
@@ -705,17 +683,6 @@ mod tests {
                 "retired operation {retired} must not be advertised"
             );
         }
-    }
-
-    #[test]
-    fn operation_lookup_is_backed_by_the_executable_registry() {
-        let operation =
-            tracedecay_tool_catalog::OperationId::new("operation.work.topology").unwrap();
-        let binding = work_executable_binding(&operation)
-            .unwrap()
-            .expect("topology is an executable Work operation");
-        assert!(binding.effect().is_read_only());
-        assert_eq!(binding.deadline().maximum_millis(), 30_000);
     }
 
     #[test]

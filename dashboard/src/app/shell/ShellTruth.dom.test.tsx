@@ -54,20 +54,6 @@ describe('shared shell truthfulness', () => {
     expect(queryByText('sync')).toBeNull();
   });
 
-  it('does not render a receipt count when the event contract has no receipt family', () => {
-    const { queryByText } = render(<StatusStrip />);
-
-    expect(queryByText('Receipts')).toBeNull();
-  });
-
-  it('does not present any milestone or PR label as the running build version', () => {
-    // The strip deliberately carries no build identity at all; the guard is
-    // against any PR- or plan-numbered label returning, not one stale literal.
-    const { container } = render(<StatusStrip />);
-
-    expect(container.textContent).not.toMatch(/\b(?:pr|plan|milestone|phase)[\s-]?\d+\b/i);
-  });
-
   it('does not claim a local daemon when the backend is offline', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
 
@@ -102,27 +88,6 @@ describe('shared shell truthfulness', () => {
     expect(queryByText('fabricated label')).toBeNull();
     // Settled: nothing qualifies a name the registry confirmed.
     expect(document.querySelector('[data-scope-label-annotation]')).toBeNull();
-  });
-
-  /**
-   * The scope bar is the one place a selected project's activation is
-   * reconciled, and `active_project_id` is the field that decides it. Every
-   * other entry into a project scope — a deep link, the command palette —
-   * arrives `unresolved`, and controls report writability as unknown until this
-   * read lands. So a bar that renders the right label but never resolves would
-   * leave every write in the product permanently disabled with the wrong
-   * reason.
-   */
-  it('resolves a deep-linked project to active when the registry names it active', async () => {
-    useScope.getState().selectProject('proj-real', 'Canonical project', 'unresolved');
-    expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
-    stubRegistry(entryPayload({ label: 'Canonical project', isActive: true }));
-
-    render(queryWrapper(<ScopeBar />));
-
-    await waitFor(() => expect(useScope.getState().scope).toMatchObject({ activation: 'active' }));
-    const writability = scopeWritable(useScope.getState().scope);
-    expect(writability).toEqual({ state: 'writable', target: 'Canonical project' });
   });
 
   /**

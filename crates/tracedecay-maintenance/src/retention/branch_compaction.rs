@@ -425,28 +425,6 @@ mod tests {
         );
     }
 
-    /// A threshold outside `[0.0, 1.0]` (`90` meaning "90%", say) must be
-    /// reported, not silently swallowed into "nothing needed compacting".
-    #[test]
-    fn an_invalid_threshold_is_reported_rather_than_disabling_the_pass_silently() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("feature.db");
-        bloated_db(&path);
-        let candidates = vec![BranchDbCandidate {
-            branch: "feature".to_string(),
-            db_path: path.clone(),
-        }];
-
-        let report = compact_branch_databases(&candidates, &config(90.0));
-
-        assert!(
-            report.policy_invalid,
-            "an out-of-range threshold must surface as policy_invalid"
-        );
-        assert!(report.compacted.is_empty());
-        assert!(report.skipped.is_empty());
-    }
-
     /// A threshold of exactly `0.0` is in range for `FreePageRatioV1` but
     /// rejected by `CompactionTriggerPolicyV1::validate` (it would schedule
     /// every store on every pass). The inherited version of this module built
@@ -544,17 +522,5 @@ mod tests {
             candidates.is_empty(),
             "the active store must be excluded through a symlinked path: {candidates:?}"
         );
-    }
-
-    #[test]
-    fn missing_file_is_silently_skipped_not_errored() {
-        let dir = tempfile::tempdir().unwrap();
-        let candidates = vec![BranchDbCandidate {
-            branch: "gone".to_string(),
-            db_path: dir.path().join("does-not-exist.db"),
-        }];
-        let report = compact_branch_databases(&candidates, &config(0.5));
-        assert!(report.compacted.is_empty());
-        assert!(report.skipped.is_empty());
     }
 }

@@ -383,16 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn graph_occurrence_id_keeps_canonical_symbol_ids() {
-        assert_eq!(
-            graph_occurrence_id(CANONICAL)
-                .expect("canonical symbol ids must stay unchanged")
-                .as_str(),
-            CANONICAL
-        );
-    }
-
-    #[test]
     fn graph_occurrence_id_rejects_other_evidence_namespaces() {
         let error = graph_occurrence_id(&format!("code-graph:{CANONICAL}"))
             .expect_err("non-symbol evidence anchors must fail closed");

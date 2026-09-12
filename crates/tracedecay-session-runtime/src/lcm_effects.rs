@@ -226,14 +226,23 @@ impl DaemonLcmEffectService {
         )
         .await
         {
-            Ok(summary) if summary.source_range.as_ref() == Some(&required_native_source_range) => {
+            Ok(summary)
+                if summary.source_range.interval() == Some(&required_native_source_range) =>
+            {
                 summary
             }
-            Ok(_) => {
+            Ok(summary) => {
                 self.control.checkpoint()?;
                 let mut pending = pending;
-                pending.response =
-                    summary_unavailable(pending.response, "authoritative_summary_source_mismatch");
+                // An absent interval is its own typed state; only a present
+                // interval that binds a different range is a mismatch.
+                pending.response = summary_unavailable(
+                    pending.response,
+                    summary
+                        .source_range
+                        .absent_reason()
+                        .unwrap_or("authoritative_summary_source_mismatch"),
+                );
                 return Ok(pending);
             }
             Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {

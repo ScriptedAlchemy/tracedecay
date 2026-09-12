@@ -79,7 +79,7 @@ pub(super) fn load_next_pending_projection(
     {
         load_current_mutations(
             connection,
-            "external_source_projected_objects_v1",
+            "external_source_projected_objects_v2",
             binding.binding_id.as_str(),
         )?
     } else {
@@ -131,13 +131,15 @@ pub(super) fn load_commit_receipt_by_idempotency(
     binding: &SourceBindingIdentityV1,
     key: &tracedecay_domain::ManifestDigest,
 ) -> rusqlite::Result<Option<SourceCommitReceiptV1>> {
-    load_encoded_optional(
+    load_slim_optional(
         connection,
-        "SELECT receipt_json FROM external_source_commit_receipts_v1
+        "SELECT receipt_json FROM external_source_commit_receipts_v2
          WHERE binding_id = ?1 AND idempotency_key = ?2",
         binding.binding_id.as_str(),
         key.as_str(),
-    )
+    )?
+    .map(|slim| super::slim::hydrate_commit_receipt(connection, binding.binding_id.as_str(), &slim))
+    .transpose()
 }
 
 #[hotpath::measure(label = "rusqlite.external_source.load_commit_receipt_by_digest")]
@@ -146,13 +148,15 @@ pub(super) fn load_commit_receipt_by_digest(
     binding: &SourceBindingIdentityV1,
     digest: &str,
 ) -> rusqlite::Result<Option<SourceCommitReceiptV1>> {
-    load_encoded_optional(
+    load_slim_optional(
         connection,
-        "SELECT receipt_json FROM external_source_commit_receipts_v1
+        "SELECT receipt_json FROM external_source_commit_receipts_v2
          WHERE binding_id = ?1 AND receipt_digest = ?2",
         binding.binding_id.as_str(),
         digest,
-    )
+    )?
+    .map(|slim| super::slim::hydrate_commit_receipt(connection, binding.binding_id.as_str(), &slim))
+    .transpose()
 }
 
 #[hotpath::measure(label = "rusqlite.external_source.load_authority_receipt")]
@@ -185,13 +189,30 @@ pub(super) fn load_projection_receipt_by_digest(
     binding: &SourceBindingIdentityV1,
     digest: &str,
 ) -> rusqlite::Result<Option<SourceProjectionCommitV1>> {
-    load_encoded_optional(
+    load_slim_optional(
         connection,
-        "SELECT receipt_json FROM external_source_projection_publications_v1
+        "SELECT receipt_json FROM external_source_projection_publications_v2
          WHERE binding_id = ?1 AND projection_digest = ?2",
         binding.binding_id.as_str(),
         digest,
-    )
+    )?
+    .map(|slim| {
+        super::slim::hydrate_projection_receipt(connection, binding.binding_id.as_str(), &slim)
+    })
+    .transpose()
+}
+
+/// The stored slim encoding of one receipt row, before hydration.
+fn load_slim_optional(
+    connection: &rusqlite::Connection,
+    sql: &str,
+    binding_id: &str,
+    key: &str,
+) -> rusqlite::Result<Option<String>> {
+    connection
+        .prepare_cached(sql)?
+        .query_row(params![binding_id, key], |row| row.get::<_, String>(0))
+        .optional()
 }
 
 #[hotpath::measure(label = "rusqlite.external_source.load_encoded_optional")]
@@ -219,7 +240,7 @@ pub(super) fn verify_encoded_row<K: rusqlite::ToSql + ?Sized>(
     collision: &'static str,
 ) -> rusqlite::Result<()> {
     let stored: String = connection.query_row(sql, params![binding_id, key], |row| row.get(0))?;
-    if stored == expected {
+    if super::slim::same_json(&stored, expected) {
         Ok(())
     } else {
         Err(invalid(collision))

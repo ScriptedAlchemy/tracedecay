@@ -198,7 +198,7 @@ pub fn run_framed_log_durability_workload(
     })?;
 
     let recover = timed("framed_log.truncate_recovery", 1, || {
-        truncate_file(&append_path, first_frame.len() as u64, DIRECTORY_POLICY)?;
+        truncate_file(&append_path, first_frame.len() as u64)?;
         let bytes = read_bounded(&append_path, FRAME_BYTES)?.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

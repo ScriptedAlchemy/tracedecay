@@ -69,6 +69,7 @@ def main() -> int:
         "hotpath-alloc": [],
         "hotpath-cpu": [],
         "hotpath-mcp": [],
+        "semantic-gpu-coreml": [],
     }
     linux_features = resolver.production_release_features(
         modern_features, "x86_64-unknown-linux-gnu"
@@ -79,7 +80,7 @@ def main() -> int:
     macos_features = resolver.production_release_features(
         modern_features, "aarch64-apple-darwin"
     )
-    if macos_features != ("production",):
+    if macos_features != ("production", "semantic-gpu-coreml"):
         raise SystemExit(f"unexpected macOS release features: {macos_features!r}")
 
     windows_features = resolver.production_release_features(
@@ -94,6 +95,14 @@ def main() -> int:
     if historical_production != ("production",):
         raise SystemExit(
             f"unexpected historical production features: {historical_production!r}"
+        )
+
+    historical_macos = resolver.production_release_features(
+        {"production": []}, "aarch64-apple-darwin"
+    )
+    if historical_macos != ("production",):
+        raise SystemExit(
+            f"unexpected historical macOS features: {historical_macos!r}"
         )
 
     partial_hotpath = resolver.production_release_features(

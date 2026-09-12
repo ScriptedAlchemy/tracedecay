@@ -204,6 +204,14 @@ fn run_acquisition_inner(
     if let Some((store, active_lease, rollback_lease)) = shared_store {
         let resources = SemanticResourceCeilings {
             max_sequence_length: model.max_length,
+            // Acquisition writes a durable artifact manifest, and its resource ceiling
+        // records the shipped capability — not this host's share. Neither
+        // operator configuration nor the process memory authority is in scope
+        // here; the composition root resolves the live ceiling against the host
+        // when it opens a session over the installed artifact.
+        max_resident_bytes: Some(
+            tracedecay_semantic_contracts::DEFAULT_SEMANTIC_RESIDENT_BYTES,
+        ),
             ..SemanticResourceCeilings::default()
         };
         let manifest = catalog_artifact_manifest(&model, resources)?;

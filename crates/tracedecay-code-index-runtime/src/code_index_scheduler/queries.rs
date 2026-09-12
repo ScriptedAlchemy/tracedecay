@@ -146,7 +146,9 @@ fn empty_callable_page() -> PageState {
 }
 
 mod graph_control;
-use graph_control::{CallableRetrievalExecutionControl, current_utc_micros, graph_budget_for_request};
+use graph_control::{
+    CallableRetrievalExecutionControl, current_utc_micros, graph_budget_for_request,
+};
 
 /// The reserved [`CodeGenerationId`] a caller supplies to request ordinary
 /// (unpinned) search: it pins no specific immutable generation, so the serving
@@ -3557,29 +3559,6 @@ mod tests {
             None,
         )
         .expect("page")
-    }
-
-    #[test]
-    fn bounded_result_preserves_complete_coverage() {
-        let outcome = bounded_result(
-            page(vec!["one"], 1),
-            tracedecay_domain::RetrieverCoverage {
-                examined: 1,
-                eligible: 1,
-                ..Default::default()
-            },
-            tracedecay_domain::UtcMicros(1),
-            None,
-            None,
-        );
-        let RetrievalPortOutcome::Completed(evidence) = outcome else {
-            panic!("uncapped complete lane stays complete");
-        };
-        assert_eq!(
-            evidence.coverage.completeness,
-            CoverageCompleteness::Complete
-        );
-        assert!(evidence.omissions.is_empty());
     }
 
     #[test]

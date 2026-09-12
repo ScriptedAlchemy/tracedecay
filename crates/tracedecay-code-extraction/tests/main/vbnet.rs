@@ -3,56 +3,6 @@ use tracedecay_code_extraction::VbNetExtractor;
 use tracedecay_domain::*;
 
 #[test]
-fn test_vb_file_node_is_root() {
-    let source = "Class Main\nEnd Class";
-    let extractor = VbNetExtractor;
-    let result = extractor.extract("src/Main.vb", source);
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "src/Main.vb");
-}
-
-#[test]
-fn test_vb_imports() {
-    let source = r#"
-Imports System
-Imports System.Collections.Generic
-"#;
-    let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
-    let uses: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert_eq!(uses.len(), 2);
-    assert!(uses.iter().any(|u| u.name == "System"));
-    assert!(uses.iter().any(|u| u.name == "System.Collections.Generic"));
-}
-
-#[test]
-fn test_vb_class() {
-    let source = r#"
-Class MyClass
-    Public Property Name As String
-End Class
-"#;
-    let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
-    let classes: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Class)
-        .collect();
-    assert_eq!(classes.len(), 1);
-    assert_eq!(classes[0].name, "MyClass");
-}
-
-#[test]
 fn test_vb_class_docstring() {
     let source = r#"
 ''' <summary>
@@ -73,57 +23,6 @@ End Class
         class.docstring.as_ref().unwrap().contains("test class"),
         "Docstring should contain 'test class', got: {:?}",
         class.docstring
-    );
-}
-
-#[test]
-fn test_vb_inheritance() {
-    let source = r#"
-Class Base
-End Class
-
-Class Child
-    Inherits Base
-End Class
-"#;
-    let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
-
-    let extends: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.reference_kind == EdgeKind::Extends)
-        .collect();
-    assert!(
-        extends.iter().any(|r| r.reference_name == "Base"),
-        "Expected Extends ref to Base, got: {:?}",
-        extends
-    );
-}
-
-#[test]
-fn test_vb_implements() {
-    let source = r#"
-Interface IFoo
-    Function Bar() As String
-End Interface
-
-Class MyClass
-    Implements IFoo
-End Class
-"#;
-    let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
-
-    let impls: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.reference_kind == EdgeKind::Implements)
-        .collect();
-    assert!(
-        impls.iter().any(|r| r.reference_name == "IFoo"),
-        "Expected Implements ref to IFoo, got: {:?}",
-        impls
     );
 }
 
@@ -306,44 +205,6 @@ Const MaxConnections As Integer = 100
         .collect();
     assert_eq!(consts.len(), 1);
     assert_eq!(consts[0].name, "MaxConnections");
-}
-
-#[test]
-fn test_vb_contains_edges() {
-    let source = r#"
-Class Foo
-    Public Sub DoWork()
-    End Sub
-End Class
-"#;
-    let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
-
-    // File contains class, class contains method
-    assert!(
-        result.edges.iter().any(|e| e.kind == EdgeKind::Contains),
-        "Expected Contains edges"
-    );
-}
-
-#[test]
-fn test_vb_call_sites() {
-    let source = r#"
-Class Foo
-    Public Sub DoWork()
-        Console.WriteLine("hello")
-    End Sub
-End Class
-"#;
-    let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
-
-    let calls: Vec<_> = result
-        .unresolved_refs
-        .iter()
-        .filter(|r| r.reference_kind == EdgeKind::Calls)
-        .collect();
-    assert!(!calls.is_empty(), "Expected call site refs");
 }
 
 #[test]

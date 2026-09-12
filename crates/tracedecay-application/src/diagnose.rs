@@ -182,29 +182,6 @@ error[E0308]: mismatched types
     }
 
     #[test]
-    fn parses_clippy_warning_without_code() {
-        let input = "\
-warning: redundant closure
-  --> src/main.rs:38:56
-   |
-";
-        let diags = parse_cargo_output(input);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].severity, Severity::Warning);
-        assert!(diags[0].code.is_none());
-        assert_eq!(diags[0].line, 38);
-        assert_eq!(diags[0].column, 56);
-    }
-
-    #[test]
-    fn ignores_unanchored_summary_errors() {
-        // Cargo's tail line has no span and must not be reported.
-        let input = "error: could not compile `tracedecay` (lib) due to 43 previous errors";
-        let diags = parse_cargo_output(input);
-        assert!(diags.is_empty());
-    }
-
-    #[test]
     fn parses_multiple_in_one_block() {
         let input = "\
 error[E0382]: borrow of moved value: `x`

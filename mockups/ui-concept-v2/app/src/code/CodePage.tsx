@@ -140,6 +140,29 @@ function MissingSemantic({ lens, onCortex, onFiles }: { lens: CodeLens; onCortex
   </div>;
 }
 
+function AuthorityBoard({ dataset }: { dataset: SemanticDataset }) {
+  const snapshot = dataset.source === "measured-snapshot";
+  return <section className="cd-authority-board" aria-label="Code authority states">
+    <div><span>SNAPSHOT</span><b>{snapshot ? "PINNED · FRESHNESS UNKNOWN" : "AUTHORED FIXTURE"}</b><small>{dataset.revision}</small></div>
+    <div><span>IMPACT</span><b className="is-unavailable">UNAVAILABLE</b><small>No snapshot-bound dependent projection</small></div>
+    <div><span>TEST MAP</span><b className="is-unavailable">UNAVAILABLE</b><small>No mapped-test authority attached</small></div>
+    <div><span>DIAGNOSTICS</span><b className="is-unavailable">UNAVAILABLE</b><small>No index diagnostic authority attached</small></div>
+  </section>;
+}
+
+function ExactFallback({ dataset, selectedId, onSelect, onClose }: { dataset: SemanticDataset; selectedId: string; onSelect: (id: string) => void; onClose: () => void }) {
+  const rows = [...dataset.nodes.map((node) => resolveNode(dataset, node.id)), ...dataset.files.flatMap((file) => file.symbols.map((node) => resolveNode(dataset, node.id)))].filter((node): node is ResolvedNode => !!node).filter((node, index, all) => all.findIndex((candidate) => candidate.id === node.id) === index);
+  return <div className="cd-exact-fallback" role="dialog" aria-label="Exact Code source table">
+    <header><b>EXACT SOURCE TABLE</b><button type="button" onClick={onClose}>CLOSE</button></header>
+    <p>{dataset.sourceLabel} · selection, path, range, and snapshot provenance. Calls, impact, diagnostics, and mapped tests retain their independent unavailable states.</p>
+    <div role="table" aria-label="Exact Code symbols">
+      {rows.map((node) => <button key={node.id} type="button" role="row" className={node.id === selectedId ? "is-on" : ""} onClick={() => onSelect(node.id)}>
+        <span role="cell">{node.name}</span><span role="cell">{node.file ?? "source unavailable"}</span><span role="cell">{node.startLine === null ? "range unavailable" : `${node.startLine}–${node.endLine}`}</span>
+      </button>)}
+    </div>
+  </div>;
+}
+
 export function CodePage(props: { onInspect?: unknown; state?: string; onState?: (id: string) => void } = {}) {
   const { mode } = useDemo();
   const params = new URLSearchParams(location.search);
@@ -152,6 +175,7 @@ export function CodePage(props: { onInspect?: unknown; state?: string; onState?:
   const [atlasSelection, setAtlasSelection] = useWorkspaceState<string>("atlas.selection", explicitPath && nodeById.has(explicitPath) ? explicitPath : "crates/tracedecay");
   const [, setAtlasView] = useWorkspaceState<AtlasViewState>("repository-atlas", { selected: explicitPath && nodeById.has(explicitPath) ? explicitPath : "crates/tracedecay", camera: null, layer: "structure", comparison: "after" });
   const [previewId, setPreviewId] = useState<string | null>(null);
+  const [exactFallback, setExactFallback] = useState(false);
   const [coreView, setCoreView] = useWorkspaceState<"overview" | "range">("code.core-view", params.get("core_view") === "range" ? "range" : "overview");
   const searchRef = useRef<HTMLInputElement>(null);
   const pinned = resolveNode(dataset, semanticSelection) ?? resolveNode(dataset, dataset.defaultSelection) ?? (dataset.nodes[0] ? { ...dataset.nodes[0], relationAvailable: true } : undefined);
@@ -211,12 +235,15 @@ export function CodePage(props: { onInspect?: unknown; state?: string; onState?:
         {view !== "files" ? <form className="cd-search" role="search" onSubmit={submitSearch}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.2" /><path d="m10.4 10.4 3.2 3.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={dataset.source === "authored-fixture" ? "Find an authored symbol or file" : "Find a measured crate"} aria-label="Search Code field" />{query ? <button type="button" className="cd-search-clear" onClick={clearSearch} aria-label="Clear Code search">×</button> : <kbd>⌘K</kbd>}<button type="submit" className="cd-search-go">FIND</button></form> : <div className="cd-files-source">MEASURED GIT SNAPSHOT · {atlasData.revision.slice(0, 8)}</div>}
       </div>
       {submitted && view !== "files" ? <div className="cd-matchbar" aria-label="Code search results"><span>{results.length ? `${results.length} matches` : "NO MATCHES"}</span>{results.map((node) => <button key={node.id} type="button" onClick={() => selectSemantic(node.id)}>{node.name}<small>{node.module}</small></button>)}</div> : null}
+      {view !== "files" ? <AuthorityBoard dataset={dataset} /> : null}
       <section className="cd-well" aria-label={view === "files" ? "Exact file atlas" : `${lens} semantic lens`}>
         {view === "files" ? <RepositoryAtlas context="code" initialSelection={atlasSelection} onSelect={selectAtlas} /> : <>
           <SourceRibbon dataset={dataset} lens={lens} />
           <SemanticField dataset={dataset} lens={lens} selectedId={pinned.id} coreView={coreView} onCoreView={chooseCoreView} onSelect={selectSemantic} onPreview={setPreviewId} onDrill={drill} onBack={back} />
           {!dataset.semanticAvailable && lens !== "cortex" ? <MissingSemantic lens={lens} onCortex={() => chooseView("cortex")} onFiles={() => chooseView("files")} /> : null}
           <div className="cd-lens-readout"><span>{lens === "cortex" ? `${dataset.regions.length} REGIONS` : !dataset.semanticAvailable ? `${lens.toUpperCase()} COUNTS UNAVAILABLE` : lens === "trace" ? `${dataset.nodes.length} SYMBOLS · ${dataset.edges.length} CHANNELS` : `${dataset.files.length} FILE CORES · ${dataset.files.reduce((sum, file) => sum + file.symbols.length, 0)} SOURCE BANDS`}</span><b>{pinned.name}</b><em>{dataset.source === "authored-fixture" ? "EXAMPLE DATA" : "MEASURED SNAPSHOT"}</em></div>
+          <button type="button" className="cd-exact-open" onClick={() => setExactFallback(true)}>EXACT SOURCE TABLE</button>
+          {exactFallback ? <ExactFallback dataset={dataset} selectedId={pinned.id} onSelect={(id) => { selectSemantic(id); setExactFallback(false); }} onClose={() => setExactFallback(false)} /> : null}
         </>}
       </section>
     </div>

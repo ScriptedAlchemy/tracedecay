@@ -9,26 +9,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::time::Instant;
 use tracedecay_private_fs::capability_dir::{
     remove_open_dir_all_nofollow, rename_noreplace, sync_directory,
 };
-use std::future::Future;
-use std::time::Instant;
 
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 use super::fence::{
-    StoreContentFence, capture_store_content_fence, capture_store_content_fence_controlled,
-    capture_store_content_fence_in_dir_controlled, capture_store_directory_fence,
-    data_root_fence_matches, open_store_directory_nofollow, open_store_parent_nofollow,
-    profile_relative_store_path, store_root_identity,
+    StoreContentFence, StoreDirectoryFence, capture_store_content_fence_in_dir_controlled,
+    capture_store_directory_fence, data_root_fence_matches, open_store_directory_nofollow,
+    open_store_parent_nofollow, profile_relative_store_path, store_root_identity,
 };
+use super::pages::newest_mtime_secs_controlled;
 use super::{
-    CollectionCompletionV1, CollectionFailure, CollectionFailureKind, CollectionMutationFailure,
-    CollectionMutationOperation, CollectionOutcome, CollectionPlan, CollectionRecoveryAction,
-    CollectionRecoveryReceipt, CollectedStore, OrphanStoreFinding, StoreCensusEntry,
-    StoreRootIdentity, UnregisteredCollectionPlan, UnregisteredStoreFinding,
+    CollectedStore, CollectionCompletionV1, CollectionFailure, CollectionFailureKind,
+    CollectionMutationFailure, CollectionMutationOperation, CollectionOutcome, CollectionPlan,
+    CollectionRecoveryAction, CollectionRecoveryReceipt, OrphanStoreFinding, StoreRootIdentity,
+    UnregisteredCollectionPlan, UnregisteredStoreFinding,
 };
 
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -773,11 +773,6 @@ fn journal_cleanup_names(journal_name: &str, state: JournalCleanupState) -> [Str
         // orphan debris as soon as journal-driven inventory cannot see it.
         JournalCleanupState::DeletionConfirmed => [renamed, journal_name.to_owned(), retired],
     }
-}
-
-#[cfg(test)]
-pub(super) fn committed_journal_cleanup_names(journal_name: &str) -> [String; 3] {
-    journal_cleanup_names(journal_name, JournalCleanupState::DeletionConfirmed)
 }
 
 fn clear_journal_in_order(
@@ -1887,6 +1882,11 @@ fn receipt_actual_path(original_path: &Path, quarantine_path: &Path) -> PathBuf 
 }
 
 // High-level registered/unregistered collection orchestration.
+
+/// Cooperative budget carried through every expensive retention read and
+/// apply boundary. The database writer is acquired only after content hashing
+/// and durable-memory inspection have completed under this control.
+#[derive(Clone, Copy)]
 pub(crate) struct CollectionControl<'a> {
     cancellation: &'a CancellationToken,
     deadline: MonotonicDeadline,
@@ -1951,7 +1951,7 @@ impl<'a> CollectionControl<'a> {
     }
 }
 
-pub(super) fn unbounded_collection_control() -> CollectionControl<'static> {
+pub(crate) fn unbounded_collection_control() -> CollectionControl<'static> {
     static CANCELLATION: std::sync::OnceLock<CancellationToken> = std::sync::OnceLock::new();
     CollectionControl::new(
         CANCELLATION.get_or_init(CancellationToken::new),
@@ -2226,7 +2226,7 @@ fn finalize_verified_quarantine(
 /// inventory pass supplied an exact database decision. A restored or retained
 /// quarantine forces a later census/confirmation pass, and recovery never
 /// fabricates the old plan's byte count.
-fn reconcile_existing_quarantine(
+pub(super) fn reconcile_existing_quarantine(
     profile_root: &Path,
     data_root: &Path,
     store_id: &str,
@@ -3151,13 +3151,13 @@ pub(super) enum DurableDatabaseInventoryV1 {
 /// follows symlinks; retention must never turn a symlinked manifest into a
 /// trusted manifest snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RegularFileSnapshot {
+pub(super) enum RegularFileSnapshot {
     Missing,
     Bytes(Vec<u8>),
     Unverifiable,
 }
 
-fn read_regular_file(path: &Path) -> RegularFileSnapshot {
+pub(super) fn read_regular_file(path: &Path) -> RegularFileSnapshot {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -3523,6 +3523,8 @@ fn is_memory_table_identifier(table: &str) -> bool {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     })
 }
+
+#[cfg(test)]
 pub(crate) async fn execute_unregistered_collection(
     db: &RegisteredGlobalDb,
     plan: &UnregisteredCollectionPlan,
@@ -3944,9 +3946,3 @@ fn collect_sqlite_candidates(
     output.sort();
     Ok(())
 }
-
-/// Compatibility convenience for one bounded read/apply page. The daemon uses
-/// [`sweep_unregistered_store_page`] directly so it can persist the returned
-/// cursor across maintenance cadences; Doctor deliberately receives one
-/// bounded preview rather than a hidden full-profile traversal.
-#[hotpath::measure(label = "maintenance.orphan_stores.sweep_unregistered", future = true)]

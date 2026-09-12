@@ -21,9 +21,9 @@ use thiserror::Error;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1,
-    EmbeddingDocumentCompositionV1, EmbeddingMetricV1, EmbeddingNormalizationV1,
-    EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1, ManifestDigest,
-    SemanticSearchIndexKeyV1,
+    EmbeddingDocumentCompositionV1, EmbeddingExecutionProviderV1, EmbeddingMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingTruncationSideV1,
+    ManifestDigest, SemanticSearchIndexKeyV1,
 };
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write};
 
@@ -131,6 +131,8 @@ pub struct NativeQualificationModelKeyV1 {
     pub runtime_backend: String,
     pub runtime_build_revision: String,
     pub device_class: EmbeddingDeviceClassV1,
+    #[serde(default, skip_serializing_if = "EmbeddingExecutionProviderV1::is_cpu")]
+    pub execution_provider: EmbeddingExecutionProviderV1,
     pub dimensions: u32,
     pub metric: EmbeddingMetricV1,
     pub normalization: EmbeddingNormalizationV1,
@@ -157,6 +159,7 @@ impl NativeQualificationModelKeyV1 {
             runtime_backend: projection.runtime_backend.clone(),
             runtime_build_revision: projection.runtime_build_revision.clone(),
             device_class: projection.device_class,
+            execution_provider: projection.execution_provider,
             dimensions: projection.dimensions,
             metric: projection.metric,
             normalization: projection.normalization,
