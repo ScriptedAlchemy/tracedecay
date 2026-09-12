@@ -100,6 +100,26 @@ _WORKFLOW_LIFECYCLE_EFFECTS = frozenset(
         "tracedecay_workflow_cancel_run",
     }
 )
+_WORK_LIFECYCLE_EFFECTS = frozenset(
+    {
+        "tracedecay_work_create",
+        "tracedecay_work_review_proposal",
+        "tracedecay_work_accept_proposal",
+        "tracedecay_work_admit_execution",
+        "tracedecay_work_start_attempt",
+        "tracedecay_work_synthesize",
+        "tracedecay_work_cancel_attempt",
+        "tracedecay_work_resume_attempts",
+        "tracedecay_work_retry_attempt",
+        "tracedecay_work_mutate_graph",
+        "tracedecay_work_adjudicate_duplicate",
+        "tracedecay_work_adjudicate_leak",
+        "tracedecay_work_pause_run",
+        "tracedecay_work_resume_run",
+        "tracedecay_work_admit_placement",
+        "tracedecay_work_release_placement",
+    }
+)
 
 
 def _manifest_digest(value: Any, field: str) -> str:
@@ -672,6 +692,7 @@ def prime_workflow_lifecycle(
 
 def prime_work_lifecycle(
     fixture: dict[str, Any], call: Call, deadline: Deadline,
+    effect_target: str | None = None,
 ) -> None:
     """Create, admit, start, inspect, and contain one real disposable Work task."""
     suffix = f"{time.monotonic_ns()}"
@@ -826,7 +847,7 @@ def prime_work_lifecycle(
         placement_arguments,
         deadline("tracedecay_work_placement_preflight"),
     )
-    call(
+    admitted_placement = call(
         "tracedecay_work_admit_placement",
         placement_arguments,
         deadline("tracedecay_work_admit_placement"),
@@ -879,6 +900,53 @@ def prime_work_lifecycle(
     if _object_field(cancelled, "identity").get("attempt_id") != attempt_id:
         raise JourneyError("Work cancellation did not retain the attempt identity")
 
+    duplicate_attempt_id = f"attempt.duplicate-probe.tool-sweep.{suffix}"
+    duplicate_start = {
+        **start_arguments,
+        "attempt_id": duplicate_attempt_id,
+        "occurred_at": occurred_at + 5,
+    }
+    duplicate_started = call(
+        "tracedecay_work_start_attempt",
+        duplicate_start,
+        deadline("tracedecay_work_start_attempt"),
+    )
+    duplicate_identity = _object_field(duplicate_started, "identity")
+    duplicate_arguments = {
+        "first_attempt": started_identity,
+        "second_attempt": duplicate_identity,
+        "verdict": "not_duplicate",
+        "reason": "distinct tool-sweep attempts",
+        "quantities": {
+            "wall_micros": None,
+            "token_count": None,
+            "cost_micros": None,
+            "test_count": None,
+            "effect_count": None,
+            "evidence": "owner_receipt",
+            "effect_outcome": "not_applicable",
+            "coverage": "known",
+        },
+        "format": "json",
+    }
+    call(
+        "tracedecay_work_prepare_duplicate_adjudication",
+        duplicate_arguments,
+        deadline("tracedecay_work_prepare_duplicate_adjudication"),
+    )
+    call(
+        "tracedecay_work_cancel_attempt",
+        {
+            "task_id": task_id,
+            "run_id": run_id,
+            "attempt_id": duplicate_attempt_id,
+            "request_id": f"cancel.duplicate-probe.tool-sweep.{suffix}",
+            "occurred_at": occurred_at + 6,
+            "format": "json",
+        },
+        deadline("tracedecay_work_cancel_attempt"),
+    )
+
     fixture.update(
         {
             "work_selection": selection,
@@ -892,6 +960,8 @@ def prime_work_lifecycle(
             "work_generate_arguments": generate_arguments,
             "work_placement_arguments": placement_arguments,
             "work_status_arguments": status_arguments,
+            "work_duplicate_arguments": duplicate_arguments,
+            "work_duplicate_identity": duplicate_identity,
             "work_effect_arguments": {
                 "tracedecay_work_create": create_request,
                 "tracedecay_work_accept_proposal": accept_request,
@@ -901,6 +971,498 @@ def prime_work_lifecycle(
             },
         }
     )
+    if effect_target in _WORK_LIFECYCLE_EFFECTS:
+        fixture["work_effect_journey"] = _prepare_work_effect_journey(
+            effect_target,
+            fixture,
+            call,
+            deadline,
+            started_identity,
+            admitted_placement,
+        )
+
+
+def _work_status_identity(
+    call: Call, deadline: Deadline, arguments: dict[str, Any], attempt_id: str,
+) -> dict[str, Any]:
+    status = call(
+        "tracedecay_work_attempt_status",
+        arguments,
+        deadline("tracedecay_work_attempt_status"),
+    )
+    identity = _object_field(status, "identity")
+    if identity.get("attempt_id") != attempt_id:
+        raise JourneyError("Work status did not retain the produced attempt identity")
+    return status
+
+
+def _fresh_work_task(
+    fixture: dict[str, Any],
+    call: Call,
+    deadline: Deadline,
+    purpose: str,
+    *,
+    admit: bool,
+) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    """Create a distinct task from the canonical prepared fixture shape."""
+    suffix = f"{purpose}.{time.monotonic_ns()}"
+    occurred_at = int(time.time() * 1_000_000)
+    source = fixture["work_prepare_create_arguments"]
+    original = source["change"]
+    replacements = {
+        original["initiative"]["id"]: f"initiative.{suffix}",
+        original["plan"]["id"]: f"plan.{suffix}",
+        original["milestone"]["id"]: f"milestone.{suffix}",
+        original["item"]["input"]["task_id"]: f"task.{suffix}",
+    }
+
+    def replace(value: Any) -> Any:
+        if isinstance(value, str):
+            return replacements.get(value, value)
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        return value
+
+    create_prepare = replace(source)
+    created_request = _object_field(
+        call(
+            "tracedecay_work_prepare_graph_mutation",
+            create_prepare,
+            deadline("tracedecay_work_prepare_graph_mutation"),
+        ),
+        "request",
+    )
+    call("tracedecay_work_create", created_request, deadline("tracedecay_work_create"))
+    task_id = replacements[original["item"]["input"]["task_id"]]
+    generated = call(
+        "tracedecay_work_generate_proposal",
+        {
+            "selection": fixture["work_selection"],
+            "task_id": task_id,
+            "proposal_id": f"proposal.{suffix}",
+            "occurred_at": occurred_at + 1,
+            "format": "json",
+        },
+        deadline("tracedecay_work_generate_proposal"),
+    )
+    proposal = _object_field(generated, "proposal")
+    if not admit:
+        return task_id, proposal, None
+    accepted_request = _object_field(
+        call(
+            "tracedecay_work_prepare_graph_mutation",
+            {
+                "selection": fixture["work_selection"],
+                "change": {
+                    "change": "decide_proposal",
+                    "proposal": proposal,
+                    "disposition": "accepted",
+                },
+                "evidence": [],
+                "format": "json",
+            },
+            deadline("tracedecay_work_prepare_graph_mutation"),
+        ),
+        "request",
+    )
+    accepted = call(
+        "tracedecay_work_accept_proposal",
+        accepted_request,
+        deadline("tracedecay_work_accept_proposal"),
+    )
+    accepted_version = _object_field(accepted, "verified_graph_version")
+    admitted_request = _object_field(
+        call(
+            "tracedecay_work_prepare_graph_mutation",
+            {
+                "selection": fixture["work_selection"],
+                "change": {
+                    "change": "admit_execution",
+                    "task_id": task_id,
+                    "based_on_version": accepted_version["graph_version"],
+                },
+                "evidence": [],
+                "format": "json",
+            },
+            deadline("tracedecay_work_prepare_graph_mutation"),
+        ),
+        "request",
+    )
+    admitted = call(
+        "tracedecay_work_admit_execution",
+        admitted_request,
+        deadline("tracedecay_work_admit_execution"),
+    )
+    return task_id, proposal, _object_field(admitted, "execution_snapshot")
+
+
+def _prepare_work_effect_journey(
+    name: str,
+    fixture: dict[str, Any],
+    call: Call,
+    deadline: Deadline,
+    started_identity: dict[str, Any],
+    admitted_placement: dict[str, Any],
+) -> PreparedJourney:
+    """Bind one Work effect to public producer output and prove its settlement."""
+    occurred_at = int(time.time() * 1_000_000)
+    if name in fixture.get("work_effect_arguments", {}):
+        return _work_replay(name, fixture, call, deadline)
+
+    if name == "tracedecay_work_mutate_graph":
+        arguments = dict(fixture["work_effect_arguments"]["tracedecay_work_create"])
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if not has_true(response, "replayed"):
+                raise JourneyError("generic graph mutation did not replay its prepared mutation")
+            call(
+                "tracedecay_work_views",
+                {"selection": fixture["work_selection"], "format": "json"},
+                deadline("tracedecay_work_views"),
+            )
+            return "prepared graph mutation replay and graph view verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name == "tracedecay_work_resume_attempts":
+        arguments = {"occurred_at": occurred_at, "format": "json"}
+
+        def cleanup(response: dict[str, Any]) -> str:
+            for field in ("recovery_required", "cancelled"):
+                if not any(isinstance(value.get(field), list) for value in objects(response)):
+                    raise JourneyError(f"attempt recovery omitted its typed {field} set")
+            replay = call(name, arguments, deadline(name))
+            if not any(
+                isinstance(value.get("recovery_required"), list)
+                for value in objects(replay)
+            ):
+                raise JourneyError("attempt recovery replay omitted its typed result")
+            return "attempt recovery scan and idempotent rescan verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name in {"tracedecay_work_pause_run", "tracedecay_work_resume_run"}:
+        pause_arguments = {
+            "task_id": fixture["work_task_id"],
+            "run_id": fixture["work_run_id"],
+            "reason": "operator_request",
+            "occurred_at": occurred_at,
+            "format": "json",
+        }
+        if name == "tracedecay_work_pause_run":
+            arguments = pause_arguments
+        else:
+            paused = call(
+                "tracedecay_work_pause_run",
+                pause_arguments,
+                deadline("tracedecay_work_pause_run"),
+            )
+            authority = first_value(paused, {"authority"})
+            if not isinstance(authority, int) or isinstance(authority, bool):
+                raise JourneyError("Work pause omitted its authority version")
+            arguments = {
+                **pause_arguments,
+                "expected_authority_version": authority,
+                "occurred_at": occurred_at + 1,
+            }
+
+        def cleanup(response: dict[str, Any]) -> str:
+            expected = "paused" if name.endswith("pause_run") else "running"
+            if first_value(response, {"state"}) != expected:
+                raise JourneyError(f"Work run control did not publish {expected}")
+            if expected == "paused":
+                authority = first_value(response, {"authority"})
+                if not isinstance(authority, int) or isinstance(authority, bool):
+                    raise JourneyError("Work pause omitted its authority version")
+                call(
+                    "tracedecay_work_resume_run",
+                    {
+                        **pause_arguments,
+                        "expected_authority_version": authority,
+                        "occurred_at": occurred_at + 1,
+                    },
+                    deadline("tracedecay_work_resume_run"),
+                )
+            reading = call(
+                "tracedecay_work_run_control",
+                {
+                    "task_id": fixture["work_task_id"],
+                    "run_id": fixture["work_run_id"],
+                    "format": "json",
+                },
+                deadline("tracedecay_work_run_control"),
+            )
+            if first_value(reading, {"state"}) != "controlled":
+                raise JourneyError("Work run-control read omitted the published aggregate")
+            return "pause/resume transition and durable run-control read verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name in {"tracedecay_work_admit_placement", "tracedecay_work_release_placement"}:
+        placement_arguments = dict(fixture["work_placement_arguments"])
+        if name == "tracedecay_work_admit_placement":
+            arguments = placement_arguments
+        else:
+            authority = first_value(admitted_placement, {"authority_version"})
+            if not isinstance(authority, int) or isinstance(authority, bool):
+                raise JourneyError("placement admission omitted its authority version")
+            arguments = {
+                "task_id": fixture["work_task_id"],
+                "run_id": fixture["work_run_id"],
+                "expected_authority_version": authority,
+                "occurred_at": occurred_at,
+                "format": "json",
+            }
+
+        def cleanup(response: dict[str, Any]) -> str:
+            state = first_value(response, {"state"})
+            if name.endswith("admit_placement"):
+                authority = first_value(response, {"authority_version"})
+                if not isinstance(authority, int) or isinstance(authority, bool):
+                    raise JourneyError("placement replay omitted its authority version")
+                released = call(
+                    "tracedecay_work_release_placement",
+                    {
+                        "task_id": fixture["work_task_id"],
+                        "run_id": fixture["work_run_id"],
+                        "expected_authority_version": authority,
+                        "occurred_at": occurred_at + 1,
+                        "format": "json",
+                    },
+                    deadline("tracedecay_work_release_placement"),
+                )
+                state = first_value(released, {"state"})
+            if state not in {"released", "quarantined"}:
+                raise JourneyError("placement release omitted its truthful terminal state")
+            status = call(
+                "tracedecay_work_placement_status",
+                {
+                    "task_id": fixture["work_task_id"],
+                    "run_id": fixture["work_run_id"],
+                    "format": "json",
+                },
+                deadline("tracedecay_work_placement_status"),
+            )
+            if first_value(status, {"state"}) != "placed":
+                raise JourneyError("placement status lost the terminal placement receipt")
+            return "placement admission/release/status lifecycle verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name == "tracedecay_work_adjudicate_leak":
+        arguments = {
+            "adjudication_id": f"leak.tool-sweep.{time.monotonic_ns()}",
+            "expected_revision": None,
+            "attempt": started_identity,
+            "detection_horizon_micros": 60_000_000,
+            "command_id": f"command.leak.tool-sweep.{time.monotonic_ns()}",
+            "format": "json",
+        }
+
+        def cleanup(response: dict[str, Any]) -> str:
+            receipt = _object_field(response, "receipt")
+            if _object_field(receipt, "command").get("command_id") != arguments["command_id"]:
+                raise JourneyError("leak adjudication receipt changed its command identity")
+            replay = call(name, arguments, deadline(name))
+            replay_receipt = _object_field(replay, "receipt")
+            if (
+                _object_field(replay_receipt, "command").get("command_id")
+                != arguments["command_id"]
+            ):
+                raise JourneyError("leak adjudication replay changed its command identity")
+            return "mounted leak scan, receipt, and exact replay verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name == "tracedecay_work_review_proposal":
+        _, review_proposal, _ = _fresh_work_task(
+            fixture, call, deadline, "review.tool-sweep", admit=False
+        )
+        prepared = call(
+            "tracedecay_work_prepare_graph_mutation",
+            {
+                "selection": fixture["work_selection"],
+                "change": {
+                    "change": "decide_proposal",
+                    "proposal": review_proposal,
+                    "disposition": "rejected",
+                },
+                "evidence": [],
+                "format": "json",
+            },
+            deadline("tracedecay_work_prepare_graph_mutation"),
+        )
+        arguments = _object_field(prepared, "request")
+
+        def cleanup(response: dict[str, Any]) -> str:
+            replay = call(name, arguments, deadline(name))
+            if not has_true(replay, "replayed"):
+                raise JourneyError("proposal review did not exactly replay its retained decision")
+            return "proposal generation/review/exact replay verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name == "tracedecay_work_synthesize":
+        synthesis_task, _, synthesis_snapshot = _fresh_work_task(
+            fixture, call, deadline, "synthesis.tool-sweep", admit=True
+        )
+        if synthesis_snapshot is None:
+            raise JourneyError("synthesis task did not return an execution snapshot")
+        arguments = {
+            "start": {
+                **fixture["work_effect_arguments"]["tracedecay_work_start_attempt"],
+                "task_id": synthesis_task,
+                "attempt_id": f"attempt.synthesis.tool-sweep.{time.monotonic_ns()}",
+                "operation": "operation.work.synthesize",
+                "execution_snapshot": synthesis_snapshot,
+                "instructions": "Synthesize the exact source evidence.",
+                "occurred_at": occurred_at,
+            },
+            "output_name": "inspection",
+            "sources": [started_identity],
+            "format": "json",
+        }
+
+        def cleanup(response: dict[str, Any]) -> str:
+            synthesis = first_value(response, {"synthesis"})
+            if synthesis not in {"admitted", "unsynthesized"}:
+                raise JourneyError("synthesis omitted its typed admission outcome")
+            replay = call(name, arguments, deadline(name))
+            if first_value(replay, {"synthesis"}) != synthesis:
+                raise JourneyError("synthesis replay changed its evidence outcome")
+            if synthesis == "admitted":
+                call(
+                    "tracedecay_work_cancel_attempt",
+                    {
+                        "task_id": synthesis_task,
+                        "run_id": arguments["start"]["run_id"],
+                        "attempt_id": arguments["start"]["attempt_id"],
+                        "request_id": f"cancel.synthesis.tool-sweep.{time.monotonic_ns()}",
+                        "occurred_at": int(time.time() * 1_000_000),
+                        "format": "json",
+                    },
+                    deadline("tracedecay_work_cancel_attempt"),
+                )
+            return "source attempt/synthesis task/typed outcome replay verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name == "tracedecay_work_retry_attempt":
+        retry_attempt_id = f"attempt.retry-source.tool-sweep.{time.monotonic_ns()}"
+        start_arguments = {
+            **fixture["work_effect_arguments"]["tracedecay_work_start_attempt"],
+            "attempt_id": retry_attempt_id,
+            "occurred_at": occurred_at,
+        }
+        started = call(
+            "tracedecay_work_start_attempt",
+            start_arguments,
+            deadline("tracedecay_work_start_attempt"),
+        )
+        identity = _object_field(started, "identity")
+        status_arguments = {
+            "task_id": fixture["work_task_id"],
+            "run_id": fixture["work_run_id"],
+            "attempt_id": retry_attempt_id,
+            "format": "json",
+        }
+        terminal: dict[str, Any] | None = None
+        terminal_state: str | None = None
+        ends_at = time.monotonic() + 5
+        while terminal is None and time.monotonic() < ends_at:
+            status = _work_status_identity(
+                call, deadline, status_arguments, retry_attempt_id
+            )
+            terminal_state = first_value(status, {"state"})
+            terminal = next(
+                (
+                    value["terminal"]
+                    for value in objects(status)
+                    if isinstance(value.get("terminal"), dict)
+                ),
+                None,
+            )
+            if terminal is None:
+                time.sleep(0.1)
+        if terminal_state not in {"failed", "timed_out"} or terminal is None:
+            raise JourneyError(
+                "retry source did not publish runtime failure evidence in the bounded fixture"
+            )
+        evidence_digest = first_value(terminal, {"evidence_digest"})
+        _manifest_digest(evidence_digest, "retry failure evidence digest")
+        arguments = {
+            "original_attempt": identity,
+            "new_attempt_id": f"attempt.retry.tool-sweep.{time.monotonic_ns()}",
+            "failure": {
+                "source": "runtime",
+                "cause": "runtime_failure",
+                "evidence_ref": f"runtime-terminal:{evidence_digest}",
+            },
+            "command_id": f"command.retry.tool-sweep.{time.monotonic_ns()}",
+            "format": "json",
+        }
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if first_value(response, {"outcome"}) != "created":
+                raise JourneyError("first retry did not create a fresh attempt")
+            receipt = _object_field(response, "receipt")
+            if _object_field(receipt, "command").get("command_id") != arguments["command_id"]:
+                raise JourneyError("retry receipt changed its command identity")
+            replay = call(name, arguments, deadline(name))
+            if first_value(replay, {"outcome"}) != "replayed":
+                raise JourneyError("retry did not replay its durable receipt")
+            call(
+                "tracedecay_work_cancel_attempt",
+                {
+                    "task_id": fixture["work_task_id"],
+                    "run_id": fixture["work_run_id"],
+                    "attempt_id": arguments["new_attempt_id"],
+                    "request_id": f"cancel.retry.tool-sweep.{time.monotonic_ns()}",
+                    "occurred_at": int(time.time() * 1_000_000),
+                    "format": "json",
+                },
+                deadline("tracedecay_work_cancel_attempt"),
+            )
+            return "runtime failure evidence/retry/new identity/replay verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name == "tracedecay_work_adjudicate_duplicate":
+        second_identity = fixture["work_duplicate_identity"]
+        prepared_duplicate = call(
+            "tracedecay_work_prepare_duplicate_adjudication",
+            fixture["work_duplicate_arguments"],
+            deadline("tracedecay_work_prepare_duplicate_adjudication"),
+        )
+        arguments = next(
+            (
+                {**value, "format": "json"}
+                for value in objects(prepared_duplicate)
+                if value.get("first_attempt") == started_identity
+                and value.get("second_attempt") == second_identity
+                and isinstance(value.get("command_id"), str)
+            ),
+            None,
+        )
+        if arguments is None:
+            raise JourneyError("duplicate producer omitted its prepared command")
+
+        def cleanup(response: dict[str, Any]) -> str:
+            receipt = _object_field(response, "receipt")
+            command = _object_field(receipt, "command")
+            if (
+                command.get("first_attempt") != started_identity
+                or command.get("second_attempt") != second_identity
+            ):
+                raise JourneyError("duplicate adjudication receipt changed its attempt identities")
+            call(name, arguments, deadline(name))
+            return "two attempts/owner evidence/adjudication replay verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    raise JourneyError(f"Work effect journey is not implemented for {name}")
 
 
 def _git_hunk_input(response: dict[str, Any]) -> tuple[str, list[str]]:
@@ -1688,6 +2250,10 @@ def prepare(
         return _git_apply(call, deadline)
     if name.startswith("tracedecay_workflow_"):
         prepared = fixture.get("workflow_effect_journey")
+        if isinstance(prepared, PreparedJourney):
+            return prepared
+    if name.startswith("tracedecay_work_"):
+        prepared = fixture.get("work_effect_journey")
         if isinstance(prepared, PreparedJourney):
             return prepared
     if name in {
