@@ -22,7 +22,8 @@ use tracedecay_code_index_retention::code_index_generations::{
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::semantic_vector_graph::ProjectVectorReadableSources;
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
-use tracedecay_domain::{ProjectId, UtcMicros, sha256_hex_suffix};
+use tracedecay_domain::UtcMicros;
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_maintenance::store_maintenance::{
     CodeGenerationRetentionOutcomeV1, VectorRetentionInventoryV1, apply_code_generation_retention,
     classify_vector_readable_sources, resolve_vector_retention_inventory,
@@ -41,14 +42,13 @@ use tracedecay_store_runtime::{StoreWriterGates, WriterScope};
 const FIXTURE_GENERATION_COUNT: usize = 6;
 
 struct UnseatedGraphFixture {
+    _pinned_home: tracedecay_runtime_core::config::PinnedUserDataDir,
+    _project: TempDir,
     graph: TraceDecay,
     store_root: PathBuf,
     schedulers: CodeIndexSchedulerRegistryV1,
     observations: StoreTelemetrySamplingRegistry,
     cancellation: tracedecay_session_memory::context::CancellationToken,
-    _scheduler_store: TempDir,
-    _project: TempDir,
-    _pinned_home: tracedecay_runtime_core::config::PinnedUserDataDir,
 }
 
 /// A mounted project graph whose daemon never seated a semantic runtime — the
@@ -68,42 +68,19 @@ async fn open_unseated_graph_fixture() -> UnseatedGraphFixture {
         "fixture daemon must have no seated semantic runtime"
     );
     let layout = graph.hook_store_layout();
-    let project_id = ProjectId::new(
-        layout
-            .identity
-            .project_id
-            .clone()
-            .expect("initialized project identity"),
-    )
-    .expect("typed project identity");
     let store_root = tracedecay_code_index_retention::code_index_generations::code_index_store_root(
         &layout.data_root,
         &layout.project_root,
     );
-    let scheduler_store = TempDir::new().expect("isolated scheduler store");
-    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
-    assert!(
-        schedulers
-            .mount_worktree(
-                project_id,
-                graph.project_root(),
-                scheduler_store.path().to_path_buf(),
-                None,
-            )
-            .await
-            .expect("mount code-index scheduler"),
-        "fixture must mount the canonical code-index scope used by retention"
-    );
     seed_sealed_generation_store(&store_root, FIXTURE_GENERATION_COUNT);
     UnseatedGraphFixture {
+        _pinned_home: pinned_home,
+        _project: project,
         graph,
         store_root,
-        schedulers,
+        schedulers: CodeIndexSchedulerRegistryV1::new(1),
         observations: StoreTelemetrySamplingRegistry::default(),
         cancellation: tracedecay_session_memory::context::CancellationToken::new(),
-        _scheduler_store: scheduler_store,
-        _project: project,
-        _pinned_home: pinned_home,
     }
 }
 
