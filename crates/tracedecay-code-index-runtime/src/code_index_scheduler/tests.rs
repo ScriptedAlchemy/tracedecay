@@ -8423,6 +8423,71 @@ async fn source_currency_witness_refuses_a_stale_generation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_read_during_reconcile_records_a_busy_follow_up() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    let _ = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    registry.clear_pending_wake_for_scope(&scope).await;
+    let receipts_before = registry.event_to_ready_receipts();
+    let owner_pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted worktree source fence");
+    {
+        let mut state = source_freshness
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the source proof");
+    }
+
+    assert!(
+        registry
+            .latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
+            .await
+            .is_none(),
+        "an expired graph proof abstains while the owner pass is in flight"
+    );
+    drop(owner_pass);
+    drop(admission);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let receipts = registry.event_to_ready_receipts();
+            if receipts.len() > receipts_before.len()
+                && receipts
+                    .iter()
+                    .skip(receipts_before.len())
+                    .any(|receipt| receipt.trigger == CodeIndexCadenceTriggerV1::BusyFollowUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("busy graph follow-up records a completed cadence receipt");
+    assert!(
+        registry
+            .event_to_ready_receipts()
+            .iter()
+            .skip(receipts_before.len())
+            .all(|receipt| receipt.trigger != CodeIndexCadenceTriggerV1::QueryAdmission),
+        "the graph wake owned by an in-flight reconcile is not query admission"
+    );
+
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_empty_source_remains_observable_while_scheduler_is_busy() {
     let fixture = GitFixture::new(&[("assets/blob.bin", "not source\n")]);
     let store = TempDir::new().expect("store root");
