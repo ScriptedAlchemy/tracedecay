@@ -1,7 +1,8 @@
 # #1103 text-build lane — Fable lane notes
 
 Worktree: `/fast/tmp/td-text-build-1103` (branch `fable/text-build-1103`).
-Target: PR #707 branch `codex/tracedecay-total-redesign-plan-reopened`, merged at `8df152a7b`.
+Target: PR #707 branch `codex/tracedecay-total-redesign-plan-reopened`, merged at `8df152a7b` (measurements) and
+again at `9e07045ba0` (clean merge; gate/park/freshness tests, the query freeze test, and clippy re-verified there).
 Env: `TRACEDECAY_SKIP_DASHBOARD_BUILD=1 TRACEDECAY_DASHBOARD_BUNDLE_SHA256=806f5649351425b7f80dbb3e088d9032d747dc524922ddc3b823c4ba821f8a1f`.
 Not pushed; no PR.
 
