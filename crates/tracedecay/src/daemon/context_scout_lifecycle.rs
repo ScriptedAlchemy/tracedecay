@@ -9,7 +9,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::StoreShardScopeV1;
 
-use tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
+use tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
 const MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1: usize = 64;

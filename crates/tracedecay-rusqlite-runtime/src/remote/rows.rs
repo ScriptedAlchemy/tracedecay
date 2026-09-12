@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) use crate::exact_sql::{optional_text, text};
+
 pub(super) fn query(
     handle: &ExactSqlHandle,
     sql: &str,
@@ -16,14 +18,6 @@ pub(super) fn statement(
     ExactSqlStatement::new(sql.to_owned(), params).map_err(map_persistence_error)
 }
 
-pub(super) fn text(value: &str) -> ExactSqlValue {
-    ExactSqlValue::Text(value.to_owned())
-}
-
-pub(super) fn optional_text(value: Option<&str>) -> ExactSqlValue {
-    value.map_or(ExactSqlValue::Null, text)
-}
-
 pub(super) fn one_row(
     rows: ExactSqlRows,
 ) -> Result<crate::exact_sql::ExactSqlRow, RemoteSqliteStorageErrorV1> {
@@ -38,10 +32,8 @@ pub(super) fn row_text(
     row: &crate::exact_sql::ExactSqlRow,
     index: usize,
 ) -> Result<&str, RemoteCapturePersistenceErrorV1> {
-    match row.values.get(index) {
-        Some(ExactSqlValue::Text(value)) => Ok(value),
-        _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
-    }
+    crate::exact_sql::text_at(&row.values, index)
+        .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
 }
 
 pub(super) fn row_blob(

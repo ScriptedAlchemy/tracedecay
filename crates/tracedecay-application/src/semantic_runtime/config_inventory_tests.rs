@@ -182,12 +182,12 @@ fn initial_state(label: &str) -> (SemanticConfigurationPinV1, RetrievalProfileSt
 /// A grant minted for `revision`, already rechecked against a matching current
 /// authorization. Only the configuration revision varies between callers.
 fn capability(revision: ConfigurationRevisionId) -> RetrievalProfileMutationCapabilityV1 {
-    use tracedecay_configuration::{
-        ConfigurationMutationAuthority, CurrentConfigurationMutationAuthorizationV1,
-    };
     use tracedecay_domain::configuration::{
         ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
         ConfigurationMutationOperationV1, ConfigurationMutationSinkV1,
+    };
+    use tracedecay_global_db::configuration::contracts::{
+        ConfigurationMutationAuthority, CurrentConfigurationMutationAuthorizationV1,
     };
 
     let scope_digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();

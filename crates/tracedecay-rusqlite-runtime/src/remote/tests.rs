@@ -400,8 +400,8 @@ fn insert_enrollment(
                     text(enrollment.node_id.as_str()),
                     ExactSqlValue::Integer(i64::try_from(enrollment.revision).unwrap()),
                     text(enrollment.fingerprint.digest().as_str()),
-                    text(&serde_json::to_string(enrollment).unwrap()),
-                    text(&serde_json::to_string(receipt).unwrap()),
+                    text(serde_json::to_string(enrollment).unwrap()),
+                    text(serde_json::to_string(receipt).unwrap()),
                 ],
             )
             .unwrap(),

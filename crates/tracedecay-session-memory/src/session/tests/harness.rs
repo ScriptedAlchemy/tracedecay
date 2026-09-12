@@ -12,6 +12,7 @@ use tracedecay_domain::{
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId,
     RetentionClass, RetrievalAnchorRecord, SanitizationReceiptId, SanitizationReceiptRefV1,
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+    sha256_hex_suffix,
 };
 use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
@@ -805,12 +806,7 @@ fn fixture_observation(
 }
 
 fn policy_digest_bytes(anchor: &RetrievalAnchorRecord) -> [u8; 32] {
-    let encoded = anchor
-        .authorization()
-        .access_policy_digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .unwrap();
+    let encoded = sha256_hex_suffix(anchor.authorization().access_policy_digest.as_str()).unwrap();
     hex::decode(encoded).unwrap().try_into().unwrap()
 }
 

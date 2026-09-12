@@ -38,7 +38,7 @@ pub(super) fn apply_workflow_effect(
             consumed_at,
         } => apply_handoff_redeem(transaction, token_digest, expected_scope, *consumed_at),
         WorkflowEffectMutationV1::Problem(problem) => {
-            Ok(WorkflowEffectOutcomeV1::Problem(*problem))
+            Ok(WorkflowEffectOutcomeV1::Problem(problem.clone()))
         }
     }
 }

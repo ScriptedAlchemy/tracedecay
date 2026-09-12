@@ -166,7 +166,7 @@ async fn set_project_setting(
     key: &str,
     value: tracedecay_domain::configuration::ConfigurationValueV1,
     idempotency_scope: &str,
-) -> crate::config::PinnedRuntimeConfiguration {
+) -> crate::config::DaemonRuntimeConfiguration {
     let graph = harness.server(project).expect("project server").cg().await;
     let configuration = graph
         .configuration_runtime()
@@ -215,7 +215,7 @@ async fn set_project_setting(
         .current()
         .await
         .expect("committed configuration");
-    let root_view = crate::config::PinnedRuntimeConfiguration::from_runtime(observed.clone())
+    let root_view = crate::config::DaemonRuntimeConfiguration::from_runtime(observed.clone())
         .expect("root runtime layers policy over the same committed pin");
     assert_eq!(root_view.config().semantic, observed.config().semantic);
     drop(graph);
@@ -238,6 +238,7 @@ fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
         runtime_backend: "fastembed-ort".to_owned(),
         runtime_build_revision: "runtime.maintenance-retention.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions: 2,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,

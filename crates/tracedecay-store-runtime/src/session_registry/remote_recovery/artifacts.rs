@@ -148,8 +148,7 @@ pub(super) fn digest_bytes(
     digest: &ManifestDigest,
 ) -> Result<[u8; 32], RemoteRecoveryPhysicalEffectErrorV1> {
     let suffix = digest
-        .as_str()
-        .strip_prefix("sha256:")
+        .hex_suffix()
         .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
     let decoded =
         hex::decode(suffix).map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
@@ -173,15 +172,6 @@ pub(super) fn classify_runtime_error(error: String) -> RemoteRecoveryPhysicalEff
     } else {
         RemoteRecoveryPhysicalEffectErrorV1::Unavailable
     }
-}
-
-pub(super) fn safe_digest_suffix(
-    digest: &ManifestDigest,
-) -> Result<&str, RemoteRecoveryPhysicalEffectErrorV1> {
-    digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 
 pub(super) fn sha256_file(path: &Path) -> Result<[u8; 32], RemoteRecoveryPhysicalEffectErrorV1> {

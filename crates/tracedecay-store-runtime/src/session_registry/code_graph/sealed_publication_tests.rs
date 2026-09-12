@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_domain::{
     CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId, canonical_sha256,
+    sha256_hex_suffix,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphGenerationManifestProvider, GraphGenerationReplaySource,
@@ -570,10 +571,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         .with_extension("graph-replay");
     tracedecay_runtime_core::storage::PrivateStoreIo::create_private_directory(&replay_root)
         .expect("private graph replay root");
-    let digest = pointer
-        .state_digest
-        .strip_prefix("sha256:")
-        .expect("sha256 state digest");
+    let digest = sha256_hex_suffix(&pointer.state_digest).expect("sha256 state digest");
     let foreign_destination = replay_root.join(format!("generation-{digest}.json"));
     std::fs::create_dir(&foreign_destination).expect("foreign digest-named directory");
     let sentinel = foreign_destination.join("sentinel");
@@ -934,9 +932,7 @@ async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
     let sealed_state_digest =
         tracedecay_graph_db::SealedGraphStateDigest::try_from(pointer.state_digest.clone())
             .expect("sealed state digest");
-    let digest_hex = pointer
-        .state_digest
-        .strip_prefix("sha256:")
+    let digest_hex = sha256_hex_suffix(&pointer.state_digest)
         .expect("sha256 state digest")
         .to_owned();
     let bundle_manifest_path = generations_root.join(format!("read-bundle-{digest_hex}.json"));
@@ -2118,10 +2114,8 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
         )
         .expect("decode publication scope pointer");
         assert_eq!(pointer.generation_id, generation_id.as_str());
-        let digest = pointer
-            .state_digest
-            .strip_prefix("sha256:")
-            .expect("sha256 publication scope digest");
+        let digest =
+            sha256_hex_suffix(&pointer.state_digest).expect("sha256 publication scope digest");
         measurement_scopes.push(PublicationMeasurementScopeV1 {
             canonical_root,
             generation,

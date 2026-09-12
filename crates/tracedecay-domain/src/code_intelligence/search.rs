@@ -978,6 +978,24 @@ pub enum EmbeddingDeviceClassV1 {
     Cpu,
 }
 
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingExecutionProviderV1 {
+    #[default]
+    Cpu,
+    CoreMl,
+    Cuda,
+    WebGpu,
+}
+
+impl EmbeddingExecutionProviderV1 {
+    pub fn is_cpu(&self) -> bool {
+        *self == Self::Cpu
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddingMetricV1 {
@@ -1084,6 +1102,10 @@ pub struct EmbeddingProjectionKeyV1 {
     pub runtime_backend: String,
     pub runtime_build_revision: String,
     pub device_class: EmbeddingDeviceClassV1,
+    /// The resolved execution provider. CPU is omitted to preserve the
+    /// canonical identity of generations produced before GPU auto-selection.
+    #[serde(default, skip_serializing_if = "EmbeddingExecutionProviderV1::is_cpu")]
+    pub execution_provider: EmbeddingExecutionProviderV1,
     pub dimensions: u32,
     pub metric: EmbeddingMetricV1,
     pub normalization: EmbeddingNormalizationV1,
@@ -1836,6 +1858,7 @@ mod tests {
             runtime_backend: "fastembed-ort".to_owned(),
             runtime_build_revision: "ort-fixture".to_owned(),
             device_class: EmbeddingDeviceClassV1::Cpu,
+            execution_provider: EmbeddingExecutionProviderV1::Cpu,
             dimensions: 8,
             metric: EmbeddingMetricV1::Cosine,
             normalization: EmbeddingNormalizationV1::L2,
@@ -1876,6 +1899,24 @@ mod tests {
         let restored_header: EmbeddingProjectionKeyV1 =
             serde_json::from_str(&header_json).expect("wire with the field");
         assert_eq!(restored_header, header);
+    }
+
+    #[test]
+    fn execution_provider_is_projection_identity_without_rekeying_cpu() {
+        let cpu = embedding_key();
+        let mut webgpu = embedding_key();
+        webgpu.execution_provider = EmbeddingExecutionProviderV1::WebGpu;
+
+        assert_ne!(
+            cpu.projection_key().expect("CPU projection"),
+            webgpu.projection_key().expect("WebGPU projection")
+        );
+        let cpu_json = serde_json::to_string(&cpu).expect("CPU JSON");
+        assert!(!cpu_json.contains("execution_provider"));
+        assert_eq!(
+            serde_json::from_str::<EmbeddingProjectionKeyV1>(&cpu_json).expect("legacy CPU key"),
+            cpu
+        );
     }
 
     #[test]

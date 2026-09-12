@@ -226,7 +226,7 @@ async fn database(label: &str) -> (TempDir, Database) {
     let path = directory.path().join(format!("{label}.db"));
     let authority = DatabaseAuthority::acquire_test(&path, "graph reconciliation test authority")
         .expect("acquire graph reconciliation fixture authority");
-    tracedecay_global_db::register_test_schema_installer();
+    tracedecay_global_db::register_registered_schema_installer();
     let (database, _) = Database::publish_profile_memory_test_runtime(
         &path,
         &authority,

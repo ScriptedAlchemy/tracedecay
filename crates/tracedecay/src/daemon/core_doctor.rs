@@ -954,7 +954,7 @@ mod doctor_runtime_route_tests {
         use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
 
         SemanticConfigurationPinV1::from_current(
-            &tracedecay_configuration::ConfigurationCurrentStateV1 {
+            &tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1 {
                 revision_id: ConfigurationRevisionId::try_from(
                     "configuration.revision.doctor".to_owned(),
                 )

@@ -22,7 +22,7 @@ use super::{
     LexicalLaneRetriever, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, admit_candidate_sources,
     lexical_query_parts,
 };
-use crate::retrieval::graph::GraphExecutionControl;
+use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, LexicalPostingReadPort, RetrievalPortError,
 };
@@ -30,7 +30,7 @@ use crate::retrieval::ports::{
 /// A request authority that never cancels: the lane must not observe it.
 struct ActiveControl;
 
-impl GraphExecutionControl for ActiveControl {
+impl RetrievalExecutionControl for ActiveControl {
     fn is_cancelled(&self) -> bool {
         false
     }
@@ -45,7 +45,7 @@ static ACTIVE_CONTROL: ActiveControl = ActiveControl;
 /// A request authority that is already cancelled when the lane consults it.
 struct CancelledControl;
 
-impl GraphExecutionControl for CancelledControl {
+impl RetrievalExecutionControl for CancelledControl {
     fn is_cancelled(&self) -> bool {
         true
     }

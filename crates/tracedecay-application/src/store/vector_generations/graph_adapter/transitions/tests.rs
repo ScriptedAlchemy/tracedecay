@@ -1018,6 +1018,7 @@ pub(in crate::store::vector_generations::graph_adapter) fn admitted_embedding()
         runtime_backend: "fixture-runtime".to_owned(),
         runtime_build_revision: "fixture-runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
+        execution_provider: tracedecay_domain::EmbeddingExecutionProviderV1::Cpu,
         dimensions: 1,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,

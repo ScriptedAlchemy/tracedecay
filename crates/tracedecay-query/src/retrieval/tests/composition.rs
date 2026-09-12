@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::{cell::Cell, rc::Rc};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_domain::{
     DiversityPolicy, EvidenceRole, ExactClass, HydrationReceipt, PublicRetrieverStatus,
@@ -12,10 +13,11 @@ use super::{
 };
 use crate::retrieval::fusion::{CompositionKernel, FusionStageInput};
 use crate::retrieval::hydrate::{
-    CanonicalLateHydration, HydrationAuthorizationV1, HydrationExecutionControlV1,
-    HydrationOutcomeV1, HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
+    HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationStageError,
     HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
 };
+use crate::retrieval::ports::RetrievalExecutionControl;
 
 fn receipt(
     candidate: &tracedecay_domain::RankedCandidate,
@@ -838,7 +840,7 @@ struct FixedHydrationExecutionControl {
     cancelled: bool,
 }
 
-impl HydrationExecutionControlV1 for FixedHydrationExecutionControl {
+impl RetrievalExecutionControl for FixedHydrationExecutionControl {
     fn elapsed_micros(&self) -> u64 {
         self.elapsed_micros
     }
@@ -1155,21 +1157,21 @@ fn hydration_rejects_receipts_outside_the_issued_work_permit() {
 
 struct MutableHydrationExecutionControl {
     elapsed_micros: u64,
-    cancelled: Rc<Cell<bool>>,
+    cancelled: Arc<AtomicBool>,
 }
 
-impl HydrationExecutionControlV1 for MutableHydrationExecutionControl {
+impl RetrievalExecutionControl for MutableHydrationExecutionControl {
     fn elapsed_micros(&self) -> u64 {
         self.elapsed_micros
     }
 
     fn is_cancelled(&self) -> bool {
-        self.cancelled.get()
+        self.cancelled.load(Ordering::Relaxed)
     }
 }
 
 struct CancellingHydrationSource {
-    cancelled: Rc<Cell<bool>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl LateHydrationSource<String> for CancellingHydrationSource {
@@ -1196,7 +1198,7 @@ impl LateHydrationSource<String> for CancellingHydrationSource {
         candidate: &tracedecay_domain::RankedCandidate,
         _permit: &HydrationWorkPermitV1,
     ) -> HydrationReadOutcomeV1<String> {
-        self.cancelled.set(true);
+        self.cancelled.store(true, Ordering::Relaxed);
         HydrationReadOutcomeV1::Complete {
             payload: "must not publish".to_owned(),
             receipt: receipt(candidate, 1),
@@ -1208,10 +1210,10 @@ impl LateHydrationSource<String> for CancellingHydrationSource {
 fn hydration_rechecks_cancellation_after_source_work_before_publishing_payload() {
     let request = request();
     let ranked = single_ranked_candidate();
-    let cancelled = Rc::new(Cell::new(false));
+    let cancelled = Arc::new(AtomicBool::new(false));
     let control = MutableHydrationExecutionControl {
         elapsed_micros: 0,
-        cancelled: Rc::clone(&cancelled),
+        cancelled: Arc::clone(&cancelled),
     };
     let mut source = CancellingHydrationSource { cancelled };
 

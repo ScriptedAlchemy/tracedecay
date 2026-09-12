@@ -286,7 +286,7 @@ impl AgentIntegration for KiroIntegration {
     #[hotpath::measure(label = "kiro_project_install")]
     fn activate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -317,7 +317,7 @@ impl AgentIntegration for KiroIntegration {
 
     fn project_host_component_registration_paths(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         _home: &Path,
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -333,7 +333,7 @@ impl AgentIntegration for KiroIntegration {
     /// scope is file-written for the same working-directory reason.
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        _components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
@@ -419,12 +419,10 @@ impl AgentIntegration for KiroIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::{
-            HostBundleComponentV1, HostBundleRegistrationStateV1 as State,
-        };
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::{HostBundleComponentV1, HostBundleRegistrationStateV1 as State};
 
         if component != HostBundleComponentV1::ContextMcp {
             return State::Missing;
@@ -452,10 +450,10 @@ impl AgentIntegration for KiroIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
             let path = mcp_config_path(home);
             vec![path.clone(), config_backup_path(&path)]
         } else {
@@ -465,10 +463,10 @@ impl AgentIntegration for KiroIntegration {
 
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
         }
@@ -477,10 +475,10 @@ impl AgentIntegration for KiroIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_remove_with(&kiro_cli, &ctx.home)?;
         }
@@ -819,8 +817,8 @@ fn is_owned_agent_config(config: &serde_json::Value) -> bool {
 
 fn kiro_context_mcp_registration_state(
     home: &Path,
-) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-    use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+) -> super::host_bundle::HostBundleRegistrationStateV1 {
+    use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
     let Ok(mcp_bytes) = std::fs::read(mcp_config_path(home)) else {
         return State::Missing;

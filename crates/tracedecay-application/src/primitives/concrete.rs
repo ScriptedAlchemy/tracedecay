@@ -212,6 +212,13 @@ impl SymbolGraphCursorSnapshot {
     pub const fn freshness(&self) -> tracedecay_graph_query::CodeGraphReadFreshnessV1 {
         self.freshness
     }
+
+    /// Whether two observations of this authority name the same served
+    /// generation. Identity only: the freshness verdict is re-resolved on
+    /// every read and moves independently of the generation it describes.
+    pub fn identifies_same_generation(&self, other: &Self) -> bool {
+        self.temporal == other.temporal && self.code_generation_id == other.code_generation_id
+    }
 }
 
 /// Supplies the authenticated query snapshot and its exact code generation.
@@ -318,8 +325,12 @@ where
                 // identity has moved since, the page in hand belongs to a
                 // generation that is no longer being served, so the caller is told
                 // it is stale instead of being handed a page-set that silently
-                // spans two generations.
-                if snapshot != claim.snapshot {
+                // spans two generations. Freshness is deliberately excluded:
+                // `rebuild_in_flight` and the bounded source proof flip while a
+                // page is read without moving the served generation, and a page
+                // that outlived its currency witness is stale in its reported
+                // freshness, not in its identity.
+                if !snapshot.identifies_same_generation(&claim.snapshot) {
                     return Err(primitive_failure(
                         PrimitiveFailureKind::Stale,
                         "application.symbol-graph.generation-changed",

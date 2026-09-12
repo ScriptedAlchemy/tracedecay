@@ -10,7 +10,6 @@ use axum::extract::Json;
 use axum::http::StatusCode;
 use serde_json::Value;
 use serde_json::json;
-use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, AuthorizedScopeSet,
     NativeIntegrationSurfaceResultV1, RequestId,
@@ -19,6 +18,7 @@ use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
 };
 use tracedecay_domain::{NativeIntegrationTransactionId, ProjectId, ScopeSetId};
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
 use crate::DashboardHttpRequestControlV1;
 

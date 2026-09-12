@@ -229,7 +229,6 @@ impl HookAdmissionLedgerV1 {
             shared_truncate_file(
                 &path,
                 (bytes.len() as u64).saturating_sub(truncated_tail_bytes),
-                DIRECTORY_POLICY,
             )
             .map_err(|_| HookAdmissionLedgerError::Io)?;
         }

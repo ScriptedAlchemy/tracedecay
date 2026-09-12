@@ -914,11 +914,14 @@ pub async fn load_run_ledger_task_summary(
     let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
     let task_key = requested_task_key.to_owned();
-    tokio::task::spawn_blocking(move || {
-        with_run_ledger_read_lock(&root, &path, || {
-            read_run_ledger_task_summary(&path, task, &task_key)
-        })
-    })
+    hotpath::future!(
+        tokio::task::spawn_blocking(move || {
+            with_run_ledger_read_lock(&root, &path, || {
+                read_run_ledger_task_summary(&path, task, &task_key)
+            })
+        }),
+        label = "automation.run_ledger.task_summary.blocking"
+    )
     .await
     .map_err(|error| config_error(format!("failed to join task ledger summary read: {error}")))?
 }
@@ -954,11 +957,22 @@ fn with_run_ledger_read_lock<T>(
     path: &Path,
     read: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let lock = exact_publication::acquire_run_ledger_lock(path).map_err(TraceDecayError::from)?;
+    // A read must not mint the dashboard directory: acquiring the lock
+    // creates it, and a root that does not exist has no ledger, no append
+    // intent, and no writer to serialize against. The readers already answer
+    // an absent ledger with an empty page.
+    if !dashboard_root.is_dir() {
+        return read();
+    }
+    let lock = hotpath::measure_block!("automation.run_ledger.read_lock.acquire", {
+        exact_publication::acquire_run_ledger_lock(path).map_err(TraceDecayError::from)
+    })?;
     let result = (|| {
-        exact_publication::ensure_no_exact_append_intent(dashboard_root)
-            .map_err(TraceDecayError::from)?;
-        read()
+        hotpath::measure_block!("automation.run_ledger.read_lock.recover", {
+            exact_publication::ensure_no_exact_append_intent(dashboard_root)
+                .map_err(TraceDecayError::from)
+        })?;
+        hotpath::measure_block!("automation.run_ledger.read_lock.body", read())
     })();
     let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
     result.and_then(|value| unlock.map(|()| value))
@@ -1235,18 +1249,27 @@ fn read_run_ledger_task_summary(
 ) -> Result<AutomationRunLedgerTaskSummary> {
     // Visible bytes are stabilized by the committed lifecycle index consulted
     // below, which syncs only when the ledger actually grew.
-    let Some(file) = exact_lookup::open_committed_run_ledger(path, false)? else {
+    let Some(file) = hotpath::measure_block!("automation.run_ledger.task_summary.open", {
+        exact_lookup::open_committed_run_ledger(path, false)
+    })?
+    else {
         return Ok(AutomationRunLedgerTaskSummary::default());
     };
     // Answer an unchanged ledger from the memo instead of rescanning it. See
     // `RUN_LEDGER_SUMMARY_MEMO` for why `(len, tail digest)` read under the
     // exclusive ledger lock is a sound witness of unchanged content.
-    let file_len = file.metadata().map_err(TraceDecayError::from)?.len();
-    let tail_digest = run_ledger_summary_tail_digest(&file, file_len)?;
-    let memo_key = run_ledger_summary_memo_key(path, task, requested_task_key);
+    let (file_len, tail_digest, memo_key) =
+        hotpath::measure_block!("automation.run_ledger.task_summary.memo_probe", {
+            let file_len = file.metadata().map_err(TraceDecayError::from)?.len();
+            let tail_digest = run_ledger_summary_tail_digest(&file, file_len)?;
+            let memo_key = run_ledger_summary_memo_key(path, task, requested_task_key);
+            Ok::<_, TraceDecayError>((file_len, tail_digest, memo_key))
+        })?;
     if let Some(summary) = cached_run_ledger_task_summary(&memo_key, file_len, &tail_digest) {
+        hotpath::gauge!("automation.run_ledger.task_summary.memo_hits").inc(1_u64);
         return Ok(summary);
     }
+    hotpath::gauge!("automation.run_ledger.task_summary.memo_misses").inc(1_u64);
     let mut rows = exact_lookup::ForwardJsonlScanner::new(&file, path)?;
     let mut selected = TaskSummarySpans::default();
     while let Some(line) = rows.next_span()? {

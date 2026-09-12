@@ -9,10 +9,7 @@ mod bundle_identity;
 pub mod claude;
 pub mod cline;
 pub mod codex;
-pub mod context_scout_model;
-pub mod context_scout_owner;
-pub mod context_scout_ports;
-pub mod context_scout_v2;
+pub mod context_scout;
 pub mod copilot;
 pub mod cursor;
 pub(crate) mod cursor_diagnostics;
@@ -22,8 +19,8 @@ pub mod devin;
 pub use cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER;
 pub mod gemini;
 pub mod hermes;
+pub mod host_bundle;
 pub mod host_bundle_registry;
-pub mod host_bundle_v2;
 pub(crate) mod host_cli;
 pub mod host_component_registration;
 pub mod kilo;
@@ -261,7 +258,7 @@ pub trait AgentIntegration {
     /// only there, so `Uninstall` must refuse while the registration stands —
     /// deleting the receipt-owned artifacts underneath a live registration
     /// leaves the host resolving a bundle that no longer exists. The refusal
-    /// travels as [`host_bundle_v2::HostBundleError::NativeRemovalRequired`],
+    /// travels as [`host_bundle::HostBundleError::NativeRemovalRequired`],
     /// and this string is what makes it actionable: without it an operator is
     /// told a capability is unsupported rather than which host command to run.
     ///
@@ -353,10 +350,10 @@ pub trait AgentIntegration {
     /// receipts; implementations must not infer uninstalled catalog pairs.
     fn host_component_registration(
         &self,
-        _component: host_bundle_v2::HostBundleComponentV1,
+        _component: host_bundle::HostBundleComponentV1,
         _ctx: &HealthcheckContext,
-    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
-        host_bundle_v2::HostBundleRegistrationStateV1::Missing
+    ) -> host_bundle::HostBundleRegistrationStateV1 {
+        host_bundle::HostBundleRegistrationStateV1::Missing
     }
 
     /// Registration state for a concrete lifecycle policy. Most hosts ignore
@@ -364,10 +361,10 @@ pub trait AgentIntegration {
     /// dashboard-disabled registrations without weakening doctor readback.
     fn host_component_registration_for_lifecycle(
         &self,
-        component: host_bundle_v2::HostBundleComponentV1,
+        component: host_bundle::HostBundleComponentV1,
         health: &HealthcheckContext,
         _install: &InstallContext,
-    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+    ) -> host_bundle::HostBundleRegistrationStateV1 {
         self.host_component_registration(component, health)
     }
 
@@ -407,7 +404,7 @@ pub trait AgentIntegration {
     /// transaction never snapshots or restores another component's state.
     fn host_component_registration_paths(
         &self,
-        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _components: &[host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
         self.host_registration_paths(home)
@@ -419,7 +416,7 @@ pub trait AgentIntegration {
     /// than silently dropping files from rollback ownership.
     fn host_component_registration_paths_checked(
         &self,
-        components: &[host_bundle_v2::HostBundleComponentV1],
+        components: &[host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Result<Vec<PathBuf>> {
         Ok(self.host_component_registration_paths(components, home))
@@ -430,7 +427,7 @@ pub trait AgentIntegration {
     /// complete set before invoking the projection.
     fn project_host_component_registration_paths(
         &self,
-        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _components: &[host_bundle::HostBundleComponentV1],
         _home: &Path,
         _project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
@@ -453,10 +450,10 @@ pub trait AgentIntegration {
     /// deployed registration boundary.
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[host_bundle_v2::HostBundleComponentV1],
+        components: &[host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&host_bundle_v2::HostBundleComponentV1::Core) {
+        if components.contains(&host_bundle::HostBundleComponentV1::Core) {
             self.activate_deployed_host_registration(ctx)
         } else {
             Ok(())
@@ -474,10 +471,10 @@ pub trait AgentIntegration {
     /// receipt-backed components.
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[host_bundle_v2::HostBundleComponentV1],
+        components: &[host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&host_bundle_v2::HostBundleComponentV1::Core) {
+        if components.contains(&host_bundle::HostBundleComponentV1::Core) {
             self.deactivate_deployed_host_registration(ctx)
         } else {
             Ok(())
@@ -491,7 +488,7 @@ pub trait AgentIntegration {
     /// project registration paths; they must not install global assets.
     fn activate_project_host_component_registration(
         &self,
-        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _components: &[host_bundle::HostBundleComponentV1],
         _ctx: &InstallContext,
         _project_path: &Path,
     ) -> Result<()> {
@@ -506,7 +503,7 @@ pub trait AgentIntegration {
     /// Remove only this host's project-scoped registration projection.
     fn deactivate_project_host_component_registration(
         &self,
-        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _components: &[host_bundle::HostBundleComponentV1],
         _ctx: &InstallContext,
         _project_path: &Path,
     ) -> Result<()> {
@@ -674,27 +671,25 @@ fn devin_is_a_registered_independent_agent() {
     assert!(available_integrations().contains(&"devin"));
 }
 
-pub fn integration_id_for_host(host: host_bundle_v2::HostKindV1) -> &'static str {
+pub fn integration_id_for_host(host: host_bundle::HostKindV1) -> &'static str {
     match host {
-        host_bundle_v2::HostKindV1::ClaudeCode => "claude",
-        host_bundle_v2::HostKindV1::CursorDesktop | host_bundle_v2::HostKindV1::CursorCloud => {
-            "cursor"
-        }
-        host_bundle_v2::HostKindV1::Codex => "codex",
-        host_bundle_v2::HostKindV1::Devin => "devin",
-        host_bundle_v2::HostKindV1::Zed => "zed",
-        host_bundle_v2::HostKindV1::Antigravity => "antigravity",
-        host_bundle_v2::HostKindV1::Vibe => "vibe",
-        host_bundle_v2::HostKindV1::Hermes => "hermes",
-        host_bundle_v2::HostKindV1::Kiro => "kiro",
-        host_bundle_v2::HostKindV1::ClineFamily => "cline",
-        host_bundle_v2::HostKindV1::Cline => "cline",
-        host_bundle_v2::HostKindV1::RooCode => "roo-code",
-        host_bundle_v2::HostKindV1::Kilo => "kilo",
-        host_bundle_v2::HostKindV1::KimiCode => "kimi",
-        host_bundle_v2::HostKindV1::OpenCode => "opencode",
-        host_bundle_v2::HostKindV1::Gemini => "gemini",
-        host_bundle_v2::HostKindV1::Copilot => "copilot",
+        host_bundle::HostKindV1::ClaudeCode => "claude",
+        host_bundle::HostKindV1::CursorDesktop | host_bundle::HostKindV1::CursorCloud => "cursor",
+        host_bundle::HostKindV1::Codex => "codex",
+        host_bundle::HostKindV1::Devin => "devin",
+        host_bundle::HostKindV1::Zed => "zed",
+        host_bundle::HostKindV1::Antigravity => "antigravity",
+        host_bundle::HostKindV1::Vibe => "vibe",
+        host_bundle::HostKindV1::Hermes => "hermes",
+        host_bundle::HostKindV1::Kiro => "kiro",
+        host_bundle::HostKindV1::ClineFamily => "cline",
+        host_bundle::HostKindV1::Cline => "cline",
+        host_bundle::HostKindV1::RooCode => "roo-code",
+        host_bundle::HostKindV1::Kilo => "kilo",
+        host_bundle::HostKindV1::KimiCode => "kimi",
+        host_bundle::HostKindV1::OpenCode => "opencode",
+        host_bundle::HostKindV1::Gemini => "gemini",
+        host_bundle::HostKindV1::Copilot => "copilot",
     }
 }
 
@@ -707,19 +702,19 @@ struct AgentRegistrationInspector<'a> {
     context: &'a HealthcheckContext,
 }
 
-impl host_bundle_v2::HostBundleRegistrationInspectorV1 for AgentRegistrationInspector<'_> {
+impl host_bundle::HostBundleRegistrationInspectorV1 for AgentRegistrationInspector<'_> {
     fn inspect_registration(
         &self,
-        host: host_bundle_v2::HostKindV1,
-        component: host_bundle_v2::HostBundleComponentV1,
-    ) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+        host: host_bundle::HostKindV1,
+        component: host_bundle::HostBundleComponentV1,
+    ) -> host_bundle::HostBundleRegistrationStateV1 {
         get_integration(integration_id_for_host(host)).map_or(
-            host_bundle_v2::HostBundleRegistrationStateV1::Missing,
+            host_bundle::HostBundleRegistrationStateV1::Missing,
             |integration| integration.host_component_registration(component, self.context),
         )
     }
 
-    fn interactive_activation_guidance(&self, host: host_bundle_v2::HostKindV1) -> Option<String> {
+    fn interactive_activation_guidance(&self, host: host_bundle::HostKindV1) -> Option<String> {
         get_integration(integration_id_for_host(host))
             .ok()
             .and_then(|integration| integration.interactive_activation_guidance())
@@ -731,9 +726,8 @@ pub fn inspect_receipt_backed_host_components(
     context: &HealthcheckContext,
     lifecycle_root: &Path,
     generator_commit: &str,
-) -> std::result::Result<host_bundle_v2::HostBundleDoctorReportV1, host_bundle_v2::HostBundleError>
-{
-    host_bundle_v2::inspect_installed_host_bundle_components_at(
+) -> std::result::Result<host_bundle::HostBundleDoctorReportV1, host_bundle::HostBundleError> {
+    host_bundle::inspect_installed_host_bundle_components_at(
         &context.home,
         lifecycle_root,
         &AgentRegistrationInspector { context },
@@ -1619,8 +1613,8 @@ fn config_holds_only_empty_root(settings: &serde_json::Value, root_key: &str) ->
 /// still launches `tracedecay serve`.
 pub fn mcp_servers_registration_state(
     settings_path: &Path,
-) -> host_bundle_v2::HostBundleRegistrationStateV1 {
-    use host_bundle_v2::HostBundleRegistrationStateV1 as State;
+) -> host_bundle::HostBundleRegistrationStateV1 {
+    use host_bundle::HostBundleRegistrationStateV1 as State;
 
     let Ok(bytes) = std::fs::read(settings_path) else {
         return State::Missing;

@@ -1,3 +1,4 @@
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_store::{
     GraphPublicationInputDigestV1, GraphPublicationReplayV1, GraphRecoveredGenerationDigestV1,
     SemanticVectorBatchOutputDigest, SemanticVectorCheckpointDigest,
@@ -66,9 +67,7 @@ impl GraphDb {
         require_receipt_output_digest(&logical_output_digest, &receipt.output_digest)?;
         batch.namespace = physical_namespace;
         let physical_output_digest = batch.semantic_vector_output_digest()?;
-        let batch_digest = physical_output_digest
-            .as_str()
-            .strip_prefix("sha256:")
+        let batch_digest = sha256_hex_suffix(physical_output_digest.as_str())
             .ok_or_else(|| GraphDbError::Corrupt {
                 message: "canonical semantic vector graph batch digest is not sha256".to_owned(),
             })?

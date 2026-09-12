@@ -917,7 +917,7 @@ use tracedecay_agent_hosts::agents::host_bundle_registry::{
     RECEIPT_BACKED_HOST_KINDS, default_components, verified_embedded_default_host_component_set,
     verified_embedded_host_bundle,
 };
-use tracedecay_agent_hosts::agents::host_bundle_v2::stock_host_kinds;
+use tracedecay_agent_hosts::agents::host_bundle::stock_host_kinds;
 use tracedecay_tool_catalog::{AvailabilityContract, CapabilityId};
 
 const REQUIRED_CAPABILITIES: [&str; 10] = [
