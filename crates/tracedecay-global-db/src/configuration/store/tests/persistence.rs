@@ -11,9 +11,9 @@ use super::super::{
 };
 use super::{
     ConfigurationAuditEventKindV1, ConfigurationValueV1, GlobalDbConfigurationControlStore,
-    HostAdmissionScope, TestConnection, TransactionBehavior, UtcMicros, control_authority,
+    HostAdmissionScope, TestConnection, UtcMicros, control_authority,
     control_authority_with_key_for_layer, count, direct_project_layer, global_setup, id,
-    protected_commit, root_revision,
+    protected_commit,
 };
 use crate::configuration::contracts::DirectConfigurationMutation;
 use crate::configuration::registry::ConfigurationRegistry;
@@ -324,12 +324,13 @@ async fn revision_store_round_trips_typed_snapshot_plan_receipt_and_audit() {
     );
 
     assert_eq!(
-        store.audit(None, 1).await.unwrap(),
+        ConfigurationRevisionStore::audit(&store, None, 1)
+            .await
+            .unwrap(),
         vec![commit.audit_event.clone()]
     );
     assert!(
-        store
-            .audit(Some(&commit.audit_event.event_id), 1)
+        ConfigurationRevisionStore::audit(&store, Some(&commit.audit_event.event_id), 1)
             .await
             .unwrap()
             .is_empty()
@@ -375,7 +376,9 @@ async fn rollback_terminal_event_is_persisted_and_visible_in_audit() {
         "rollback_applied"
     );
     assert_eq!(
-        store.audit(None, 1).await.unwrap(),
+        ConfigurationRevisionStore::audit(&store, None, 1)
+            .await
+            .unwrap(),
         vec![commit.audit_event]
     );
 }

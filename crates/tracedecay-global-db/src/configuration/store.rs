@@ -11,8 +11,6 @@ use super::contracts::{
 use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
 use super::schema::ConfigurationSchemaError;
-#[cfg(test)]
-use super::schema::ensure_configuration_schema;
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use thiserror::Error;
 use tracedecay_domain::configuration::{
@@ -29,7 +27,7 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
-use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_store::StoreShardScopeV1;
 use tracedecay_store::configuration::{
@@ -52,27 +50,17 @@ use activation::{
     insert_component_activation_event, latest_component_activation_state,
     validate_activation_error_code, validate_component_name,
 };
-#[cfg(test)]
-use audit::decode_audit_row;
 use codec::{StoredConfigurationProtectedOperationV1, invalid_store_data, unavailable_store};
-#[cfg(test)]
-use mutation::commit_configuration_transaction;
-#[cfg(test)]
-use mutation::validate_commit_bindings;
 use mutation::{
     ConfigurationCommitDraft, commit_direct_in_transaction_with_registry,
     current_state_from_transaction, derived_identifier, map_protected_change_snapshot_error,
     map_store_error,
 };
 use read::read_revision_from_executor;
-#[cfg(test)]
-use read::{current_revision_id_from_executor, read_change_plan_from_executor};
 use read::{
     validate_snapshot_registry_completeness, validate_snapshot_registry_completeness_with_registry,
 };
 use revision::{insert_revision, insert_revision_with_registry};
-#[cfg(test)]
-use write::insert_change_plan;
 
 pub use mutation::{ConfigurationDirectCommitOutcomeV1, commit_direct_in_transaction};
 
