@@ -263,6 +263,40 @@ fn branch_search_page_status(has_more: bool) -> (&'static str, Option<&'static s
     }
 }
 
+fn exact_branch_source(
+    ctx: &McpToolContext<'_>,
+    branch: &str,
+    revision: &tracedecay_domain::GitOidV1,
+) -> Result<(std::path::PathBuf, tracedecay_domain::RefId)> {
+    let source =
+        tracedecay_runtime_core::branch_meta::load_branch_meta(&ctx.store_layout().data_root)
+            .and_then(|meta| {
+                meta.branches
+                    .get(branch)
+                    .and_then(|entry| entry.graph_source.clone())
+            })
+            .filter(|source| source.source_oid == revision.as_str());
+    let (project_root, reference) = source.map_or_else(
+        || {
+            (
+                ctx.project_root().to_path_buf(),
+                format!("refs/heads/{branch}"),
+            )
+        },
+        |source| {
+            (
+                std::path::PathBuf::from(source.worktree_root),
+                source.reference,
+            )
+        },
+    );
+    let reference =
+        tracedecay_domain::RefId::new(reference).map_err(|error| TraceDecayError::Config {
+            message: format!("invalid branch source reference: {error}"),
+        })?;
+    Ok((project_root, reference))
+}
+
 /// Searches the generation sealed for the selected local ref's exact commit.
 #[hotpath::measure(future = true, label = "mcp.git.branch_search.total")]
 pub async fn handle_branch_search(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
@@ -337,15 +371,10 @@ pub async fn handle_branch_search(ctx: &McpToolContext<'_>, args: Value) -> Resu
             },
         ));
     };
-    let source_reference =
-        tracedecay_domain::RefId::new(format!("refs/heads/{branch}")).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("invalid branch reference: {error}"),
-            }
-        })?;
+    let (source_root, source_reference) = exact_branch_source(ctx, &branch, &revision.commit)?;
     match hotpath::future!(
         executor(tracedecay_query::code_search::CodeIndexSearchRequestV1 {
-            project_root: ctx.project_root().to_path_buf(),
+            project_root: source_root,
             query,
             source_revision: Some(revision.commit.clone()),
             source_tree: Some(revision.tree.clone()),
