@@ -326,8 +326,13 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_active_project" => {
                 let project = admitted_project_authorities(cg, &options)?;
                 let snapshots = AdmittedRequestSnapshotsV1::default();
-                let ctx = admitted_tool_context(&options, &project, &snapshots, None)?;
-                portable_info::handle_active_project(&ctx, &args, server_stats, scope_prefix)
+                let ctx = admitted_tool_context(
+                    &options,
+                    &project,
+                    &snapshots,
+                    options.code_index_freshness_reader.as_ref(),
+                )?;
+                portable_info::handle_active_project(&ctx, &args, server_stats, scope_prefix).await
             }
             "tracedecay_project_list" => {
                 portable_info::handle_project_list(

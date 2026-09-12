@@ -149,12 +149,17 @@ fn multi_root_execute_accepts_its_emitted_continuation_object() {
     };
     let generation = tracedecay_domain::RootScopeOutcomeV1::new(
         digest('b'),
-        tracedecay_domain::ScopeOutcome::<tracedecay_domain::RootGenerationV1>::Denied,
+        tracedecay_domain::ScopeOutcome::<Option<tracedecay_domain::RootGenerationV1>>::Denied,
     )
     .expect("denied root generation");
     let emitted = tracedecay_contracts::MultiRootContinuationV1::new(
         digest('a'),
-        vec![generation],
+        vec![generation.clone()],
+        vec![tracedecay_domain::RootScopeOutcomeV1::new(
+            digest('b'),
+            tracedecay_domain::ScopeOutcome::<Option<tracedecay_contracts::OpaqueCursor>>::Denied,
+        )
+        .expect("denied root cursor")],
         digest('c'),
         digest('d'),
         1,

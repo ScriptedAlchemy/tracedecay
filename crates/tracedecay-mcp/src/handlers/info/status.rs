@@ -97,6 +97,37 @@ fn age_seconds(recorded_at_micros: Option<i64>) -> Option<i64> {
     Some(now.saturating_sub(recorded).max(0) / 1_000_000)
 }
 
+#[derive(Clone, Copy)]
+struct ReadyServingSourceV1<'a> {
+    reference: &'a str,
+    revision: Option<&'a str>,
+    current_source_verified: bool,
+}
+
+fn ready_serving_source(
+    payload: Option<
+        &tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessPayloadV1,
+    >,
+) -> Option<ReadyServingSourceV1<'_>> {
+    let freshness = payload?.worktrees.first()?;
+    if freshness.latest_generation_id.is_none()
+        || !matches!(
+            freshness.code_graph_serving,
+            Some(
+                tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+            )
+        )
+    {
+        return None;
+    }
+    Some(ReadyServingSourceV1 {
+        reference: freshness.source_reference.as_deref()?,
+        revision: freshness.source_revision.as_deref(),
+        current_source_verified: freshness.coverage == "complete"
+            && freshness.staleness_state.as_deref() == Some("fresh"),
+    })
+}
+
 fn attach_compact_branch_summary(
     branch_diagnostics: &BranchDiagnostics,
     output: &mut Value,
@@ -280,27 +311,11 @@ pub async fn handle_status(
             CodeIndexRetrievalServingV1::AuthorityUnattached,
         ),
     };
-    let ready_serving_source = freshness_payload
-        .as_ref()
-        .and_then(|payload| payload.worktrees.first())
-        .filter(|freshness| {
-            freshness.latest_generation_id.is_some()
-                && matches!(
-                    freshness.code_graph_serving,
-                    Some(
-                        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
-                    )
-                )
-        })
-        .and_then(|freshness| {
-            freshness
-                .source_reference
-                .as_deref()
-                .zip(freshness.source_revision.as_deref())
-        });
+    let ready_serving_source = ready_serving_source(freshness_payload.as_ref());
     let branch_diagnostics = ctx.branch_diagnostics_for_serving_source(
-        ready_serving_source.map(|(reference, _)| reference),
-        ready_serving_source.map(|(_, revision)| revision),
+        ready_serving_source.map(|source| source.reference),
+        ready_serving_source.and_then(|source| source.revision),
+        ready_serving_source.is_some_and(|source| source.current_source_verified),
     );
     output["code_index_freshness"] = code_index_freshness;
     if include_storage_health {
@@ -579,7 +594,11 @@ fn render_status_md(value: &Value) -> String {
                     md.field(k, &format!("{} item(s)", a.len()));
                 }
                 Value::Object(o) => {
-                    md.field(k, &format!("{{{} field(s)}}", o.len()));
+                    if let Some(status) = o.get("status").and_then(Value::as_str) {
+                        md.field(&format!("{k}.status"), status);
+                    } else {
+                        md.field(k, &format!("{{{} field(s)}}", o.len()));
+                    }
                 }
                 Value::Null => {}
             }
@@ -651,13 +670,19 @@ fn store_kind_name(kind: &StoreKind) -> &'static str {
 }
 
 #[hotpath::measure(label = "mcp.info.active_project.total")]
-pub fn handle_active_project(
+pub async fn handle_active_project(
     ctx: &McpToolContext<'_>,
     args: &Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let branch = ctx.branch_diagnostics();
+    let freshness_payload = ctx.freshness().await;
+    let ready_serving_source = ready_serving_source(freshness_payload.as_ref());
+    let branch = ctx.branch_diagnostics_for_serving_source(
+        ready_serving_source.map(|source| source.reference),
+        ready_serving_source.and_then(|source| source.revision),
+        ready_serving_source.is_some_and(|source| source.current_source_verified),
+    );
     let output = active_project_context(ctx, &branch, server_stats, scope_prefix);
     Ok(generic_tool_result(
         Some(ctx.project_root()),
@@ -679,7 +704,20 @@ mod tests {
 
     use super::{
         code_index_freshness_projection, graph_statistics_value, historical_session_catch_up_state,
+        render_status_md,
     };
+
+    #[test]
+    fn status_markdown_exposes_nested_status_without_expanding_other_objects() {
+        let rendered = render_status_md(&serde_json::json!({
+            "code_index_freshness": {"status": "stale", "coverage": "partial"},
+            "branch": {"current_branch": "main", "tracked_branch_count": 1}
+        }));
+
+        assert!(rendered.contains("**code_index_freshness.status:** stale"));
+        assert!(rendered.contains("**branch:** {2 field(s)}"));
+        assert!(!rendered.contains("coverage"));
+    }
 
     /// The daemon serializes `graph_statistics` and `tracedecay status`
     /// deserializes it as the same Rust type. This round-trip is the wire

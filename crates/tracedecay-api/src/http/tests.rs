@@ -118,11 +118,6 @@ fn callable_code_operation_parser_is_exact_and_separately_owned() {
             HttpApplicationOwnerKind::CallableCode,
         ),
         (
-            "code_definition",
-            ApplicationSurfaceOperation::CodeDefinition,
-            HttpApplicationOwnerKind::CallableCode,
-        ),
-        (
             "code_type_definition",
             ApplicationSurfaceOperation::CodeTypeDefinition,
             HttpApplicationOwnerKind::CallableCode,

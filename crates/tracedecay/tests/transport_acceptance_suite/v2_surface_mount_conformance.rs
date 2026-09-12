@@ -101,7 +101,7 @@ const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
 /// metadata. CLI, MCP, and HTTP must expose the same application operations.
 /// Restating the set here is deliberate: it is the reverse authority, so it
 /// must not be derived from the thing under test.
-const CALLABLE_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
+const CALLABLE_CODE_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
     ApplicationSurfaceOperation::CodeExactOccurrence,
     ApplicationSurfaceOperation::CodePhraseSearch,
     ApplicationSurfaceOperation::CodeSymbolSearch,
@@ -113,7 +113,6 @@ const CALLABLE_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
     ApplicationSurfaceOperation::CodeFacets,
     ApplicationSurfaceOperation::CodeTimeline,
     ApplicationSurfaceOperation::CodeDeclaration,
-    ApplicationSurfaceOperation::CodeDefinition,
     ApplicationSurfaceOperation::CodeTypeDefinition,
     ApplicationSurfaceOperation::CodeReferences,
 ];

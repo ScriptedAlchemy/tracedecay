@@ -3,7 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
+    CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolPageV1,
+    CodeGraphSymbolSummaryV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -14,6 +15,16 @@ use super::map_projection_error;
 
 const MAX_ANALYTICAL_SYMBOLS: usize = 500_000;
 const MAX_ANALYTICAL_RELATIONS: usize = 2_000_000;
+const HEALTH_EDGE_KINDS: [RelationEdgeKindV1; 8] = [
+    RelationEdgeKindV1::Calls,
+    RelationEdgeKindV1::Uses,
+    RelationEdgeKindV1::TypeOf,
+    RelationEdgeKindV1::Implements,
+    RelationEdgeKindV1::Extends,
+    RelationEdgeKindV1::Returns,
+    RelationEdgeKindV1::Receives,
+    RelationEdgeKindV1::Annotates,
+];
 
 #[derive(Debug, Clone)]
 pub struct NodeMetrics {
@@ -100,6 +111,59 @@ impl<'a> GraphQueryManager<'a> {
                 return Ok(symbols);
             }
         }
+    }
+
+    pub fn symbols_in_logical_files_page(
+        &self,
+        logical_paths: &HashSet<String>,
+        after: Option<&SymbolOccurrenceId>,
+        limit: usize,
+        max_symbols_examined: usize,
+    ) -> Result<CodeGraphSymbolPageV1> {
+        if limit == 0 || max_symbols_examined == 0 {
+            return Err(invalid_request(
+                "verified graph file-symbol paging requires positive limits",
+            ));
+        }
+        let mut matched = Vec::new();
+        for path in logical_paths {
+            let budget = max_symbols_examined
+                .checked_sub(matched.len())
+                .filter(|remaining| *remaining > 0)
+                .ok_or_else(|| {
+                    budget_exhausted("verified graph file-symbol paging exceeded its scan budget")
+                })?;
+            let mut in_file = self
+                .reader
+                .symbols_in_logical_file(
+                    path,
+                    budget.saturating_add(1),
+                    Arc::clone(&self.cancellation),
+                )
+                .map_err(|error| {
+                    super::map_code_graph_read_runtime_error(map_projection_error(error))
+                })?;
+            if in_file.len() > budget {
+                return Err(budget_exhausted(
+                    "verified graph file-symbol paging exceeded its scan budget",
+                ));
+            }
+            matched.append(&mut in_file);
+        }
+        matched.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+        let mut symbols = Vec::with_capacity(limit.min(matched.len()));
+        let mut has_more = false;
+        for symbol in matched {
+            if after.is_some_and(|after| symbol.occurrence <= *after) {
+                continue;
+            }
+            if symbols.len() == limit {
+                has_more = true;
+                break;
+            }
+            symbols.push(symbol);
+        }
+        Ok(CodeGraphSymbolPageV1 { symbols, has_more })
     }
 
     #[hotpath::measure(label = "usecases.graph.dead_code", future = true)]
@@ -336,22 +400,40 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         path_prefix: Option<&str>,
     ) -> Result<HashMap<String, HashSet<String>>> {
+        if let Some(path_prefix) = path_prefix {
+            let files = hotpath::measure_block!("usecases.graph.adjacency.files", {
+                self.reader
+                    .files(MAX_ANALYTICAL_SYMBOLS, Arc::clone(&self.cancellation))
+                    .map_err(|error| {
+                        super::map_code_graph_read_runtime_error(map_projection_error(error))
+                    })
+            })?;
+            let logical_paths = files
+                .into_iter()
+                .map(|file| file.logical_path)
+                .filter(|path| path_is_within(path, path_prefix))
+                .collect::<HashSet<_>>();
+            let symbols = hotpath::measure_block!("usecases.graph.adjacency.symbols", {
+                self.symbols_in_logical_files_page(
+                    &logical_paths,
+                    None,
+                    MAX_ANALYTICAL_SYMBOLS,
+                    MAX_ANALYTICAL_SYMBOLS,
+                )
+                .map(|page| page.symbols)
+            })?;
+            let edges = hotpath::measure_block!("usecases.graph.adjacency.edges", {
+                self.incoming_edges(
+                    &symbols,
+                    &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+                )
+            })?;
+            return Ok(file_adjacency(logical_paths, &symbols, &edges));
+        }
         Ok(self
             .build_file_adjacency_bounded(MAX_ANALYTICAL_SYMBOLS, MAX_ANALYTICAL_RELATIONS)
             .await?
-            .adjacency
-            .into_iter()
-            .filter(|(source, _)| path_prefix.is_none_or(|prefix| path_is_within(source, prefix)))
-            .map(|(source, targets)| {
-                let targets = targets
-                    .into_iter()
-                    .filter(|target| {
-                        path_prefix.is_none_or(|prefix| path_is_within(target, prefix))
-                    })
-                    .collect();
-                (source, targets)
-            })
-            .collect())
+            .adjacency)
     }
 
     #[hotpath::skip]
@@ -367,10 +449,6 @@ impl<'a> GraphQueryManager<'a> {
                     super::map_code_graph_read_runtime_error(map_projection_error(error))
                 })
         })?;
-        let mut adjacency = files
-            .iter()
-            .map(|file| (file.logical_path.clone(), HashSet::new()))
-            .collect::<HashMap<_, _>>();
         let symbols = hotpath::measure_block!("usecases.graph.adjacency.symbols", {
             self.page_all_symbols(
                 max_dependency_edges.max(1),
@@ -393,27 +471,15 @@ impl<'a> GraphQueryManager<'a> {
                     super::map_code_graph_read_runtime_error(map_projection_error(error))
                 })
         })?;
-        let paths = symbols
-            .into_iter()
-            .filter_map(|symbol| Some((symbol.occurrence, symbol.binding?.logical_path?)))
-            .collect::<HashMap<_, _>>();
-        for edge in &edges {
-            let (Some(source), Some(target)) = (
-                paths.get(&edge.edge.from_occurrence),
-                paths.get(&edge.edge.to_occurrence),
-            ) else {
-                continue;
-            };
-            if source != target {
-                adjacency
-                    .entry(source.clone())
-                    .or_default()
-                    .insert(target.clone());
-            }
-        }
+        let dependency_edges_examined = edges.len();
+        let adjacency = file_adjacency(
+            files.into_iter().map(|file| file.logical_path).collect(),
+            &symbols,
+            &edges,
+        );
         Ok(FileAdjacencyScan {
             files_examined: adjacency.len(),
-            dependency_edges_examined: edges.len(),
+            dependency_edges_examined,
             adjacency,
         })
     }
@@ -430,37 +496,14 @@ impl<'a> GraphQueryManager<'a> {
                     super::map_code_graph_read_runtime_error(map_projection_error(error))
                 })
         })?;
-        let symbols = hotpath::measure_block!("usecases.graph.health.symbols", {
-            self.page_all_symbols(
-                MAX_ANALYTICAL_SYMBOLS,
-                "verified health symbol census exceeded its analytical budget",
-            )
-        })?;
-        let occurrences = symbols
-            .iter()
-            .map(|symbol| symbol.occurrence.clone())
-            .collect::<Vec<_>>();
-        let edges = hotpath::measure_block!("usecases.graph.health.edges", {
-            self.reader
-                .edges_among(
-                    &occurrences,
-                    &[
-                        RelationEdgeKindV1::Calls,
-                        RelationEdgeKindV1::Uses,
-                        RelationEdgeKindV1::TypeOf,
-                        RelationEdgeKindV1::Implements,
-                        RelationEdgeKindV1::Extends,
-                        RelationEdgeKindV1::Returns,
-                        RelationEdgeKindV1::Receives,
-                        RelationEdgeKindV1::Annotates,
-                    ],
-                    MAX_ANALYTICAL_RELATIONS,
-                    Arc::clone(&self.cancellation),
-                )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })
-        })?;
+        let logical_paths = path_prefix.map(|prefix| {
+            files
+                .iter()
+                .map(|file| file.logical_path.clone())
+                .filter(|path| path_is_within(path, prefix))
+                .collect::<HashSet<_>>()
+        });
+        let (symbols, edges) = self.health_evidence(logical_paths.as_ref())?;
         let metadata = health_symbol_metadata(&symbols)?;
         let mut adjacency = files
             .into_iter()
@@ -504,40 +547,134 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         path_prefix: Option<&str>,
     ) -> Result<Vec<VerifiedHealthFileAggregateV1>> {
+        let logical_paths = match path_prefix {
+            Some(prefix) => Some(
+                self.reader
+                    .files(MAX_ANALYTICAL_SYMBOLS, Arc::clone(&self.cancellation))
+                    .map_err(|error| {
+                        super::map_code_graph_read_runtime_error(map_projection_error(error))
+                    })?
+                    .into_iter()
+                    .map(|file| file.logical_path)
+                    .filter(|path| path_is_within(path, prefix))
+                    .collect::<HashSet<_>>(),
+            ),
+            None => None,
+        };
+        let (symbols, edges) = self.health_evidence(logical_paths.as_ref())?;
+        let metadata = health_symbol_metadata(&symbols)?;
+        Ok(fold_health_aggregates(metadata, &edges, path_prefix))
+    }
+
+    fn health_evidence(
+        &self,
+        logical_paths: Option<&HashSet<String>>,
+    ) -> Result<(Vec<CodeGraphSymbolSummaryV1>, Vec<CodeGraphSemanticEdgeV1>)> {
         let symbols = hotpath::measure_block!("usecases.graph.health.symbols", {
-            self.page_all_symbols(
-                MAX_ANALYTICAL_SYMBOLS,
-                "verified health symbol census exceeded its analytical budget",
-            )
+            match logical_paths {
+                Some(paths) => self
+                    .symbols_in_logical_files_page(
+                        paths,
+                        None,
+                        MAX_ANALYTICAL_SYMBOLS,
+                        MAX_ANALYTICAL_SYMBOLS,
+                    )
+                    .map(|page| page.symbols),
+                None => self.page_all_symbols(
+                    MAX_ANALYTICAL_SYMBOLS,
+                    "verified health symbol census exceeded its analytical budget",
+                ),
+            }
         })?;
         let occurrences = symbols
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
         let edges = hotpath::measure_block!("usecases.graph.health.edges", {
-            self.reader
-                .edges_among(
-                    &occurrences,
-                    &[
-                        RelationEdgeKindV1::Calls,
-                        RelationEdgeKindV1::Uses,
-                        RelationEdgeKindV1::TypeOf,
-                        RelationEdgeKindV1::Implements,
-                        RelationEdgeKindV1::Extends,
-                        RelationEdgeKindV1::Returns,
-                        RelationEdgeKindV1::Receives,
-                        RelationEdgeKindV1::Annotates,
-                    ],
-                    MAX_ANALYTICAL_RELATIONS,
-                    Arc::clone(&self.cancellation),
-                )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })
+            if logical_paths.is_some() {
+                self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)
+            } else {
+                self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)
+            }
         })?;
-        let metadata = health_symbol_metadata(&symbols)?;
-        Ok(fold_health_aggregates(metadata, &edges, path_prefix))
+        Ok((symbols, edges))
     }
+
+    fn incoming_edges(
+        &self,
+        symbols: &[CodeGraphSymbolSummaryV1],
+        kinds: &[RelationEdgeKindV1],
+    ) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        let occurrences = symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<Vec<_>>();
+        self.reader
+            .callers(
+                &occurrences,
+                kinds,
+                MAX_ANALYTICAL_RELATIONS,
+                Arc::clone(&self.cancellation),
+            )
+            .map(|edges| edges.into_iter().flatten().collect())
+            .map_err(|error| super::map_code_graph_read_runtime_error(map_projection_error(error)))
+    }
+
+    fn edges_among(
+        &self,
+        occurrences: &[SymbolOccurrenceId],
+        kinds: &[RelationEdgeKindV1],
+    ) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
+        if occurrences.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.reader
+            .edges_among(
+                occurrences,
+                kinds,
+                MAX_ANALYTICAL_RELATIONS,
+                Arc::clone(&self.cancellation),
+            )
+            .map_err(|error| super::map_code_graph_read_runtime_error(map_projection_error(error)))
+    }
+}
+
+fn file_adjacency(
+    logical_paths: HashSet<String>,
+    symbols: &[CodeGraphSymbolSummaryV1],
+    edges: &[CodeGraphSemanticEdgeV1],
+) -> HashMap<String, HashSet<String>> {
+    let paths = symbols
+        .iter()
+        .filter_map(|symbol| {
+            Some((
+                symbol.occurrence.clone(),
+                symbol.binding.as_ref()?.logical_path.clone()?,
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut adjacency = logical_paths
+        .into_iter()
+        .map(|path| (path, HashSet::new()))
+        .collect::<HashMap<_, _>>();
+    for edge in edges {
+        let (Some(source), Some(target)) = (
+            paths.get(&edge.edge.from_occurrence),
+            paths.get(&edge.edge.to_occurrence),
+        ) else {
+            continue;
+        };
+        if source != target {
+            adjacency
+                .entry(source.clone())
+                .or_default()
+                .insert(target.clone());
+        }
+    }
+    adjacency
 }
 
 fn health_symbol_metadata(
@@ -591,6 +728,11 @@ fn fold_health_aggregates(
         .iter()
         .filter(|(_, (_, record))| is_test_marker(record))
         .map(|(occurrence, _)| occurrence.clone())
+        .chain(edges.iter().filter_map(|edge| {
+            (edge.neighbor.occurrence == edge.edge.from_occurrence
+                && edge.neighbor.metadata.as_ref().is_some_and(is_test_marker))
+            .then(|| edge.edge.from_occurrence.clone())
+        }))
         .collect::<HashSet<_>>();
     let test_annotated = edges
         .iter()
@@ -651,13 +793,99 @@ fn unavailable(detail: &str) -> TraceDecayError {
     }
 }
 
+fn invalid_request(detail: &str) -> TraceDecayError {
+    TraceDecayError::project_route("code-graph-invalid-request", false, detail)
+}
+
+fn budget_exhausted(detail: &str) -> TraceDecayError {
+    TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
+}
+
 fn path_is_within(path: &str, directory: &str) -> bool {
     Path::new(path).starts_with(directory)
 }
 
 #[cfg(test)]
 mod path_scope_tests {
-    use super::path_is_within;
+    use std::collections::{HashMap, HashSet};
+    use std::fmt::Debug;
+
+    use tracedecay_code_index::graph_projection::{
+        CodeGraphSemanticEdgeV1, CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
+    };
+    use tracedecay_code_index::lineage::LineageSymbolRecordV1;
+    use tracedecay_domain::{
+        CanonicalRelationEdgeV1, ComplexityAnalysisV1, EdgeAuthorityV1, FileOccurrenceId,
+        LanguageDescriptorRevision, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
+    };
+
+    use super::{file_adjacency, fold_health_aggregates, path_is_within};
+
+    fn digest<T>(byte: char) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: Debug,
+    {
+        T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+    }
+
+    fn metadata(occurrence: &str, name: &str, kind: &str) -> LineageSymbolRecordV1 {
+        LineageSymbolRecordV1 {
+            occurrence: SymbolOccurrenceId::new(occurrence).expect("occurrence"),
+            identity: digest('1'),
+            qualified_name: name.to_owned(),
+            simple_name: name.to_owned(),
+            kind: kind.to_owned(),
+            visibility: "private".to_owned(),
+            branches: 0,
+            loops: 0,
+            max_nesting: 0,
+            complexity_analysis: ComplexityAnalysisV1::Complete,
+            line_span: 1,
+            start_line: 1,
+            signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
+            skip_test_coverage: false,
+            file_identity: digest('2'),
+            content_digest: digest('3'),
+        }
+    }
+
+    fn symbol(occurrence: &str, file: &str) -> CodeGraphSymbolSummaryV1 {
+        CodeGraphSymbolSummaryV1 {
+            occurrence: SymbolOccurrenceId::new(occurrence).expect("occurrence"),
+            binding: Some(CodeGraphSymbolBindingV1 {
+                file: FileOccurrenceId::new(format!("file.{occurrence}")).expect("file occurrence"),
+                logical_path: Some(file.to_owned()),
+                source_span: None,
+                chunk: None,
+                language_descriptor_revision: LanguageDescriptorRevision::new("language.rust.v1")
+                    .expect("language revision"),
+            }),
+            metadata: None,
+        }
+    }
+
+    fn edge(
+        from: &CodeGraphSymbolSummaryV1,
+        to: &CodeGraphSymbolSummaryV1,
+    ) -> CodeGraphSemanticEdgeV1 {
+        CodeGraphSemanticEdgeV1 {
+            edge: CanonicalRelationEdgeV1 {
+                from_occurrence: from.occurrence.clone(),
+                to_occurrence: to.occurrence.clone(),
+                kind: RelationEdgeKindV1::Calls,
+                authority: EdgeAuthorityV1::SyntaxExact,
+                evidence_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+            },
+            neighbor: from.clone(),
+        }
+    }
 
     #[test]
     fn directory_scope_excludes_sibling_names_with_the_same_prefix() {
@@ -670,5 +898,75 @@ mod path_scope_tests {
             "crates/tracedecay-code-index/src/lib.rs",
             "crates/tracedecay"
         ));
+    }
+
+    #[test]
+    fn scoped_adjacency_matches_whole_graph_induced_result_at_the_boundary() {
+        let inside = symbol("symbol.inside", "src/scoped/inside.rs");
+        let next = symbol("symbol.next", "src/scoped/next.rs");
+        let outside = symbol("symbol.outside", "src/outside.rs");
+        let edges = vec![edge(&inside, &next), edge(&outside, &inside)];
+        let whole = file_adjacency(
+            HashSet::from([
+                "src/scoped/inside.rs".to_owned(),
+                "src/scoped/next.rs".to_owned(),
+                "src/outside.rs".to_owned(),
+            ]),
+            &[inside.clone(), next.clone(), outside],
+            &edges,
+        );
+        let scoped = file_adjacency(
+            HashSet::from([
+                "src/scoped/inside.rs".to_owned(),
+                "src/scoped/next.rs".to_owned(),
+            ]),
+            &[inside, next],
+            &edges,
+        );
+
+        assert_eq!(
+            scoped["src/scoped/inside.rs"],
+            HashSet::from(["src/scoped/next.rs".to_owned()])
+        );
+        assert_eq!(
+            scoped,
+            whole
+                .into_iter()
+                .filter(|(source, _)| source.starts_with("src/scoped/"))
+                .map(|(source, targets)| {
+                    (
+                        source,
+                        targets
+                            .into_iter()
+                            .filter(|target| target.starts_with("src/scoped/"))
+                            .collect(),
+                    )
+                })
+                .collect()
+        );
+    }
+
+    #[test]
+    fn scoped_health_recognizes_an_external_test_marker_from_the_incoming_edge() {
+        let inside_record = metadata("symbol.inside_test", "inside_test", "function");
+        let marker_record = metadata("symbol.test_marker", "test", "annotation_usage");
+        let mut inside = symbol("symbol.inside_test", "src/scoped/inside.rs");
+        inside.metadata = Some(inside_record.clone());
+        let mut marker = symbol("symbol.test_marker", "src/outside.rs");
+        marker.metadata = Some(marker_record);
+        let mut annotation = edge(&marker, &inside);
+        annotation.edge.kind = RelationEdgeKindV1::Annotates;
+        let aggregates = fold_health_aggregates(
+            HashMap::from([(
+                inside.occurrence.clone(),
+                ("src/scoped/inside.rs".to_owned(), &inside_record),
+            )]),
+            &[annotation],
+            Some("src/scoped"),
+        );
+
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].function_methods, 1);
+        assert_eq!(aggregates[0].dead_function_methods, 0);
     }
 }

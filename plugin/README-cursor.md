@@ -130,7 +130,6 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_code_callees",
     "tracedecay:tracedecay_code_callers",
     "tracedecay:tracedecay_code_declaration",
-    "tracedecay:tracedecay_code_definition",
     "tracedecay:tracedecay_code_exact_occurrence",
     "tracedecay:tracedecay_code_facets",
     "tracedecay:tracedecay_code_implementations",

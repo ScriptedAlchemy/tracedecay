@@ -144,7 +144,7 @@ async fn drain_all_hosts(
         let Some(project_id) = project_id else {
             continue;
         };
-        let report = drain_admitted_host_spool(
+        let report = Box::pin(drain_admitted_host_spool(
             data_root,
             *host,
             project_id,
@@ -152,7 +152,7 @@ async fn drain_all_hosts(
             graph,
             project_sessions,
             background_cpu,
-        )
+        ))
         .await;
         if let Some(report) = report
             && (report.committed > 0 || report.duplicates > 0 || report.tombstoned > 0)
@@ -194,7 +194,7 @@ async fn drain_admitted_host_spool(
     let (spool, _report) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now).ok()?;
     let binding = published_hook_scope_binding(data_root, host, now);
     Some(
-        drain_host_spool_once(
+        Box::pin(drain_host_spool_once(
             spool,
             project_id,
             binding.as_ref(),
@@ -229,7 +229,7 @@ async fn drain_admitted_host_spool(
                     .await,
                 )
             },
-        )
+        ))
         .await,
     )
 }
@@ -308,13 +308,13 @@ pub(crate) fn register_hook_v2_replay_consumer(
             else {
                 break;
             };
-            drain_all_hosts(
+            Box::pin(drain_all_hosts(
                 &graph_owner,
                 &task_data_root,
                 delivery_settlements.as_ref(),
                 &task_project_sessions,
                 &task_background_cpu,
-            )
+            ))
             .await;
             drop(graph_owner);
             drop(delivery_settlements);

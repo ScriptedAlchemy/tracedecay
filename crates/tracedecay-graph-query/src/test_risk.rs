@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 
 use serde::Serialize;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
@@ -144,7 +145,7 @@ pub async fn analyze_test_risk(
     include_tested: bool,
     limit: usize,
 ) -> Result<TestRiskReport> {
-    let evidence = verified_test_evidence(graph)?;
+    let evidence = verified_test_evidence(graph, path_prefix)?;
     let eligible_fns: Vec<_> = evidence
         .symbols
         .iter()
@@ -163,12 +164,12 @@ pub async fn analyze_test_risk(
 
     let excluded_count = eligible_fns
         .iter()
-        .filter(|n| !n.file.starts_with("src/"))
+        .filter(|n| !is_source_file(&n.file))
         .count();
     let source_fns: Vec<_> = eligible_fns
         .iter()
         .copied()
-        .filter(|n| n.file.starts_with("src/"))
+        .filter(|n| is_source_file(&n.file))
         .collect();
 
     let mut fan_in: HashMap<String, usize> = HashMap::new();
@@ -206,6 +207,8 @@ pub async fn analyze_test_risk(
             n.callable
                 && n.skip_test_coverage
                 && !is_test_file(&n.file)
+                && is_source_file(&n.file)
+                && tracedecay_runtime_core::path_scope::path_matches_scope(&n.file, path_prefix)
                 && !n.qualified_name.contains("::tests::")
         })
         .count();
@@ -328,8 +331,32 @@ pub struct VerifiedTestEvidence {
 }
 
 #[hotpath::measure(label = "graph.health.test_risk.evidence")]
-pub fn verified_test_evidence(graph: &VerifiedGraphQuery) -> Result<VerifiedTestEvidence> {
-    let page = graph.symbols_page(None, MAX_TEST_RISK_SYMBOLS)?;
+pub fn verified_test_evidence(
+    graph: &VerifiedGraphQuery,
+    path_prefix: Option<&str>,
+) -> Result<VerifiedTestEvidence> {
+    let scoped_paths = path_prefix
+        .map(|prefix| {
+            graph.files(MAX_TEST_RISK_SYMBOLS).map(|files| {
+                files
+                    .into_iter()
+                    .map(|file| file.logical_path)
+                    .filter(|path| {
+                        tracedecay_runtime_core::path_scope::path_matches_scope(path, Some(prefix))
+                    })
+                    .collect::<HashSet<_>>()
+            })
+        })
+        .transpose()?;
+    let page = match &scoped_paths {
+        Some(paths) => graph.symbols_in_logical_files_page(
+            paths,
+            None,
+            MAX_TEST_RISK_SYMBOLS,
+            MAX_TEST_RISK_SYMBOLS,
+        )?,
+        None => graph.symbols_page(None, MAX_TEST_RISK_SYMBOLS)?,
+    };
     if page.has_more {
         return Err(test_risk_graph_problem(
             "verified test-risk symbol census exceeded its budget",
@@ -345,12 +372,7 @@ pub fn verified_test_evidence(graph: &VerifiedGraphQuery) -> Result<VerifiedTest
     let mut test_markers = HashSet::new();
     for symbol in page.symbols {
         let (metadata, file) = verified_test_symbol_parts(&symbol)?;
-        if metadata.kind == "annotation_usage"
-            && matches!(
-                metadata.simple_name.as_str(),
-                "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
-            )
-        {
+        if tracedecay_code_index::is_test_marker(metadata) {
             test_markers.insert(symbol.occurrence.clone());
         }
         files.insert(symbol.occurrence.as_str().to_owned(), file.to_owned());
@@ -370,11 +392,15 @@ pub fn verified_test_evidence(graph: &VerifiedGraphQuery) -> Result<VerifiedTest
             skip_test_coverage: metadata.skip_test_coverage,
         });
     }
-    let edges = graph.edges_among(
-        &occurrences,
-        &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Annotates],
-        MAX_TEST_RISK_RELATIONS,
-    )?;
+    let edges = if scoped_paths.is_some() {
+        scoped_test_edges(graph, &occurrences, &mut files, &mut test_markers)?
+    } else {
+        graph.edges_among(
+            &occurrences,
+            &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Annotates],
+            MAX_TEST_RISK_RELATIONS,
+        )?
+    };
     hotpath::gauge!("graph.health.test_risk.symbols_total").inc(symbols.len() as u64);
     hotpath::gauge!("graph.health.test_risk.edges_total").inc(edges.len() as u64);
     let mut calls = Vec::new();
@@ -397,6 +423,95 @@ pub fn verified_test_evidence(graph: &VerifiedGraphQuery) -> Result<VerifiedTest
         files,
         test_annotated,
     })
+}
+
+fn scoped_test_edges(
+    graph: &VerifiedGraphQuery,
+    occurrences: &[SymbolOccurrenceId],
+    files: &mut HashMap<String, String>,
+    test_markers: &mut HashSet<SymbolOccurrenceId>,
+) -> Result<Vec<tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1>> {
+    let mut edges = Vec::new();
+    let mut seen = occurrences.iter().cloned().collect::<HashSet<_>>();
+    let mut frontier = occurrences.to_vec();
+    for _ in 0..ATTRIBUTION_DEPTH {
+        if frontier.is_empty() {
+            break;
+        }
+        let remaining = MAX_TEST_RISK_RELATIONS
+            .checked_sub(edges.len())
+            .filter(|remaining| *remaining > 0)
+            .ok_or_else(|| {
+                test_risk_graph_problem("verified test-risk relation census exceeded its budget")
+            })?;
+        let incoming = graph
+            .callers(&frontier, &[RelationEdgeKindV1::Calls], remaining)?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if edges.len().saturating_add(incoming.len()) > MAX_TEST_RISK_RELATIONS {
+            return Err(test_risk_graph_problem(
+                "verified test-risk relation census exceeded its budget",
+            ));
+        }
+        let mut next = Vec::new();
+        for edge in &incoming {
+            let (metadata, file) = verified_test_symbol_parts(&edge.neighbor)?;
+            files.insert(
+                edge.neighbor.occurrence.as_str().to_owned(),
+                file.to_owned(),
+            );
+            if seen.insert(edge.neighbor.occurrence.clone()) {
+                next.push(edge.neighbor.occurrence.clone());
+            }
+            if tracedecay_code_index::is_test_marker(metadata) {
+                test_markers.insert(edge.neighbor.occurrence.clone());
+            }
+        }
+        edges.extend(incoming);
+        frontier = next;
+    }
+    if seen.is_empty() {
+        return Ok(edges);
+    }
+    let remaining = MAX_TEST_RISK_RELATIONS
+        .checked_sub(edges.len())
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| {
+            test_risk_graph_problem("verified test-risk relation census exceeded its budget")
+        })?;
+    let annotated = graph
+        .callers(
+            &seen.into_iter().collect::<Vec<_>>(),
+            &[RelationEdgeKindV1::Annotates],
+            remaining,
+        )?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if edges.len().saturating_add(annotated.len()) > MAX_TEST_RISK_RELATIONS {
+        return Err(test_risk_graph_problem(
+            "verified test-risk relation census exceeded its budget",
+        ));
+    }
+    for edge in &annotated {
+        let (metadata, file) = verified_test_symbol_parts(&edge.neighbor)?;
+        files.insert(
+            edge.neighbor.occurrence.as_str().to_owned(),
+            file.to_owned(),
+        );
+        if tracedecay_code_index::is_test_marker(metadata) {
+            test_markers.insert(edge.neighbor.occurrence.clone());
+        }
+    }
+    edges.extend(annotated);
+    Ok(edges)
+}
+
+fn is_source_file(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .any(|component| component.as_os_str() == "src")
 }
 
 pub fn verified_test_symbol_parts(
