@@ -429,6 +429,13 @@ pub(super) async fn execute_expand(
     let provider = specific_provider(&request.provider)?;
     let session_id = session_id(&request.session_id)?;
     let (target, grain, summary) = match &request.target {
+        LcmExpandTargetV1::CanonicalOccurrence { message_id } => (
+            LcmExpandTarget::CanonicalOccurrence {
+                message_id: required(message_id)?.to_owned(),
+            },
+            RetrievalGrainV1::Occurrence,
+            false,
+        ),
         LcmExpandTargetV1::RawMessage { store_id } => {
             let store_id = i64::try_from(*store_id)
                 .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;

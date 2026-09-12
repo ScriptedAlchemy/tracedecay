@@ -747,30 +747,6 @@ def prime_fixture_values(
         raise SweepError("automation run list producer returned no inspectable run identity")
     fixture["automation_run_id"] = run_id
 
-    loaded = _producer_call(
-        client,
-        "tracedecay_lcm_load_session",
-        {
-            "provider": "codex",
-            "session_id": fixture["session_id"],
-            "limit": 10,
-            "format": "json",
-        },
-        deadline("tracedecay_lcm_load_session"),
-    )
-    raw_message = next(
-        (
-            value
-            for value in _objects(loaded)
-            if isinstance(value.get("store_id"), int)
-            and value.get("content") == fixture["lcm_message"]
-        ),
-        None,
-    )
-    if raw_message is None:
-        raise SweepError("LCM session producer omitted the captured prompt message")
-    fixture["lcm_store_id"] = raw_message["store_id"]
-
     refresh_selectors = profile_refresh_selectors(fixture)
     begun_refresh = _producer_call(
         client,
@@ -794,6 +770,72 @@ def prime_fixture_values(
             "session_refresh_operation_id": refresh_operation_id,
         }
     )
+    refresh_deadline = time.monotonic() + 30
+    while True:
+        refresh_status = _producer_call(
+            client,
+            "tracedecay_session_refresh_status",
+            {"handle": refresh_handle, **refresh_selectors},
+            deadline("tracedecay_session_refresh_status"),
+        )
+        outcome = first_value(refresh_status, {"outcome"})
+        if outcome == "complete":
+            if (
+                first_value(refresh_status, {"operation_id"}) != refresh_operation_id
+                or first_value(refresh_status, {"state"}) != "complete"
+            ):
+                raise SweepError("session refresh completion omitted its durable receipt")
+            break
+        if outcome != "running" or time.monotonic() >= refresh_deadline:
+            raise SweepError(f"session refresh did not complete (observed {outcome!r})")
+        time.sleep(0.05)
+
+    loaded = _producer_call(
+        client,
+        "tracedecay_lcm_load_session",
+        {
+            "provider": "codex",
+            "session_id": fixture["session_id"],
+            "limit": 10,
+            "format": "json",
+        },
+        deadline("tracedecay_lcm_load_session"),
+    )
+    raw_message = next(
+        (
+            value
+            for value in _objects(loaded)
+            if value.get("storage_kind") == "canonical_occurrence"
+            and isinstance(value.get("message_id"), str)
+            and value.get("content") == fixture["lcm_message"]
+        ),
+        None,
+    )
+    if raw_message is None:
+        raise SweepError("LCM session producer omitted the captured canonical prompt message")
+    fixture["lcm_message_id"] = raw_message["message_id"]
+    expanded = _producer_call(
+        client,
+        "tracedecay_lcm_expand",
+        {
+            "provider": "codex",
+            "session_id": fixture["session_id"],
+            "target": {
+                "kind": "canonical_occurrence",
+                "message_id": fixture["lcm_message_id"],
+            },
+            "format": "json",
+        },
+        deadline("tracedecay_lcm_expand"),
+    )
+    expanded_objects = list(_objects(expanded))
+    if not any(
+        value.get("content") == fixture["lcm_message"] for value in expanded_objects
+    ) or not any(
+        value.get("message_id") == fixture["lcm_message_id"]
+        for value in expanded_objects
+    ):
+        raise SweepError("LCM expansion did not return the canonical prompt identity and content")
 
     # The callable code-query surface serves only complete immutable index
     # generations, and a cold fixture publishes its first generation
@@ -1071,7 +1113,10 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, An
         return {
             "provider": "codex",
             "session_id": fixture["session_id"],
-            "target": {"kind": "raw_message", "store_id": fixture["lcm_store_id"]},
+            "target": {
+                "kind": "canonical_occurrence",
+                "message_id": fixture["lcm_message_id"],
+            },
             "format": "json",
         }
     if name == "tracedecay_lcm_load_session":

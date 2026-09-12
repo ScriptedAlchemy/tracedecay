@@ -399,6 +399,9 @@ impl DaemonSessionRetrievalService {
 
     fn lcm_expand_target_key(target: &LcmExpandTarget) -> String {
         match target {
+            LcmExpandTarget::CanonicalOccurrence { message_id } => {
+                format!("occurrence:{message_id}")
+            }
             LcmExpandTarget::RawMessage { store_id } => format!("raw:{store_id}"),
             LcmExpandTarget::SummaryNode { node_id } => format!("summary:{node_id}"),
             LcmExpandTarget::ExternalPayload { payload_ref } => {

@@ -411,18 +411,21 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
             arguments, {"run_id": "automation.run.fixture", "format": "json"}
         )
 
-    def test_lcm_expand_consumes_the_captured_message_store_id(self) -> None:
+    def test_lcm_expand_consumes_the_canonical_message_identity(self) -> None:
         runner = load_runner()
         arguments = runner.materialize_tool_arguments(
             {
                 "name": "tracedecay_lcm_expand",
                 "inputSchema": {"type": "object", "properties": {}, "required": []},
             },
-            {"session_id": "session.fixture", "lcm_store_id": 41},
+            {"session_id": "session.fixture", "lcm_message_id": "message.fixture"},
         )
         self.assertEqual(arguments["provider"], "codex")
         self.assertEqual(arguments["session_id"], "session.fixture")
-        self.assertEqual(arguments["target"], {"kind": "raw_message", "store_id": 41})
+        self.assertEqual(
+            arguments["target"],
+            {"kind": "canonical_occurrence", "message_id": "message.fixture"},
+        )
 
     def test_session_refresh_status_consumes_the_begin_producer_handle(self) -> None:
         runner = load_runner()
@@ -1316,11 +1319,21 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 '{"runs":[{"run_id":"automation.run.fixture"}]}'
             ),
             "tracedecay_lcm_load_session": cls.response(
-                '{"messages":[{"store_id":41,"content":"catalog sweep captured LCM message"}]}'
+                '{"messages":[{"message_id":"message.fixture",'
+                '"storage_kind":"canonical_occurrence",'
+                '"content":"catalog sweep captured LCM message"}]}'
+            ),
+            "tracedecay_lcm_expand": cls.response(
+                '{"expansion":{"content":"catalog sweep captured LCM message",'
+                '"raw_message":{"message_id":"message.fixture"}}}'
             ),
             "tracedecay_session_refresh_begin": cls.response(
                 '{"outcome":"started","handle":"srh_fixture",'
                 '"operation_id":"refresh.operation.fixture"}'
+            ),
+            "tracedecay_session_refresh_status": cls.response(
+                '{"outcome":"complete","receipt":{"operation_id":'
+                '"refresh.operation.fixture","state":"complete"}}'
             ),
             "tracedecay_active_project": cls.response(
                 '{"project_id":"project.fixture"}'
@@ -1415,7 +1428,9 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_git_hunks",
             "tracedecay_automation_run_list",
             "tracedecay_lcm_load_session",
+            "tracedecay_lcm_expand",
             "tracedecay_session_refresh_begin",
+            "tracedecay_session_refresh_status",
             "tracedecay_active_project",
             "tracedecay_configuration_set",
             "tracedecay_configuration_unset",
@@ -1472,7 +1487,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(fixture["code_node_id"], "sym:code")
         self.assertEqual(fixture["preview_input_id"], "preview.fixture")
         self.assertEqual(fixture["automation_run_id"], "automation.run.fixture")
-        self.assertEqual(fixture["lcm_store_id"], 41)
+        self.assertEqual(fixture["lcm_message_id"], "message.fixture")
         self.assertEqual(fixture["session_refresh_handle"], "srh_fixture")
         self.assertEqual(
             fixture["session_refresh_operation_id"],
