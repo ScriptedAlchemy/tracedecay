@@ -207,18 +207,24 @@ impl SessionTemporalExecutionReport {
 #[derive(Debug)]
 pub enum SessionTemporalExecutionError {
     WrongScope,
-    Stale { generation_lag: u64 },
+    Stale {
+        generation_lag: u64,
+    },
     Locked,
     Redacted,
     Deleted,
     Denied,
     Unavailable,
     ResetRequired,
-    Empty { freshness: SessionDataFreshness },
+    Empty {
+        freshness: SessionDataFreshness,
+    },
     /// The bounded budget boundary that refused, classified where the kernel
     /// port resource is still known. Dropping it here left every refusal
     /// indistinguishable from an oversized request at the application surface.
-    BudgetExhausted { stage: SessionRetrievalBudgetStageV1 },
+    BudgetExhausted {
+        stage: SessionRetrievalBudgetStageV1,
+    },
     Cancelled,
     Kernel(TemporalKernelError),
 }
