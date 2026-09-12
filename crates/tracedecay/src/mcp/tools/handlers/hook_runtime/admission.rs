@@ -419,23 +419,23 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         )
         .await;
     }
-    let lifecycle = if host_response_available {
-        hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await
+    let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
+    let claim_authority = if host_response_available {
+        match (
+            tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1::new(
+                envelope.clone(),
+                &snapshot.binding,
+            ),
+            lifecycle.as_ref(),
+        ) {
+            (Some(hook), Some(lifecycle)) => {
+                cg.resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
+                    .await
+            }
+            _ => None,
+        }
     } else {
         None
-    };
-    let claim_authority = match (
-        tracedecay_agent_hosts::agents::context_scout::ports::AdmittedContextScoutHookV1::new(
-            envelope.clone(),
-            &snapshot.binding,
-        ),
-        lifecycle.as_ref(),
-    ) {
-        (Some(hook), Some(lifecycle)) => {
-            cg.resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
-                .await
-        }
-        _ => None,
     };
     let context_scout_address = claim_authority
         .as_ref()
