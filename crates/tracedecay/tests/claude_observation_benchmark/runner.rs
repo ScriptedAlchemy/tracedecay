@@ -10,12 +10,12 @@ use tracedecay_store::{
 };
 
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::claude::ClaudeSource;
 use tracedecay_sessions::runtime::claude_observation::{
     ClaudeObservationIngestStats, ingest_source_with_observations_with_admission,

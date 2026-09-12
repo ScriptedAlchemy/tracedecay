@@ -1,9 +1,12 @@
 //! The advertised MCP tool catalog, as host installers see it.
 //!
-//! **Not a registered port.** `tracedecay-mcp` owns the catalog
+//! **Not a registered port.** `tracedecay-mcp-catalog` owns the catalog
 //! (`~160` JSON-Schema descriptors plus host-capability filtering) and sits
 //! *below* this crate, so installers read it directly instead of through a
 //! process-global callback the composition root had to remember to install.
+//! The MCP server crate reads the same catalog from the same place; it is not
+//! named here because it sits *above* the host installers once the daemon
+//! composition depends on them.
 //!
 //! That direction matters for correctness, not tidiness. While this was a
 //! `OnceLock<fn>` pair, an unwired process answered with an empty catalog —
@@ -45,7 +48,7 @@ pub struct AdvertisedToolV1 {
 /// snapshot is the one remaining runtime input — so a caller writing host
 /// permissions or schema files fails loudly instead of writing an empty set.
 pub fn advertised_tools() -> Result<Vec<AdvertisedToolV1>> {
-    let definitions = tracedecay_mcp::get_tool_definitions().map_err(|error| {
+    let definitions = tracedecay_mcp_catalog::get_tool_definitions().map_err(|error| {
         TraceDecayError::project_route(
             "mcp.catalog_discovery_unavailable",
             false,
@@ -74,7 +77,7 @@ pub fn advertised_tools() -> Result<Vec<AdvertisedToolV1>> {
 /// The tool names whose output honours a `format` argument.
 #[must_use]
 pub fn format_capable_tool_names() -> &'static [&'static str] {
-    tracedecay_mcp::format_capable_tool_names()
+    tracedecay_mcp_catalog::format_capable_tool_names()
 }
 
 #[cfg(test)]

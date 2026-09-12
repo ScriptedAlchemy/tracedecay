@@ -1,0 +1,29 @@
+[package]
+name = "tracedecay-mcp-catalog"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Advertised MCP tool catalog for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[dependencies]
+hotpath.workspace = true
+# The multi-root execute tool derives its input schema from the contracts DTO.
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+[dev-dependencies]
+# The advertised application schemas must round-trip through the shared
+# CLI/MCP request adapter that daemon-protocol owns.
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }

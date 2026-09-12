@@ -9,7 +9,6 @@ fn durable_deletion_receipt_enqueues_restart_safe_graph_release() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )
@@ -47,7 +46,6 @@ fn graph_release_queue_pages_more_than_one_retention_batch() {
         let plan = prepare_next_code_generation_retention_cancellable(
             store.path(),
             &BTreeSet::new(),
-            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             &|| false,
             None,
         )
@@ -89,7 +87,6 @@ fn graph_release_queue_rejects_corrupt_and_oversize_evidence() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )
@@ -126,9 +123,9 @@ fn graph_release_queue_rejects_corrupt_and_oversize_evidence() {
 
 #[test]
 fn identical_pool_and_staged_bytes_must_still_match_the_generation_digest() {
-    let (store, _generations) = fixture_store(5);
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    let (store, generations) = fixture_store(5);
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let canonical = store
         .path()
@@ -158,9 +155,9 @@ fn identical_pool_and_staged_bytes_must_still_match_the_generation_digest() {
 #[cfg(unix)]
 #[test]
 fn replaced_pool_path_is_not_the_opened_stable_destination() {
-    let (store, _generations) = fixture_store(5);
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    let (store, generations) = fixture_store(5);
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let canonical = store
         .path()
@@ -185,10 +182,10 @@ fn replaced_pool_path_is_not_the_opened_stable_destination() {
 
 #[test]
 fn missing_staged_generation_blocks_pool_exposure_before_receipt() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention");
     let receipt = build_receipt(&plan, plan.collectable_generations.clone(), UtcMicros(109))
         .expect("build retention receipt");
     let transaction = CodeGenerationRetentionTransactionV1 {
@@ -230,8 +227,8 @@ fn missing_staged_generation_blocks_pool_exposure_before_receipt() {
 fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_missing_replay() {
     let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan =
-        plan_code_generation_retention(store.path(), &BTreeSet::new(), 3).expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention");
     assert_eq!(plan.collectable_generations.len(), 1);
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
@@ -383,7 +380,6 @@ fn graph_release_queue_rejects_symlink_evidence() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )

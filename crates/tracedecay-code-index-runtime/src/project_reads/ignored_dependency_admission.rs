@@ -8,8 +8,8 @@ use tracedecay_application::code_index::{
     CodeIndexIgnoredDependencyAdmissionPortV1, CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_contracts::clock::now_micros;
 use tracedecay_contracts::{RequestAdmission, RequestContext, ResolvedScope};
-use tracedecay_session_memory::context::application_observed_at;
 
 use crate::code_index_scheduler::{
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,
@@ -30,14 +30,14 @@ struct RequestContextOnlyCodeIndexControlV1<'a> {
 impl CodeIndexExecutionControlV1 for RequestContextOnlyCodeIndexControlV1<'_> {
     fn is_cancelled(&self) -> bool {
         matches!(
-            self.context.admission_at(application_observed_at()),
+            self.context.admission_at(now_micros()),
             RequestAdmission::Cancelled
         )
     }
 
     fn is_deadline_exceeded(&self) -> bool {
         matches!(
-            self.context.admission_at(application_observed_at()),
+            self.context.admission_at(now_micros()),
             RequestAdmission::TimedOut
         )
     }

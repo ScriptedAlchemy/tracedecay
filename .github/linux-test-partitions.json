@@ -143,6 +143,7 @@
         "tracedecay-framing",
         "tracedecay-hooks",
         "tracedecay-host-integration",
+        "tracedecay-mcp-catalog",
         "tracedecay-policy",
         "tracedecay-privacy",
         "tracedecay-private-fs",

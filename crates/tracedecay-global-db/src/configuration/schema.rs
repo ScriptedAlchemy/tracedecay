@@ -13,6 +13,18 @@ pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const CONFIGURATION_FORMAT_REVISION: i64 = 1;
 const FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
     "sha256:c79fac916ce535c2b90bd46af0fec9dcd80bdb85ae7e226879dd6eb765e6ca63";
+/// The configuration shape every release from v0.1.0-beta.25 through
+/// v0.1.0-beta.37 published: the final shape plus the inert
+/// `configuration_credential_references` table and its two immutability
+/// triggers, which no shipped surface ever wrote. A store carrying it is a
+/// shipped shape that converges by retiring that table, never by reset.
+const RELEASED_CONFIGURATION_SCHEMA_DIGEST: &str =
+    "sha256:99b8f5f5cebc584ab564181d8a67ee665031c20bbdf63b479c212d16a1c63746";
+const RETIRE_RELEASED_CREDENTIAL_REFERENCES_SQL: &str = "
+DROP TRIGGER IF EXISTS configuration_credential_references_immutable_update;
+DROP TRIGGER IF EXISTS configuration_credential_references_immutable_delete;
+DROP TABLE configuration_credential_references;
+";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigurationSchemaError {
@@ -512,17 +524,29 @@ BEGIN
 END;
 ";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigurationShape {
+    Absent,
+    Final,
+    /// The exact shape shipped by beta.25 through beta.37.
+    Released,
+}
+
 async fn validate_configuration_schema(
     connection: &impl QueryExecutor,
-) -> Result<bool, ConfigurationSchemaError> {
+) -> Result<ConfigurationShape, ConfigurationSchemaError> {
     let Some(definition_digest) = configuration_definition_digest(connection).await? else {
-        return Ok(false);
+        return Ok(ConfigurationShape::Absent);
     };
-    if definition_digest != FINAL_CONFIGURATION_SCHEMA_DIGEST {
+    let shape = if definition_digest == FINAL_CONFIGURATION_SCHEMA_DIGEST {
+        ConfigurationShape::Final
+    } else if definition_digest == RELEASED_CONFIGURATION_SCHEMA_DIGEST {
+        ConfigurationShape::Released
+    } else {
         return Err(ConfigurationSchemaError::ResetRequired {
             reason: "persisted schema is not the exact final configuration shape",
         });
-    }
+    };
 
     let mut rows = connection
         .query(
@@ -543,19 +567,21 @@ async fn validate_configuration_schema(
             reason: "configuration format marker is not the exact final revision",
         });
     }
-    Ok(true)
+    Ok(shape)
 }
 
+/// Read-only admission: the final shape and the shipped shape are both
+/// admissible; the writer converges the shipped one on its next open.
 pub async fn admit_configuration_schema(
     connection: &impl QueryExecutor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
 ) -> Result<(), ConfigurationSchemaError> {
-    if validate_configuration_schema(connection).await? || fresh_store.is_some() {
-        Ok(())
-    } else {
-        Err(ConfigurationSchemaError::ResetRequired {
+    match validate_configuration_schema(connection).await? {
+        ConfigurationShape::Final | ConfigurationShape::Released => Ok(()),
+        ConfigurationShape::Absent if fresh_store.is_some() => Ok(()),
+        ConfigurationShape::Absent => Err(ConfigurationSchemaError::ResetRequired {
             reason: "configuration schema is missing from a non-fresh registered store",
-        })
+        }),
     }
 }
 
@@ -563,8 +589,12 @@ pub async fn ensure_configuration_schema(
     connection: &impl Executor,
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
 ) -> Result<(), ConfigurationSchemaError> {
-    if validate_configuration_schema(connection).await? {
-        return Ok(());
+    match validate_configuration_schema(connection).await? {
+        ConfigurationShape::Final => return Ok(()),
+        ConfigurationShape::Released => {
+            return retire_released_credential_references(connection).await;
+        }
+        ConfigurationShape::Absent => {}
     }
     if fresh_store.is_none() {
         return Err(ConfigurationSchemaError::ResetRequired {
@@ -577,11 +607,40 @@ pub async fn ensure_configuration_schema(
         });
     }
     connection.execute_batch(CONFIGURATION_SCHEMA_SQL).await?;
-    if validate_configuration_schema(connection).await? {
+    if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
         Ok(())
     } else {
         Err(ConfigurationSchemaError::ResetRequired {
             reason: "fresh configuration schema publication was incomplete",
+        })
+    }
+}
+
+/// Converges a shipped store to the final shape. The retired table never had
+/// a writer, so a row in it is unknown data this binary must not discard.
+async fn retire_released_credential_references(
+    connection: &impl Executor,
+) -> Result<(), ConfigurationSchemaError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM configuration_credential_references LIMIT 1",
+            (),
+        )
+        .await?;
+    if rows.next().await?.is_some() {
+        return Err(ConfigurationSchemaError::ResetRequired {
+            reason: "released configuration store holds credential references no shipped binary wrote",
+        });
+    }
+    drop(rows);
+    connection
+        .execute_batch(RETIRE_RELEASED_CREDENTIAL_REFERENCES_SQL)
+        .await?;
+    if validate_configuration_schema(connection).await? == ConfigurationShape::Final {
+        Ok(())
+    } else {
+        Err(ConfigurationSchemaError::ResetRequired {
+            reason: "released configuration store did not converge to the final shape",
         })
     }
 }

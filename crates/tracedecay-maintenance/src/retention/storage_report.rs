@@ -32,9 +32,8 @@ use tracedecay_runtime_core::sqlite_read_snapshot::{
 };
 
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
-    scoped_code_index_store_root,
+    CodeGenerationRetentionGenerationV1, GenerationDigestVerificationV1,
+    plan_code_generation_retention_with_verification, scoped_code_index_store_root,
 };
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
@@ -215,7 +214,6 @@ pub struct CodeGenerationRetentionDryRunEntry {
     pub active_generation_id: Option<String>,
     pub active_generation_file: Option<String>,
     pub vector_readable_sources: Vec<String>,
-    pub rollback_floor: usize,
     pub superseded_generation_count: usize,
     pub superseded_generation_bytes: u64,
     pub collectable_generation_count: usize,
@@ -731,7 +729,6 @@ fn append_project_report(
     let plan = match plan_code_generation_retention_with_verification(
         &code_index_store_root,
         &readable_sources,
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         verification,
     ) {
         Ok(plan) => plan,
@@ -758,7 +755,6 @@ fn append_project_report(
             .iter()
             .map(|source| source.as_str().to_owned())
             .collect(),
-        rollback_floor: plan.rollback_floor,
         superseded_generation_count: plan.superseded_generations.len(),
         superseded_generation_bytes: plan.superseded_generation_bytes(),
         collectable_generation_count: plan.collectable_generations.len(),

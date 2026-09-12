@@ -933,10 +933,10 @@ impl DaemonInvocationState {
             };
             let child_cursor = request.continuation.as_ref().and_then(|continuation| {
                 match continuation.root_cursor(&scope.scope_digest) {
-                    Some(tracedecay_domain::ScopeOutcome::Exact(cursor))
-                    | Some(tracedecay_domain::ScopeOutcome::Partial { value: cursor, .. }) => {
-                        cursor.clone()
-                    }
+                    Some(
+                        tracedecay_domain::ScopeOutcome::Exact(cursor)
+                        | tracedecay_domain::ScopeOutcome::Partial { value: cursor, .. },
+                    ) => cursor.clone(),
                     _ => None,
                 }
             });

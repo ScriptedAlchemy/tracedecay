@@ -759,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn retrieval_query_reaches_the_rollup_with_an_honest_answered_denominator() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.emit.retrieval").await;
         // Half the windows abstain. The rollup must count every query as
         // observed but only the answered ones as answered.
@@ -799,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn adoption_eligibility_reaches_the_rollup_with_its_funnel_denominators() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.emit.adoption.eligible").await;
         let cells = rollup_cells(&harness, |_| {
             vec![
@@ -832,7 +832,7 @@ mod tests {
 
     #[tokio::test]
     async fn adoption_outcome_carries_unresolved_outcomes_as_partial_coverage() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.emit.adoption.outcome").await;
         let cells = rollup_cells(&harness, |_| {
             vec![
@@ -876,7 +876,7 @@ mod tests {
 
     #[tokio::test]
     async fn latency_reaches_the_rollup_as_an_operation_latency_cell() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.emit.latency").await;
         let cells = rollup_cells(&harness, |_| {
             vec![
@@ -908,7 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn operation_resource_without_a_terminal_result_reports_unknown_not_zero() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.emit.resource").await;
         // Every other window ends without an observed terminal state. Those
         // must reach the rollup as `unknown`, never as completions.
@@ -966,7 +966,7 @@ mod tests {
 
     #[tokio::test]
     async fn storage_duration_reaches_the_rollup_as_a_storage_latency_cell() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.emit.storage").await;
         let cells = rollup_cells(&harness, |_| {
             vec![
@@ -992,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_published_index_generations_reach_the_publication_cell() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.emit.index").await;
         // Every window carries both a published generation and a no-op rescan.
         // The rescan is a real lifecycle event but not a publication, so it

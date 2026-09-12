@@ -6,7 +6,21 @@ use tracedecay_domain::sha256_hex_suffix;
 mod graph_replay_pool_lock_tests;
 mod graph_replay_release_tests;
 
-const TEST_ROLLBACK_FLOOR: usize = 3;
+/// Marks the newest `count` superseded fixture generations as vector-readable
+/// sources so a fixture keeps exactly one collectable generation: the exact
+/// liveness mark production uses, standing in for the retired rollback floor.
+fn protected_superseded(
+    generations: &[FixtureGeneration],
+    count: usize,
+) -> BTreeSet<CodeGenerationId> {
+    generations
+        .iter()
+        .rev()
+        .skip(1)
+        .take(count)
+        .map(|generation| generation.id.clone())
+        .collect()
+}
 
 fn indexed_generation(
     sequence: usize,
@@ -775,12 +789,8 @@ fn text_artifact_retention_preserves_references_and_collects_orphans() {
     let corrupt_path = artifacts_root.join(&corrupt_name);
     std::fs::write(&corrupt_path, b"corrupt backup").expect("write corrupt backup");
 
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan artifact retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan artifact retention");
     assert!(plan.collectable_generations.is_empty());
     assert_eq!(plan.collectable_text_artifacts.len(), 3);
     assert!(plan.has_collectable_work());
@@ -869,12 +879,8 @@ fn text_artifact_retention_collects_empty_publish_crash_placeholder() {
     let placeholder_path = artifacts_root.join(&placeholder_name);
     std::fs::write(&placeholder_path, []).expect("write interrupted publish placeholder");
 
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("an empty daemon-owned publish placeholder is collectable crash debris");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("an empty daemon-owned publish placeholder is collectable crash debris");
     assert_eq!(plan.collectable_text_artifacts.len(), 1);
     assert_eq!(
         plan.collectable_text_artifacts[0].artifact_file,
@@ -917,12 +923,8 @@ fn text_artifact_retention_collects_staging_database_sidecars_with_their_owner()
         std::fs::write(path, bytes).expect("write staging database evidence");
     }
 
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan staging database retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan staging database retention");
     assert_eq!(plan.collectable_text_artifacts.len(), 4);
 
     let report = execute_code_generation_retention(
@@ -948,12 +950,8 @@ fn cancellable_artifact_apply_stops_rehash_before_quarantine_and_retries() {
     let bytes = vec![b'x'; 3 * 64 * 1024];
     let orphan = text_artifact_for_bytes(&active.id, &bytes);
     let orphan_path = write_text_artifact(&store, &orphan, &bytes);
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan fully verified artifact collection");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan fully verified artifact collection");
     assert_eq!(plan.collectable_text_artifacts.len(), 1);
 
     let checks = std::sync::atomic::AtomicUsize::new(0);
@@ -1013,12 +1011,8 @@ fn text_artifact_retention_uses_bounded_restartable_batches() {
             .expect("write corrupt backup");
     }
 
-    let first = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("first bounded page");
+    let first =
+        plan_code_generation_retention(store.path(), &BTreeSet::new()).expect("first bounded page");
     assert_eq!(
         first.collectable_text_artifacts.len(),
         MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1
@@ -1032,12 +1026,8 @@ fn text_artifact_retention_uses_bounded_restartable_batches() {
     )
     .expect("apply first bounded page");
 
-    let second = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("restart from the next artifact page");
+    let second = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("restart from the next artifact page");
     assert_eq!(second.collectable_text_artifacts.len(), 2);
     execute_code_generation_retention(
         store.path(),
@@ -1086,12 +1076,8 @@ fn text_artifact_retention_refuses_tamper_and_publish_cas_movement() {
     let descriptor = attach_fixture_text_artifact(&store, active, b"expected artifact bytes");
     let artifact_path = code_text_artifact_path(store.path(), &descriptor).expect("artifact path");
     std::fs::write(&artifact_path, b"tampered artifact bytes").expect("tamper artifact");
-    let error = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect_err("a referenced tampered artifact must fail closed");
+    let error = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect_err("a referenced tampered artifact must fail closed");
     assert!(matches!(
         error,
         CodeGenerationRetentionErrorV1::UnsafeState(_)
@@ -1101,12 +1087,8 @@ fn text_artifact_retention_refuses_tamper_and_publish_cas_movement() {
     let active = generations.last().expect("active generation");
     let orphan = text_artifact_for_bytes(&active.id, b"candidate before publish");
     let orphan_path = write_text_artifact(&store, &orphan, b"candidate before publish");
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan orphan before concurrent publish");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan orphan before concurrent publish");
     let mut moved = read_active_pointer(store.path()).expect("pointer before movement");
     moved.publication_digest = "sha256:concurrent-publish".to_owned();
     std::fs::write(
@@ -1141,12 +1123,8 @@ fn text_artifact_retention_refuses_symlinked_inventory_entries() {
     let outside = tempfile::NamedTempFile::new().expect("outside artifact");
     let symlink = artifacts_root.join(format!("text-artifact-{}.bin", "d".repeat(64)));
     std::os::unix::fs::symlink(outside.path(), &symlink).expect("create symlink");
-    let error = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect_err("symlinked artifact entry must fail closed");
+    let error = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect_err("symlinked artifact entry must fail closed");
     assert!(matches!(
         error,
         CodeGenerationRetentionErrorV1::UnsafeState(_)
@@ -1163,12 +1141,8 @@ fn text_artifact_recovery_rolls_back_before_receipt_and_commits_after_receipt() 
     let active = generations.last().expect("active generation");
     let orphan = text_artifact_for_bytes(&active.id, b"recoverable orphan");
     let orphan_path = write_text_artifact(&store, &orphan, b"recoverable orphan");
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan artifact transaction");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan artifact transaction");
     let receipt = build_text_artifact_receipt(
         &plan,
         plan.active_pointer.as_ref(),
@@ -1215,12 +1189,8 @@ fn cancellable_recovery_preserves_pending_artifact_journal_for_retry() {
     let active = generations.last().expect("active generation");
     let orphan = text_artifact_for_bytes(&active.id, b"recover after cancellation");
     let orphan_path = write_text_artifact(&store, &orphan, b"recover after cancellation");
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan artifact transaction");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan artifact transaction");
     let receipt = build_text_artifact_receipt(
         &plan,
         plan.active_pointer.as_ref(),
@@ -1319,7 +1289,6 @@ fn next_retention_plan_limits_collection_to_one_generation() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )
@@ -1342,7 +1311,6 @@ fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )
@@ -1358,15 +1326,15 @@ fn next_retention_plan_collects_the_oldest_superseded_generation_first() {
     );
 }
 
-/// The rollback reserve still holds the NEWEST superseded generations while
-/// the batch sweeps from the oldest end, so the two orders cannot collapse
-/// into one another.
+/// Marked generations stay live while the batch sweeps from the oldest end,
+/// so the newest-first report order and the oldest-first collection order
+/// cannot collapse into one another.
 #[test]
-fn retention_reserves_the_newest_superseded_window_and_sweeps_from_the_oldest() {
+fn retention_keeps_marked_superseded_generations_and_sweeps_from_the_oldest() {
     let (store, generations) = fixture_store(6);
 
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-        .expect("plan retention with a rollback reserve");
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention with marked superseded generations");
 
     assert_eq!(
         plan.collectable_generations
@@ -1374,7 +1342,7 @@ fn retention_reserves_the_newest_superseded_window_and_sweeps_from_the_oldest() 
             .map(|generation| generation.generation_id.clone())
             .collect::<Vec<_>>(),
         vec![generations[0].id.clone(), generations[1].id.clone()],
-        "generations 2..4 are the newest superseded rollback reserve"
+        "generations 2..4 are marked vector-readable sources"
     );
 }
 
@@ -1384,7 +1352,7 @@ fn unpublished_store_collects_sealed_crash_debris_under_the_absent_pointer() {
     std::fs::remove_file(store.path().join(ACTIVE_POINTER_FILE))
         .expect("remove publication pointer to model an interrupted first publish");
 
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), 0)
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
         .expect("plan unpublished crash-debris retention");
     assert_eq!(plan.collectable_generations.len(), 2);
 
@@ -1417,7 +1385,6 @@ fn idle_maintenance_preparation_stays_metadata_only() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )
@@ -1462,7 +1429,6 @@ fn metadata_only_segment_census_observes_at_most_one_directory_entry() {
     let plan = plan_code_generation_retention_with_verification(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         GenerationDigestVerificationV1::MetadataOnly,
     )
     .expect("plan bounded metadata-only census");
@@ -1505,7 +1471,6 @@ fn maintenance_preparation_wakes_for_an_unreferenced_final_segment() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )
@@ -1541,7 +1506,6 @@ fn collectable_maintenance_preparation_escalates_to_full_verification() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )
@@ -1561,7 +1525,6 @@ fn cancellable_maintenance_preparation_stops_during_generation_verification() {
     let error = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2,
         None,
     )
@@ -1579,7 +1542,6 @@ fn executing_a_prevalidated_unit_collects_only_that_generation() {
     let plan = prepare_next_code_generation_retention_cancellable(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         &|| false,
         None,
     )
@@ -1605,21 +1567,22 @@ fn executing_a_prevalidated_unit_collects_only_that_generation() {
 
 #[test]
 fn apply_preserves_collectable_generations_when_receipt_commit_fails() {
-    let (store, _generations) = fixture_store(5);
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-        .expect("plan retention");
+    let (store, generations) = fixture_store(5);
+    let marked = protected_superseded(&generations, 3);
+    let plan = plan_code_generation_retention(store.path(), &marked).expect("plan retention");
     assert_eq!(plan.collectable_generations.len(), 1);
     let collectable = plan.collectable_generations[0].clone();
     let active_file = plan
         .active_generation_file()
         .expect("published fixture has an active generation")
         .to_owned();
-    let rollback_files = plan
+    let marked_files = plan
         .superseded_generations
         .iter()
-        .take(plan.rollback_floor)
+        .filter(|generation| marked.contains(&generation.generation_id))
         .map(|generation| generation.generation_file.clone())
         .collect::<Vec<_>>();
+    assert_eq!(marked_files.len(), 3);
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
 
     std::fs::write(store.path().join(RECEIPTS_DIRECTORY), b"not a directory")
@@ -1644,21 +1607,20 @@ fn apply_preserves_collectable_generations_when_receipt_commit_fails() {
         generations_root.join(active_file).is_file(),
         "retention must preserve the active generation"
     );
-    for rollback_file in rollback_files {
+    for marked_file in marked_files {
         assert!(
-            generations_root.join(rollback_file).is_file(),
-            "retention must preserve the rollback floor"
+            generations_root.join(marked_file).is_file(),
+            "retention must preserve marked superseded generations"
         );
     }
 }
 
 #[test]
 fn recovery_restores_quarantined_generations_without_a_durable_receipt() {
-    let (store, _generations) = fixture_store(5);
-    let vector_readable_sources = BTreeSet::new();
-    let plan =
-        plan_code_generation_retention(store.path(), &vector_readable_sources, TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let (store, generations) = fixture_store(5);
+    let vector_readable_sources = protected_superseded(&generations, 3);
+    let plan = plan_code_generation_retention(store.path(), &vector_readable_sources)
+        .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let receipt = build_receipt(&plan, plan.collectable_generations.clone(), UtcMicros(101))
         .expect("build retention receipt");
@@ -1689,9 +1651,9 @@ fn recovery_restores_quarantined_generations_without_a_durable_receipt() {
 
 #[test]
 fn apply_retires_collectable_generations_into_the_graph_replay_pool() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     assert_eq!(plan.collectable_generations.len(), 1);
     let collectable = plan.collectable_generations[0].clone();
@@ -1727,9 +1689,9 @@ fn apply_retires_collectable_generations_into_the_graph_replay_pool() {
 
 #[test]
 fn failed_receipt_commit_withdraws_the_graph_replay_pool_exposure() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
@@ -1771,10 +1733,10 @@ fn queued_release_count(store_root: &Path) -> usize {
 
 #[test]
 fn retention_refuses_a_corrupt_same_name_graph_replay_pool_entry() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
@@ -1822,9 +1784,9 @@ fn retention_refuses_a_corrupt_same_name_graph_replay_pool_entry() {
 
 #[test]
 fn retention_refuses_a_directory_graph_replay_pool_entry() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
@@ -1867,10 +1829,10 @@ fn retention_refuses_a_directory_graph_replay_pool_entry() {
 #[cfg(unix)]
 #[test]
 fn retention_refuses_a_symlink_graph_replay_pool_entry() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
@@ -1920,10 +1882,10 @@ fn retention_refuses_a_symlink_graph_replay_pool_entry() {
 
 #[test]
 fn retention_accepts_an_identical_existing_graph_replay_pool_entry() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let pool_root = store.path().join("graph-replay-pool");
     tracedecay_private_fs::create_private_directory(&pool_root).expect("create pool root");
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
         .expect("plan retention");
     let collectable = plan.collectable_generations[0].clone();
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
@@ -1957,20 +1919,20 @@ fn retention_accepts_an_identical_existing_graph_replay_pool_entry() {
 }
 
 #[test]
-fn plan_keeps_active_vector_pinned_and_rollback_generations() {
+fn plan_keeps_active_and_vector_pinned_generations() {
     let (store, generations) = fixture_store(7);
-    let vector_readable_sources = [generations[0].id.clone()].into_iter().collect();
+    let mut vector_readable_sources = protected_superseded(&generations, 3);
+    vector_readable_sources.insert(generations[0].id.clone());
 
-    let plan =
-        plan_code_generation_retention(store.path(), &vector_readable_sources, TEST_ROLLBACK_FLOOR)
-            .expect("plan retention");
+    let plan = plan_code_generation_retention(store.path(), &vector_readable_sources)
+        .expect("plan retention");
 
     assert_eq!(plan.active_generation_id, Some(generations[6].id.clone()));
     assert!(
         plan.collectable_generations
             .iter()
             .all(|generation| generation.generation_id != generations[0].id),
-        "a vector-readable generation remains pinned even outside the rollback floor"
+        "the oldest vector-readable generation remains pinned"
     );
     let collectable_ids = plan
         .collectable_generations
@@ -2481,12 +2443,11 @@ fn metadata_only_census_matches_full_verification() {
         .join(format!(".text-artifact-{}.staging", "e".repeat(64)));
     std::fs::write(&stale_staging, b"metadata parity staging").expect("write stale staging");
 
-    let full = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-        .expect("full census");
+    let marked = protected_superseded(&generations, 3);
+    let full = plan_code_generation_retention(store.path(), &marked).expect("full census");
     let metadata_only = plan_code_generation_retention_with_verification(
         store.path(),
-        &BTreeSet::new(),
-        TEST_ROLLBACK_FLOOR,
+        &marked,
         GenerationDigestVerificationV1::MetadataOnly,
     )
     .expect("metadata-only census");
@@ -2526,16 +2487,11 @@ fn metadata_only_artifact_census_does_not_hash_unlink_evidence() {
     let metadata_only = plan_code_generation_retention_with_verification(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         GenerationDigestVerificationV1::MetadataOnly,
     )
     .expect("metadata census uses bounded filename/type/size identity");
     assert_eq!(metadata_only.collectable_text_artifacts.len(), 1);
-    let full = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    );
+    let full = plan_code_generation_retention(store.path(), &BTreeSet::new());
     assert!(
         matches!(full, Err(CodeGenerationRetentionErrorV1::UnsafeState(_))),
         "only full verification may trust the content address for unlinking"
@@ -2544,11 +2500,10 @@ fn metadata_only_artifact_census_does_not_hash_unlink_evidence() {
 
 #[test]
 fn applied_retention_refuses_a_metadata_only_plan() {
-    let (store, _generations) = fixture_store(5);
+    let (store, generations) = fixture_store(5);
     let plan = plan_code_generation_retention_with_verification(
         store.path(),
-        &BTreeSet::new(),
-        TEST_ROLLBACK_FLOOR,
+        &protected_superseded(&generations, 3),
         GenerationDigestVerificationV1::MetadataOnly,
     )
     .expect("metadata-only census");
@@ -2591,7 +2546,6 @@ fn unpublished_store_retention_reclaims_orphaned_partial_generations() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(99),
         Some(&pool_root),
@@ -2648,12 +2602,8 @@ fn unpublished_store_execution_refuses_when_a_pointer_appears() {
     let pointer_bytes = std::fs::read(&pointer_path).expect("read fixture pointer");
     std::fs::remove_file(&pointer_path).expect("sever the active pointer");
 
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan unpublished-store retention");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan unpublished-store retention");
     assert_eq!(plan.active_generation_id, None);
     assert_eq!(plan.collectable_generations.len(), 1);
 
@@ -2704,7 +2654,6 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(21),
         None,
@@ -2767,21 +2716,17 @@ fn indexed_generation_ids(store_root: &Path) -> BTreeSet<String> {
 
 /// Membership of the durable `generation_index` is history, not liveness.
 ///
-/// Marking every entry live made `rollback_floor` dead and moved the real
-/// floor onto the index bounds, so a store that publishes as fast as
-/// maintenance collects never released a byte.
+/// Marking every entry live moved the real retention floor onto the index
+/// bounds, so a store that publishes as fast as maintenance collects never
+/// released a byte.
 #[test]
 fn the_durable_generation_index_does_not_pin_a_superseded_generation() {
     let (store, generations) = fixture_store(5);
     let pointer = index_every_fixture_generation(&store, &generations);
     assert_eq!(pointer.generation_index.len(), 5);
 
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan retention over a full durable history");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan retention over a full durable history");
 
     let collectable = plan
         .collectable_generations
@@ -2794,22 +2739,22 @@ fn the_durable_generation_index_does_not_pin_a_superseded_generation() {
     );
 }
 
-/// The rollback reserve is the only history a plan keeps, and it is the
-/// caller's `rollback_floor` -- never the pointer's bounded index.
+/// Marked vector-readable sources are the only superseded history a plan
+/// keeps -- never the pointer's bounded index.
 #[test]
-fn the_rollback_floor_is_the_only_superseded_history_a_plan_keeps() {
+fn marked_sources_are_the_only_superseded_history_a_plan_keeps() {
     let (store, generations) = fixture_store(5);
     index_every_fixture_generation(&store, &generations);
 
-    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-        .expect("plan retention with a rollback reserve");
+    let plan = plan_code_generation_retention(store.path(), &protected_superseded(&generations, 3))
+        .expect("plan retention with marked superseded generations");
 
     let collectable = plan
         .collectable_generations
         .iter()
         .map(|generation| generation.generation_id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
-    // Four superseded generations, three reserved: exactly the oldest is free.
+    // Four superseded generations, three marked: exactly the oldest is free.
     assert_eq!(
         collectable,
         BTreeSet::from([generations[0].id.as_str().to_owned()])
@@ -2823,12 +2768,8 @@ fn applying_retention_rewrites_the_durable_index_before_unlinking() {
     let (store, generations) = fixture_store(5);
     index_every_fixture_generation(&store, &generations);
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan retention");
+    let plan =
+        plan_code_generation_retention(store.path(), &BTreeSet::new()).expect("plan retention");
     let collected = plan.collectable_generations.clone();
     assert_eq!(collected.len(), 4, "every superseded generation is free");
 
@@ -2863,12 +2804,8 @@ fn applying_retention_rewrites_the_durable_index_before_unlinking() {
     validate_durable_generation_index(&pointer).expect("the rewritten index must revalidate");
     // Fails if the unlink outran the rewrite: the census refuses a pointer
     // whose index names a missing generation.
-    plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("the store must stay plannable after a collection");
+    plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("the store must stay plannable after a collection");
 }
 
 struct PointerRewriteFixture {
@@ -2900,12 +2837,8 @@ impl PointerRewriteFixture {
 fn pointer_rewrite_fixture() -> PointerRewriteFixture {
     let (store, generations) = fixture_store(5);
     let original = index_every_fixture_generation(&store, &generations);
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan retention");
+    let plan =
+        plan_code_generation_retention(store.path(), &BTreeSet::new()).expect("plan retention");
     let collected = plan.collectable_generations.clone();
     let receipt =
         build_receipt(&plan, collected.clone(), UtcMicros(212)).expect("build retention receipt");
@@ -2978,12 +2911,8 @@ fn recovery_rolls_back_a_quarantined_generation_and_its_index_entry() {
         fixture.original,
         "rollback must restore the index entries that named them"
     );
-    plan_code_generation_retention(
-        fixture.store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("a rolled-back store must stay plannable");
+    plan_code_generation_retention(fixture.store.path(), &BTreeSet::new())
+        .expect("a rolled-back store must stay plannable");
 }
 
 /// Crash after the receipt is durable: recovery finishes forward and keeps the
@@ -3037,10 +2966,6 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
         fixture.rewritten,
         "recovery must finish the rewrite the receipt already released"
     );
-    plan_code_generation_retention(
-        fixture.store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("a recovered store must stay plannable");
+    plan_code_generation_retention(fixture.store.path(), &BTreeSet::new())
+        .expect("a recovered store must stay plannable");
 }

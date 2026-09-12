@@ -64,7 +64,8 @@ fn paginated_repository(prefix: &str) -> TempDir {
         .map(|index| {
             format!("pub fn {prefix}_{index}() -> &'static str {{ \"multi-root-page-marker\" }}\n")
         })
-        .collect::<String>();
+        .collect::<Vec<_>>()
+        .concat();
     std::fs::write(repository.path().join("lib.rs"), source).expect("paged source");
     git(repository.path(), &["add", "."]);
     git(

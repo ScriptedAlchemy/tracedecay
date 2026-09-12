@@ -19,8 +19,9 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use super::super::{RegisteredHttpOperation, WorkOperation, invoke_registered_http};
+use super::super::registered_http::{RegisteredHttpOperation, invoke_registered_http};
 use super::validated_daemon_outcome;
+use tracedecay_api::WorkOperation;
 
 fn digest(seed: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")

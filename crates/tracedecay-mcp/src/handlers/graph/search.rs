@@ -1498,11 +1498,11 @@ mod tests {
     #[test]
     fn schema_anchor_bound_matches_the_retrieval_kernel_bound() {
         assert_eq!(
-            crate::tools::definitions::SEARCH_MAX_LEXICAL_ANCHORS,
+            tracedecay_mcp_catalog::SEARCH_MAX_LEXICAL_ANCHORS,
             tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHORS_V1
         );
         assert_eq!(
-            crate::tools::definitions::SEARCH_MAX_LEXICAL_ANCHOR_BYTES,
+            tracedecay_mcp_catalog::SEARCH_MAX_LEXICAL_ANCHOR_BYTES,
             tracedecay_query::retrieval::lexical::MAX_LEXICAL_ANCHOR_BYTES_V1
         );
     }
@@ -1644,7 +1644,7 @@ mod tests {
                 })
             },
         );
-        let freshness: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+        let freshness: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
             std::sync::Arc::new(move |_| {
                 let freshness_order = std::sync::Arc::clone(&freshness_order);
                 Box::pin(async move {
