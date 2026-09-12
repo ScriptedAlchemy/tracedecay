@@ -36,7 +36,6 @@ pub use bundle::{
     SealedReadBundleWriterV1, load_sealed_read_bundle_artifact, retire_sealed_read_bundle,
     sweep_aborted_sealed_read_bundle_temporaries,
 };
-pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 pub use error::{GraphBudgetKind, GraphConflictContextV1, GraphDbError};
 pub use generation::{
     GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
@@ -105,6 +104,7 @@ pub use registry::{
     VerifiedGenerationBatchCommit, VerifiedGenerationBeginV1,
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
+pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
 /// What hydration decoded on **this thread** since the last take.
 ///
