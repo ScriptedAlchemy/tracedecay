@@ -490,6 +490,33 @@ async fn run_authenticated_multi_root_journey() {
         .expect("second URI")
         .to_string();
 
+    // The direct MCP route must collapse an unknown and an unauthorized
+    // scope-set identity into the same denial; an empty evidence packet would
+    // otherwise falsely claim the read completed.
+    let unknown_scope_set_id =
+        ScopeSetId::new("scope-set.daemon-journey.unknown").expect("unknown scope set id");
+    let observed_at = now();
+    let (deadline, cancellation) = controls("unknown-read", observed_at);
+    let unknown_read = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_scope_set_read(
+            "request.multi-root.unknown-read",
+            MultiRootScopeSetReadRequestV1::new(unknown_scope_set_id)
+                .expect("unknown read request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    assert!(matches!(
+        unknown_read.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    ));
+
     // A single folder that is not the active project is still refused: a lone
     // sibling hint must not reroute the session.
     let (deadline, cancellation) = controls("sibling-root-lsp", now());
