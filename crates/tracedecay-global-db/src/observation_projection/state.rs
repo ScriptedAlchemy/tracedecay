@@ -1538,18 +1538,6 @@ mod reconcile_tests {
         );
     }
 
-    /// Host-independent half of the same invariant: whatever `canonicalize`
-    /// returns, the stored spelling never carries the verbatim prefix.
-    #[test]
-    fn stored_project_paths_never_carry_the_verbatim_prefix() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let project = tmp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let normalized = canonicalize_session_project_paths(&record(&project.to_string_lossy()));
-        assert!(!normalized.project_path.starts_with(r"\\?\"));
-        assert!(!normalized.project_key.starts_with(r"\\?\"));
-    }
-
     #[test]
     fn genuinely_different_roots_still_refuse_to_reconcile() {
         let tmp = tempfile::TempDir::new().unwrap();

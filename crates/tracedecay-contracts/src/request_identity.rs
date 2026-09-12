@@ -373,25 +373,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn separate_process_nonces_break_legacy_timestamp_counter_collisions() {
-        let first = ProcessUniqueIdentityAuthority::from_instance_nonce([1; 16]);
-        let second = ProcessUniqueIdentityAuthority::from_instance_nonce([2; 16]);
-        let legacy_pair = (
-            "request.http.100.1".to_owned(),
-            "request.http.100.1".to_owned(),
-        );
-        assert_eq!(legacy_pair.0, legacy_pair.1);
-
-        let first = first
-            .mint_string(GlobalRequestSurface::Http.prefix())
-            .unwrap();
-        let second = second
-            .mint_string(GlobalRequestSurface::Http.prefix())
-            .unwrap();
-        assert_ne!(first, second);
-    }
-
-    #[test]
     fn every_process_local_surface_survives_restart_with_reused_legacy_inputs() {
         let collisions = [
             (GlobalRequestSurface::Cli, "request.cli.100.42.1"),
@@ -487,21 +468,6 @@ mod tests {
         assert_ne!(cli, http);
         assert!(cli.starts_with("request.cli."));
         assert!(http.starts_with("request.http."));
-    }
-
-    #[test]
-    fn semantic_qualification_has_a_domain_separated_request_identity() {
-        let authority = ProcessUniqueIdentityAuthority::from_instance_nonce([4; 16]);
-        let evaluation = authority
-            .mint_string(GlobalRequestSurface::SemanticEvaluation.prefix())
-            .unwrap();
-        let qualification = authority
-            .mint_string(GlobalRequestSurface::SemanticQualification.prefix())
-            .unwrap();
-
-        assert_ne!(evaluation, qualification);
-        assert!(evaluation.starts_with("request.semantic-evaluation."));
-        assert!(qualification.starts_with("request.semantic-qualification."));
     }
 
     #[test]

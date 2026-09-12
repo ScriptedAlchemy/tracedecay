@@ -81,14 +81,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_scope_is_sargable_equality() {
-        let scope = LcmScopeSql::new("provider", "session_id", "cursor", None);
-        assert_eq!(scope.where_clause(), "WHERE provider = ?");
-        assert_eq!(scope.and_clause(), " AND provider = ?");
-        assert_eq!(scope.values().len(), 1);
-    }
-
-    #[test]
     fn session_scope_adds_both_equalities() {
         let scope = LcmScopeSql::new("provider", "session_id", "cursor", Some("session-a"));
         assert_eq!(

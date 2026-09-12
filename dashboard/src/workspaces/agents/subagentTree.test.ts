@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AnalyticsSubagentNodeV1, AnalyticsSubagentTreePayloadV1 } from '../../contracts/generated.ts';
-import {
-  groupSubagentTrees,
-  subagentElapsedSeconds,
-  subagentLabel,
-  subagentTreeCensus,
-} from './subagentTree.ts';
+import { groupSubagentTrees, subagentElapsedSeconds, subagentTreeCensus } from './subagentTree.ts';
 
 function node(overrides: Partial<AnalyticsSubagentNodeV1>): AnalyticsSubagentNodeV1 {
   return {
@@ -74,16 +69,6 @@ describe('groupSubagentTrees', () => {
 
   it('answers an empty reading with no groups', () => {
     expect(groupSubagentTrees([])).toEqual([]);
-  });
-});
-
-describe('subagentLabel', () => {
-  it('prefers the agent, then the title, and never invents a name', () => {
-    expect(subagentLabel(node({ agent: 'Codex', title: 'sweep' }))).toBe('Codex');
-    expect(subagentLabel(node({ agent: null, title: 'sweep' }))).toBe('sweep');
-    expect(subagentLabel(node({ agent: null, title: null, session_id: 'session.z' }))).toBe(
-      'session.z',
-    );
   });
 });
 

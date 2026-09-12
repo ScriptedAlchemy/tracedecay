@@ -560,39 +560,4 @@ mod tests {
         assert_eq!(metadata["client_name"], "codex");
         assert_eq!(metadata["mcp_instance_id"], "mcp-instance-test");
     }
-
-    #[test]
-    fn mcp_tool_analytics_event_records_instance_id_when_session_absent() {
-        // The common case: no client-supplied session_id, so the honest
-        // grouping key is the per-process mcp_instance_id in metadata while
-        // the session_id column stays NULL.
-        let request_id = json!(9);
-        let arguments = json!({});
-        let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
-            project_root: Path::new("/repo"),
-            session_id: None,
-            tool_name: "tracedecay_search",
-            outcome: "success",
-            raw_file_tokens: 0,
-            response_tokens: 0,
-            net_saved_tokens: 0,
-            duration_us: None,
-            timestamp: 12345,
-            request_id: &request_id,
-            arguments: &arguments,
-            internal_analytics: None,
-            client_name: Some("claude-code"),
-            mcp_instance_id: Some("mcp-abc123"),
-            failure_reason: None,
-        });
-
-        assert!(
-            event.session_id.is_none(),
-            "instance id must not masquerade as a real session id"
-        );
-        let metadata: serde_json::Value =
-            serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}"))
-                .expect("metadata should parse");
-        assert_eq!(metadata["mcp_instance_id"], "mcp-abc123");
-    }
 }

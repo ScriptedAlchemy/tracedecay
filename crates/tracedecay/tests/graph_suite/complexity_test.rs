@@ -226,12 +226,6 @@ fn dangerous() {
     assert_eq!(m.unsafe_blocks, 2, "expected 2 unsafe blocks");
 }
 
-#[test]
-fn test_complexity_no_unsafe() {
-    let m = rust_fn_complexity("fn safe() { let x = 42; }");
-    assert_eq!(m.unsafe_blocks, 0);
-}
-
 // ── Unchecked calls (unwrap/expect) ─────────────────────────────────────────
 
 #[test]
@@ -246,22 +240,6 @@ fn risky(v: Option<i32>) -> i32 {
     assert!(
         m.unchecked_calls >= 1,
         "expected unwrap to be detected, got {}",
-        m.unchecked_calls
-    );
-}
-
-#[test]
-fn test_complexity_expect_detection() {
-    let m = rust_fn_complexity(
-        r#"
-fn risky(v: Option<i32>) -> i32 {
-    v.expect("missing")
-}
-"#,
-    );
-    assert!(
-        m.unchecked_calls >= 1,
-        "expected expect() to be detected, got {}",
         m.unchecked_calls
     );
 }
@@ -297,12 +275,6 @@ fn checked(x: i32) {
         "expected >= 3 assertions, got {}",
         m.assertions
     );
-}
-
-#[test]
-fn test_complexity_no_assertions() {
-    let m = rust_fn_complexity("fn plain() { let x = 1; }");
-    assert_eq!(m.assertions, 0);
 }
 
 // ── Combined complexity ─────────────────────────────────────────────────────

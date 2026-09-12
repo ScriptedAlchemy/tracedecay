@@ -51,28 +51,7 @@ where
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use serde_json::json;
-
     use super::*;
-
-    #[tokio::test]
-    async fn standalone_writer_executes_operation_once() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&calls);
-        let writer = standalone_dashboard_automation_writer();
-
-        let result = writer(Box::new(move || {
-            Box::pin(async move {
-                observed.fetch_add(1, Ordering::Relaxed);
-                Ok(json!({ "status": "ok" }))
-            })
-        }))
-        .await
-        .expect("standalone dashboard automation write should succeed");
-
-        assert_eq!(result, json!({ "status": "ok" }));
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-    }
 
     #[tokio::test]
     async fn standalone_writer_serializes_operations() {

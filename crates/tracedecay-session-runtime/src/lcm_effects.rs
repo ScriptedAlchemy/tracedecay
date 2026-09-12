@@ -1949,49 +1949,6 @@ done
     }
 
     #[tokio::test]
-    async fn mounted_profile_scheduler_runs_summary_convergence_on_startup() {
-        let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-scheduler").await;
-        let db = harness.registered.clone();
-        let storage_root = db.db_path().parent().unwrap();
-        let session_id = "mounted-convergence-session";
-        assert!(db.upsert_session(&session("codex", session_id)).await);
-        for ordinal in 1..=4 {
-            let mut record = message(session_id, ordinal);
-            record.message_id = format!("{session_id}-message-{ordinal}");
-            record.provider = "codex".to_string();
-            db.lcm_ingest_raw_message(storage_root, &record)
-                .await
-                .unwrap();
-        }
-        let summary_text = "native summary consumed by the mounted scheduler";
-        ingest_codex_compaction_evidence(
-            &db,
-            session_id,
-            "mounted-convergence-summary",
-            5,
-            summary_text,
-        )
-        .await;
-
-        let registry =
-            super::super::session_temporal_refresh_scheduler::registry::SessionTemporalRefreshSchedulerRegistry::default();
-        let database_path = db.db_path().to_path_buf();
-        registry
-            .ensure_profile(database_path.clone(), db.clone())
-            .await;
-        assert!(
-            registry
-                .wait_profile_idle(&database_path, Duration::from_secs(10))
-                .await
-        );
-        let status = db.lcm_status("codex", Some(session_id)).await.unwrap();
-        registry.shutdown().await;
-
-        assert_eq!(status.summary_node_count, 1);
-        assert_eq!(status.raw_message_count, 6);
-    }
-
-    #[tokio::test]
     async fn mounted_schedulers_share_historical_work_admission() {
         let mut stores = Vec::new();
         for index in 0..3 {

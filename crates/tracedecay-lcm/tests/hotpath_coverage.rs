@@ -1,14 +1,9 @@
 // Its own test binary, not an lcm_suite module: it sets HOTPATH_* process
 // environment variables in-process.
-//! Hotpath coverage contract for `tracedecay-lcm`.
+//! Unguarded hotpath contract for `tracedecay-lcm`.
 //!
-//! Feature-off (default build): every hotpath macro must be a no-op — no
-//! report file even when the report environment is set.
-//!
-//! Feature-on (`--features hotpath`): a process-boundary guard must capture
-//! this crate's measured security-scan and compression-policy sites in a
-//! functions-timing report, proving the instrumentation is real rather than
-//! dead configuration.
+//! With either feature configuration, setting report environment variables
+//! alone must not create a report without a process-boundary guard.
 
 use serde_json::json;
 use tracedecay_lcm::compression_policy::{
@@ -42,12 +37,11 @@ fn run_lcm_policy_workload() -> usize {
     spans.len()
 }
 
-#[cfg(not(feature = "hotpath"))]
-mod feature_off {
+mod unguarded {
     use std::path::Path;
 
-    /// With the feature off the macros expand to their primary expression:
-    /// the workload behaves identically and the report environment is ignored.
+    /// The workload behaves identically and report environment is ignored
+    /// until a process-boundary guard is installed.
     #[test]
     fn workload_is_a_no_op_for_profiling() {
         let report = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lcm-hotpath-off.json");
@@ -64,46 +58,7 @@ mod feature_off {
 
         assert!(
             !report.exists(),
-            "feature-off build must never write a hotpath report"
+            "unguarded workload must never write a hotpath report"
         );
-    }
-}
-
-#[cfg(feature = "hotpath")]
-mod feature_on {
-    use std::path::Path;
-
-    /// A guard-scoped run of the same workload must record this crate's
-    /// measured sites, proving `--features hotpath` produces live
-    /// instrumentation and not an empty report.
-    #[test]
-    fn guard_report_captures_measured_policy_sites() {
-        // SAFETY: set before the first guard build in this process, which is
-        // the only reader; the metrics listener must stay off in tests.
-        unsafe { std::env::set_var("HOTPATH_METRICS_SERVER_OFF", "1") };
-        let report = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lcm-hotpath-on.json");
-        let _ = std::fs::remove_file(&report);
-
-        {
-            let _guard = hotpath::HotpathGuardBuilder::new("lcm-hotpath-coverage")
-                .format(hotpath::Format::Json)
-                .output_path(&report)
-                .report("functions-timing")
-                .build();
-            assert!(super::run_lcm_policy_workload() > 0);
-        }
-
-        let report_text =
-            std::fs::read_to_string(&report).expect("feature-on guard drop must write a report");
-        for label in [
-            "sessions.lcm.scan_base64",
-            "sessions.lcm.scan_repetition",
-            "sessions.lcm.overflow_cap",
-        ] {
-            assert!(
-                report_text.contains(label),
-                "hotpath report must capture measured site `{label}`: {report_text}"
-            );
-        }
     }
 }

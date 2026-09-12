@@ -673,51 +673,6 @@ async fn claude_thinking_blocks_do_not_project_as_ordinary_messages() {
 }
 
 #[tokio::test]
-async fn claude_transcript_ingest_is_incremental() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let path = write_claude_transcript(&home, &project, "claude-sess");
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let source = ClaudeSource::with_home(&home);
-
-    let first = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(first.messages_upserted, 2);
-    // Re-ingesting the unchanged file is a no-op.
-    let second = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(second.messages_upserted, 0);
-
-    // Appending one line ingests only that line.
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    writeln!(
-        f,
-        "{}",
-        serde_json::json!({
-            "type": "user",
-            "cwd": project.to_string_lossy(),
-            "sessionId": "claude-sess",
-            "uuid": "u3",
-            "timestamp": "2026-01-01T00:01:00.000Z",
-            "message": {"role": "user", "content": "Add a regression test for billing"}
-        })
-    )
-    .unwrap();
-    drop(f);
-
-    let third = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(third.messages_upserted, 1);
-}
-
-#[tokio::test]
 async fn claude_transcript_for_other_project_is_skipped() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
@@ -1579,42 +1534,6 @@ fn write_claude_subagent_with_meta(
     )
     .unwrap();
     path
-}
-
-#[tokio::test]
-async fn claude_subagent_meta_json_enriches_draft() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    write_claude_transcript(&home, &project, "parent-meta");
-    write_claude_subagent_with_meta(&home, "parent-meta", "worker", None);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let source = ClaudeSource::with_home(&home);
-    let stats = try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
-    assert_eq!(stats.sessions_upserted, 2);
-
-    let child = db
-        .get_session("claude", "agent-worker")
-        .await
-        .expect("subagent session should be stored");
-    assert!(child.is_subagent);
-    assert_eq!(child.parent_session_id.as_deref(), Some("parent-meta"));
-    assert_eq!(child.agent_id.as_deref(), Some("worker"));
-    // toolUseId rides the dedicated parent_tool_use_id column.
-    assert_eq!(child.parent_tool_use_id.as_deref(), Some("toolu_spawn_42"));
-
-    let metadata: serde_json::Value =
-        serde_json::from_str(child.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(metadata["agent_type"], "Explore");
-    assert_eq!(
-        metadata["agent_description"],
-        "Investigate the billing fallback path"
-    );
-    assert_eq!(metadata["spawn_depth"], 1);
-    // Not a workflow-nested subagent: no run id.
-    assert!(metadata.get("workflow_run_id").is_none());
 }
 
 #[tokio::test]

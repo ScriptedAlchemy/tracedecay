@@ -29,8 +29,6 @@ use tracedecay_capture::kiro::{
 use tracedecay_capture::normalize_timestamp_secs;
 
 use crate::admission::HostAdmission;
-#[cfg(test)]
-use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
@@ -39,13 +37,13 @@ use crate::runtime::shared::{
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
     title_from_messages,
 };
+#[cfg(test)]
+use crate::runtime::snapshot_observation::canonical_snapshot_envelope;
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionBatch,
     SnapshotCaptureOutcome, bounded_snapshot_input_len, capture_snapshot_observations,
     non_durable_snapshot_record, read_snapshot_text_bounded,
 };
-#[cfg(test)]
-use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, read_changed_file,

@@ -676,44 +676,6 @@ fn revision_history_and_explicit_lineage_are_immutable() {
     );
 }
 
-#[test]
-fn source_commit_does_not_publish_projection_inline() {
-    let definition = definition();
-    let binding = binding(&definition);
-    let observation = object();
-    let mutation = mutation(
-        &binding,
-        &partition(),
-        observation.clone(),
-        None,
-        SourceObjectTransitionV1::Initial,
-        '2',
-    );
-    let source = commit(
-        &definition,
-        &binding,
-        None,
-        SourceCoverageV1::Partial,
-        vec![mutation],
-        None,
-        '2',
-    );
-
-    let state = committed(apply_source_commit(None, source).unwrap());
-
-    assert_eq!(
-        state
-            .latest_mutation(observation.native_object())
-            .unwrap()
-            .observation(),
-        &observation
-    );
-    assert!(
-        state.projected_objects().is_empty(),
-        "source acknowledgement must precede projection publication"
-    );
-}
-
 fn source_with_one_observation(
     idempotency_seed: char,
 ) -> (

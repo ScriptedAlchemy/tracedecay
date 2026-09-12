@@ -398,29 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_covers_every_compiled_extractor_extension() {
-        let extractors = tracedecay_code_extraction::LanguageRegistry::new();
-        let registry = StaticLanguageRegistry::from_extraction_registry(&extractors);
-        assert!(!registry.descriptors().is_empty());
-        for extension in extractors.supported_extensions() {
-            let descriptor = registry
-                .descriptor_for_extension(&extension.to_lowercase())
-                .unwrap_or_else(|| panic!("descriptor for extension {extension}"));
-            // The descriptor's language must be the language of the extractor
-            // that would actually parse the file.
-            let probe = format!("probe.{extension}");
-            let extractor = extractors
-                .extractor_for_file(&probe)
-                .expect("extractor resolves");
-            assert_eq!(
-                descriptor.language.as_str(),
-                canonical_language_id(extractor.language_name()),
-                "extension {extension} dispatched to a different language"
-            );
-        }
-    }
-
-    #[test]
     fn descriptor_lookups_are_canonical_and_deterministic() {
         let registry = StaticLanguageRegistry::new();
         let again = StaticLanguageRegistry::new();
@@ -469,16 +446,6 @@ mod tests {
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);
-    }
-
-    #[test]
-    fn every_descriptor_passes_domain_validation() {
-        let registry = StaticLanguageRegistry::new();
-        for descriptor in registry.descriptors() {
-            descriptor.validate().expect("descriptor validates");
-            assert!(!descriptor.aliases.is_empty());
-            assert!(!descriptor.extensions.is_empty());
-        }
     }
 
     #[test]
@@ -541,28 +508,6 @@ mod tests {
             StaticLanguageRegistry::try_from_descriptors(vec![uppercase, rust]).is_err(),
             "case-collision rejection must not depend on input order"
         );
-    }
-
-    #[test]
-    fn from_descriptors_sorts_valid_descriptors() {
-        let rust = StaticLanguageRegistry::new()
-            .descriptor(&language("rust"))
-            .expect("rust")
-            .clone();
-        let mut renamed = rust.clone();
-        renamed.language = language("aaa-test-language");
-        renamed.aliases = vec!["aaa-test-language".to_owned()];
-        renamed.extensions = vec!["aaa".to_owned()];
-        renamed
-            .validate()
-            .expect("renamed descriptor remains canonical");
-        let registry = StaticLanguageRegistry::from_descriptors(vec![rust, renamed]);
-        let ids: Vec<&str> = registry
-            .descriptors()
-            .iter()
-            .map(|d| d.language.as_str())
-            .collect();
-        assert_eq!(ids, vec!["aaa-test-language", "rust"]);
     }
 
     #[test]

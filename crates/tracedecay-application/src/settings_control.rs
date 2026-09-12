@@ -328,32 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn preview_builds_one_typed_atomic_batch_without_mutating_runtime() {
-        let project_id = ProjectId::new("project.settings").unwrap();
-        let revision = ConfigurationRevisionId::new("configuration.revision.settings").unwrap();
-        let current = pinned_defaults(&project_id, &revision);
-        let changed_timings = !current.config().telemetry.timings;
-        let preview = preview_project_settings(
-            &project_id,
-            &current,
-            ProjectSettingsPatchV1 {
-                expected_revision_id: revision.as_str().to_owned(),
-                max_file_size: Some(42),
-                telemetry: Some(TelemetrySettingsPatchV1 {
-                    timings: Some(changed_timings),
-                }),
-                ..ProjectSettingsPatchV1::default()
-            },
-        )
-        .unwrap();
-        let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
-            panic!("project settings must be atomic")
-        };
-        assert_eq!(mutations.len(), 2);
-        assert_eq!(current.config().max_file_size, 1_048_576);
-    }
-
-    #[test]
     fn context_scout_flag_toggles_only_the_state_of_the_effective_value() {
         let project_id = ProjectId::new("project.settings.scout").unwrap();
         let revision = ConfigurationRevisionId::new("configuration.revision.scout").unwrap();

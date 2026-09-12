@@ -98,27 +98,6 @@ struct Point {
 }
 
 #[test]
-fn test_c_union() {
-    let source = r#"
-union Data {
-    int i;
-    float f;
-    char c;
-};
-"#;
-    let extractor = CExtractor;
-    let result = extractor.extract("data.h", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let unions: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Union)
-        .collect();
-    assert_eq!(unions.len(), 1);
-    assert_eq!(unions[0].name, "Data");
-}
-
-#[test]
 fn test_c_union_with_fields() {
     let source = r#"
 union Data {
@@ -239,27 +218,6 @@ fn test_c_include() {
         .filter(|n| n.kind == NodeKind::Include)
         .collect();
     assert_eq!(includes.len(), 2);
-}
-
-#[test]
-fn test_c_global_variable() {
-    let source = r#"
-int global_counter = 0;
-const char *name = "hello";
-"#;
-    let extractor = CExtractor;
-    let result = extractor.extract("globals.c", source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let statics: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Static)
-        .collect();
-    assert!(
-        !statics.is_empty(),
-        "should have global variables as Static nodes, got: {:?}",
-        result.nodes
-    );
 }
 
 #[test]

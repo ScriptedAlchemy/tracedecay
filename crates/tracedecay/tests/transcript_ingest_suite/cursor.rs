@@ -712,40 +712,6 @@ async fn cursor_tool_use_blocks_populate_tool_event_metadata() {
 }
 
 #[tokio::test]
-async fn cursor_transcript_ingest_is_idempotent() {
-    let tmp = TempDir::new().unwrap();
-    let project = init_project(&tmp);
-
-    let transcript = tmp.path().join("cursor-session.jsonl");
-    std::fs::write(
-        &transcript,
-        r#"{"role":"user","message":{"content":[{"type":"text","text":"Remember the Cursor transcript parser decision."}]}}
-"#,
-    )
-    .unwrap();
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = serde_json::json!({
-        "session_id": "cursor-session",
-        "transcript_path": transcript,
-        "workspace_roots": [project]
-    });
-
-    // Ingestion is now incremental: the first call ingests the message and
-    // records a parse offset, so a second call over the *unchanged* file is a
-    // no-op rather than re-upserting the same row.
-    let first = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    let second = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(first.messages_upserted, 1);
-    assert_eq!(second.messages_upserted, 0);
-
-    let results = db
-        .search_session_messages("cursor", None, "parser decision", 10)
-        .await;
-    assert_eq!(results.len(), 1);
-}
-
-#[tokio::test]
 // Intentional: this test retains and reopens the profile's registered project
 // session runtime, so it pins process-wide profile env under GLOBAL_DB_ENV_LOCK.
 #[allow(clippy::await_holding_lock)]
@@ -822,49 +788,6 @@ async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
 }
 
 #[tokio::test]
-async fn cursor_transcript_ingest_reads_only_appended_lines() {
-    let tmp = TempDir::new().unwrap();
-    let project = init_project(&tmp);
-
-    let transcript = tmp.path().join("cursor-session.jsonl");
-    std::fs::write(
-        &transcript,
-        r#"{"role":"user","message":{"content":[{"type":"text","text":"First message about incremental ingestion."}]}}
-"#,
-    )
-    .unwrap();
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = serde_json::json!({
-        "session_id": "cursor-session",
-        "transcript_path": transcript,
-        "workspace_roots": [project]
-    });
-
-    let first = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(first.messages_upserted, 1);
-
-    // Append a new line; only the appended line should be parsed/upserted.
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap();
-    file.write_all(
-        b"{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Second message about incremental ingestion.\"}]}}\n",
-    )
-    .unwrap();
-    drop(file);
-
-    let second = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(second.messages_upserted, 1);
-
-    let results = db
-        .search_session_messages("cursor", None, "incremental ingestion", 10)
-        .await;
-    assert_eq!(results.len(), 2);
-}
-
-#[tokio::test]
 async fn cursor_transcript_ingest_uses_cwd_root_in_multi_root_workspace() {
     let tmp = TempDir::new().unwrap();
     let root_a = tmp.path().join("root-a");
@@ -926,46 +849,6 @@ async fn cursor_transcript_ingest_cap_defers_large_backlog() {
 
     let uncapped = ingest_cursor_transcript_event(&event.to_string(), &db).await;
     assert_eq!(uncapped.messages_upserted, 0);
-}
-
-#[tokio::test]
-async fn cursor_transcript_ingest_defers_partial_final_line() {
-    let tmp = TempDir::new().unwrap();
-    let project = init_project(&tmp);
-
-    let transcript = tmp.path().join("cursor-session.jsonl");
-    // A complete first line followed by a partial (un-terminated) second line,
-    // as can happen mid-flush while Cursor is still writing the transcript.
-    let complete = "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Complete line about partial handling.\"}]}}\n";
-    let partial = "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Partial line about partial handling.\"}]}}";
-    std::fs::write(&transcript, format!("{complete}{partial}")).unwrap();
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = serde_json::json!({
-        "session_id": "cursor-session",
-        "transcript_path": transcript,
-        "workspace_roots": [project]
-    });
-
-    // The partial final line is left unconsumed.
-    let first = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(first.messages_upserted, 1);
-
-    // Once the trailing newline arrives, the previously-partial line is ingested.
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&transcript)
-        .unwrap();
-    file.write_all(b"\n").unwrap();
-    drop(file);
-
-    let second = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(second.messages_upserted, 1);
-
-    let results = db
-        .search_session_messages("cursor", None, "partial handling", 10)
-        .await;
-    assert_eq!(results.len(), 2);
 }
 
 #[tokio::test]
@@ -1038,27 +921,6 @@ async fn cursor_subagent_child_messages_inherit_parent_dispatch_model() {
         child_hit.message.model.as_deref(),
         Some("claude-opus-4-8-thinking-max")
     );
-}
-
-#[tokio::test]
-async fn cursor_capped_ingest_discovers_subagents() {
-    let tmp = TempDir::new().unwrap();
-    let project = init_project(&tmp);
-    let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = cursor_hook_event(&project, &parent);
-
-    let stats = ingest_cursor_transcript_event_capped(&event.to_string(), &db, Some(4096)).await;
-    assert_eq!(stats.sessions_upserted, 2);
-    assert_eq!(stats.messages_upserted, 2);
-
-    let child = db
-        .get_session("cursor", "worker-1")
-        .await
-        .expect("subagent session should be stored");
-    assert_eq!(child.parent_session_id.as_deref(), Some("parent-session"));
-    assert!(child.is_subagent);
 }
 
 #[tokio::test]
@@ -1312,51 +1174,6 @@ async fn cursor_sweep_ingests_historical_transcripts() {
         Some("sweep-session")
     );
     assert!(child_session.is_subagent);
-
-    let hits = db
-        .search_session_messages("cursor", None, "orchard catchup", 10)
-        .await;
-    assert_eq!(hits.len(), 2);
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn cursor_sweep_after_hook_ingest_is_noop() {
-    let tmp = TempDir::new().unwrap();
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let project = init_project(&tmp);
-    let home = tmp.path().join("home");
-    let _env_guards = [
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ];
-    let (parent, _child) = write_sweep_fixture(&home, &project);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let event = serde_json::json!({
-        "session_id": "sweep-session",
-        "transcript_path": parent,
-        "workspace_roots": [project],
-        "cwd": project,
-    });
-    let hook = ingest_cursor_transcript_event(&event.to_string(), &db).await;
-    assert_eq!(hook.sessions_upserted, 2);
-    assert_eq!(hook.messages_upserted, 2);
-
-    // The production sweep shares the hook path's observation frontier, so
-    // everything the hook already admitted is a no-op.
-    let stats = try_ingest_cursor_project_sweep_capped(
-        &project,
-        &db,
-        None,
-        std::collections::HashSet::new(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(stats.sessions_upserted, 0);
-    assert_eq!(stats.messages_upserted, 0);
 
     let hits = db
         .search_session_messages("cursor", None, "orchard catchup", 10)

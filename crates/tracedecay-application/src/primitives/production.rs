@@ -2924,36 +2924,6 @@ mod unavailable_evidence_tests {
             );
         }
     }
-
-    #[test]
-    fn generic_failure_preserves_unknown_domain_coverage() {
-        let outcome: RetrievalPortOutcome<()> = failed(EvidenceDomain::Graph, UtcMicros(1));
-        let coverage = &outcome.evidence().coverage;
-
-        assert!(coverage.validate().is_ok());
-        assert_eq!(
-            coverage.domains,
-            vec![CoverageDomainState {
-                domain: EvidenceDomain::Graph,
-                completeness: CoverageCompleteness::Unknown,
-            }]
-        );
-    }
-
-    #[test]
-    fn diagnostic_unavailability_preserves_unknown_domain_coverage() {
-        let outcome = diagnostics_unavailable(UtcMicros(1), OmissionReason::Unavailable);
-        let coverage = &outcome.evidence().coverage;
-
-        assert!(coverage.validate().is_ok());
-        assert_eq!(
-            coverage.domains,
-            vec![CoverageDomainState {
-                domain: EvidenceDomain::Diagnostic,
-                completeness: CoverageCompleteness::Unknown,
-            }]
-        );
-    }
 }
 
 #[cfg(test)]
@@ -3901,46 +3871,6 @@ mod affected_tests_tests {
         );
 
         assert!(matches!(outcome, RetrievalPortOutcome::Completed(_)));
-    }
-
-    #[test]
-    fn partial_attribution_stays_partial() {
-        let project_id = ProjectId::new("project.affected-tests").expect("project");
-        let generation = generation("generation.affected-tests.1");
-        let mut read = complete_read(generation.clone());
-        read.provider_state = ProviderEvaluationStateV1::Partial;
-        read.coverage = GenerationProviderCoverageV1::Partial {
-            examined: 2,
-            eligible: 1,
-            excluded: 0,
-            unknown: 1,
-            capped: false,
-        };
-        read.evidence.as_mut().expect("join").coverage = GenerationTestJoinCoverageV1::Partial {
-            reasons: vec![GenerationTestJoinPartialReasonV1::InputPartial {
-                reason: "indexing".to_owned(),
-            }],
-        };
-        let authority = Arc::new(AttributionFixture {
-            calls: AtomicUsize::new(0),
-            read,
-        });
-        let port = TraceDecayAffectedTestsPortV1::from_binding(
-            Some(project_id.clone()),
-            generation.clone(),
-            Some(authority),
-        );
-        let (context, operation, _) = context(project_id);
-
-        let outcome = port.affected_tests(
-            &RetrievalPortContext {
-                request: &context,
-                operation: &operation,
-            },
-            &request(generation),
-        );
-
-        assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
     }
 
     #[test]

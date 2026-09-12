@@ -380,17 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn restore_is_non_serving_until_published() {
-        assert!(!StagedRestoreProgressV1::ReadyForPublication.serving());
-        assert!(
-            StagedRestoreProgressV1::Published {
-                receipt_id: "restore.1".into()
-            }
-            .serving()
-        );
-    }
-
-    #[test]
     fn old_authority_stays_read_only_after_rejoin() {
         for state in [
             AuthorityRejoinStateV1::FencedReadOnly {

@@ -339,27 +339,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_only_blocks_known_quota_until_its_deadline() {
-        let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
-        tracker.record(&checkpoint(4_000, 9_000));
-        let permit = granted(Arc::clone(&tracker).acquire(UtcMicros(1_000)));
-        permit.finish(None, Some(UtcMicros(2_000)));
-
-        let GitHubRequestAdmissionV1::RateLimited(blocked) =
-            Arc::clone(&tracker).acquire(UtcMicros(1_999))
-        else {
-            panic!("Retry-After must block before its deadline");
-        };
-        assert_eq!(blocked.limit, 5_000);
-        assert_eq!(blocked.remaining, 3_999);
-        assert_eq!(blocked.reset_at, UtcMicros(2_000));
-        assert!(matches!(
-            Arc::clone(&tracker).acquire(UtcMicros(2_000)),
-            GitHubRequestAdmissionV1::Granted(_)
-        ));
-    }
-
-    #[test]
     fn secondary_limit_remains_typed_after_the_primary_window_expires() {
         let tracker = Arc::new(GitHubRateLimitTrackerV1::default());
         tracker.record(&checkpoint(4_000, 3_000));

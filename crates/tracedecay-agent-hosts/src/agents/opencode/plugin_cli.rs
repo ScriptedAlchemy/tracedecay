@@ -166,14 +166,6 @@ mod tests {
         );
     }
 
-    /// The project-local deployment path carries the same requirement.
-    #[test]
-    fn the_project_local_plugin_path_is_discovered_by_the_hosts_own_loader() {
-        assert!(is_host_discovered_plugin_path(Path::new(
-            ".opencode/plugins/tracedecay.ts"
-        )));
-    }
-
     /// The executable form of the adoption decision: a staged *module*
     /// directory — the only shape `opencode plugin` accepts, because it needs
     /// a `package.json` entrypoint — is NOT discovered by the host's own

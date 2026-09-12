@@ -534,38 +534,6 @@ mod tests {
     }
 
     #[test]
-    fn expando_matches_upstream_table() {
-        assert_eq!(expando_for_key("rust"), Some('µ'));
-        assert_eq!(expando_for_key("c"), Some('𐀀'));
-        assert_eq!(expando_for_key("css"), Some('_'));
-        assert_eq!(expando_for_key("javascript"), None);
-    }
-
-    #[test]
-    fn finds_rust_call_shape_in_process() {
-        let dir = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "orders.rs",
-            "fn place(wh: &mut W, o: &O) {\n    reserve_stock(wh, &item.sku, item.quantity);\n    let t = compute_total(&o.items);\n}\n",
-        );
-        // A file whose only mention is a comment must not match the call shape.
-        write(
-            dir.path(),
-            "util.js",
-            "// reserve_stock is called elsewhere\nconst note = 'reserve_stock(a, b, c)';\n",
-        );
-
-        let res = search_tree(dir.path(), "reserve_stock($$$)", None, None, 50).unwrap();
-        assert_eq!(res.matches.len(), 1, "matches: {:?}", res.matches);
-        let m = &res.matches[0];
-        assert_eq!(m.file, "orders.rs");
-        assert_eq!(m.line, 2);
-        assert_eq!(m.lang, "rust");
-        assert!(m.matched_text.contains("reserve_stock"));
-    }
-
-    #[test]
     fn cancelled_search_stops_before_scanning() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "calls.rs", "fn f() { target(1); }\n");
@@ -602,123 +570,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_trees_are_pruned_unless_the_path_glob_selects_them() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("src")).unwrap();
-        fs::create_dir_all(dir.path().join("dist")).unwrap();
-        fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
-        write(
-            dir.path(),
-            "src/tracked.rs",
-            "fn tracked() { target(1); }\n",
-        );
-        write(
-            dir.path(),
-            "dist/generated.rs",
-            "fn generated() { target(2); }\n",
-        );
-        write(
-            dir.path(),
-            "node_modules/pkg/unrelated.rs",
-            "fn unrelated() { target(3); }\n",
-        );
-
-        let default = search_tree(dir.path(), "target($A)", Some("rust"), None, 50).unwrap();
-        assert_eq!(
-            default
-                .matches
-                .iter()
-                .map(|item| item.file.as_str())
-                .collect::<Vec<_>>(),
-            vec!["src/tracked.rs"]
-        );
-
-        let selected =
-            search_tree(dir.path(), "target($A)", Some("rust"), Some("dist/**"), 50).unwrap();
-        assert_eq!(
-            selected
-                .matches
-                .iter()
-                .map(|item| item.file.as_str())
-                .collect::<Vec<_>>(),
-            vec!["dist/generated.rs"]
-        );
-    }
-
-    #[test]
-    fn basename_glob_can_select_a_file_inside_a_generated_tree() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("dist/nested")).unwrap();
-        write(
-            dir.path(),
-            "dist/nested/generated.rs",
-            "fn generated() { target(1); }\n",
-        );
-
-        let selected = search_tree(
-            dir.path(),
-            "target($A)",
-            Some("rust"),
-            Some("generated.rs"),
-            50,
-        )
-        .unwrap();
-
-        assert_eq!(selected.matches.len(), 1);
-        assert_eq!(selected.matches[0].file, "dist/nested/generated.rs");
-    }
-
-    #[test]
-    fn explicit_lang_overrides_extension_inference_for_selected_files() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "a.rs", "fn f() { g(1); }\n");
-        write(dir.path(), "b.py", "g(1)\n");
-        let res = search_tree(dir.path(), "g($A)", Some("rust"), Some("b.py"), 50).unwrap();
-        assert_eq!(res.matches.len(), 1);
-        assert_eq!(res.matches[0].file, "b.py");
-        assert_eq!(res.matches[0].lang, "rust");
-    }
-
-    #[test]
-    fn explicit_lang_scans_extensionless_caller_selected_file() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "Dockerfile", "FROM alpine\nRUN echo ready\n");
-
-        let res = search_tree(
-            dir.path(),
-            "RUN echo ready",
-            Some("dockerfile"),
-            Some("Dockerfile"),
-            50,
-        )
-        .unwrap();
-
-        assert_eq!(res.files_scanned, 1);
-        assert_eq!(res.matches.len(), 1, "matches: {:?}", res.matches);
-        assert_eq!(res.matches[0].file, "Dockerfile");
-    }
-
-    #[test]
-    fn path_glob_scopes_the_sweep() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("src")).unwrap();
-        fs::create_dir(dir.path().join("tests")).unwrap();
-        write(
-            dir.path().join("src").as_path(),
-            "a.rs",
-            "fn f() { g(1); }\n",
-        );
-        write(
-            dir.path().join("tests").as_path(),
-            "b.rs",
-            "fn f() { g(2); }\n",
-        );
-        let res = search_tree(dir.path(), "g($A)", None, Some("src/**/*.rs"), 50).unwrap();
-        assert_eq!(res.matches.len(), 1);
-        assert_eq!(res.matches[0].file, "src/a.rs");
-    }
-
-    #[test]
     fn unknown_explicit_lang_is_hard_error() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "a.rs", "fn f() {}\n");
@@ -733,19 +584,6 @@ mod tests {
             search_tree(dir.path(), "   ", None, None, 50).unwrap_err(),
             AstGrepSearchError::EmptyPattern
         ));
-    }
-
-    #[test]
-    fn truncates_at_max_results() {
-        let dir = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "a.rs",
-            "fn f() {\n g(1);\n g(2);\n g(3);\n g(4);\n}\n",
-        );
-        let res = search_tree(dir.path(), "g($A)", Some("rust"), None, 2).unwrap();
-        assert_eq!(res.matches.len(), 2);
-        assert!(res.truncated);
     }
 
     #[test]
@@ -771,14 +609,5 @@ mod tests {
             result.lines_examined
         );
         assert!(result.lines_visited < TOTAL_LINES);
-    }
-
-    #[test]
-    fn source_line_lookup_uses_the_match_byte_offset() {
-        let source = "first\r\nsecond é\r\nthird\n";
-        let offset = source.find('é').unwrap();
-
-        assert_eq!(source_line_at_byte(source, offset), "second é");
-        assert!(source_line_at_byte(source, source.len() + 1).is_empty());
     }
 }

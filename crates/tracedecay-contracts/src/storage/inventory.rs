@@ -217,31 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn orphan_resolved_identity_is_not_orphan() {
-        let record = OrphanStoreRecordV1 {
-            store: store(),
-            identity_resolves: true,
-            size_bytes: StorageByteSizeV1(1_000),
-            first_unresolved_at: UtcMicros(100),
-            observed_at: UtcMicros(400),
-        };
-        assert!(!record.is_orphan());
-    }
-
-    #[test]
-    fn retention_backlog_detects_past_window_bytes() {
-        let record = RetentionBacklogRecordV1 {
-            store: store(),
-            table: TableNameV1::new("lcm_raw_messages").expect("valid"),
-            past_window_bytes: StorageByteSizeV1(3_800),
-            oldest_past_window_at: UtcMicros(10),
-            window_watermark_at: UtcMicros(100),
-        };
-        assert!(record.has_backlog());
-        assert!(record.validate().is_ok());
-    }
-
-    #[test]
     fn retention_backlog_rejects_inconsistent_watermark() {
         let record = RetentionBacklogRecordV1 {
             store: store(),

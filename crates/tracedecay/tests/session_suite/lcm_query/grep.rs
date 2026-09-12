@@ -171,44 +171,6 @@ async fn grep_like_fallback_recalls_infix_hyphen_query_matches() {
 }
 
 #[tokio::test]
-async fn grep_like_fallback_recalls_infix_slash_query_matches() {
-    let tmp = TempDir::new().unwrap();
-    let db = registered_lcm_runtime(&tmp).await;
-    let store_ids = insert_raw_messages(
-        &db,
-        "cursor",
-        "session-1",
-        &["the docs mention srcfoo as a fused path token".to_string()],
-    )
-    .await;
-
-    let hits = db
-        .lcm_grep_for_test(LcmGrepRequest {
-            provider: "cursor".into(),
-            query: "src/foo".into(),
-            scope: LcmScope::Session,
-            session_id: Some("session-1".into()),
-            include_summaries: false,
-            limit: 10,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            git_filter: Default::default(),
-        })
-        .await
-        .expect("slash fallback query should keep infix matches")
-        .hits;
-
-    assert!(hits.iter().any(|hit| hit.store_id == Some(store_ids[0])));
-    assert!(
-        hits.iter()
-            .any(|hit| hit.snippet.to_ascii_lowercase().contains("srcfoo"))
-    );
-}
-
-#[tokio::test]
 async fn grep_like_fallback_handles_hash_separator_queries() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;

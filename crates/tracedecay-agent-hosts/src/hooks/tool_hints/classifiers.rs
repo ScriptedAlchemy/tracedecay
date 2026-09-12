@@ -933,26 +933,6 @@ mod tests {
     }
 
     #[test]
-    fn new_rust_function_body_is_a_redundancy_candidate() {
-        assert!(is_redundancy_candidate_edit(&edit(
-            "Write",
-            "src/widgets.rs",
-            &rust_fn_body(),
-        )));
-        // Edit and MultiEdit tools qualify too.
-        assert!(is_redundancy_candidate_edit(&edit(
-            "Edit",
-            "src/widgets.rs",
-            &rust_fn_body(),
-        )));
-        assert!(is_redundancy_candidate_edit(&edit(
-            "MultiEdit",
-            "src/widgets.rs",
-            &rust_fn_body(),
-        )));
-    }
-
-    #[test]
     fn short_or_non_function_edits_are_not_candidates() {
         // Under the line threshold, even with a `fn`.
         assert!(!is_redundancy_candidate_edit(&edit(

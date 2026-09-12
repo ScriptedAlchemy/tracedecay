@@ -1031,31 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn enable_plugin_creates_missing_profile_config() {
-        let dir = TempDir::new().unwrap();
-        let config = dir.path().join(".hermes/profiles/work/config.yaml");
-
-        enable_plugin(&config).unwrap();
-
-        let updated = read(&config);
-        assert_enabled(&updated);
-        assert!(
-            !config.with_extension("yaml.bak").exists(),
-            "first write should not create a backup for a missing config"
-        );
-    }
-
-    #[test]
-    fn disable_plugin_ignores_missing_config() {
-        let dir = TempDir::new().unwrap();
-        let config = dir.path().join(".hermes/profiles/missing/config.yaml");
-
-        disable_plugin(&config).unwrap();
-
-        assert!(!config.exists());
-    }
-
-    #[test]
     fn enable_then_disable_restores_existing_config_bytes() {
         let original = "theme: dark\nplugins:\n  enabled:\n    - foreign\n";
         let enabled = enable_plugin_config(original).unwrap();

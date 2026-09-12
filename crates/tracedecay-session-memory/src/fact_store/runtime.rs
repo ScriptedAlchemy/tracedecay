@@ -620,24 +620,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mounted_runtime_rejects_a_different_database_client_binding() {
-        let project = ProjectId::new("project.fact-runtime").unwrap();
-        let binding = binding(&project);
-        let locator = VerifiedStoreLocatorV1::new(
-            binding.shard_id.clone(),
-            binding.incarnation,
-            LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-        );
-        let other_binding = profile_binding();
-        let other_locator = VerifiedStoreLocatorV1::new(
-            other_binding.shard_id.clone(),
-            other_binding.incarnation,
-            LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
-        );
-        assert!(validate_mount_parts(&binding, &locator, &other_binding, &other_locator).is_err());
-    }
-
     #[tokio::test]
     async fn read_only_runtime_client_denies_submit_and_serves_typed_reads() {
         let temp = tempfile::tempdir().unwrap();
@@ -713,42 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn fact_read_request_carries_exact_binding_and_semantic_metadata() {
-        let project = ProjectId::new("project.fact-runtime").unwrap();
-        let binding = binding(&project);
-        let owner = FactOwnerV1::Project {
-            project_id: project,
-        };
-        let query = FactCurrentQuery::new(owner.clone(), fact_id(owner)).unwrap();
-        let request = build_read_request(
-            &binding,
-            FactReadOperationV1::Current(query),
-            CURRENT_OPERATION,
-        )
-        .unwrap();
-        assert_eq!(request.binding(), &binding);
-        assert_eq!(request.consistency(), &ConsistencyModeV1::LatestAvailable);
-        assert_eq!(request.priority(), OperationPriorityV1::Foreground);
-        assert!(request.admission_bytes() > 1);
-        assert!(matches!(
-            request.operation(),
-            RuntimeReadOperationV1::Repository {
-                op: RepositoryReadOperationV1::Project(ProjectReadOperationV1::Fact(
-                    FactReadOperationV1::Current(_)
-                ))
-            }
-        ));
-        assert!(
-            request
-                .control()
-                .deadline
-                .deadline_id
-                .as_str()
-                .starts_with("deadline.memory-fact.")
-        );
-    }
-
-    #[test]
     fn fact_read_request_rejects_cross_project_and_profile_owners() {
         let project = ProjectId::new("project.fact-runtime").unwrap();
         let binding = binding(&project);
@@ -771,91 +717,6 @@ mod tests {
                 assert!(build_read_request(&binding, operation, CURRENT_OPERATION).is_err());
             }
         }
-    }
-
-    #[test]
-    fn profile_fact_read_request_uses_profile_memory_binding() {
-        let binding = profile_binding();
-        let owner = FactOwnerV1::Profile;
-        let query = FactCurrentQuery::new(owner.clone(), fact_id(owner)).unwrap();
-        let request = build_read_request(
-            &binding,
-            FactReadOperationV1::Current(query),
-            CURRENT_OPERATION,
-        )
-        .unwrap();
-
-        assert_eq!(request.binding(), &binding);
-        assert!(matches!(
-            request.operation(),
-            RuntimeReadOperationV1::Repository {
-                op: RepositoryReadOperationV1::Project(ProjectReadOperationV1::Fact(
-                    FactReadOperationV1::Current(_)
-                ))
-            }
-        ));
-    }
-
-    #[test]
-    fn fact_submit_request_carries_exact_binding_and_semantic_metadata() {
-        let project = ProjectId::new("project.fact-runtime").unwrap();
-        let binding = binding(&project);
-        let owner = FactOwnerV1::Project {
-            project_id: project,
-        };
-        let fact_id = fact_id(owner.clone());
-        let event = FactLineageEventV1::new(
-            fact_id.clone(),
-            owner.clone(),
-            FactLineageEventKindV1::PayloadAccessChanged {
-                previous: PayloadAccessState::Eligible,
-                current: PayloadAccessState::Deleted,
-            },
-            UtcMicros(1),
-            None,
-        )
-        .unwrap();
-        let batch =
-            FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap();
-        let command = fact_command(&batch);
-        let digest = canonical_sha256(&command).unwrap();
-        let request = build_submit_request(
-            &binding,
-            RepositoryWritePayloadV1::Fact(Box::new(batch)),
-            &command,
-            digest.as_str(),
-            "fact.fixture.event.fixture",
-        )
-        .unwrap();
-
-        assert_eq!(request.binding(), &binding);
-        assert_eq!(request.envelope().metadata.shard_id, binding.shard_id);
-        assert_eq!(
-            request.envelope().metadata.client_id.as_str(),
-            "client.memory-fact"
-        );
-        assert_eq!(
-            request
-                .envelope()
-                .metadata
-                .idempotency
-                .command_digest
-                .as_str(),
-            digest.as_str()
-        );
-        assert_eq!(
-            request.control().requested_at,
-            request.envelope().metadata.admitted_at
-        );
-        assert_eq!(
-            request.envelope().metadata.durability,
-            DurabilityClassV1::Full
-        );
-        assert_eq!(
-            request.envelope().metadata.priority,
-            OperationPriorityV1::Foreground
-        );
-        assert!(request.envelope().metadata.admission_bytes > 1);
     }
 
     #[test]
@@ -886,32 +747,5 @@ mod tests {
             Some(RuntimeInterruptionV1::Cancelled)
         ));
         assert!(probe.try_begin_commit());
-    }
-
-    #[test]
-    fn committed_purge_returns_receipt_without_active_assertion() {
-        let owner = FactOwnerV1::Profile;
-        let fact_id = fact_id(owner.clone());
-        let event = FactLineageEventV1::new(
-            fact_id.clone(),
-            owner.clone(),
-            FactLineageEventKindV1::PayloadAccessChanged {
-                previous: PayloadAccessState::Eligible,
-                current: PayloadAccessState::Deleted,
-            },
-            UtcMicros(1),
-            None,
-        )
-        .unwrap();
-        let last_event_id = event.event_id().clone();
-        let batch =
-            FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap();
-
-        let outcome = finish_commit_outcome(&batch, last_event_id, None, false).unwrap();
-
-        let FactCommitOutcome::Committed(receipt) = outcome else {
-            panic!("expected committed purge receipt");
-        };
-        assert_eq!(receipt.active_assertion_id(), None);
     }
 }

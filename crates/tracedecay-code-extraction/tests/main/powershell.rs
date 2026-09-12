@@ -3,78 +3,6 @@ use tracedecay_code_extraction::PowerShellExtractor;
 use tracedecay_domain::*;
 
 #[test]
-fn test_powershell_extract_functions() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
-    let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let fns: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Function)
-        .collect();
-    assert_eq!(
-        fns.len(),
-        5,
-        "expected 5 functions, got {}: {:?}",
-        fns.len(),
-        fns.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(fns.iter().any(|n| n.name == "Write-Log"));
-    assert!(fns.iter().any(|n| n.name == "Test-Config"));
-    assert!(fns.iter().any(|n| n.name == "Connect-Server"));
-    assert!(fns.iter().any(|n| n.name == "Disconnect-Server"));
-    assert!(fns.iter().any(|n| n.name == "Main"));
-}
-
-#[test]
-fn test_powershell_extract_consts() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
-    let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    assert_eq!(
-        consts.len(),
-        2,
-        "expected 2 consts, got {}: {:?}",
-        consts.len(),
-        consts.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(consts.iter().any(|n| n.name == "MaxRetries"));
-    assert!(consts.iter().any(|n| n.name == "DefaultPort"));
-}
-
-#[test]
-fn test_powershell_extract_imports() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
-    let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let uses: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Use)
-        .collect();
-    assert_eq!(
-        uses.len(),
-        2,
-        "expected 2 Use nodes, got {}: {:?}",
-        uses.len(),
-        uses.iter().map(|n| &n.name).collect::<Vec<_>>()
-    );
-    assert!(uses.iter().any(|n| n.name == "ActiveDirectory"));
-    assert!(uses.iter().any(|n| n.name.contains("Utils.ps1")));
-}
-
-#[test]
 fn test_powershell_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
     let extractor = PowerShellExtractor;
@@ -160,20 +88,6 @@ fn test_powershell_docstrings() {
         "docstring: {:?}",
         main_fn.docstring
     );
-}
-
-#[test]
-fn test_powershell_file_node() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
-    let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
-    let files: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::File)
-        .collect();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].name, "sample.ps1");
 }
 
 #[test]

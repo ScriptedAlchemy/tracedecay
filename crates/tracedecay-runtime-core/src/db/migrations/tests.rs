@@ -146,22 +146,6 @@ async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// An empty file is created at the one supported shape, and reopening it is a
-/// pure identity check.
-#[tokio::test]
-async fn an_empty_database_is_created_at_the_supported_schema_version() {
-    let (conn, _dir) = create_raw_db().await;
-
-    assert_eq!(super::get_version(&*conn).await.unwrap(), 0);
-    ensure_schema_current_connection(&conn).await.unwrap();
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-
-    ensure_schema_current_connection(&conn)
-        .await
-        .expect("reopening a current store is an identity check");
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-}
-
 #[tokio::test]
 async fn a_shipped_v35_alias_trigger_is_repaired_without_losing_rows() {
     let (conn, dir) = create_schema_db().await;

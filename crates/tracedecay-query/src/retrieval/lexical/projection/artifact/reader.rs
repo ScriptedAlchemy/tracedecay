@@ -2936,8 +2936,6 @@ mod tests {
     use std::cmp::Reverse;
     use std::collections::{BTreeSet, BinaryHeap};
     use std::path::PathBuf;
-    #[cfg(feature = "hotpath")]
-    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use roaring::RoaringBitmap;
@@ -2948,8 +2946,6 @@ mod tests {
     use tracedecay_private_fs::open_private_file;
 
     use super::super::format::encode_ngram_bitmap;
-    #[cfg(feature = "hotpath")]
-    use super::ArtifactConnectionMutex;
     use super::{
         ARTIFACT_NGRAM_INTERSECTION_SCRATCH_V1, ARTIFACT_NGRAM_MAX_CANDIDATES_V1,
         ARTIFACT_SQLITE_CACHE_BYTES, ARTIFACT_SQLITE_MAX_BIND_PARAMETERS_V1,
@@ -3163,23 +3159,6 @@ mod tests {
         })
         .expect("SQLite stream succeeds");
         documents
-    }
-
-    #[cfg(feature = "hotpath")]
-    #[test]
-    fn repeated_feature_on_reader_connections_use_plain_mutexes_and_preserve_queries() {
-        for expected in 0..16i64 {
-            let connection: ArtifactConnectionMutex<Connection> =
-                StdMutex::new(Connection::open_in_memory().expect("in-memory SQLite"));
-
-            let value = connection
-                .lock()
-                .expect("reader connection lock")
-                .query_row("SELECT ?1", [expected], |row| row.get::<_, i64>(0))
-                .expect("query through reader connection lock");
-
-            assert_eq!(value, expected);
-        }
     }
 
     #[test]

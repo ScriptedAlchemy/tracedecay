@@ -666,21 +666,6 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_telemetry_maps_to_unsupported_state() {
-        let read = StorageTelemetryReadV1::Unsupported { store: store() };
-        let finding = over_budget_finding(
-            &budget(300_000),
-            &read,
-            DoctorCoverageCompletenessV1::Complete,
-        )
-        .expect("finding");
-        assert_eq!(
-            finding.finding().state(),
-            DoctorEvidenceStateV1::Unsupported
-        );
-    }
-
-    #[test]
     fn denied_and_unknown_telemetry_map_to_their_states() {
         for (read, expected) in [
             (

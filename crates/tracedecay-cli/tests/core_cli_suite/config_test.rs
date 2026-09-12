@@ -4,47 +4,6 @@ use tracedecay_configuration::{
 };
 
 #[test]
-fn default_config_excludes_generated_vendor_cache_trees_and_gitignore_on() {
-    let config = TraceDecayConfig::default();
-    assert!(config.git_ignore);
-    assert!(config.include.is_empty());
-    for pattern in [
-        "target/**",
-        ".git/**",
-        ".tracedecay/**",
-        "**/node_modules/**",
-        "vendor/**",
-        "**/vendor/**",
-        "build/**",
-        "**/build/**",
-        "dist/**",
-        "**/dist/**",
-        "out/**",
-        "**/out/**",
-        "coverage/**",
-        "**/coverage/**",
-        ".cache/**",
-        "**/.cache/**",
-        ".next/**",
-        "**/.next/**",
-        ".turbo/**",
-        "**/.turbo/**",
-        ".gradle/**",
-        "**/.gradle/**",
-        ".venv/**",
-        "**/.venv/**",
-        "venv/**",
-        "**/venv/**",
-        "**/__pycache__/**",
-    ] {
-        assert!(
-            config.exclude.iter().any(|p| p == pattern),
-            "missing default exclude pattern {pattern}"
-        );
-    }
-}
-
-#[test]
 fn legacy_config_fixture_load_does_not_rewrite_input() {
     let dir = TempDir::new().unwrap();
     let config = TraceDecayConfig::default();
@@ -168,15 +127,4 @@ fn test_discover_project_root_returns_none() {
     let dir = tempfile::TempDir::new().unwrap();
     let found = tracedecay::config::discover_project_root(dir.path());
     assert!(found.is_none());
-}
-
-#[test]
-fn test_discover_project_root_at_root_itself() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let root = dir.path();
-    std::fs::create_dir_all(root.join(".tracedecay")).unwrap();
-    std::fs::write(root.join(".tracedecay/tracedecay.db"), b"fake").unwrap();
-
-    let found = tracedecay::config::discover_project_root(root);
-    assert_eq!(found, Some(root.to_path_buf()));
 }

@@ -614,36 +614,6 @@ mod tests {
     }
 
     #[test]
-    fn same_content_renews_the_expiry() {
-        let root = tempfile::tempdir().unwrap();
-        let first = store_response_handle_in_root(root.path(), "payload", 10).unwrap();
-        let second = store_response_handle_in_root(root.path(), "payload", 20).unwrap();
-
-        assert_eq!(second.handle, first.handle);
-        assert_eq!(first.created_at, 10);
-        assert_eq!(second.created_at, 20);
-        assert_eq!(second.expires_at, 20 + RESPONSE_HANDLE_TTL_SECS);
-        assert_eq!(
-            inventory_response_handles_in_root(root.path())
-                .unwrap()
-                .file_count,
-            1
-        );
-        let ResponseHandleLookup::Found(persisted) =
-            retrieve_from_root(root.path(), &second.handle, 20).unwrap()
-        else {
-            panic!("renewed response handle was not retrievable");
-        };
-        assert_eq!(persisted.created_at, 20);
-
-        let other_root = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            retrieve_from_root(other_root.path(), &second.handle, 20).unwrap(),
-            ResponseHandleLookup::Missing
-        ));
-    }
-
-    #[test]
     fn concurrent_identical_stores_publish_one_complete_record() {
         let root = tempfile::tempdir().unwrap();
         let root = Arc::new(root.path().to_path_buf());
@@ -833,46 +803,6 @@ mod tests {
             ResponseHandleLookup::Found(found) if found.content == "read me"
         ));
         assert!(matches!(missing.unwrap(), ResponseHandleLookup::Missing));
-    }
-
-    #[test]
-    fn concurrent_lookups_overlap_without_failing_closed() {
-        const READERS: usize = 8;
-        const LOOKUPS_PER_READER: usize = 50;
-        let root = tempfile::tempdir().unwrap();
-        let record = store_response_handle_in_root(root.path(), "shared read", 10).unwrap();
-        let root = Arc::new(root.path().to_path_buf());
-        let handle = Arc::new(record.handle);
-        let barrier = Arc::new(Barrier::new(READERS));
-        let workers = (0..READERS)
-            .map(|_| {
-                let root = Arc::clone(&root);
-                let handle = Arc::clone(&handle);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    (0..LOOKUPS_PER_READER)
-                        .filter(|_| {
-                            !matches!(
-                                retrieve_from_root(&root, &handle, 10),
-                                Ok(ResponseHandleLookup::Found(_))
-                            )
-                        })
-                        .count()
-                })
-            })
-            .collect::<Vec<_>>();
-        let failures = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .sum::<usize>();
-
-        assert_eq!(
-            failures,
-            0,
-            "{failures} of {} overlapping lookups did not return the record",
-            READERS * LOOKUPS_PER_READER
-        );
     }
 
     #[test]

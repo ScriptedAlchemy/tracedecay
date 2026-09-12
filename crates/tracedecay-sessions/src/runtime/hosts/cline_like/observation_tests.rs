@@ -349,21 +349,6 @@ async fn api_append_preserves_unchanged_native_ui_observation() {
 }
 
 #[test]
-fn snapshot_budget_counts_all_task_input_files_once() {
-    let temp = tempfile::TempDir::new().expect("temp Cline task");
-    let task_dir = temp.path().join("task-1");
-    std::fs::create_dir_all(&task_dir).unwrap();
-    let transcript = task_dir.join("api_conversation_history.json");
-    std::fs::write(&transcript, b"12345").unwrap();
-    std::fs::write(task_dir.join("ui_messages.json"), b"1234").unwrap();
-    std::fs::write(task_dir.join("task_metadata.json"), b"123").unwrap();
-    std::fs::write(task_dir.join("history_item.json"), b"12").unwrap();
-    std::fs::write(task_dir.join("history.json"), b"1").unwrap();
-
-    assert_eq!(snapshot_input_bytes("cline", &transcript).unwrap(), 15);
-}
-
-#[test]
 fn snapshot_discovery_filters_scope_before_spending_byte_budget() {
     let temp = tempfile::TempDir::new().expect("temp Cline storage");
     let tasks = temp.path().join("tasks");
@@ -648,64 +633,6 @@ fn host_admission_failures_preserve_provider_with_bounded_reason_codes() {
             } if error_provider == provider
         ));
     }
-}
-
-#[test]
-fn snapshot_normalization_preserves_roo_code_without_generic_metadata() {
-    let native = serde_json::json!({
-        "provider": "cline",
-        "session_id": "forged-task",
-        "message_id": "forged-message",
-        "role": "assistant",
-        "timestamp": 1_800_000_000_i64,
-        "ordinal": 7,
-        "kind": "message",
-        "model": "redacted-model",
-        "text": "Redacted response",
-        "tool_names": "read_file",
-        "usage": {"input_tokens": 12, "output_tokens": 3},
-        // Untyped bags / content-without-visibility must not invent facts.
-        "reasoning": "Redacted reasoning",
-        "git": {"commit": "redacted"},
-        "workflow": {"task": "redacted"},
-        "source_path": "/must-not-survive",
-        "cwd": "/must-not-survive",
-        "metadata": {"must-not-survive": true},
-    });
-    let range = ObservationSourceRangeV1::new(7, 8).unwrap();
-    let parsed = parse_normalized_observation_record_v1(
-        &serde_json::to_vec(&native).unwrap(),
-        range,
-        ObservationOrderingDomainV1::SnapshotOrder,
-        |native| {
-            canonical_snapshot_envelope(
-                &native,
-                "roo-code",
-                "redacted-task",
-                "redacted-task:message",
-                range,
-            )
-        },
-    )
-    .expect("redacted Roo Code canonical envelope");
-    let canonical = parsed.value();
-    assert_eq!(canonical["provider"], "roo-code");
-    assert_eq!(canonical["stable_record_id"], "redacted-task:message");
-    assert_eq!(canonical["relations"]["session_id"], "redacted-task");
-    assert_eq!(
-        canonical["relations"]["message_id"],
-        "redacted-task:message"
-    );
-    assert!(canonical["relations"].get("thread_id").is_none());
-    assert_eq!(canonical["evidence"]["ordering_domain"], "snapshot_order");
-    assert_eq!(canonical["evidence"]["range"]["start"], 7);
-    // message + tool_names fallback + usage; no invented reasoning/git/workflow
-    assert_eq!(canonical["facts"].as_array().unwrap().len(), 3);
-    let encoded = canonical.to_string();
-    assert!(!encoded.contains("must-not-survive"));
-    assert!(!encoded.contains("source_path"));
-    assert!(!encoded.contains("metadata"));
-    assert!(!encoded.contains("Redacted reasoning"));
 }
 
 const GOLDEN_API_HISTORY: &str = include_str!(

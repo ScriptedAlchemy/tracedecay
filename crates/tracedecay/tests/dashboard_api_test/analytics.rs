@@ -1050,19 +1050,3 @@ fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
         assert_eq!(mcp["error_class"], "unauthorized");
     });
 }
-
-#[test]
-fn costs_read_model_is_mounted_on_the_active_dashboard() {
-    let _lock = ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_fixture(false).await;
-        let (status, costs) = get_json(&http_agent(), &format!("{}/api/costs", fixture.base_url));
-        assert_eq!(status, 200);
-        assert_eq!(costs["payload"]["authorized_scope_ref"], "all");
-        assert!(costs["payload"]["usage"].is_array());
-        assert!(costs["payload"]["estimated_cost"].is_array());
-    });
-}

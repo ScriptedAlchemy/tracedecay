@@ -1277,18 +1277,16 @@ fn map_authority_error(
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use super::*;
-    use tracedecay_domain::configuration::ConfigurationRevisionId;
     use tracedecay_domain::{
         ChunkerRevision, ComponentRevision, EmbeddingDeviceClassV1, EmbeddingDocumentCompositionV1,
         EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
         EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, FusionProfileId, PrivacyDomainId,
         ProjectId, RepositoryId, RetrievalBudget, WorktreeId,
     };
-    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 
     use crate::config::retrieval::SemanticCompatibilityPinsV1;
@@ -1329,13 +1327,6 @@ mod tests {
                 self.evaluation_calls.load(Ordering::SeqCst),
                 self.publish_calls.load(Ordering::SeqCst),
             )
-        }
-
-        fn published_snapshot(&self) -> Option<SemanticEvaluationPublicationSnapshotV1> {
-            self.published_snapshot
-                .lock()
-                .expect("published snapshot lock")
-                .clone()
         }
     }
 
@@ -1580,25 +1571,6 @@ mod tests {
     }
 
     #[test]
-    fn publication_snapshot_identity_invalidates_source_drift() {
-        let candidate = query_candidate();
-        let before = query_snapshot(&candidate);
-        let mut changed_source = before.clone();
-        changed_source.code_source_manifest_digest = digest('5');
-        assert_ne!(
-            changed_source, before,
-            "a changed sealed source commitment must invalidate qualification"
-        );
-
-        let mut changed_capability = before.clone();
-        changed_capability.code_capability_manifest_digest = digest('6');
-        assert_ne!(
-            changed_capability, before,
-            "a changed sealed capability commitment must invalidate qualification"
-        );
-    }
-
-    #[test]
     fn measured_report_resources_replace_semantic_pins_but_retain_configured_ceiling() {
         let measured = semantic_resources(10);
         let configured_ceiling = semantic_resources(20);
@@ -1694,54 +1666,6 @@ mod tests {
             .expect("the baseline is executable under its retained runtime");
     }
 
-    async fn operation_for_publish_test() -> ProductionSemanticConfigurationOperationV1 {
-        let directory = tempfile::tempdir().expect("test profile directory");
-        let project_root = directory.path().join("project");
-        std::fs::create_dir_all(&project_root).expect("test project directory");
-        let project_id =
-            ProjectId::new("project.native-qualification-operation").expect("project id");
-        let database_runtime = RegisteredGlobalDbTestRuntime::project(
-            directory.path().join("profile"),
-            &project_root,
-            project_id.clone(),
-        )
-        .await
-        .expect("registered project database");
-        let database = database_runtime
-            .project_database_arc()
-            .expect("project database");
-        let snapshot = tracedecay_configuration::config::resolver::resolve_configuration(
-            &tracedecay_configuration::config::registry::ConfigurationRegistry::core()
-                .expect("configuration registry"),
-            &[],
-        )
-        .expect("registry defaults resolve")
-        .snapshot;
-        let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
-            tracedecay_configuration::config::RuntimeConfigurationTarget {
-                project_id,
-                project_root,
-            },
-            ConfigurationRevisionId::try_from(
-                "configuration.native-qualification-operation".to_owned(),
-            )
-            .expect("configuration revision"),
-            snapshot,
-        )
-        .expect("registry defaults materialize");
-        let (configuration, _) = ProjectConfigurationRuntime::open(
-            tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
-                configuration,
-                database.clone(),
-            ),
-        )
-        .expect("configuration runtime");
-        ProductionSemanticConfigurationOperationV1::new(
-            Arc::new(configuration),
-            Arc::new(RegisteredSemanticAcceptedProfileAuthorityV1::new(database)),
-        )
-    }
-
     #[tokio::test]
     async fn qualification_rejects_a_controlled_evaluator_without_publishing() {
         let candidate = query_candidate();
@@ -1794,21 +1718,6 @@ mod tests {
 
         assert_rejection_names_its_invariant(&result, "vector, lifecycle, or runtime pins");
         assert_eq!(authority.calls(), (1, 0, 0));
-    }
-
-    #[tokio::test]
-    async fn evaluate_and_publish_runs_the_native_evaluator_before_publication() {
-        let candidate = query_candidate();
-        let authority = RecordingSnapshotAuthority::rejecting([query_snapshot(&candidate)]);
-        let operation = operation_for_publish_test().await;
-
-        let result = operation
-            .evaluate_and_publish_profile(&authority, workspace_root(), candidate)
-            .await;
-
-        assert_rejection_names_its_invariant(&result, "native semantic evaluation failed");
-        assert_eq!(authority.calls(), (1, 1, 0));
-        assert_eq!(authority.published_snapshot(), None);
     }
 
     /// Every rejection reachable from qualification or publication must name

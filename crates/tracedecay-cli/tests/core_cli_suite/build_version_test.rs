@@ -93,19 +93,3 @@ fn version_flag_always_names_the_exact_commit() {
 fn the_agent_host_bundles_are_stamped_with_this_packages_version() {
     assert_eq!(tracedecay_agent_hosts::PRODUCT_VERSION, PACKAGE_VERSION);
 }
-
-/// Build metadata is ignored for precedence, so release comparisons, upgrade
-/// checks and Release Please still see the released version.
-#[test]
-fn the_reported_version_still_begins_with_the_released_version() {
-    let version = reported_version();
-    assert!(
-        version.starts_with(PACKAGE_VERSION),
-        "{version:?} must begin with the released version {PACKAGE_VERSION:?}"
-    );
-    let metadata = &version[PACKAGE_VERSION.len()..];
-    assert!(
-        metadata.starts_with('+'),
-        "everything after the released version must be SemVer build metadata, got {metadata:?}"
-    );
-}

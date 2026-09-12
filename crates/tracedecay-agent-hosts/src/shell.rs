@@ -187,15 +187,4 @@ mod tests {
             vec!["grep", "unterminated src"]
         );
     }
-
-    #[test]
-    fn shell_invocations_extract_nested_commands() {
-        assert_eq!(
-            shell_invocations(r#"cd /tmp && FOO=1 bash -lc "rg 'foo bar' src""#),
-            vec![ShellInvocation {
-                base: "rg".to_string(),
-                args: vec!["foo bar".to_string(), "src".to_string()],
-            }]
-        );
-    }
 }

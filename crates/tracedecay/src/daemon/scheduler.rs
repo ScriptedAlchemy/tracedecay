@@ -17,8 +17,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::branch_admin::MaintenanceReaperKind;
 use super::{DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey};
-#[cfg(test)]
-use tracedecay_runtime_core::logging::format_daemon_log_line;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod combined_effect;
@@ -237,17 +235,6 @@ fn scheduler_record_log_fields(
         fields.push(("reason", reason.clone()));
     }
     fields
-}
-
-#[cfg(test)]
-pub(super) fn daemon_scheduler_record_log_line(
-    project_path: &Path,
-    record: &tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord,
-) -> String {
-    format_daemon_log_line(
-        "scheduler_task",
-        &scheduler_record_log_fields(project_path, record),
-    )
 }
 
 fn log_daemon_scheduler_record(

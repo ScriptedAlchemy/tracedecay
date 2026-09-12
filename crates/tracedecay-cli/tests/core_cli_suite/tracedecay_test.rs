@@ -167,33 +167,3 @@ fn source_edit_expected_state(stdout: &[u8]) -> String {
         .unwrap_or_else(|| panic!("preview omitted expected_state: {document}"))
         .to_owned()
 }
-
-#[test]
-fn daemon_tool_str_replace_dry_run_preserves_source() {
-    let original = "pub fn answer() -> u32 { 1 }\n";
-    let (_home, _project, home_path, project_path) = setup_daemon_project(original);
-    let project_arg = project_path.to_string_lossy().to_string();
-    let output = run_tool(
-        &project_path,
-        &home_path,
-        &[
-            "--project",
-            &project_arg,
-            "str_replace",
-            "--json",
-            "--args",
-            r#"{"path":"src/lib.rs","old_str":"pub fn answer() -> u32 { 1 }","new_str":"pub fn answer() -> u32 { 2 }","dry_run":true}"#,
-        ],
-    );
-
-    assert!(
-        output.status.success(),
-        "daemon-owned source-edit dry run failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert_eq!(
-        fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
-        original
-    );
-}

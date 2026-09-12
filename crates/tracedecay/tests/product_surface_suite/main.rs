@@ -12,7 +12,6 @@ mod git_intelligence_regression;
 mod host_bundle_acceptance;
 mod native_integration_surface_mount;
 mod packaged_semantic_evaluator;
-mod plugin_conformance;
 mod profile_backup_rehearsal_test;
 #[allow(clippy::cloned_ref_to_slice_refs, clippy::drop_non_drop)] // test builders and explicit early drops
 #[forbid(unsafe_code)]

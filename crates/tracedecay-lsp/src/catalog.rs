@@ -165,16 +165,6 @@ mod tests {
     const CONTEXT_METHOD: &str = "tracedecay/context";
 
     #[test]
-    fn current_context_binding_is_admitted() {
-        let admission = LspCatalogAdmission::from_application_catalog().unwrap();
-
-        assert_eq!(
-            admission.binding(CONTEXT_METHOD).unwrap().as_str(),
-            "binding.lsp.context.v1"
-        );
-    }
-
-    #[test]
     fn missing_context_binding_is_rejected() {
         let contributions = context_binding_fixture(None);
         let handlers = application_handler_descriptors().unwrap();

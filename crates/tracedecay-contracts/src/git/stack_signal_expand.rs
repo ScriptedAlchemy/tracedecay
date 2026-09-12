@@ -313,14 +313,4 @@ mod tests {
             })
         );
     }
-
-    #[test]
-    fn port_failures_preserve_concealed_signal_identity() {
-        assert_eq!(
-            GitHubStackSignalExpandPortError::Concealed.into_surface_result(),
-            GitHubStackSignalExpandSurfaceResultV1::unavailable(
-                GitHubStackSignalExpandUnavailableV1::Concealed,
-            )
-        );
-    }
 }

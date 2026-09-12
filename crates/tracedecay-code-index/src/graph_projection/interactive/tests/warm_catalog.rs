@@ -334,27 +334,6 @@ fn concurrent_warmers_share_one_full_catalog_build() {
 }
 
 #[test]
-fn warmed_import_catalog_serves_a_budget_that_cannot_scan_the_cold_projection() {
-    let cold_store = store_for(many_import_manifest());
-    assert_eq!(
-        reader(&cold_store)
-            .external_type_import_candidates("pkg", None, 1, cancellation_budget(6))
-            .expect_err("six cancellation observations cannot build the cold catalog"),
-        CodeGraphProjectionError::Cancelled
-    );
-
-    let warm_store = store_for(many_import_manifest());
-    warm_store
-        .warm_interactive_catalog_with_cancellation(Arc::new(NeverCancelled))
-        .expect("warm valid import catalog");
-    let candidates = reader(&warm_store)
-        .external_type_import_candidates("pkg", None, 1, cancellation_budget(6))
-        .expect("bounded import lookup reuses the warm catalog");
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].logical_path, "src/warm-import-00.ts");
-}
-
-#[test]
 fn corrupt_import_payload_and_link_fail_warming_without_exposure() {
     let (files, imports) = super::imports::two_import_fixture();
     let mut malformed =

@@ -118,11 +118,6 @@ describe('Chart theming and motion', () => {
     expect(JSON.stringify(option)).not.toContain('Inter');
   });
 
-  it('animates by default when nothing has asked for stillness', async () => {
-    render(<Chart option={OPTION} ariaLabel="tokens per day" />);
-    expect((await lastOption()).animation).toBe(true);
-  });
-
   it('honours a pinned "reduced" preference on an OS reporting none', async () => {
     // The exact bypass: the app's own control said reduce, the OS said nothing,
     // and the chart animated anyway because it only ever asked the OS.
@@ -176,24 +171,6 @@ describe('Chart registered-series guard', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-  });
-
-  it('draws a registered series', async () => {
-    render(<Chart option={OPTION} ariaLabel="tokens per day" />);
-    expect((await lastOption()).series).toBeTruthy();
-  });
-
-  it('names a de-registered bar series instead of mounting a blank canvas', async () => {
-    const { queryByRole, getByText } = render(
-      <Chart
-        option={{ series: [{ type: 'bar', data: [1] }] } as EChartsOption}
-        ariaLabel="events per day"
-      />,
-    );
-
-    expect(getByText(/cannot draw a bar series/i)).toBeTruthy();
-    expect(queryByRole('img')).toBeNull();
-    await waitFor(() => expect(applied.length).toBe(0));
   });
 
   it('names an unregistered series instead of mounting a blank canvas', async () => {

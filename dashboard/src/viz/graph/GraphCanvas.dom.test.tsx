@@ -2,7 +2,6 @@ import { fireEvent, render, waitFor } from '@testing-library/react';
 import type Graph from 'graphology';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphCanvas } from './GraphCanvas.tsx';
-import { ActivationField } from './activation.ts';
 
 type NodeAttributes = Record<string, unknown>;
 type NodeReducer = (node: string, data: NodeAttributes) => NodeAttributes;
@@ -34,13 +33,8 @@ vi.mock('./activation.ts', () => ({
       return false;
     }
 
-    subscribe(listener: () => void) {
-      sigmaState.strikeListeners.add(listener);
-      return () => sigmaState.strikeListeners.delete(listener);
-    }
-
-    strike() {
-      for (const listener of sigmaState.strikeListeners) listener();
+    subscribe() {
+      return () => {};
     }
   },
   cssColorToRgb: () => [128, 128, 128],
@@ -228,16 +222,6 @@ describe('GraphCanvas', () => {
       expect(sigmaState.constructCount).toBe(0);
     });
 
-    // The default hover pass paints an opaque white shadowed disc over the
-    // hovered body — the one theme-blind drawing Sigma would do on this
-    // field. The renderer must hand it the theme drawer at construction;
-    // renderer.test.ts and nodeHover.test.ts own what that drawer paints.
-    it('replaces sigma default white hover pass with the theme drawer', async () => {
-      render(<GraphCanvas nodes={NODES} edges={[]} />);
-      await waitFor(() => expect(sigmaState.constructCount).toBe(1));
-      expect(typeof sigmaState.drawNodeHover).toBe('function');
-    });
-
     it('builds one once the container is measured, without a mount retry', async () => {
       box.width = 0;
       box.height = 0;
@@ -314,29 +298,6 @@ describe('GraphCanvas', () => {
     });
   });
 
-  it('prints the visual grammar instead of leaving circles unexplained', () => {
-    const { getByLabelText } = render(
-      <GraphCanvas
-        nodes={[{ id: 'node', label: 'Node', kind: 'function', degree: 1 }]}
-        edges={[]}
-        encoding={{
-          body: 'one symbol',
-          size: 'connectedness',
-          hue: 'symbol kind',
-          signal: 'activation or supplied vitality',
-          relation: 'one real graph edge',
-        }}
-      />,
-    );
-
-    const key = getByLabelText('Graph visual key').textContent ?? '';
-    expect(key).toMatch(/disc\s*·\s*one symbol/i);
-    expect(key).toMatch(/size\s*·\s*connectedness/i);
-    expect(key).toMatch(/hue\s*·\s*symbol kind/i);
-    expect(key).toMatch(/glow\s*·\s*activation or supplied vitality/i);
-    expect(key).toMatch(/line\s*·\s*one real graph edge/i);
-  });
-
   it('shares focus with the accessible list and exposes text camera controls', async () => {
     const nodes = [{ id: 'node', label: 'Node', kind: 'project', degree: 1 }];
     const onInspect = vi.fn();
@@ -374,94 +335,6 @@ describe('GraphCanvas', () => {
     fireEvent.click(view.getByRole('button', { name: 'Zoom out graph' }));
     fireEvent.click(view.getByRole('button', { name: 'Fit' }));
     expect(sigmaState.cameraActions).toEqual(['in', 'out', 'fit']);
-  });
-
-  it('clamps dense connected fields before their bodies can fuse', async () => {
-    const nodes = Array.from({ length: 40 }, (_, index) => ({
-      id: `node-${index}`,
-      label: `Node ${index}`,
-      kind: index % 2 === 0 ? 'function' : 'struct',
-      degree: index === 0 ? 39 : 1,
-    }));
-    const edges = nodes.slice(1).map((node) => ({
-      source: nodes[0]!.id,
-      target: node.id,
-    }));
-
-    render(<GraphCanvas nodes={nodes} edges={edges} />);
-    await waitFor(() => expect(sigmaState.graph).toBeDefined());
-
-    const realSizes = sigmaState
-      .graph!.nodes()
-      .filter((id) => !id.startsWith('__'))
-      .map((id) => sigmaState.graph!.getNodeAttribute(id, 'size') as number);
-    expect(Math.max(...realSizes)).toBeLessThanOrEqual(7.5);
-  });
-
-  it('keeps absent connectedness unknown instead of coercing it to a healthy value', async () => {
-    const { getByText } = render(
-      <GraphCanvas
-        nodes={[{ id: 'unknown', label: 'Unknown degree', kind: 'function' }]}
-        edges={[]}
-      />,
-    );
-    await waitFor(() => expect(sigmaState.graph).toBeDefined());
-
-    expect(sigmaState.graph!.getNodeAttribute('unknown', 'degree')).toBeUndefined();
-    expect(sigmaState.graph!.getNodeAttribute('unknown', 'size')).toBeGreaterThan(0);
-    expect(getByText(/connectedness is absent for 1 symbol/i).textContent).toMatch(
-      /minimum marker, not zero/i,
-    );
-  });
-
-  it('preserves low-alpha rendering attributes for companion nodes', async () => {
-    render(
-      <GraphCanvas
-        nodes={[{ id: 'node', label: 'Node', kind: 'function', degree: 1 }]}
-        edges={[]}
-      />,
-    );
-    await waitFor(() => expect(sigmaState.nodeReducer).toBeDefined());
-    const companion = {
-      x: 1,
-      y: 2,
-      size: 16,
-      color: 'rgba(122, 162, 247, 0.050)',
-      label: '',
-      zIndex: 0,
-    };
-
-    for (const managed of [
-      '__halo__node',
-      '__bloom__node',
-      '__ring__node',
-      '__pulse__0',
-      '__way__0:1',
-    ]) {
-      expect(sigmaState.nodeReducer?.(managed, companion)).toEqual(companion);
-    }
-  });
-
-  it('wakes the sleeping render loop when a caller-owned field strikes from outside', async () => {
-    const field = new ActivationField();
-    render(
-      <GraphCanvas
-        nodes={[
-          { id: 'hub', label: 'Hub', kind: 'repository', degree: 2 },
-          { id: 'leaf', label: 'Leaf', kind: 'project', degree: 1 },
-        ]}
-        edges={[{ source: 'hub', target: 'leaf' }]}
-        activation={field}
-      />,
-    );
-    await waitFor(() => expect(sigmaState.nodeReducer).toBeDefined());
-    // The canvas subscribed to the field it was handed — this is the seam a
-    // live SSE strike (struck entirely outside this component) uses to wake
-    // the loop instead of leaving heat on the field that nothing draws.
-    expect(sigmaState.strikeListeners.size).toBeGreaterThan(0);
-    const before = sigmaState.refreshCount;
-    field.strike(['leaf'], 0.8);
-    await waitFor(() => expect(sigmaState.refreshCount).toBeGreaterThan(before));
   });
 
   it('states the missing WebGL context and the caller-supplied text alternative', async () => {

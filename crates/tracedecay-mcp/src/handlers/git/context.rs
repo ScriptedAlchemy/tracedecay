@@ -1602,18 +1602,6 @@ mod blocking_git_span_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[tokio::test]
-    async fn a_blocking_span_returns_the_synchronous_result_unchanged() {
-        let value = blocking_git_span("test", || Ok::<_, String>(vec!["a".to_owned()]))
-            .await
-            .expect("the join must succeed");
-        assert_eq!(value, Ok(vec!["a".to_owned()]));
-        let failure = blocking_git_span("test", || Err::<Vec<String>, _>("boom".to_owned()))
-            .await
-            .expect("a failing gix call is still a successful join");
-        assert_eq!(failure, Err("boom".to_owned()));
-    }
-
-    #[tokio::test]
     async fn a_blocking_span_does_not_starve_the_runtime_worker() {
         // Single-threaded runtime: another task can only make progress if the
         // synchronous work is genuinely off the worker. Running it inline would

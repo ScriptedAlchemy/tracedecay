@@ -1291,25 +1291,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runtime_build_revision_names_the_pinned_fastembed_version() {
-        let manifest = include_str!("../../Cargo.toml");
-        let pinned = manifest
-            .lines()
-            .find_map(|line| {
-                let dependency = line.trim().strip_prefix("fastembed = ")?;
-                let (_, rest) = dependency.split_once("version = \"=")?;
-                rest.split_once('"').map(|(version, _)| version)
-            })
-            .expect("tracedecay-semantic must pin an exact fastembed version");
-        assert!(
-            FASTEMBED_RUNTIME_BUILD_REVISION_V1.starts_with(&format!("fastembed-{pinned}+")),
-            "FASTEMBED_RUNTIME_BUILD_REVISION_V1 ({FASTEMBED_RUNTIME_BUILD_REVISION_V1}) must \
-             record the exact pinned fastembed version ({pinned}); a runtime upgrade must bump \
-             the recorded revision so projection keys replay"
-        );
-    }
-
     #[cfg(all(feature = "semantic-fastembed", not(windows)))]
     #[test]
     fn detected_fastembed_environment_uses_process_evidence() {

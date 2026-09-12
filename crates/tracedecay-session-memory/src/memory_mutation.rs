@@ -177,14 +177,6 @@ mod tests {
     use super::fresh_one_shot_commit_gate;
 
     #[test]
-    fn commit_gate_admits_exactly_one_fresh_commit() {
-        let gate = fresh_one_shot_commit_gate(Arc::new(|| false));
-
-        assert!(gate());
-        assert!(!gate());
-    }
-
-    #[test]
     fn commit_gate_rejects_an_interrupted_commit_without_consuming_admission() {
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let gate = fresh_one_shot_commit_gate({

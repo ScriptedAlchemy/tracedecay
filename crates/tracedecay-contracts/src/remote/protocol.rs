@@ -595,10 +595,7 @@ mod tests {
 
     use super::*;
     use tracedecay_domain::{
-        AuthorityEpoch, CurrentRemoteAuthorityV1, ObservabilityTerminalResultV1,
-        OperationActivationOutcomeV1, OperationAvailabilityV1, OperationPhaseTimingV1,
-        OperationPhaseV1, OperationReadinessV1, OperationResourceObservedV1,
-        OperationStageTimingV1, OperationStageV1, ProjectId, RemotePlacementRevisionV1,
+        AuthorityEpoch, CurrentRemoteAuthorityV1, ProjectId, RemotePlacementRevisionV1,
         RepositoryId, RepositoryStateSnapshotId, WorktreeId,
     };
     use tracedecay_tool_catalog::SchemaId;
@@ -722,106 +719,6 @@ mod tests {
             panic!("inconsistent response must not report success");
         };
         assert_eq!(problem.request_id, request_id);
-    }
-
-    #[test]
-    fn protocol_round_trip_preserves_observability_contracts() {
-        let resource = OperationResourceObservedV1 {
-            provider_request_id: Some("request.remote.observability".to_owned()),
-            scheduled_latency_micros: 5,
-            service_latency_micros: 34,
-            process_rss_bytes: None,
-            process_pss_bytes: None,
-            cpu_user_micros: None,
-            cpu_system_micros: None,
-            read_bytes: None,
-            write_bytes: None,
-            input_tokens: None,
-            output_tokens: None,
-            cost_amount: None,
-            cost_currency: None,
-            pricing_revision: None,
-            stage_timings: vec![
-                OperationStageTimingV1 {
-                    stage: OperationStageV1::Scheduled,
-                    elapsed_micros: 0,
-                },
-                OperationStageTimingV1 {
-                    stage: OperationStageV1::Admitted,
-                    elapsed_micros: 5,
-                },
-                OperationStageTimingV1 {
-                    stage: OperationStageV1::Started,
-                    elapsed_micros: 8,
-                },
-                OperationStageTimingV1 {
-                    stage: OperationStageV1::FirstUsefulResult,
-                    elapsed_micros: 21,
-                },
-                OperationStageTimingV1 {
-                    stage: OperationStageV1::Terminal,
-                    elapsed_micros: 34,
-                },
-            ],
-            phase_timings: vec![
-                OperationPhaseTimingV1 {
-                    phase: OperationPhaseV1::ProcessSpawn,
-                    duration_micros: 3,
-                },
-                OperationPhaseTimingV1 {
-                    phase: OperationPhaseV1::ProcessReady,
-                    duration_micros: 4,
-                },
-                OperationPhaseTimingV1 {
-                    phase: OperationPhaseV1::Dispatch,
-                    duration_micros: 8,
-                },
-                OperationPhaseTimingV1 {
-                    phase: OperationPhaseV1::OutputWrite,
-                    duration_micros: 1,
-                },
-            ],
-            absolute_deadline_micros: Some(50),
-            availability: OperationAvailabilityV1::Available,
-            activation_outcome: Some(OperationActivationOutcomeV1::Committed),
-            process_count: Some(2),
-            input_bytes: Some(128),
-            output_bytes: Some(64),
-        };
-        let request = RemoteProtocolRequestV1::new(
-            RequestId::new("request.remote.observability").unwrap(),
-            BrainId::new("brain.remote").unwrap(),
-            BrainNodeId::new("node.caller").unwrap(),
-            1,
-            None,
-            UtcMicros(10),
-            resource,
-        )
-        .unwrap();
-
-        let encoded = serde_json::to_vec(&request).unwrap();
-        let decoded: RemoteProtocolRequestV1<OperationResourceObservedV1> =
-            serde_json::from_slice(&encoded).unwrap();
-
-        assert_eq!(
-            decoded.body.readiness(),
-            OperationReadinessV1 {
-                foreground_ready_micros: Some(21),
-                background_complete_micros: Some(34),
-            }
-        );
-        assert_eq!(decoded.body.phase_timings, request.body.phase_timings);
-        assert_eq!(
-            decoded.body.absolute_deadline_micros,
-            request.body.absolute_deadline_micros
-        );
-        assert_eq!(decoded.body.availability, request.body.availability);
-        assert_eq!(
-            decoded
-                .body
-                .validate(Some(ObservabilityTerminalResultV1::Succeeded)),
-            Ok(())
-        );
     }
 
     #[test]

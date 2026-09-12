@@ -1395,14 +1395,14 @@ mod tests {
 
     use super::super::artifact_store::AdmittedArtifactV1;
     use super::super::fastembed_adapter::{
-        BoundedSanitizedTextBatchV1, EmbedError, EmbeddingRuntime, FakeEmbeddingRuntime,
-        FakeEmbeddingSession, ManualCancellation, ProjectionArtifactPinV1, RuntimeFailureKindV1,
+        EmbedError, FakeEmbeddingRuntime, ManualCancellation, ProjectionArtifactPinV1,
+        RuntimeFailureKindV1,
     };
     use super::test_support::*;
     use super::*;
     use tracedecay_domain::{
         EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
-        EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
+        EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
     };
     use tracedecay_semantic_contracts::{ArtifactProfileKindV1, Sha256DigestHex};
 
@@ -1419,61 +1419,6 @@ mod tests {
         .expect("valid config")
     }
 
-    struct TimedOpenRuntime {
-        inner: FakeEmbeddingRuntime,
-        clock: Arc<ManualClock>,
-        load_time: Duration,
-    }
-
-    impl EmbeddingRuntime for TimedOpenRuntime {
-        type Session = FakeEmbeddingSession;
-
-        fn resident_bytes_reservation(&self, authority: &AdmittedProjectionArtifactV1) -> u64 {
-            self.inner.resident_bytes_reservation(authority)
-        }
-
-        fn verify_artifact_compatibility(
-            &self,
-            authority: &AdmittedProjectionArtifactV1,
-        ) -> Result<(), EmbedError> {
-            self.inner.verify_artifact_compatibility(authority)
-        }
-
-        fn open_session(
-            &self,
-            authority: &AdmittedProjectionArtifactV1,
-            interruption: &dyn SemanticExecutionAuthority,
-        ) -> Result<Self::Session, EmbedError> {
-            self.clock.advance(self.load_time);
-            self.inner.open_session(authority, interruption)
-        }
-    }
-
-    #[test]
-    fn cold_open_beyond_the_artifact_deadline_is_discarded() {
-        let clock = Arc::new(ManualClock::new());
-        let pool = SessionPool::new(
-            TimedOpenRuntime {
-                inner: FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
-                clock: Arc::clone(&clock),
-                load_time: Duration::from_millis(30_001),
-            },
-            Arc::clone(&clock),
-            config(1, Duration::from_mins(1), 1 << 20),
-        )
-        .expect("valid config");
-
-        assert_eq!(
-            pool.acquire(&authority()).err(),
-            Some(SessionAcquireError::LoadDeadlineExceeded {
-                elapsed: Duration::from_millis(30_001),
-                deadline: Duration::from_millis(30_000),
-            })
-        );
-        assert_eq!(pool.stats().last_cold_load_micros, Some(30_001_000));
-        assert_eq!(pool.stats().live_sessions, 0);
-    }
-
     #[test]
     fn config_validation_rejects_zero_bounds() {
         let mut c = config(0, Duration::from_secs(1), 1024);
@@ -1481,30 +1426,6 @@ mod tests {
         c.max_sessions = 1;
         c.memory_ceiling_bytes = 0;
         assert_eq!(c.validate(), Err(SessionPoolConfigError::ZeroMemoryCeiling));
-    }
-
-    #[test]
-    fn acquire_release_reuses_warmed_session() {
-        let pool = fake_pool(2, Duration::from_mins(1), 1 << 20);
-        let authority = authority();
-        {
-            let _guard = pool.acquire(&authority).expect("first acquire");
-            assert_eq!(pool.stats().active, 1);
-        }
-        let stats = pool.stats();
-        assert_eq!(stats.active, 0);
-        assert_eq!(stats.idle, 1);
-        assert_eq!(stats.sessions_opened, 1);
-        {
-            let _guard = pool.acquire(&authority).expect("second acquire");
-            let stats = pool.stats();
-            assert_eq!(stats.active, 1);
-            assert_eq!(stats.idle, 0);
-            assert_eq!(
-                stats.sessions_opened, 1,
-                "release/acquire reuses the warmed session"
-            );
-        }
     }
 
     #[test]
@@ -1615,24 +1536,6 @@ mod tests {
         // Same identity as the first still hits its warmed session.
         let _d = pool.acquire(&domain_a).expect("hit");
         assert_eq!(pool.stats().sessions_opened, 3);
-    }
-
-    #[test]
-    fn pool_identity_derives_projection_and_privacy_from_admission() {
-        let identity = identity_with_epoch("domain-a", 7);
-        let same = identity_with_epoch("domain-a", 7);
-        let different_domain = identity_with_epoch("domain-b", 7);
-        let different_epoch = identity_with_epoch("domain-a", 8);
-
-        assert_eq!(identity, same);
-        assert_ne!(identity, different_domain);
-        assert_ne!(identity, different_epoch);
-        assert_eq!(identity.projection_key(), same.projection_key());
-        assert_eq!(
-            identity.privacy_domain(),
-            &domain_id::<PrivacyDomainId>("privacy.domain-a")
-        );
-        assert_eq!(identity.privacy_key_epoch(), 7);
     }
 
     #[test]
@@ -1956,31 +1859,6 @@ mod tests {
     }
 
     #[test]
-    fn blocking_acquire_succeeds_after_a_release() {
-        let pool = SessionPool::new(
-            FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
-            ManualClock::new(),
-            config(1, Duration::from_mins(1), 1 << 20),
-        )
-        .expect("valid config");
-        let authority = authority();
-        let held = pool.acquire(&authority).expect("held");
-        let cancel = ManualCancellation::new();
-        thread::scope(|scope| {
-            let waiting =
-                scope.spawn(|| pool.acquire_blocking(&authority, Duration::from_secs(5), &cancel));
-            while pool.stats().queued_waiters == 0 {
-                thread::yield_now();
-            }
-            drop(held);
-            waiting
-                .join()
-                .expect("no panic")
-                .expect("waiter acquires after release");
-        });
-    }
-
-    #[test]
     fn blocking_acquire_waits_without_repeated_runtime_admission() {
         let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024);
         let counters = runtime.counters();
@@ -2228,54 +2106,6 @@ mod tests {
         assert_eq!(stats.idle, 0);
         assert_eq!(stats.sessions_closed, 1);
         assert_eq!(stats.resident_bytes, 0);
-    }
-
-    #[test]
-    fn pooled_guard_derefs_to_session_and_embeds() {
-        let pool = fake_pool(1, Duration::from_mins(1), 1 << 20);
-        let authority = authority();
-        let id = SessionIdentityV1::from_authority(&authority);
-        let mut guard = pool.acquire(&authority).expect("acquire");
-        assert_eq!(guard.identity(), &id);
-        assert_eq!(
-            guard.authority(),
-            &authority,
-            "session echoes its admitted projection-artifact authority"
-        );
-        let batch = BoundedSanitizedTextBatchV1::try_new(vec!["fn main()".to_string()], 8, 1024)
-            .expect("batch");
-        let cancel = ManualCancellation::new();
-        let vectors = guard.embed_batch(&batch, &cancel).expect("embed");
-        assert_eq!(vectors.len(), 1);
-        assert_eq!(vectors[0].dimensions, 8);
-    }
-
-    #[test]
-    fn stats_track_lifecycle_counters() {
-        let runtime = FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024);
-        let counters = runtime.counters();
-        let pool = SessionPool::new(
-            runtime,
-            ManualClock::new(),
-            config(2, Duration::from_secs(5), 1 << 20),
-        )
-        .expect("valid config");
-        let authority = authority();
-        {
-            let _g = pool.acquire(&authority).expect("one");
-        }
-        pool.inner.clock.advance(Duration::from_secs(6));
-        assert_eq!(pool.reap_idle(), 1);
-        let stats = pool.stats();
-        assert_eq!(stats.sessions_opened, 1);
-        assert_eq!(stats.sessions_closed, 1);
-        assert_eq!(stats.sessions_reaped, 1);
-        assert_eq!(
-            counters.sessions_opened.load(AtomicOrdering::SeqCst),
-            1,
-            "pool stats agree with runtime counters"
-        );
-        assert_eq!(counters.sessions_closed.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[test]

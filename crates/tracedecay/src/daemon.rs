@@ -30,8 +30,7 @@ use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch
 #[cfg(all(unix, test))]
 use scheduler::{
     AutomationSchedulerHandle, automation_scheduler_configured,
-    automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
-    run_automation_scheduler_tick, scheduler_task_log_fields,
+    automation_scheduler_tick_secs_for_project, run_automation_scheduler_tick,
 };
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
@@ -85,8 +84,6 @@ pub(super) struct AuthenticatedFirstRequest {
 impl AuthenticatedFirstRequest {
     pub(super) fn new(raw: String) -> Self {
         hotpath::gauge!("daemon.engine.first_request.decode").inc(1_u64);
-        #[cfg(test)]
-        FIRST_REQUEST_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
         let parsed = JsonRpcRequest::decode(raw.trim()).ok();
         Self { raw, parsed }
     }
@@ -102,19 +99,6 @@ impl AuthenticatedFirstRequest {
     pub(super) fn into_raw(self) -> String {
         self.raw
     }
-}
-
-#[cfg(test)]
-static FIRST_REQUEST_DECODE_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(super) fn reset_first_request_decode_count_for_test() {
-    FIRST_REQUEST_DECODE_COUNT.store(0, Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(super) fn first_request_decode_count_for_test() -> usize {
-    FIRST_REQUEST_DECODE_COUNT.load(Ordering::Relaxed)
 }
 
 /// How long a client rides out a project open that has not finished yet.
@@ -328,8 +312,6 @@ use projectless::{
 };
 mod project_composition;
 mod project_delivery_mount;
-#[cfg(test)]
-use project_composition::daemon_transcript_source_home;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
 #[cfg(test)]

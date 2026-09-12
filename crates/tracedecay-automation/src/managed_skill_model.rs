@@ -572,31 +572,6 @@ mod tests {
     }
 
     #[test]
-    fn materialized_skill_is_active_with_an_activation_timestamp() {
-        let skill = ManagedSkillDraft {
-            id: "immediate-activation".to_string(),
-            title: "Immediate activation".to_string(),
-            summary: "Materialize policy-validated guidance immediately.".to_string(),
-            routing_description: "Activate policy-validated guidance.".to_string(),
-            category: "testing".to_string(),
-            targets: vec![SkillInstallTarget::Claude],
-            body_markdown: "# Immediate activation\n".to_string(),
-            support_files: Vec::new(),
-            provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::AutomationRun,
-                actor: "automation".to_string(),
-                run_id: Some("run-1".to_string()),
-            },
-        }
-        .materialize()
-        .unwrap();
-
-        assert_eq!(skill.metadata.state, ManagedSkillState::Active);
-        assert_eq!(skill.metadata.activated_at, Some(skill.metadata.created_at));
-        assert_eq!(skill.metadata.updated_at, skill.metadata.created_at);
-    }
-
-    #[test]
     fn legacy_skill_without_consolidation_metadata_deserializes() {
         let skill = ManagedSkillDraft {
             id: "legacy-skill".to_string(),

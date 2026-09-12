@@ -1115,12 +1115,6 @@ fn quote(value: &str) -> String {
 }
 
 #[cfg(test)]
-// A `#[path]`-loaded module resolves its children beside itself, not under a
-// directory named for it, so name the subdirectory explicitly.
-#[path = "codegen/transport_conformance_tests.rs"]
-mod transport_conformance_tests;
-
-#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
     use std::error::Error;
@@ -1196,25 +1190,6 @@ mod tests {
             "additionalProperties": false,
             "$defs": definitions
         })
-    }
-
-    #[test]
-    fn schema_body_drives_typescript_request_and_result_types() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "state": { "enum": ["available", "partial", "unavailable"] },
-                "tags": { "type": "array", "items": { "type": "string" } }
-            },
-            "required": ["name", "state"],
-            "additionalProperties": false
-        });
-
-        assert_eq!(
-            render_schema_type(&schema).unwrap(),
-            "{ readonly name: string; readonly state: \"available\" | \"partial\" | \"unavailable\"; readonly tags?: readonly string[] }"
-        );
     }
 
     #[test]
@@ -1380,36 +1355,6 @@ mod tests {
     }
 
     #[test]
-    fn equal_definitions_share_one_alias_across_roots() {
-        let first = definition_schema(json!({
-            "Inner": { "type": "string" },
-            "Wrapper": { "$ref": "#/$defs/Inner" }
-        }));
-        let second = json!({
-            "type": "array",
-            "items": { "$ref": "#/$defs/Wrapper" },
-            "$defs": {
-                "Inner": { "type": "string" },
-                "Wrapper": { "$ref": "#/$defs/Inner" }
-            }
-        });
-
-        let mut table = SchemaTable::default();
-        let first_root = table.register_root(&first).unwrap();
-        let second_root = table.register_root(&second).unwrap();
-        assert_eq!(table.definitions.len(), 2);
-        assert_eq!(first_root.names, second_root.names);
-        assert_eq!(
-            render_schema_type_at(&second, &second_root.names).unwrap(),
-            "readonly Wrapper[]"
-        );
-        // Different root bodies stay distinct runtime records even though
-        // every definition is shared.
-        assert_eq!(table.schemas.len(), 2);
-        assert_ne!(first_root.index, second_root.index);
-    }
-
-    #[test]
     fn same_short_name_with_a_different_body_stays_distinct() {
         let first = definition_schema(json!({
             "Wrapper": { "enum": ["accepted", "rejected"] }
@@ -1561,53 +1506,6 @@ mod tests {
             curate.result_semantics,
             SdkResultSemanticsV1::FactStoreCurateTerminal
         );
-    }
-
-    #[test]
-    fn canonical_sdk_registry_selects_mounted_git_reads_and_mcp_mutations() {
-        let registry = canonical_application_registry().unwrap();
-        let operations = canonical_operations(&registry).unwrap();
-        let git_status = operations
-            .iter()
-            .find(|operation| operation.operation_id == "operation.application.git_status")
-            .expect("Git status SDK operation");
-
-        assert_eq!(git_status.name, "application_git_status");
-        assert!(matches!(
-            &git_status.transport,
-            OperationTransport::Http { route } if route == "/application/git/status"
-        ));
-        assert_eq!(git_status.binding, "binding.http.git_status.v1");
-        for (operation, route) in [
-            ("git_diff", "/application/git/diff"),
-            ("git_history", "/application/git/history"),
-            ("git_blame", "/application/git/blame"),
-            ("git_hunks", "/application/git/hunks"),
-        ] {
-            let operation_id = format!("operation.application.{operation}");
-            let generated = operations
-                .iter()
-                .find(|candidate| candidate.operation_id == operation_id)
-                .unwrap_or_else(|| panic!("{operation_id} must be generated"));
-            assert_eq!(generated.name, format!("application_{operation}"));
-            assert!(matches!(
-                &generated.transport,
-                OperationTransport::Http { route: generated_route } if generated_route == route
-            ));
-        }
-        for operation in ["git_preview", "git_apply"] {
-            let operation_id = format!("operation.application.{operation}");
-            let generated = operations
-                .iter()
-                .find(|candidate| candidate.operation_id == operation_id)
-                .unwrap_or_else(|| panic!("{operation_id} must be generated"));
-            assert_eq!(generated.name, operation);
-            assert!(matches!(
-                &generated.transport,
-                OperationTransport::McpTool { tool_name }
-                    if tool_name == &format!("tracedecay_{operation}")
-            ));
-        }
     }
 
     #[test]

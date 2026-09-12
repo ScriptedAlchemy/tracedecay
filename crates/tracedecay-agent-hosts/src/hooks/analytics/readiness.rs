@@ -48,7 +48,6 @@ pub(crate) enum MetricAvailability {
     NoSamples,
     Unavailable,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReadinessHost {
@@ -491,11 +490,4 @@ fn host_admission_status_rank(status: HostAdmissionStatus) -> u8 {
         HostAdmissionStatus::Committed => 6,
         HostAdmissionStatus::ExactDuplicate => 7,
     }
-}
-
-/// Deterministic empty distributions for readiness catalog identity (no live rows).
-#[cfg(test)]
-pub(crate) fn empty_hook_completed_readiness_distributions() -> HookCompletedReadinessDistributions
-{
-    aggregate_hook_completed_readiness(&[])
 }

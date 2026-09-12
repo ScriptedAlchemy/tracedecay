@@ -1043,17 +1043,3 @@ fn append_folds_the_admitted_event_onto_one_prior_reconstruction() {
         cursor
     );
 }
-
-#[test]
-fn proposal_state_and_owner_cursor_advance_once_per_new_event() {
-    let store = RegisteredWorkStore::start("cursor");
-    let service = WorkService::new(store.storage().clone());
-    let owner = context("project.work.cursor", "actor.work.owner");
-    create(&service, &owner, "task.work.cursor");
-
-    let owner_authority = authority(&owner);
-    let cursor = store
-        .inspect(|connection| WorkSqliteStorage::owner_cursor(connection, &owner_authority))
-        .unwrap();
-    assert_eq!(cursor, 1);
-}

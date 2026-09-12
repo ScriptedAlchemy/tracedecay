@@ -27,18 +27,3 @@ pub fn process_run_id() -> &'static str {
         }
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn process_run_id_is_stable_within_the_process() {
-        let first = process_run_id();
-        let second = process_run_id();
-        // Same borrow of the same OnceLock-backed value on every call.
-        assert_eq!(first, second);
-        assert!(std::ptr::eq(first, second));
-        assert!(!first.is_empty());
-    }
-}

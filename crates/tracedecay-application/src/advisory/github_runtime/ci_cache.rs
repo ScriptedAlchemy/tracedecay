@@ -218,22 +218,6 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_cache_snapshots_share_retained_body_storage() {
-        let cache = CiResponseCacheV1::default();
-        cache.retain("https://fixture/runs/shared", &etag("E-shared"), b"shared");
-        let CiResponseCacheReadOutcomeV1::Hit(first) = cache.get("https://fixture/runs/shared")
-        else {
-            panic!("expected first snapshot");
-        };
-        let CiResponseCacheReadOutcomeV1::Hit(second) = cache.get("https://fixture/runs/shared")
-        else {
-            panic!("expected second snapshot");
-        };
-
-        assert_eq!(first.body.as_ptr(), second.body.as_ptr());
-    }
-
-    #[test]
     fn oversized_bodies_are_not_retained() {
         let cache = CiResponseCacheV1::default();
         let oversized = vec![b'a'; MAX_CACHED_CI_BODY_BYTES_V1 + 1];

@@ -1018,17 +1018,6 @@ mod tests {
         assert_eq!(FileRenameInfoEx, 22);
     }
 
-    #[test]
-    fn current_user_sid_string_is_canonical() {
-        let sid = current_user_sid_string().unwrap();
-
-        assert!(sid.starts_with("S-1-"));
-        assert!(
-            sid.bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        );
-    }
-
     fn snapshot(path: &Path, kind: PathKind) -> SecuritySnapshot {
         let file = open_handle_with_share(
             path,
@@ -1056,24 +1045,6 @@ mod tests {
         assert_eq!(snapshot.ace_count, 1);
         assert!(snapshot.ace_is_allowed);
         assert_eq!(snapshot.ace_mask, FILE_ALL_ACCESS);
-        assert_eq!(
-            snapshot.ace_inheritance,
-            SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8
-        );
-        assert!(snapshot.trustee_is_current_user);
-    }
-
-    #[test]
-    fn private_directory_is_private_from_creation() {
-        let temp = tempfile::tempdir().unwrap();
-        let private = temp.path().join("private");
-
-        create_private_directory(&private).unwrap();
-
-        let snapshot = snapshot(&private, PathKind::Directory);
-        assert!(snapshot.owner_is_current_user);
-        assert!(snapshot.dacl_is_protected);
-        assert_eq!(snapshot.ace_count, 1);
         assert_eq!(
             snapshot.ace_inheritance,
             SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8

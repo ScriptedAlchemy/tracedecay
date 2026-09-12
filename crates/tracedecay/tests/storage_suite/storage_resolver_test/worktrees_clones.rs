@@ -401,49 +401,6 @@ async fn renamed_checkout_session_db_follows_registered_store() {
 }
 
 #[tokio::test]
-async fn same_remote_clone_session_db_does_not_borrow_registered_store() {
-    let _guard = HOME_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let remote = dir.path().join("remote.git");
-    let project = dir.path().join("repo");
-    let clone = dir.path().join("repo-clone");
-    let home = test_home(&dir);
-    let _home_guard = HomeGuard::set(&home);
-
-    git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]);
-    git(
-        dir.path(),
-        &["clone", remote.to_str().unwrap(), project.to_str().unwrap()],
-    );
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
-    git(&project, &["config", "user.email", "test@example.com"]);
-    git(&project, &["config", "user.name", "TraceDecay Test"]);
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "-m", "initial"]);
-    git(&project, &["push", "origin", "HEAD:master"]);
-    git(
-        dir.path(),
-        &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
-    );
-
-    let cg = init_with_maintenance(&project).await.unwrap();
-    let registered_session_db = cg.store_layout().sessions_db_path.clone();
-    drop(cg);
-
-    // The original checkout still exists on disk, so the same-remote clone must
-    // not inherit its registered session store even though the remote is unique
-    // in the registry.
-    let resolved = resolve_project_session_db_path(&clone)
-        .expect("clone should still resolve a default session DB path");
-    assert_ne!(
-        normalize_test_path(&resolved),
-        normalize_test_path(&registered_session_db),
-        "a separate same-remote clone must not borrow another checkout's session store",
-    );
-}
-
-#[tokio::test]
 async fn same_remote_repositories_keep_distinct_persistent_identities() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();

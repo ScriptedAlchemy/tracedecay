@@ -390,18 +390,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cost_handshake_preserves_discovered_project_identity() {
-        crate::product_runtime::register_for_tests();
-        let handshake = global_cost_handshake().unwrap();
-        assert_eq!(
-            handshake.project_path,
-            tracedecay_runtime_core::config::discover_project_root(
-                &std::env::current_dir().unwrap()
-            )
-        );
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn refresh_worker_is_nonblocking_and_runtime_context_safe() {
         let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(0);

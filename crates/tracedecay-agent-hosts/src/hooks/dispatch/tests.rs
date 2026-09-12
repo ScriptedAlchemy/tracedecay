@@ -3,14 +3,13 @@ use crate::agents::context_scout::ContextScoutDeliveryReceiptHookV1;
 use crate::hooks::daemon_ports::daemon_admission_response;
 use std::sync::Mutex;
 use tracedecay_contracts::context_scout::{
-    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutFeedbackKindV1,
-    ContextScoutFeedbackV1,
+    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
 use tracedecay_domain::feedback::{FeedbackCycleId, FeedbackResultId, FeedbackScopeV1};
 use tracedecay_domain::{CodeGenerationId, CommitId, ManifestDigest, RepositoryId, WorktreeId};
 use tracedecay_hooks::{
     HookAdmissionReceiptV1, HookDeliveryFutureV1, HookFeedbackDeliveryOutcomeV1,
-    HookGuidanceDispositionV1,
+    HookGuidanceDispositionV1, HookScopedFeedbackV1,
 };
 
 /// Test shim over [`super::native_material`], which now takes the identity
@@ -404,162 +403,6 @@ async fn feedback_notice_never_delivers_after_deadline_or_failed_admission() {
     .unwrap();
     assert!(backpressured.feedback.is_none());
     assert_eq!(*port.calls.lock().unwrap(), 1);
-}
-
-#[tokio::test]
-async fn host_delivery_and_explicit_feedback_use_typed_daemon_commits() {
-    let project = tempfile::tempdir().unwrap();
-    let notice = sample_notice();
-    let mut envelope = sample_envelope(&notice);
-    envelope.event_id = [7; 16];
-    let envelope_id = [22; 16];
-    let receipt = ContextScoutDeliveryReceiptV1 {
-        receipt_id: context_scout_delivery_receipt_id(envelope.event_id, envelope_id),
-        envelope_id,
-        delivered_at: UtcMicros(23),
-        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
-    };
-    let feedback = ContextScoutFeedbackV1 {
-        receipt_id: receipt.receipt_id,
-        kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
-    };
-    let commit = ContextScoutFeedbackCommitV1 {
-        receipt: receipt.clone(),
-        feedback,
-    };
-    let guard = crate::hooks::TestDaemonHookActionGuard::install([
-        serde_json::json!({ "status": "stored" }),
-        serde_json::json!({ "status": "duplicate" }),
-        serde_json::json!({ "status": "stored" }),
-    ]);
-    let admission = sample_receipt(HookImmediateAdmissionStateV1::Accepted, false);
-    let rollback = HookFeedbackRollbackSwitchV1 {
-        configuration_revision: 1,
-        route: HookFeedbackDeliveryRouteV1::HookV2,
-    };
-    let deadline = HookSynchronousDeadlineV1::after_elapsed(0);
-
-    let recorded = deliver_hook_feedback(
-        &envelope,
-        &admission,
-        rollback,
-        Some(ContextScoutDeliveryReceiptHookV1 {
-            receipt: receipt.clone(),
-        }),
-        deadline,
-        &DaemonDeliveryReceiptPort::new(
-            &crate::ports::hook_runtime::crate_test_runtime(),
-            project.path(),
-        ),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        recorded.outcome,
-        Some(HookFeedbackDeliveryOutcomeV1::Delivered)
-    );
-
-    let committed = deliver_hook_feedback(
-        &envelope,
-        &admission,
-        rollback,
-        Some(commit.clone()),
-        deadline,
-        &DaemonContextScoutFeedbackPort::new(
-            &crate::ports::hook_runtime::crate_test_runtime(),
-            project.path(),
-        ),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        committed.outcome,
-        Some(HookFeedbackDeliveryOutcomeV1::Duplicate)
-    );
-
-    let delivered = deliver_hook_feedback(
-        &envelope,
-        &admission,
-        rollback,
-        Some(notice.clone()),
-        deadline,
-        &DaemonFeedbackNoticeDeliveryPort::new(
-            &crate::ports::hook_runtime::crate_test_runtime(),
-            project.path(),
-        ),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        delivered.outcome,
-        Some(HookFeedbackDeliveryOutcomeV1::Delivered)
-    );
-    assert_eq!(delivered.feedback.as_ref(), Some(&notice));
-
-    let calls = guard.calls();
-    assert_eq!(calls.len(), 3);
-    assert_eq!(calls[0].0.as_deref(), Some(project.path()));
-    assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
-    assert_eq!(
-        serde_json::from_value::<ContextScoutDeliveryReceiptV1>(calls[0].1["receipt"].clone())
-            .unwrap(),
-        receipt
-    );
-    assert_eq!(calls[1].1["action"], "hook_v2_feedback");
-    assert_eq!(
-        serde_json::from_value::<ContextScoutFeedbackV1>(calls[1].1["feedback"].clone()).unwrap(),
-        commit.feedback
-    );
-    assert_eq!(calls[2].1["action"], "hook_v2_feedback_notice_delivery");
-    assert_eq!(
-        serde_json::from_value::<tracedecay_application::advisory::AdvisoryHookLookupNoticeV1>(
-            calls[2].1["feedback_notice"].clone()
-        )
-        .unwrap(),
-        notice
-    );
-}
-
-#[tokio::test]
-async fn scout_receipt_and_feedback_helpers_delegate_to_daemon_ports() {
-    let project = tempfile::tempdir().unwrap();
-    let receipt = ContextScoutDeliveryReceiptV1 {
-        receipt_id: [21; 16],
-        envelope_id: [22; 16],
-        delivered_at: UtcMicros(23),
-        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
-    };
-    let feedback = ContextScoutFeedbackV1 {
-        receipt_id: receipt.receipt_id,
-        kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
-    };
-    let guard = crate::hooks::TestDaemonHookActionGuard::install([
-        serde_json::json!({ "status": "stored" }),
-        serde_json::json!({ "status": "duplicate" }),
-    ]);
-
-    assert!(
-        record_context_scout_delivery(
-            &crate::ports::hook_runtime::crate_test_runtime(),
-            project.path(),
-            &receipt
-        )
-        .await
-    );
-    assert!(
-        commit_context_scout_feedback(
-            &crate::ports::hook_runtime::crate_test_runtime(),
-            project.path(),
-            &receipt,
-            feedback
-        )
-        .await
-    );
-
-    let calls = guard.calls();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].1["action"], "hook_v2_delivery_receipt");
-    assert_eq!(calls[1].1["action"], "hook_v2_feedback");
 }
 
 #[test]

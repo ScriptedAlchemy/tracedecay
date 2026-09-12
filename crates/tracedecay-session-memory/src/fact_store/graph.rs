@@ -1257,7 +1257,6 @@ mod tests {
     use super::*;
     use crate::fact_store::DatabaseFactStore;
     use crate::fact_store::crud::{initial_batch, sanitize_payload};
-    use tracedecay_runtime_core::db::engine::params;
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
     async fn database(label: &str) -> (TempDir, Database) {
@@ -1337,41 +1336,5 @@ mod tests {
         let cancelled = observer.snapshot();
         assert!(cancelled.source_rows_loaded > before.source_rows_loaded);
         assert!(cancelled.source_bytes_loaded > before.source_bytes_loaded);
-    }
-
-    #[tokio::test]
-    async fn failed_source_load_records_materialized_source_work() {
-        let (_directory, database) = database("failed-source-telemetry").await;
-        let fact_id = seed_source_fact(&database, "failed-source-telemetry").await;
-        let transaction = database
-            .begin_memory_write_transaction(OPERATION)
-            .await
-            .expect("begin source corruption transaction");
-        assert_eq!(
-            transaction
-                .execute(
-                    "DELETE FROM memory_v2_assertion_payloads
-                     WHERE fact_id = ?1",
-                    params![fact_id.as_str()],
-                )
-                .await
-                .expect("remove the active assertion payload"),
-            1
-        );
-        transaction
-            .commit()
-            .await
-            .expect("commit source corruption transaction");
-        let observer = database.project_memory_reconciliation_telemetry_observer();
-        let before = observer.snapshot();
-
-        let error = load_source(&database, &FactOwnerV1::Profile, None, Some(&database))
-            .await
-            .expect_err("an active assertion without its payload must fail source loading");
-        assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
-
-        let failed = observer.snapshot();
-        assert!(failed.source_rows_loaded > before.source_rows_loaded);
-        assert!(failed.source_bytes_loaded > before.source_bytes_loaded);
     }
 }

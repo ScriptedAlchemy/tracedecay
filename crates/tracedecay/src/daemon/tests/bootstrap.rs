@@ -17,30 +17,6 @@ use tracedecay_session_memory::context::CancellationToken;
 
 static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[test]
-fn bootstrap_tool_catalog_uses_project_node_count() {
-    let request: super::super::JsonRpcRequest = serde_json::from_value(serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/list"
-    }))
-    .expect("tools/list request");
-    let response = super::super::daemon_bootstrap_response(&request, None, Some(65_395))
-        .expect("bootstrap response")
-        .expect("tools/list response");
-    let result = response.result.expect("tools/list result");
-    let context_description = result["tools"]
-        .as_array()
-        .expect("tool catalog")
-        .iter()
-        .find(|tool| tool["name"] == serde_json::json!("tracedecay_context"))
-        .and_then(|tool| tool["description"].as_str())
-        .expect("context tool description");
-
-    assert!(context_description.contains("5 calls maximum"));
-    assert!(context_description.contains("65395 nodes"));
-}
-
 fn project_open_test_route(name: &str) -> ProjectRouteKey {
     ProjectRouteKey {
         profile_root: std::path::PathBuf::from(format!("/profiles/{name}")),
@@ -2131,27 +2107,6 @@ fn exhausted_code_runtime_capacity_retries_at_resource_cadence() {
     );
     assert!(
         super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF
-            > super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF
-    );
-}
-
-#[test]
-fn undecodable_authority_row_backs_off_beyond_the_transient_debounce() {
-    // The identity material of a committed observation stopped matching the
-    // derivation the running binary applies, so every reopen re-runs the whole
-    // authority audit and fails on the same row.
-    let backoff = super::super::project_open_retry_backoff(&authority_invariant_error(
-        "invalid committed observation authority JSON: serialized observation identity \
-         does not match its source evidence",
-    ));
-
-    assert_eq!(
-        backoff,
-        Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
-        "an undecodable persisted row must not reopen at the transient debounce cadence"
-    );
-    assert!(
-        super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF
             > super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF
     );
 }

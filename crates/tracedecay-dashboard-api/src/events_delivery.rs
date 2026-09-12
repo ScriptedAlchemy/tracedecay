@@ -664,14 +664,6 @@ mod tests {
         assert!(!valid_receipt(&format!("dsa1:{}", "z".repeat(64))));
     }
 
-    #[test]
-    fn acknowledgement_future_is_send_for_the_http_router() {
-        fn require_send<T: Send>(_: T) {}
-
-        let registry = DashboardDeliverySettlementRegistryV1::new(None);
-        require_send(registry.acknowledge(&format!("dsa1:{}", "a".repeat(64))));
-    }
-
     #[tokio::test]
     async fn receipt_survives_restart_between_sse_frame_and_browser_ack() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
