@@ -56,7 +56,7 @@ pub use product_runtime::{
 mod project_store_runtime;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports, session_review_port};
-pub mod serve;
+mod serve;
 // Session-temporal harness lives under `benches/`; the lib only paths it in
 // when a bench target or integration lane asks for `test-helpers`.
 #[cfg(any(test, feature = "test-helpers"))]
