@@ -20,8 +20,7 @@ use std::pin::Pin;
 use serde_json::Value;
 use tracedecay_domain::ObservationScopeV1;
 
-use crate::tracedecay::TraceDecay;
-use tracedecay_application::observation::ObservationCancellation;
+use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -31,6 +30,7 @@ use tracedecay_session_memory::session::lcm::{
     LcmTranscriptIngestCommand,
 };
 use tracedecay_sessions::admission::HostAdmissionOutcome;
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestStats;
 use tracedecay_sessions::runtime::snapshot_observation::SnapshotCaptureOutcome;
 

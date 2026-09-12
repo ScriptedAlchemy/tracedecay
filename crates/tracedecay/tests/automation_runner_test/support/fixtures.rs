@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
+use tracedecay::project::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 use tracedecay_automation_runtime::automation::automatic_facts::record_session_automatic_facts;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, read_run_artifact_payload,

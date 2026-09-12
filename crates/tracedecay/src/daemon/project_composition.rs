@@ -439,7 +439,7 @@ enum GraphOpen {
 
 /// The opened graph and the route-wide choices resolved from its configuration.
 struct OpenedProjectGraph {
-    cg: Arc<crate::tracedecay::TraceDecay>,
+    cg: Arc<crate::project::TraceDecay>,
     key: ProjectServerKey,
     runtime_configuration: tracedecay_configuration::config::PinnedRuntimeConfiguration,
     semantic: SemanticProjectRuntime,
@@ -452,7 +452,7 @@ struct OpenedProjectGraph {
 struct ProjectRoutePorts {
     code_index: ProjectCodeIndexAuthorities,
     dashboard_code_index_freshness_reader:
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader,
     dashboard_feedback_status_reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     dashboard_pr_autotrack_reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
@@ -494,7 +494,7 @@ impl ComposedCoreServer {
     fn publish_route_ports(
         &self,
         context: crate::mcp::server::McpServerConstructionContext,
-        cg: &Arc<crate::tracedecay::TraceDecay>,
+        cg: &Arc<crate::project::TraceDecay>,
         invocation: &DaemonInvocationState,
     ) -> crate::mcp::server::McpServerConstructionContext {
         let ports = &self.ports;
@@ -1111,7 +1111,7 @@ impl ProjectOpenInputs<'_> {
     #[hotpath::measure(label = "daemon.project.compose.admit_sessions", future = true)]
     async fn admit_session_databases(
         &self,
-        cg: &Arc<crate::tracedecay::TraceDecay>,
+        cg: &Arc<crate::project::TraceDecay>,
         project_id: &tracedecay_domain::ProjectId,
         project_database_is_read_only: bool,
     ) -> Result<AdmittedSessionDatabases> {
@@ -1917,7 +1917,7 @@ struct ProjectCodeIndexAuthorities {
     graph_projection_read_port: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ignored_dependency_admission:
         Arc<dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
-    generation_census_reader: tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+    generation_census_reader: tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader,
     graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort,
     search_authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
     search_executor: crate::mcp::server::CodeIndexSearchExecutor,
@@ -1929,7 +1929,7 @@ struct ProjectCodeIndexAuthorities {
 /// not the handshake path, so a relocated store still binds its own scope.
 fn project_code_index_authorities(
     invocation: &DaemonInvocationState,
-    cg: &Arc<crate::tracedecay::TraceDecay>,
+    cg: &Arc<crate::project::TraceDecay>,
     canonical_project_path: &Path,
     authoritative_project_id: &str,
     profile_identity: &profile_identity::LocalProfileIdentityAuthorityV1,
@@ -2017,8 +2017,8 @@ fn project_code_index_authorities(
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader {
-    let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+) -> tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader {
+    let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
         Arc::new(move |project_root| {
             let schedulers = schedulers.clone();
             Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
@@ -2049,7 +2049,7 @@ fn project_dashboard_pr_autotrack_reader()
 /// never fatal: telemetry must not fail an otherwise healthy project open.
 fn register_route_store_telemetry(
     sampling: &tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
-    cg: &Arc<crate::tracedecay::TraceDecay>,
+    cg: &Arc<crate::project::TraceDecay>,
     scope: &tracedecay_contracts::ResolvedScope,
     session_databases: [&tracedecay_global_db::RegisteredGlobalDb; 3],
 ) {

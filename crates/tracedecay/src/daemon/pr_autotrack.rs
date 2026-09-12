@@ -77,14 +77,14 @@ pub(super) use runtime::spawn_with_administration;
 #[derive(Clone, Copy)]
 struct PrStoreAdministration<'a> {
     schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
-    graph: Option<&'a Arc<crate::tracedecay::TraceDecay>>,
+    graph: Option<&'a Arc<crate::project::TraceDecay>>,
     command_control: &'a PrCommandControl,
 }
 
 impl<'a> PrStoreAdministration<'a> {
     fn with_control(
         schedulers: &'a CodeIndexSchedulerRegistryV1,
-        graph: &'a Arc<crate::tracedecay::TraceDecay>,
+        graph: &'a Arc<crate::project::TraceDecay>,
         command_control: &'a PrCommandControl,
     ) -> Self {
         Self {
@@ -136,7 +136,7 @@ fn log_pr_skip(repo_root: &Path, branch_label: Option<&str>, pr: Option<u64>, re
 #[cfg(test)]
 pub(crate) async fn activate_manual_branch_head(
     repo_root: &Path,
-    graph: &Arc<crate::tracedecay::TraceDecay>,
+    graph: &Arc<crate::project::TraceDecay>,
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     branch: &str,
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
@@ -160,7 +160,7 @@ pub(crate) async fn activate_manual_branch_head(
 #[hotpath::measure(label = "daemon.pr_autotrack.activate", future = true)]
 pub(crate) async fn activate_manual_branch_head_with_lifecycle(
     repo_root: &Path,
-    graph: &Arc<crate::tracedecay::TraceDecay>,
+    graph: &Arc<crate::project::TraceDecay>,
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     branch: &str,
     lifecycle: &ManualBranchLifecycleLeaseV1,
@@ -833,7 +833,7 @@ async fn track_pr(
 #[hotpath::measure(label = "daemon.pr_autotrack.activate_worktree", future = true)]
 async fn activate_linked_worktree(
     schedulers: &CodeIndexSchedulerRegistryV1,
-    graph: &crate::tracedecay::TraceDecay,
+    graph: &crate::project::TraceDecay,
     worktree: &Path,
 ) -> std::result::Result<(), String> {
     let project_id = graph

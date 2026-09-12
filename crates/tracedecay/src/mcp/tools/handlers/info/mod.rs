@@ -22,14 +22,14 @@ pub(super) use status::handle_admin_sync;
 /// the composition-root reader until that surface moves.
 pub(crate) async fn graph_statistics_value(
     generation_census_reader: Option<
-        &tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+        &tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader,
     >,
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
     let census = match generation_census_reader {
         Some(reader) => reader().await,
         None => {
-            tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-                reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
+            tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                reason: tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::AuthorityUnavailable,
             }
         }
     };
@@ -38,6 +38,6 @@ pub(crate) async fn graph_statistics_value(
 
 pub(super) use serde_json::{Value, json};
 
-pub(super) use crate::tracedecay::TraceDecay;
+pub(super) use crate::project::TraceDecay;
 pub(super) use tracedecay_domain::errors::{Result, TraceDecayError};
 pub(super) use tracedecay_mcp::ToolResult;

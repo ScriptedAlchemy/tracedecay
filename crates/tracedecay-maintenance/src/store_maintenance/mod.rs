@@ -443,7 +443,7 @@ pub enum CodeGenerationRetentionOutcomeV1 {
 /// saturated capacity, failed activation, nothing serving, or a census reset
 /// by a failure or mutation — the pass reports its degradation and collects
 /// nothing: the offline protection set (active pointer head, durable pointer
-/// index, rollback floor, and the serving generation) cannot name the exact
+/// index, and the serving generation) cannot name the exact
 /// source generations a mounted vector activation lease binds, so sweeping
 /// under it deleted a live vector source. Reset, corrupt, and denied vector
 /// authorities stay fail-closed for the same reason.
@@ -535,7 +535,7 @@ pub async fn apply_code_generation_retention(
 ) -> CodeGenerationRetentionOutcomeV1 {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1,
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention_cancellable,
+        execute_code_generation_retention_cancellable,
         prepare_next_code_generation_retention_cancellable,
     };
     let layout = lease.store_layout();
@@ -644,7 +644,6 @@ pub async fn apply_code_generation_retention(
         prepare_next_code_generation_retention_cancellable(
             &plan_root,
             &plan_sources,
-            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             &|| plan_cancellation.is_cancelled(),
             Some(&plan_pool_root),
         )

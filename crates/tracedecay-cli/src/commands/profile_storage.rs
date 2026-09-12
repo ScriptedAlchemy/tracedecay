@@ -558,7 +558,7 @@ async fn handle_storage_report(
     }
     for retention in &report.code_generation_retention {
         println!(
-            "  code-index retention dry run for {}: active {} ({}), rollback floor {}",
+            "  code-index retention dry run for {}: active {} ({})",
             retention.project_id,
             retention
                 .active_generation_id
@@ -568,7 +568,6 @@ async fn handle_storage_report(
                 .active_generation_file
                 .as_deref()
                 .unwrap_or("<no pointer>"),
-            retention.rollback_floor
         );
         println!(
             "    superseded: {} generation(s), {} bytes ({})",
@@ -833,9 +832,9 @@ mod reset_project_store_tests {
             "profile storage exact-shape fixture",
         )
         .unwrap();
-        let graph = tracedecay::tracedecay::TraceDecay::init_with_exclusive_maintenance(
+        let graph = tracedecay::project::TraceDecay::init_with_exclusive_maintenance(
             &project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions {
+            tracedecay::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: Some(profile_root.join("global.db")),
             },

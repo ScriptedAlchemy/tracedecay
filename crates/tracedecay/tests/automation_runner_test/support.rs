@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
+pub(crate) use tracedecay::project::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 pub(crate) use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 pub(crate) use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
     record_session_automatic_facts,

@@ -21,7 +21,7 @@ use tracedecay_store_runtime::retained_memory::{
     MemoryTargetAccessV1, RetainedMemoryTargetAuthorityV1, RetainedMemoryTargetV1,
 };
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 
 #[cfg(test)]
 mod memory_target_journeys;

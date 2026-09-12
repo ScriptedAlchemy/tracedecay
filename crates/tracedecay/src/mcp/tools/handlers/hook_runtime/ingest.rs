@@ -1,8 +1,7 @@
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
-use tracedecay_application::observation::ObservationCancellation;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
@@ -15,6 +14,7 @@ use tracedecay_session_memory::session::lcm::{
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
+use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::source::TranscriptSource;
 
 use super::super::SessionAuthorities;
@@ -703,7 +703,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
                     cg.project_root()
                 )),
                 cg.project_root(),
-                crate::tracedecay::current_timestamp()
+                crate::project::current_timestamp()
             ),
             label = "mcp.hook_runtime.hint_settle"
         )

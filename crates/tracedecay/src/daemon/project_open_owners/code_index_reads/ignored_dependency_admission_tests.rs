@@ -317,7 +317,7 @@ async fn writable_binding_serves_exact_scope_generation_while_catalog_warms() {
     );
     assert_eq!(
         serving.code_graph_serving_readiness(),
-        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready,
+        tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready,
         "admission returns only after graph activation completes for the generation it minted"
     );
     let graph = serving

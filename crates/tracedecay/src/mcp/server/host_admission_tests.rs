@@ -71,7 +71,7 @@ fn terminal_receipt(root: PathBuf) -> Value {
 }
 
 async fn server_with_broker(
-    cg: crate::tracedecay::TraceDecay,
+    cg: crate::project::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
     reconcile_sink: CodeIndexReconcileSink,
@@ -83,7 +83,7 @@ async fn server_with_broker(
 }
 
 async fn server_with_owned_project_replay_worker(
-    cg: crate::tracedecay::TraceDecay,
+    cg: crate::project::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
     reconcile_sink: CodeIndexReconcileSink,
@@ -1078,7 +1078,7 @@ fn session_start_with_route(root: PathBuf) -> Value {
 }
 
 async fn server_with_broker_and_runtime(
-    cg: crate::tracedecay::TraceDecay,
+    cg: crate::project::TraceDecay,
     broker: SharedHostAdmissionBroker,
     reconcile_sink: CodeIndexReconcileSink,
     runtime: Arc<HostAdmissionTestRuntimeV1>,

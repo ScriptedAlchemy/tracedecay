@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use serde_json::{Value, json};
-use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader;
+use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
 use tracedecay_domain::ExactClass;
 use tracedecay_mcp::ToolResult;
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 
 fn completed_sparse_search() -> tracedecay_query::code_search::CodeIndexSearchOutcomeV1 {
     completed_sparse_search_for_generation("generation.mcp-verified-graph-fixture.1")
@@ -381,16 +381,15 @@ fn freshness_reader(
     let latest_generation_id = latest_generation_id.map(str::to_owned);
     let staleness_state = staleness_state.to_owned();
     std::sync::Arc::new(move |worktree_root: std::path::PathBuf| {
-        let freshness =
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
-                worktree_root: worktree_root.display().to_string(),
-                latest_generation_id: latest_generation_id.clone(),
-                staleness_state: Some(staleness_state.clone()),
-                rebuild_in_flight,
-                hook_hint_count: Some(0),
-                coverage: "complete".to_owned(),
-                ..Default::default()
-            };
+        let freshness = tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
+            worktree_root: worktree_root.display().to_string(),
+            latest_generation_id: latest_generation_id.clone(),
+            staleness_state: Some(staleness_state.clone()),
+            rebuild_in_flight,
+            hook_hint_count: Some(0),
+            coverage: "complete".to_owned(),
+            ..Default::default()
+        };
         Box::pin(async move { Some(freshness) })
     })
 }

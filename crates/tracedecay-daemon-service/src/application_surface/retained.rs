@@ -16,7 +16,7 @@ use tracedecay_contracts::retained_surfaces::{
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
-use super::{RegisteredHttpOperation, invoke_registered_http};
+use super::registered_http::{RegisteredHttpOperation, invoke_registered_http};
 use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};

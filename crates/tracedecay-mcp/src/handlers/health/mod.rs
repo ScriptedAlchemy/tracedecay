@@ -1,10 +1,12 @@
 //! Portable code-health report handlers.
 
+mod dispatch;
 mod dsm;
 mod reports;
 mod runtime;
 mod test_map;
 
+pub use dispatch::dispatch_tool;
 pub use dsm::handle_dsm;
 pub use reports::{handle_dependency_depth, handle_gini, handle_health};
 pub use runtime::{collect_database_snapshot, handle_runtime};

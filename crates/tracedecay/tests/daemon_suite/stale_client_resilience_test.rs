@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use tracedecay::daemon::call_tool;
-use tracedecay::tracedecay::MovedStoreAdoption;
+use tracedecay::project::MovedStoreAdoption;
 use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 
 use crate::common::{daemon_socket_path, spawn_tracedecay_daemon, tempdir_or_panic};

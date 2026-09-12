@@ -60,7 +60,6 @@ pub(crate) fn register_test_schema_installer() {
 pub mod advisory;
 pub mod code_index;
 pub mod config;
-pub mod configuration;
 pub mod dashboard_diagnostics;
 pub mod delivery;
 pub mod diagnose;
@@ -80,7 +79,6 @@ pub mod lsp_runtime;
 mod lsp_support;
 pub mod native_integration;
 pub mod observability;
-pub mod observation;
 pub mod operation_stream;
 pub mod pr_tracking;
 pub mod primitives;

@@ -1,12 +1,9 @@
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutControlV1, ContextScoutDurableStoreOutcomeV1, ContextScoutErrorV1,
-};
-use tracedecay_application::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_contracts::context_scout::{
@@ -25,6 +22,9 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_sessions::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
 
 use super::admission::{

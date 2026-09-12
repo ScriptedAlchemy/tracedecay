@@ -28,7 +28,7 @@ fn session_start(root: PathBuf) -> Value {
 }
 
 async fn server_with_broker(
-    cg: crate::tracedecay::TraceDecay,
+    cg: crate::project::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
     reconcile_sink: CodeIndexReconcileSink,
@@ -42,7 +42,7 @@ async fn server_with_broker(
 }
 
 async fn server_without_broker(
-    cg: crate::tracedecay::TraceDecay,
+    cg: crate::project::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     reconcile_sink: CodeIndexReconcileSink,
 ) -> Arc<McpServer> {

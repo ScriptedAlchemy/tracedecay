@@ -7,7 +7,7 @@ use tracedecay_contracts::{CancellationSignal, Deadline, now_micros};
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
@@ -358,7 +358,7 @@ mod tests {
         let profile_root = std::fs::canonicalize(profile_root).unwrap();
         let cg = TraceDecay::init_with_options(
             &project_root,
-            crate::tracedecay::TraceDecayOpenOptions {
+            crate::project::TraceDecayOpenOptions {
                 global_db_path: Some(profile_root.join("global.db")),
                 profile_root: Some(profile_root),
             },

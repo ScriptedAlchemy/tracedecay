@@ -357,7 +357,7 @@ impl McpServer {
             response_tokens: 0,
             net_saved_tokens: 0,
             duration_us,
-            timestamp: crate::tracedecay::current_timestamp(),
+            timestamp: crate::project::current_timestamp(),
             request_id,
             arguments,
             internal_analytics: None,
@@ -390,7 +390,7 @@ impl McpServer {
             project_root,
             event,
             current_branch,
-            crate::tracedecay::current_timestamp(),
+            crate::project::current_timestamp(),
             admission_seq,
         ) else {
             return;
@@ -463,7 +463,7 @@ impl McpServer {
         };
         let thread_id = bounded_identifier(route.thread_id.as_deref())
             .and_then(|value| tracedecay_privacy::protect_sensitive_structural_id(&value).ok());
-        let ts = crate::tracedecay::current_timestamp();
+        let ts = crate::project::current_timestamp();
         // Session-only pre-debounce: the full key needs branch/worktree, which
         // cost gix/git discovery. A burst for one session almost always shares
         // those, so reject here before paying for derivation. Mid-session
