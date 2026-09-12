@@ -19,11 +19,11 @@ use tracedecay_sessions::admission::HostAdmissionStatus;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_store::{ObservationPersistOutcome, ObservationReplayRequest, ObservationStore};
 
-use tracedecay_application::observation::{
+use tracedecay_host_admission::*;
+use tracedecay_sessions::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ExternalSourceProjectionStateV1,
     ObservationCancellation,
 };
-use tracedecay_host_admission::*;
 
 fn initialize_repository(path: &Path) {
     fs::create_dir_all(path).unwrap();

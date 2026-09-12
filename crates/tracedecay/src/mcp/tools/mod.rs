@@ -42,7 +42,6 @@ pub(crate) use handlers::{
 pub struct LegacyToolCompatibilityOwner;
 
 impl LegacyToolCompatibilityOwner {
-    pub const OWNER: &'static str = "root MCP tool-dispatch migration";
     pub fn admits(
         tool_name: &str,
     ) -> std::result::Result<bool, dispatch::McpDispatchMetadataError> {

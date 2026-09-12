@@ -1615,9 +1615,8 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        DurablePublicationPointerV1, acquire_code_generation_store_lock,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
+        acquire_code_generation_store_lock, run_code_generation_retention,
     };
     use tracedecay_domain::{
         CodeGenerationId, ProjectId, RepositoryId, UtcMicros, sha256_hex_suffix,
@@ -2377,7 +2376,6 @@ mod tests {
                 let report = run_code_generation_retention(
                     &scoped_store,
                     &BTreeSet::new(),
-                    DEFAULT_SUPERSEDED_GENERATION_FLOOR,
                     CodeGenerationRetentionModeV1::Apply,
                     UtcMicros(1),
                     Some(&replay_root),

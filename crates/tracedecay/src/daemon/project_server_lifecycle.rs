@@ -372,7 +372,7 @@ mod shutdown_owner_tests {
         let _pin = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project root");
         let (graph, _runtime) =
-            crate::tracedecay::TraceDecay::init_test_fixture_with_registered_runtime(
+            crate::project::TraceDecay::init_test_fixture_with_registered_runtime(
                 project.path(),
                 "project.shutdown-owner",
             )

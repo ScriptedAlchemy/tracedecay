@@ -14,7 +14,7 @@ pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
 pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
-pub(crate) use tracedecay::tracedecay::TraceDecay;
+pub(crate) use tracedecay::project::TraceDecay;
 pub(crate) use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
 };
@@ -220,7 +220,7 @@ pub(crate) async fn setup_project(
             });
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()
         .unwrap_or_else(|error| panic!("resolve dashboard fixture profile root: {error}"));
-    let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
+    let open_options = tracedecay::project::TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: None,
     };

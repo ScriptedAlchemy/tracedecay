@@ -15,7 +15,7 @@ use crate::mcp::project_route::{
 use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -327,7 +327,7 @@ pub struct McpServer {
     dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
-        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
     dashboard_explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     dashboard_feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
@@ -355,7 +355,7 @@ pub struct McpServer {
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
-        tokio::sync::OnceCell<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>,
+        tokio::sync::OnceCell<tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader>,
     /// Admission supplied by an authenticated daemon application route. It is
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
@@ -1152,7 +1152,7 @@ impl McpServer {
         tokio::task::spawn_blocking(move || {
             let _ = cleanup_expired_response_handles(
                 &response_handle_project_root,
-                crate::tracedecay::current_timestamp(),
+                crate::project::current_timestamp(),
             );
         });
         if own_project_host_admission_replay

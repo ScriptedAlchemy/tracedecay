@@ -629,7 +629,7 @@ pub fn code_generation_retention_finding(
         (false, false, false, false) => clean_finding_with_evidence(
             completeness,
             references,
-            "superseded code generations are bounded by exact liveness and rollback floor; every scope root resolves to a live project root; every sealed graph artifact is a verified head",
+            "superseded code generations are bounded by exact liveness; every scope root resolves to a live project root; every sealed graph artifact is a verified head",
         )?,
     };
     DoctorStorageFindingV1::new(kind, finding)

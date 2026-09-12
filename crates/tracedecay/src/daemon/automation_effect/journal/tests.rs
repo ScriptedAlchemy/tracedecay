@@ -169,7 +169,7 @@ fn canonical_journal_path(dashboard_root: &std::path::Path, run_id: &RunId) -> s
 }
 
 fn external_admission_for_recovery_project(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     run_id: &str,
     request_id: &str,
     job_id: &str,
@@ -191,7 +191,7 @@ fn external_admission_for_recovery_project(
 }
 
 fn admission_for_recovery_project(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     run_id: &str,
     request_id: &str,
 ) -> DurableAutomationAdmission {
@@ -215,7 +215,7 @@ fn admission_for_recovery_project(
 }
 
 fn retirement_admission_for_recovery_project(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     run_id: &str,
     request_id: &str,
     binding: tracedecay_automation_runtime::automation::effect_runtime::retirement::RetirementBinding,
@@ -419,15 +419,15 @@ fn now_secs() -> i64 {
 async fn retained_recovery_project(
     temp: &tempfile::TempDir,
     name: &str,
-) -> crate::tracedecay::TraceDecay {
+) -> crate::project::TraceDecay {
     let project_root = temp.path().join(format!("{name}-project"));
     let profile_root = temp.path().join(format!("{name}-profile"));
     std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
     std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
         .expect("project source");
-    crate::tracedecay::TraceDecay::init_with_options(
+    crate::project::TraceDecay::init_with_options(
         &project_root,
-        crate::tracedecay::TraceDecayOpenOptions {
+        crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
             global_db_path: Some(profile_root.join("global.db")),
         },
@@ -452,7 +452,7 @@ async fn fixed_task_lock_is_denied(
 }
 
 async fn retained_repeated_memory_curator(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
     run_id: &str,
@@ -476,7 +476,7 @@ async fn retained_repeated_memory_curator(
 }
 
 async fn retained_repeated_memory_curator_run(
-    cg: &crate::tracedecay::TraceDecay,
+    cg: &crate::project::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     configuration_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
     run_id: &str,
@@ -894,9 +894,9 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
         &serde_json::to_vec_pretty(&mismatched_transition).expect("mismatched transition bytes"),
     );
     cg.close();
-    let reopened = crate::tracedecay::TraceDecay::init_with_options(
+    let reopened = crate::project::TraceDecay::init_with_options(
         &project_root,
-        crate::tracedecay::TraceDecayOpenOptions {
+        crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
             global_db_path: Some(profile_root.join("global.db")),
         },
@@ -1342,9 +1342,9 @@ async fn recovery_defers_unavailable_memory_without_blocking_external_or_termina
     write_private_test_file(&intent_path, corrupt);
     cg.close();
 
-    let read_only = crate::tracedecay::TraceDecay::open_read_only_with_options(
+    let read_only = crate::project::TraceDecay::open_read_only_with_options(
         &project_root,
-        crate::tracedecay::TraceDecayOpenOptions {
+        crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
             global_db_path: Some(profile_root.join("global.db")),
         },
@@ -1399,9 +1399,9 @@ async fn empty_pending_index_does_not_open_project_memory() {
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     cg.close();
 
-    let read_only = crate::tracedecay::TraceDecay::open_read_only_with_options(
+    let read_only = crate::project::TraceDecay::open_read_only_with_options(
         &project_root,
-        crate::tracedecay::TraceDecayOpenOptions {
+        crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
             global_db_path: Some(profile_root.join("global.db")),
         },
@@ -1512,9 +1512,9 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
     std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
         .expect("project source");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
+    let cg = crate::project::TraceDecay::init_with_options(
         &project_root,
-        crate::tracedecay::TraceDecayOpenOptions {
+        crate::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
             global_db_path: Some(profile_root.join("global.db")),
         },

@@ -275,7 +275,7 @@ impl Default for MaintenanceCoordinator {
 /// store stays alive for the duration of the writer-held critical section.
 enum MaintenanceStoreWork {
     Session(tracedecay_global_db::RegisteredGlobalDbLeaseV1),
-    Graph(Arc<crate::tracedecay::TraceDecay>),
+    Graph(Arc<crate::project::TraceDecay>),
 }
 
 impl MaintenanceStoreWork {
@@ -288,7 +288,7 @@ impl MaintenanceStoreWork {
 }
 
 pub(crate) fn project_store_maintenance_lease(
-    graph: &crate::tracedecay::TraceDecay,
+    graph: &crate::project::TraceDecay,
 ) -> ProjectStoreMaintenanceLeaseV1 {
     ProjectStoreMaintenanceLeaseV1::new(
         graph.project_root().to_path_buf(),

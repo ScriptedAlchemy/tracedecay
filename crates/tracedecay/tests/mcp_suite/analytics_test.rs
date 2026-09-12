@@ -11,9 +11,9 @@ use crate::support::{
     production_composition_fixture, real_mcp_server, setup_empty_project,
 };
 #[cfg(feature = "test-transport")]
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::project::current_timestamp;
 #[cfg(feature = "test-transport")]
-use tracedecay::tracedecay::current_timestamp;
+use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_global_db::AnalyticsEventInsert;
 

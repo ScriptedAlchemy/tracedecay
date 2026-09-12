@@ -24,7 +24,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
@@ -677,7 +677,7 @@ pub(super) async fn handle_dashboard(
     doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     remote_operational_status: Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     code_index_freshness_reader: Option<
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     >,
     explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     feedback_status_reader: Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,

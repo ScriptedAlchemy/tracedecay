@@ -24,8 +24,8 @@ use tracedecay_session_memory::memory::MemoryApplication;
 use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 
 use crate::daemon::retained_owner::open_project_retained_memory_target;
-use crate::tracedecay::TraceDecay;
-use crate::tracedecay::current_timestamp;
+use crate::project::TraceDecay;
+use crate::project::current_timestamp;
 use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{AnalyticsToolCounts, RegisteredGlobalDb};

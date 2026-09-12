@@ -10,10 +10,10 @@ use tracedecay_store_runtime::retained_memory::{
 };
 
 use crate::daemon::retained_owner::open_project_retained_memory_target;
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 
-fn open_options(profile_root: &Path) -> crate::tracedecay::TraceDecayOpenOptions {
-    crate::tracedecay::TraceDecayOpenOptions {
+fn open_options(profile_root: &Path) -> crate::project::TraceDecayOpenOptions {
+    crate::project::TraceDecayOpenOptions {
         global_db_path: Some(profile_root.join("global.db")),
         profile_root: Some(profile_root.to_path_buf()),
     }

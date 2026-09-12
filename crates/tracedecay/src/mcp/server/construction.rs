@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_contracts::{
     ProfileIdentityReadPort, SessionTemporalRefreshWakePort,
     remote::status::RemoteOperationalStatusReaderV1,
@@ -147,7 +147,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) remote_operational_status: Option<RemoteOperationalStatusReaderV1>,
     pub(crate) dashboard_doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
-        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
     pub(crate) dashboard_explorer_semantic_reader:
         Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub(crate) dashboard_feedback_status_reader:
@@ -641,7 +641,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_dashboard_code_index_freshness_reader(
         mut self,
-        reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
+        reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     ) -> Self {
         self.dashboard_code_index_freshness_reader = Some(reader);
         self

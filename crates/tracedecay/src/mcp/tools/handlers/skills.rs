@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_automation_runtime::ports::session_store::AutomationSessionStore;
 
-use crate::tracedecay::TraceDecay;
+use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::hermes_skill_bridge::{
     HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
 };
@@ -110,7 +110,7 @@ pub(super) async fn handle_skill_list(
     let usage_summaries = summarize_skill_usage(&profile_root, &skills).await?;
     let recommendations = stale_skill_recommendations(
         &usage_summaries,
-        crate::tracedecay::current_timestamp(),
+        crate::project::current_timestamp(),
         STALE_SKILL_AFTER_SECS,
     );
     let improvement_recommendations = skill_improvement_recommendations(&usage_summaries);
@@ -203,7 +203,7 @@ pub(super) async fn handle_skill_view(
     let usage_summary = summarize_skill_usage_for(&profile_root, &skill).await?;
     let stale_recommendation = stale_skill_recommendations(
         std::slice::from_ref(&usage_summary),
-        crate::tracedecay::current_timestamp(),
+        crate::project::current_timestamp(),
         STALE_SKILL_AFTER_SECS,
     )
     .into_iter()

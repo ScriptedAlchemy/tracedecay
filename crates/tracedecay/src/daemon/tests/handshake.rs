@@ -74,7 +74,7 @@ fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
     let decoded = DaemonHandshake::from_line(&encoded).expect("legacy handshake should decode");
     assert_eq!(
         decoded.moved_store_adoption,
-        crate::tracedecay::MovedStoreAdoption::Never
+        crate::project::MovedStoreAdoption::Never
     );
 }
 

@@ -196,7 +196,7 @@ impl McpServer {
         agent: HookAgent,
     ) -> std::result::Result<bool, HostAdmissionOutcome> {
         let marker = hook_events::sync_marker_path(&cg.store_layout().data_root, agent);
-        let now = crate::tracedecay::current_timestamp();
+        let now = crate::project::current_timestamp();
         if !hook_events::should_run_sync(&marker, now, 3) {
             return Ok(false);
         }

@@ -296,7 +296,8 @@ use lsp_sessions::{
 };
 mod maintenance;
 pub mod pr_autotrack;
-#[cfg_attr(any(test, feature = "test-transport"), allow(clippy::too_many_lines))]
+#[cfg(any(test, feature = "test-transport"))]
+#[allow(clippy::too_many_lines)]
 mod production_harness;
 mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
@@ -396,12 +397,6 @@ mod invocation_tests;
 mod tests;
 
 #[cfg(test)]
-#[path = "../../tracedecay-code-index-runtime/src/code_index_scheduler/ignored_dependencies_tests.rs"]
-#[allow(clippy::expect_used)]
-mod code_index_ignored_dependencies_tests;
-
-#[cfg(test)]
-#[path = "../../tracedecay-code-index-runtime/src/code_index_scheduler/registry/runtime_generation_census_tests.rs"]
 #[allow(clippy::expect_used)]
 mod code_index_runtime_generation_census_tests;
 

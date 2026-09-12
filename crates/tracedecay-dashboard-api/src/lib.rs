@@ -209,6 +209,7 @@ use tracedecay_api::{WorkOperation, WorkflowOperation};
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_automation_runtime::automation::host_io::HostIo;
+use tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -343,7 +344,7 @@ pub struct DashboardStateCompositionV1 {
     /// Daemon-owned Remote Brain operational read. Standalone dashboards leave
     /// it absent and `GET /api/remote/status` reports typed unavailable.
     pub remote_operational_status_reader: Option<RemoteOperationalStatusReader>,
-    pub code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub code_index_freshness_reader: Option<CodeIndexFreshnessReader>,
     /// Daemon-owned read over the semantic activation gate and runtime
     /// status for the Explorer semantic source. Standalone dashboards leave
     /// it absent and the source reports typed `unsupported`.
@@ -455,7 +456,7 @@ pub struct DashboardState {
     pub savings_db_path: String,
     pub project_root: PathBuf,
     /// Live read port over the daemon-owned code-index scheduler registry.
-    pub code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub code_index_freshness_reader: Option<CodeIndexFreshnessReader>,
     /// Root-addressed read over the daemon-owned semantic activation gate and
     /// runtime status. Absent for standalone dashboards, whose Explorer
     /// semantic source reports typed `unsupported` instead of guessing from

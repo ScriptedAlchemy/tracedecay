@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
-use crate::code_index::production::CodeIndexProductionErrorV1;
+use tracedecay_code_index::production::CodeIndexProductionErrorV1;
 
 use super::*;
 
