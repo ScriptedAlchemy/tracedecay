@@ -44,6 +44,11 @@ hotpath = ["hotpath/hotpath"]
 # Explicit opt-in (same policy as `test-transport` on the runtime crate):
 # exposes `*_for_test` constructors to dependent crates' test builds only.
 test-helpers = ["tracedecay-temporal-query/test-helpers"]
+# Evaluation-only in-memory lexical projection (`retrieval::lexical::
+# CodeLexicalProjectionAdapterV1` and its builder). Production retrieval reads
+# the durable lexical artifact; only the search-quality evaluator and this
+# crate's own suites build projections directly from admitted chunks.
+search-eval = []
 # The grammar tier the shipped product indexes with, forwarded exactly as
 # `tracedecay-cli`'s `production` forwards `tracedecay/production`. Only the
 # `tracedecay-index-bench` binary needs it: a profiling run must parse the
@@ -52,6 +57,9 @@ production = ["tracedecay-code-index/lite", "tracedecay-code-index/full"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+# Self dev-dependency: the search-quality suites drive the eval-only in-memory
+# lexical projection, so the crate's own test build enables it.
+tracedecay-query = { path = ".", features = ["search-eval"] }
 static_assertions = "1.1.0"
 tempfile = "3"
 # Test-only: the relocated search-quality suites build lexical/exact fixtures
