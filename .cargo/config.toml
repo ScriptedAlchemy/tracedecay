@@ -9,6 +9,10 @@ target-dir = "target"
 # setting; it has no effect on Rust code.
 CFLAGS = { value = "-DNDEBUG", force = false }
 CXXFLAGS = { value = "-DNDEBUG", force = false }
+# SQLite's sorter merges at most 16 runs, so 15 helpers are the largest
+# effective auxiliary width. Keep the bundled build deterministic across
+# developer and CI hosts instead of accepting SQLite's default ceiling of 8.
+LIBSQLITE3_FLAGS = { value = "-DSQLITE_MAX_WORKER_THREADS=15", force = true }
 
 # Global accounting (savings ledger, worldwide-counter flushes) is ON by
 # default for installed binaries, but `cargo test` / `cargo run` would then
