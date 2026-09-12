@@ -15,7 +15,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 use tracedecay_code_index_runtime::project_reads::project_code_index_generation_census_reader;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_runtime_core::config::PinnedUserDataDir;
-use tracedecay_session_memory::runtime_telemetry::{
+use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
 

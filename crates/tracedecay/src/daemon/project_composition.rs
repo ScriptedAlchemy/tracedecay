@@ -452,7 +452,7 @@ struct OpenedProjectGraph {
 struct ProjectRoutePorts {
     code_index: ProjectCodeIndexAuthorities,
     dashboard_code_index_freshness_reader:
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader,
+        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
     dashboard_explorer_semantic_reader: tracedecay_dashboard_api::ExplorerSemanticReader,
     dashboard_feedback_status_reader: tracedecay_dashboard_api::feedback_api::FeedbackStatusReader,
     dashboard_pr_autotrack_reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader,
@@ -1917,7 +1917,7 @@ struct ProjectCodeIndexAuthorities {
     graph_projection_read_port: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     ignored_dependency_admission:
         Arc<dyn tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
-    generation_census_reader: tracedecay_session_memory::runtime_telemetry::GenerationCensusReader,
+    generation_census_reader: tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader,
     graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort,
     search_authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
     search_executor: crate::mcp::server::CodeIndexSearchExecutor,
@@ -2017,8 +2017,8 @@ fn project_code_index_authorities(
 /// Dashboard-facing freshness reader for this route's code-index schedulers.
 fn project_dashboard_freshness_reader(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader {
-    let reader: tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader =
+) -> tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader {
+    let reader: tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader =
         Arc::new(move |project_root| {
             let schedulers = schedulers.clone();
             Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })

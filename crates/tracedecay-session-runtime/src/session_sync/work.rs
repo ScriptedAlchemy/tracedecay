@@ -565,7 +565,7 @@ impl SessionSyncProjectContext {
         {
             return SessionSyncWorkResult::Interrupted(interruption);
         }
-        let cancellation = tracedecay_application::observation::ObservationCancellation::default();
+        let cancellation = tracedecay_sessions::observation::ObservationCancellation::default();
         let control = tracedecay_sessions::runtime::git_correlation::BoundedGitControl::new(
             cancellation.clone(),
             GIT_SYNC_COMMAND_DEADLINE,

@@ -12,11 +12,11 @@
 
 use std::fmt::Write as _;
 
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1, CodeIndexWorktreeFreshnessV1,
+};
 use tracedecay_contracts::retrieval::{
     PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1, PrimitiveSearchFreshnessV1,
-};
-use tracedecay_dashboard_api::code_index_freshness_api::{
-    CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1, CodeIndexWorktreeFreshnessV1,
 };
 
 use tracedecay_query::code_search::{CodeIndexLaneStatusV1, CodeIndexSearchCoverageV1};
@@ -182,7 +182,7 @@ pub(super) fn freshness_lines(freshness: &PrimitiveSearchFreshnessV1) -> String 
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1;
+    use tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1;
 
     use super::*;
 

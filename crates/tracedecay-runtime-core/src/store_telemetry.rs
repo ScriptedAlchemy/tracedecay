@@ -1,8 +1,8 @@
 //! Kernel store telemetry: file sizes, pragmas, writer owner, and reader pool.
 //!
 //! Snapshot wire types (`DatabaseSnapshot`, generation census, registry
-//! projection) live above this crate. Callers admit those values and assemble
-//! the product snapshot from this kernel collect.
+//! projection) live in [`crate::runtime_telemetry`]. Callers admit those
+//! values and assemble the product snapshot from this kernel collect.
 
 use std::path::{Path, PathBuf};
 

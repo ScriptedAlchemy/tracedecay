@@ -819,7 +819,7 @@ mod tests {
 
     #[tokio::test]
     async fn planner_admission_reaches_the_rollup_with_requested_as_its_denominator() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.planner").await;
         let cells = rollup_cells(&harness, |day| {
             // Half the windows admit one of three requested lanes; the rest
@@ -871,7 +871,7 @@ mod tests {
 
     #[tokio::test]
     async fn retriever_contributions_are_denominated_by_what_the_lane_returned() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.retriever").await;
         let cells = rollup_cells(&harness, |day| {
             retriever_envelope(
@@ -908,7 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn unhydrated_synthesis_publishes_no_point_value() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.synthesis").await;
         // Token accounting is unavailable before hydration, so the projection
         // reports partial coverage. The rollup must refuse a point value
@@ -945,7 +945,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_denied_source_is_censored_in_the_rollup_and_never_a_zero_match() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.source").await;
         // Two eligible sources per window: one searched, one denied. The
         // denied one must land in `censored`, leaving the searched numerator
@@ -986,7 +986,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_independently_observed_context_use_enters_the_numerator() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.context").await;
         // One window in three is an independently verified use, one is a
         // censored linkage, one is a cited-but-unverified use. Only the first
@@ -1031,7 +1031,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ablation_over_an_empty_denominator_is_unknown_not_zero() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.ablation").await;
         let measurement = |input: u64, output: u64| SemanticNativeStageMeasurementV1 {
             elapsed_micros: 100,
@@ -1081,7 +1081,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_queue_accounts_the_drop_instead_of_losing_it_silently() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = harness("project.retrieval.bounded").await;
         let db = harness
             .runtime
@@ -1152,7 +1152,7 @@ mod tests {
 
     #[tokio::test]
     async fn opting_in_is_shared_and_opting_out_is_retained_locally_only() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let consent_for = |scope: &str, previous, current, day: i64| {
             consent_envelope(
                 &LaneIdentity::direct(

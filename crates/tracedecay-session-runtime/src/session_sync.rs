@@ -38,7 +38,7 @@ pub struct DaemonSessionSyncService {
     scan_slots: Arc<tokio::sync::Semaphore>,
     project_gates: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
-    shutdown: tracedecay_application::observation::ObservationCancellation,
+    shutdown: tracedecay_sessions::observation::ObservationCancellation,
     shutdown_notify: Arc<tokio::sync::Notify>,
     journal_changed: Arc<tokio::sync::Notify>,
 }
@@ -131,7 +131,7 @@ impl Default for DaemonSessionSyncService {
             scan_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             project_gates: Arc::new(Mutex::new(BTreeMap::new())),
             active_imports: Arc::new(Mutex::new(BTreeMap::new())),
-            shutdown: tracedecay_application::observation::ObservationCancellation::default(),
+            shutdown: tracedecay_sessions::observation::ObservationCancellation::default(),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             journal_changed: Arc::new(tokio::sync::Notify::new()),
         }
