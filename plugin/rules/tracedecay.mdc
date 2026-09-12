@@ -22,3 +22,7 @@ not a supported fallback.
 Preview and read results do not grant mutation authority. Apply, cancellation,
 and rollback consume their returned identities and typed state; reconcile
 committed effects before retrying an interrupted operation.
+
+Once the user authorizes a change, carry it through implementation and relevant
+verification. Pause only for a missing decision or an external or destructive
+action outside that authority.
