@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod advisory;
+mod application_catalog_projection;
 pub mod authorization;
 mod bearer_token;
 pub mod branch_snapshots;
