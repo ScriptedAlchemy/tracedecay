@@ -17,9 +17,8 @@ use tracedecay_domain::configuration::{
 };
 
 use tracedecay_contracts::{ProjectSettingsPatchInputV1, validate_project_settings_patch};
-
-use tracedecay_configuration::DirectConfigurationMutation;
 use tracedecay_configuration::config::PinnedRuntimeConfiguration;
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
 pub use tracedecay_contracts::SettingsValidationIssueV1;
 

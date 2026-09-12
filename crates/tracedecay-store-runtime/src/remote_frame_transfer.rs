@@ -272,8 +272,7 @@ fn frame_transfer_effect_envelope(
     let committed_state =
         canonical_sha256(&receipt).map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
     let identity = input_digest
-        .as_str()
-        .strip_prefix("sha256:")
+        .hex_suffix()
         .ok_or(RemoteProtocolFailureV1::AuthorityUnavailable)?;
     let deadline = Deadline::new(UtcMicros(request.body.expires_at_micros))
         .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;

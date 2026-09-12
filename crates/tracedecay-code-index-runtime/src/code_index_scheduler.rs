@@ -41,7 +41,7 @@ use tracedecay_domain::{
     ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId,
     RetrievalBudget, RetrieverBatch, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
     SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1, TreeId,
-    WorktreeId, canonical_sha256,
+    WorktreeId, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_private_fs::{
     framed_log::DirectorySyncPolicy, make_private_directory, open_private_file,
@@ -768,14 +768,11 @@ impl TemporaryEvidencePackV1 {
                 "sealed evidence pack does not match its commit identity",
             ));
         }
-        let digest_hex = segment_digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or_else(|| {
-                DaemonCodeIndexPublicationStoreV1::unavailable(
-                    "sealed evidence pack digest is not sha256",
-                )
-            })?;
+        let digest_hex = sha256_hex_suffix(segment_digest.as_str()).ok_or_else(|| {
+            DaemonCodeIndexPublicationStoreV1::unavailable(
+                "sealed evidence pack digest is not sha256",
+            )
+        })?;
         let final_path = root.join(format!("segment-{digest_hex}.json"));
         match final_path.symlink_metadata() {
             Ok(metadata) => {
@@ -1085,9 +1082,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         digest: &ManifestDigest,
         bytes: &[u8],
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let digest_hex = digest
-            .as_str()
-            .strip_prefix("sha256:")
+        let digest_hex = sha256_hex_suffix(digest.as_str())
             .ok_or_else(|| Self::unavailable("sealed segment digest is not sha256"))?;
         let expected_digest = digest.as_str();
         if Self::state_digest(bytes) != expected_digest {
@@ -1470,7 +1465,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation segment range exceeds its manifest identity".to_owned(),
             ));
         }
-        let digest_hex = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+        let digest_hex = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
         })?;
         let path = self
@@ -1528,7 +1523,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation segment range exceeds its manifest identity".to_owned(),
             ));
         }
-        let digest_hex = digest.strip_prefix("sha256:").ok_or_else(|| {
+        let digest_hex = sha256_hex_suffix(digest).ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
         })?;
         let path = self
@@ -1844,10 +1839,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let expected_file = format!(
             "generation-{}.json",
-            entry
-                .state_digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&entry.state_digest)
+            sha256_hex_suffix(&entry.state_digest).unwrap_or(&entry.state_digest)
         );
         if entry.generation_file != expected_file {
             return Err(Self::corruption(
@@ -2463,9 +2455,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .set(generation_size.saturating_add(referenced_segment_bytes));
             let generation_file = format!(
                 "generation-{}.json",
-                state_digest
-                    .strip_prefix("sha256:")
-                    .unwrap_or(&state_digest)
+                sha256_hex_suffix(&state_digest).unwrap_or(&state_digest)
             );
             let generation_path = self.generations_root.join(&generation_file);
             match generation_path.symlink_metadata() {
@@ -4779,15 +4769,11 @@ impl LatestCodeTextGenerationV1 {
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )?;
         let sealed_identity = store.sealed_identity(&generation_id)?;
-        let sealed_hex = sealed_identity
-            .digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or_else(|| {
-                RetrievalPortError::Contract(
-                    "durable sealed lexical source digest is not SHA-256".to_owned(),
-                )
-            })?;
+        let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "durable sealed lexical source digest is not SHA-256".to_owned(),
+            )
+        })?;
         let artifacts_root = code_text_artifacts_root(store.store_root());
         ensure_private_text_artifacts_root(&artifacts_root)?;
         let staging_path = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));

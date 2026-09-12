@@ -13,7 +13,7 @@ use tracedecay_domain::{
     GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
     GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
     GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    ManifestDigest, UtcMicros, canonical_sha256,
+    ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_policy::{
     GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassificationInputV1,
@@ -725,10 +725,8 @@ fn transaction_id(
         preview_digest,
     ))
     .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(GitIndexTransactionPortError::StalePreview)?;
+    let encoded =
+        sha256_hex_suffix(digest.as_str()).ok_or(GitIndexTransactionPortError::StalePreview)?;
     GitIndexTransactionId::new(format!("git-index-transaction.v1.{encoded}"))
         .map_err(|_| GitIndexTransactionPortError::StalePreview)
 }

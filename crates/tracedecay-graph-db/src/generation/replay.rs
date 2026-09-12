@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::sha256_hex_suffix;
 use tracedecay_store::runtime::{
     GraphPublicationInputDigestV1, GraphPublicationReplayV1, GraphVerifiedHeadV1, StoreShardIdV1,
 };
@@ -357,7 +358,7 @@ impl GraphProjectorRevision {
 }
 
 fn validate_sha256(value: &str, subject: &str) -> Result<(), GraphDbError> {
-    let Some(digest) = value.strip_prefix("sha256:") else {
+    let Some(digest) = sha256_hex_suffix(value) else {
         return Err(GraphDbError::invalid(format!("{subject} must use sha256")));
     };
     if digest.len() != 64

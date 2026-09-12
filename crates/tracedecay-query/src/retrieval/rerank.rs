@@ -14,12 +14,7 @@ use tracedecay_domain::{
     SanitizedStageFailure,
 };
 
-/// Request state sampled before authorization and local execution.
-pub trait RerankExecutionControlV1 {
-    fn elapsed_micros(&self) -> u64;
-
-    fn is_cancelled(&self) -> bool;
-}
+use super::ports::RetrievalExecutionControl;
 
 /// A strict permit for producing one ephemeral authorized view.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,7 +140,7 @@ where
         request: &RetrievalRequest,
         policy: &RerankPolicy,
         pre_rerank: &[RankedCandidate],
-        control: &dyn RerankExecutionControlV1,
+        control: &dyn RetrievalExecutionControl,
     ) -> BoundedRerankOutcomeV1 {
         let original = pre_rerank.to_vec();
         let mut usage = RerankUsageV1 {
@@ -401,7 +396,7 @@ fn executor_fallback(
     original: Vec<RankedCandidate>,
     failure: LocalRerankFailureV1,
     mut usage: RerankUsageV1,
-    control: &dyn RerankExecutionControlV1,
+    control: &dyn RetrievalExecutionControl,
 ) -> BoundedRerankOutcomeV1 {
     usage.elapsed_micros = control.elapsed_micros();
     match failure {
@@ -422,7 +417,7 @@ fn executor_fallback(
     }
 }
 
-fn deadline_exhausted(policy: &RerankPolicy, control: &dyn RerankExecutionControlV1) -> bool {
+fn deadline_exhausted(policy: &RerankPolicy, control: &dyn RetrievalExecutionControl) -> bool {
     policy
         .deadline_micros
         .is_some_and(|deadline| control.elapsed_micros() >= deadline)
@@ -430,7 +425,7 @@ fn deadline_exhausted(policy: &RerankPolicy, control: &dyn RerankExecutionContro
 
 fn remaining_deadline(
     policy: &RerankPolicy,
-    control: &dyn RerankExecutionControlV1,
+    control: &dyn RetrievalExecutionControl,
 ) -> Option<u64> {
     policy
         .deadline_micros

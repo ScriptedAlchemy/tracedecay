@@ -379,7 +379,7 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
-            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+            let _ = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 ts.db.clone(),
                 project_id,
                 tracedecay_domain::UtcMicros(
@@ -612,7 +612,7 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
-            let _ = tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+            let _ = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 ts.db.clone(),
                 project_id,
                 tracedecay_domain::UtcMicros(
@@ -827,7 +827,7 @@ fn configuration_runtime_unavailable() -> TraceDecayError {
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
-    use tracedecay_agent_hosts::agents::context_scout_ports::{
+    use tracedecay_agent_hosts::agents::context_scout::ports::{
         AdmittedContextScoutHookV1, ContextScoutAddressBindOutcomeV1, ContextScoutAuthorityPinV1,
         ContextScoutConfigurationPinV1, ContextScoutLifecycleAddressV1,
         ProjectContextScoutAddressRegistryV1,
@@ -852,9 +852,9 @@ mod tests {
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     async fn mount_verified_reopen_claim(
-        owner: &tracedecay_agent_hosts::agents::context_scout_owner::ProjectContextScoutOwnerV1,
+        owner: &tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1,
     ) -> (
-        tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
+        tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
         tracedecay_contracts::context_scout::ContextScoutAddressV1,
     ) {
         fn id<T: TryFrom<String>>(value: &str) -> T
@@ -1010,7 +1010,7 @@ mod tests {
                     true,
                 )
                 .await,
-            tracedecay_agent_hosts::agents::context_scout_owner::ContextScoutClaimAdmissionV1::Mounted,
+            tracedecay_agent_hosts::agents::context_scout::owner::ContextScoutClaimAdmissionV1::Mounted,
             "one claim authority must be admissible before reopen"
         );
         (lifecycle, address)
@@ -1036,7 +1036,7 @@ mod tests {
             .context_scout_owner()
             .expect("Context Scout owner starts with the project");
         let registered =
-            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+            tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
                 project_id,
             );
         assert!(
@@ -1065,7 +1065,7 @@ mod tests {
             "mounted claim authority must remain resolvable after branch reopen"
         );
         let registered =
-            tracedecay_agent_hosts::agents::context_scout_owner::lookup_registered_context_scout_owners(
+            tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
                 project_id,
             );
         assert_eq!(

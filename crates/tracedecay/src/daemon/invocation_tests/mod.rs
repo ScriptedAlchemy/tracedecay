@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_agent_hosts::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
+use tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1;
 use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::work::{

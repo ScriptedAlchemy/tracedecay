@@ -51,13 +51,13 @@ use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
 };
-use tracedecay_query::retrieval::graph::{
-    GraphExecutionControl, GraphLaneRequest, GraphLaneRetriever,
-};
+use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
 use tracedecay_query::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest,
 };
-use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
+use tracedecay_query::retrieval::ports::{
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl,
+};
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
@@ -146,7 +146,7 @@ fn empty_callable_page() -> PageState {
 }
 
 mod graph_control;
-use graph_control::{CallableGraphExecutionControl, current_utc_micros, graph_budget_for_request};
+use graph_control::{CallableRetrievalExecutionControl, current_utc_micros, graph_budget_for_request};
 
 /// The reserved [`CodeGenerationId`] a caller supplies to request ordinary
 /// (unpinned) search: it pins no specific immutable generation, so the serving
@@ -1301,7 +1301,7 @@ enum DispatchExpansionStop {
 }
 
 fn check_dispatch_control(
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
     budget: RetrievalBudget,
 ) -> Result<(), DispatchExpansionStop> {
     if control.is_cancelled() {
@@ -1327,7 +1327,7 @@ fn visit_trait_dispatch_targets(
     callee: &SymbolOccurrenceId,
     scope: &tracedecay_contracts::CodeQueryScope,
     budget: RetrievalBudget,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
     examined: &mut u64,
     mut visit: impl FnMut(&SymbolOccurrenceId) -> bool,
 ) -> Result<bool, DispatchExpansionStop> {
@@ -1401,7 +1401,7 @@ fn visit_trait_dispatch_targets(
 fn callee_dispatch_usage(
     page: &NativeLanePageV1<SymbolRelationRecord>,
     examined: u64,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> RetrievalBudgetUsage {
     RetrievalBudgetUsage {
         candidates_examined: page.coverage.examined.saturating_add(examined),
@@ -1417,7 +1417,7 @@ fn augment_callee_dispatch_page(
     page: NativeLanePageV1<NativeGraphRecordV1>,
     scope: &tracedecay_contracts::CodeQueryScope,
     budget: RetrievalBudget,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> Result<NativeLanePageV1<SymbolRelationRecord>, Box<NativeLaneOutcomeV1<SymbolRelationRecord>>>
 {
     let candidate_cap = usize::try_from(budget.max_candidates_per_lane).unwrap_or(usize::MAX);
@@ -1510,7 +1510,7 @@ fn augment_callee_dispatch(
     outcome: NativeLaneOutcomeV1<NativeGraphRecordV1>,
     scope: &tracedecay_contracts::CodeQueryScope,
     budget: RetrievalBudget,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
 ) -> NativeLaneOutcomeV1<SymbolRelationRecord> {
     match outcome {
         NativeLaneOutcomeV1::Complete(page) => {
@@ -2436,7 +2436,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 .split_whitespace()
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            let lexical_control = CallableGraphExecutionControl::for_request(context.request);
+            let lexical_control = CallableRetrievalExecutionControl::for_request(context.request);
             let lane_request = LexicalLaneRequest {
                 query_view: &request.query,
                 generation: served_generation.clone(),
@@ -2581,7 +2581,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let graph_control = CallableGraphExecutionControl::for_request(context.request);
+            let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
             let outcome = graph_serving
                 .graph
                 .retrieve_graph(&lane_request, Arc::clone(&graph_control));

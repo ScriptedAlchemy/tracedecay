@@ -478,8 +478,8 @@ impl DaemonInvocationOperation {
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::FeedbackObserve => "feedback_observe",
-            Self::PrimitiveImpact => "feedback_impact",
-            Self::PrimitiveAffectedTests => "affected_tests",
+            Self::PrimitiveImpact => "primitive_impact",
+            Self::PrimitiveAffectedTests => "primitive_affected_tests",
             Self::PrimitiveTestResults => "test_results",
             Self::PrimitiveRead => "primitive_read",
             Self::CodeExactOccurrence => "code_exact_occurrence",
@@ -2589,6 +2589,30 @@ pub fn parse_daemon_invocation_request(
         };
         DaemonInvocationResponse::problem(request_id, problem)
     }))
+}
+
+#[cfg(test)]
+mod operation_label_tests {
+    use super::DaemonInvocationOperation;
+
+    /// Handle-bearing feedback operations and their direct-request primitive
+    /// twins are distinct dispatch paths; the client labels every invocation
+    /// with `as_str`, so a shared label would merge them in observability.
+    #[test]
+    fn primitive_operations_carry_labels_distinct_from_their_feedback_twins() {
+        for (feedback, primitive) in [
+            (
+                DaemonInvocationOperation::FeedbackImpact,
+                DaemonInvocationOperation::PrimitiveImpact,
+            ),
+            (
+                DaemonInvocationOperation::AffectedTests,
+                DaemonInvocationOperation::PrimitiveAffectedTests,
+            ),
+        ] {
+            assert_ne!(feedback.as_str(), primitive.as_str(), "{feedback:?} vs {primitive:?}");
+        }
+    }
 }
 
 #[cfg(test)]

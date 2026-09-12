@@ -18,10 +18,10 @@ use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileMutationCapabilityV1,
     RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
-use tracedecay_configuration::{
+use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, DirectConfigurationMutation,
 };
-use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_global_db::configuration::store::ConfigurationDirectCommitOutcomeV1;
 
 pub use tracedecay_contracts::SemanticActivationCoordinationErrorV1;
@@ -152,7 +152,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
 
     pub async fn preview_central_mutation(
         &self,
-        authority: &tracedecay_configuration::ConfigurationMutationAuthority,
+        authority: &ConfigurationMutationAuthority,
         mutation: &DirectConfigurationMutation,
         expected_revision: &tracedecay_domain::ConfigurationRevisionId,
     ) -> Result<

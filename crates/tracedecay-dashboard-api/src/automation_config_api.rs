@@ -27,7 +27,7 @@ use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{
     AutomationConfig, AutomationConfigPatch, effective_config, from_configuration_snapshot,
 };
-use tracedecay_configuration::DirectConfigurationMutation;
+use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
 use crate::application_surface::configuration_apply_error;
 

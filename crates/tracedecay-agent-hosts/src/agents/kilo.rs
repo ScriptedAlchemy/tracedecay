@@ -45,12 +45,12 @@ impl AgentIntegration for KiloIntegration {
 
     fn host_component_registration(
         &self,
-        component: super::host_bundle_v2::HostBundleComponentV1,
+        component: super::host_bundle::HostBundleComponentV1,
         ctx: &HealthcheckContext,
-    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+    ) -> super::host_bundle::HostBundleRegistrationStateV1 {
+        use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
-        if component != super::host_bundle_v2::HostBundleComponentV1::ContextMcp {
+        if component != super::host_bundle::HostBundleComponentV1::ContextMcp {
             return State::Missing;
         }
 
@@ -84,10 +84,10 @@ impl AgentIntegration for KiloIntegration {
 
     fn host_component_registration_paths(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         home: &Path,
     ) -> Vec<PathBuf> {
-        if components == [super::host_bundle_v2::HostBundleComponentV1::ContextMcp] {
+        if components == [super::host_bundle::HostBundleComponentV1::ContextMcp] {
             let path = kilo_config_path(home);
             vec![path.clone(), config_backup_path(&path)]
         } else {
@@ -98,10 +98,10 @@ impl AgentIntegration for KiloIntegration {
     #[hotpath::measure(label = "kilo_mcp_install")]
     fn activate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             install_mcp_server_entry(
                 &kilo_config_path(&ctx.home),
                 "mcp",
@@ -119,10 +119,10 @@ impl AgentIntegration for KiloIntegration {
 
     fn deactivate_deployed_host_component_registration(
         &self,
-        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        components: &[super::host_bundle::HostBundleComponentV1],
         ctx: &InstallContext,
     ) -> Result<()> {
-        if components.contains(&super::host_bundle_v2::HostBundleComponentV1::ContextMcp) {
+        if components.contains(&super::host_bundle::HostBundleComponentV1::ContextMcp) {
             uninstall_mcp_server_entry(
                 &kilo_config_path(&ctx.home),
                 "mcp",

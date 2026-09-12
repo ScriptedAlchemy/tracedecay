@@ -15,7 +15,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use crate::exact_sql::{
     ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
-    ExactSqlValue,
+    ExactSqlValue, optional_text_at, text_column,
 };
 use crate::repository::RetainedExactSqlCapability;
 
@@ -117,21 +117,6 @@ fn execute_tx(
     transaction.execute(statement(sql, params)?).map(|_| ())
 }
 
-fn text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
-    match values.get(index)? {
-        ExactSqlValue::Text(value) => Some(value),
-        _ => None,
-    }
-}
-
-fn optional_text(values: &[ExactSqlValue], index: usize) -> Result<Option<&str>, ()> {
-    match values.get(index) {
-        Some(ExactSqlValue::Text(value)) => Ok(Some(value)),
-        Some(ExactSqlValue::Null) => Ok(None),
-        _ => Err(()),
-    }
-}
-
 fn encode<T: serde::Serialize>(value: &T) -> Result<String, HandoffOpenAuthorityError> {
     serde_json::to_string(value).map_err(|_| codec_unavailable())
 }
@@ -158,7 +143,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         )
         .map_err(unavailable)?;
         if let Some(row) = existing.rows.first() {
-            let persisted_payload = text(&row.values, 0).ok_or_else(codec_unavailable)?;
+            let persisted_payload = text_column(&row.values, 0).ok_or_else(codec_unavailable)?;
             let persisted: HandoffOpenGrantV1 = decode(persisted_payload)?;
             let _ = transaction.rollback();
             if persisted.same_issue_identity(grant) {
@@ -215,13 +200,13 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
 
         let mut listings = Vec::new();
         for row in &rows.rows {
-            let payload = text(&row.values, 0).ok_or_else(codec_unavailable)?;
+            let payload = text_column(&row.values, 0).ok_or_else(codec_unavailable)?;
             let grant: HandoffOpenGrantV1 = decode(payload)?;
             if !filter.matches(grant.context()) {
                 continue;
             }
             let consumed_at =
-                match optional_text(&row.values, 1).map_err(|_| codec_unavailable())? {
+                match optional_text_at(&row.values, 1).map_err(|_| codec_unavailable())? {
                     Some(payload) => {
                         let consumption: HandoffOpenConsumptionV1 = decode(payload)?;
                         Some(*consumption.consumed_at())
@@ -251,7 +236,7 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
         let Some(row) = rows.rows.first() else {
             return Ok(None);
         };
-        let payload = text(&row.values, 0).ok_or_else(codec_unavailable)?;
+        let payload = text_column(&row.values, 0).ok_or_else(codec_unavailable)?;
         let grant: HandoffOpenGrantV1 = decode(payload)?;
         if !expected.matches(grant.context()) || observed_at >= *grant.expires_at() {
             return Ok(None);
@@ -281,17 +266,19 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
             let _ = transaction.rollback();
             return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
         };
-        let grant_payload = text(&row.values, 0).ok_or_else(codec_unavailable)?;
+        let grant_payload = text_column(&row.values, 0).ok_or_else(codec_unavailable)?;
         let grant: HandoffOpenGrantV1 = decode(grant_payload)?;
         if !expected.matches(grant.context()) || consumed_at >= *grant.expires_at() {
             let _ = transaction.rollback();
             return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
         }
 
-        let consumed_request_id = optional_text(&row.values, 1).map_err(|_| codec_unavailable())?;
+        let consumed_request_id =
+            optional_text_at(&row.values, 1).map_err(|_| codec_unavailable())?;
         let consumed_input_digest =
-            optional_text(&row.values, 2).map_err(|_| codec_unavailable())?;
-        let consumption_payload = optional_text(&row.values, 3).map_err(|_| codec_unavailable())?;
+            optional_text_at(&row.values, 2).map_err(|_| codec_unavailable())?;
+        let consumption_payload =
+            optional_text_at(&row.values, 3).map_err(|_| codec_unavailable())?;
         match (
             consumed_request_id,
             consumed_input_digest,

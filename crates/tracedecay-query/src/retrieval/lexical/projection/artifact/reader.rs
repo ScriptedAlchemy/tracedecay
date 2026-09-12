@@ -41,7 +41,7 @@ use super::{
     sqlite_corrupt, sqlite_error,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
-use crate::retrieval::graph::GraphExecutionControl;
+use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
     RetrievalPortError, contract_error, lane_candidate_cap,
@@ -945,7 +945,7 @@ fn visit_lexical_rows(
     terms: &BTreeSet<String>,
     metrics: &ArtifactQueryMetricsV1,
     layout: LexicalArtifactLayoutV1,
-    control: &dyn GraphExecutionControl,
+    control: &dyn RetrievalExecutionControl,
     mut visitor: impl FnMut(
         u32,
         String,
@@ -2961,7 +2961,7 @@ mod tests {
         ngram_document_query, query_ngrams, retain_bounded, term_frequency, union_document_queries,
         visit_document_ids, visit_lexical_rows,
     };
-    use crate::retrieval::graph::GraphExecutionControl;
+    use crate::retrieval::ports::RetrievalExecutionControl;
     use crate::retrieval::ports::RetrievalPortError;
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
@@ -2977,7 +2977,7 @@ mod tests {
         }
     }
 
-    impl GraphExecutionControl for AlwaysActiveControl {
+    impl RetrievalExecutionControl for AlwaysActiveControl {
         fn is_cancelled(&self) -> bool {
             false
         }
@@ -3007,7 +3007,7 @@ mod tests {
         }
     }
 
-    impl GraphExecutionControl for CancelAtObservation {
+    impl RetrievalExecutionControl for CancelAtObservation {
         fn is_cancelled(&self) -> bool {
             self.observations.fetch_add(1, Ordering::SeqCst) + 1 >= self.cancel_at
         }

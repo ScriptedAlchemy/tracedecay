@@ -19,14 +19,14 @@ use code_index_task_support::{
 
 const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;
 
-struct McpSemanticExecutionControlV1<A> {
+struct McpRetrievalExecutionControlV1<A> {
     started: std::time::Instant,
     admission_provider: A,
     deadline: Option<tracedecay_contracts::Deadline>,
     cancellation: Option<tracedecay_contracts::CancellationSignal>,
 }
 
-impl<A> McpSemanticExecutionControlV1<A> {
+impl<A> McpRetrievalExecutionControlV1<A> {
     fn request_termination(&self) -> Option<code_search::CodeIndexSearchUnavailableReasonV1> {
         mcp_search_request_termination(
             self.deadline.as_ref(),
@@ -86,7 +86,7 @@ pub fn mcp_search_request_termination(
 /// the request itself may have been cancelled or timed out, or the MCP read
 /// route may have been revoked underneath it. `Some` means stop and return.
 fn search_terminated<A: CodeIndexMcpReadAdmissionV1>(
-    control: &McpSemanticExecutionControlV1<A>,
+    control: &McpRetrievalExecutionControlV1<A>,
     admission_provider: &A,
     code_generation: Option<&str>,
 ) -> Option<code_search::CodeIndexSearchOutcomeV1> {
@@ -514,8 +514,8 @@ fn code_index_search_display_bytes(
     .ok_or(tracedecay_query::retrieval::hydrate::HydrationUnavailableV1::Internal)
 }
 
-impl<A: CodeIndexMcpReadAdmissionV1> tracedecay_query::retrieval::semantic::SemanticExecutionControl
-    for McpSemanticExecutionControlV1<A>
+impl<A: CodeIndexMcpReadAdmissionV1> tracedecay_query::retrieval::ports::RetrievalExecutionControl
+    for McpRetrievalExecutionControlV1<A>
 {
     fn is_cancelled(&self) -> bool {
         !self.admission_provider.route_is_registered() || self.request_termination().is_some()
@@ -523,19 +523,6 @@ impl<A: CodeIndexMcpReadAdmissionV1> tracedecay_query::retrieval::semantic::Sema
 
     fn elapsed_micros(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
-    }
-}
-
-impl<A: CodeIndexMcpReadAdmissionV1>
-    tracedecay_query::retrieval::hydrate::HydrationExecutionControlV1
-    for McpSemanticExecutionControlV1<A>
-{
-    fn elapsed_micros(&self) -> u64 {
-        tracedecay_query::retrieval::semantic::SemanticExecutionControl::elapsed_micros(self)
-    }
-
-    fn is_cancelled(&self) -> bool {
-        !self.admission_provider.route_is_registered() || self.request_termination().is_some()
     }
 }
 
@@ -680,7 +667,7 @@ where
                         tracedecay_query::retrieval::semantic::SemanticQueryModeV1::StrictSemantic
                     }
                 };
-                let control = Arc::new(McpSemanticExecutionControlV1 {
+                let control = Arc::new(McpRetrievalExecutionControlV1 {
                     started: std::time::Instant::now(),
                     admission_provider: admission_provider.clone(),
                     deadline,

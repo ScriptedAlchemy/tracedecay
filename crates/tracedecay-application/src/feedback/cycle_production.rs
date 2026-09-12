@@ -64,13 +64,13 @@ use crate::diagnostics_publication::{
     compiler_diagnostic_configuration_revision_v1,
 };
 use crate::source_authorization::ProjectSourceAccessSnapshot;
-use tracedecay_configuration::ConfigurationCurrentStateV1;
 use tracedecay_configuration::config::analyzer::{
     configured_language_selection, resolved_analyzer_settings,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1;
 use tracedecay_lsp::analyzer::broker::MountedLspProvider;
 
 const POLICY_REVISION_V1: u64 = 1;

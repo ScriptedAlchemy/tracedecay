@@ -308,7 +308,7 @@ fn valid_mutation_settlement(settlement: &ContextScoutMutationSettlementV1) -> b
 
 fn mutation_receipt_key(effect_identity: &ManifestDigest) -> Option<String> {
     effect_identity.validate().ok()?;
-    let suffix = effect_identity.as_str().strip_prefix("sha256:")?;
+    let suffix = effect_identity.hex_suffix()?;
     Some(format!("{MUTATION_RECEIPT_KEY_PREFIX_V1}{suffix}"))
 }
 
