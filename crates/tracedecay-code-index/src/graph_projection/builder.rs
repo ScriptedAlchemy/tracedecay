@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+
+use rayon::prelude::*;
 
 use crate::chunks::{CodeIndexImportEvidenceV1, published_symbol_spans};
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
@@ -84,6 +87,50 @@ pub(super) struct ProductionCodeGraphInputs<'a> {
     pub(super) files: &'a [SanitizedCodeFileV1],
     pub(super) symbols: &'a GenerationSymbolIndexV1,
     pub(super) imports: &'a [CodeIndexImportEvidenceV1],
+}
+
+fn collect_graph_rows_ordered<T, R>(
+    items: &[T],
+    operation: impl Fn(&T) -> Result<R, CodeGraphProjectionError> + Send + Sync,
+) -> Result<Vec<R>, CodeGraphProjectionError>
+where
+    T: Sync,
+    R: Send,
+{
+    crate::parallelism::install(|| {
+        const ROWS_PER_WORK_UNIT: usize = 512;
+        let run = |(chunk_index, chunk): (usize, &[T])| {
+            crate::parallelism::with_background_cpu_permit(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    chunk.iter().map(&operation).collect::<Result<Vec<_>, _>>()
+                }))
+                .unwrap_or_else(|payload| {
+                    Err(CodeGraphProjectionError::Unavailable(
+                        crate::parallelism::CodeIndexParallelismErrorV1::from_panic_payload(
+                            chunk_index.saturating_mul(ROWS_PER_WORK_UNIT),
+                            &*payload,
+                        )
+                        .to_string(),
+                    ))
+                })
+            })
+        };
+        if items.len() < 2 || crate::parallelism::indexing_workers() < 2 {
+            items.iter().map(operation).collect()
+        } else {
+            let chunks = items
+                .par_chunks(ROWS_PER_WORK_UNIT)
+                .enumerate()
+                .map(&run)
+                .collect::<Vec<_>>();
+            let mut collected = Vec::with_capacity(items.len());
+            for chunk in chunks {
+                collected.extend(chunk?);
+            }
+            Ok(collected)
+        }
+    })
+    .map_err(|error| CodeGraphProjectionError::Unavailable(error.to_string()))?
 }
 
 pub(super) fn build_projection(
@@ -202,14 +249,16 @@ pub(super) fn build_projection(
             retained_edges.sort_by(compare_edges);
             retained_edges.dedup();
 
-            let mut occurrences: BTreeSet<_> = bindings
+            let mut occurrences = bindings
                 .keys()
                 .chain(symbol_metadata.keys())
                 .cloned()
-                .collect();
+                .collect::<Vec<_>>();
             for edge in &retained_edges {
-                occurrences.insert(edge.to_occurrence.clone());
+                occurrences.push(edge.to_occurrence.clone());
             }
+            occurrences.sort();
+            occurrences.dedup();
             Ok::<_, CodeGraphProjectionError>((
                 files,
                 symbol_metadata,
@@ -270,40 +319,58 @@ pub(super) fn build_projection(
         }
 
         let mut symbol_ids = BTreeMap::<SymbolOccurrenceId, GraphEntityId>::new();
-        for occurrence in &occurrences {
-            symbol_ids.insert(occurrence.clone(), symbol_entity_id(occurrence)?);
+        let row_window = crate::parallelism::indexing_workers()
+            .max(1)
+            .saturating_mul(512);
+        hotpath::gauge!("code_index.seal.collect.emit.effective_workers")
+            .set(crate::parallelism::indexing_workers());
+        for window in occurrences.chunks(row_window) {
+            check()?;
+            let identities = collect_graph_rows_ordered(window, symbol_entity_id)?;
+            symbol_ids.extend(window.iter().cloned().zip(identities));
         }
-        for occurrence in occurrences {
-            let identity = require_symbol_id(&symbol_ids, &occurrence)?.clone();
-            let record = SymbolRecordV1 {
-                binding: bindings.get(&occurrence).cloned(),
-                metadata: symbol_metadata
-                    .get(&occurrence)
-                    .map(|record| LineageSymbolRecordV1::clone(record)),
-                occurrence,
-            };
-            entities.push(symbol_entity(identity, record)?);
+        for window in occurrences.chunks(row_window) {
+            check()?;
+            entities.extend(collect_graph_rows_ordered(window, |occurrence| {
+                let identity = require_symbol_id(&symbol_ids, occurrence)?.clone();
+                let record = SymbolRecordV1 {
+                    binding: bindings.get(occurrence).cloned(),
+                    metadata: symbol_metadata
+                        .get(occurrence)
+                        .map(|record| LineageSymbolRecordV1::clone(record)),
+                    occurrence: occurrence.clone(),
+                };
+                symbol_entity(identity, record)
+            })?);
         }
         if production.is_some() {
-            for (occurrence, binding) in &bindings {
-                let file_id = file_ids.get(&binding.file).cloned().ok_or_else(|| {
-                    CodeGraphProjectionError::Contract(
-                        "code graph binding refers to a file outside its immutable snapshot"
-                            .to_owned(),
-                    )
-                })?;
-                let symbol_id = require_symbol_id(&symbol_ids, occurrence)?;
-                relations.push(file_symbol_relation(
-                    projection, binding, file_id, occurrence, symbol_id,
+            let binding_rows = bindings.iter().collect::<Vec<_>>();
+            for window in binding_rows.chunks(row_window) {
+                check()?;
+                relations.extend(collect_graph_rows_ordered(
+                    window,
+                    |&(occurrence, binding)| {
+                        let file_id = file_ids.get(&binding.file).cloned().ok_or_else(|| {
+                            CodeGraphProjectionError::Contract(
+                                "code graph binding refers to a file outside its immutable snapshot"
+                                    .to_owned(),
+                            )
+                        })?;
+                        let symbol_id = require_symbol_id(&symbol_ids, occurrence)?;
+                        file_symbol_relation(projection, binding, file_id, occurrence, symbol_id)
+                    },
                 )?);
             }
         }
-        for edge in &retained_edges {
+        for window in retained_edges.chunks(row_window) {
             check()?;
-            let (entity, source, target) = edge_artifacts(projection, edge, &symbol_ids)?;
-            entities.push(entity);
-            relations.push(source);
-            relations.push(target);
+            for (entity, source, target) in collect_graph_rows_ordered(window, |edge| {
+                edge_artifacts(projection, edge, &symbol_ids)
+            })? {
+                entities.push(entity);
+                relations.push(source);
+                relations.push(target);
+            }
         }
         let projection_node_count = entities.len().checked_add(1).ok_or_else(|| {
             CodeGraphProjectionError::Contract(
