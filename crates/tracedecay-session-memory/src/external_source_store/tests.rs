@@ -507,7 +507,7 @@ async fn scoped_reset_readmits_the_same_host_observation_without_conflict() {
         );
         let leftover: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM external_source_commit_receipts_v1",
+                "SELECT COUNT(*) FROM external_source_commit_receipts_v2",
                 [],
                 |row| row.get(0),
             )

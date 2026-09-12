@@ -3,10 +3,11 @@
 use crate::db::engine::{Executor, QueryExecutor};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-/// The three tables that once carried their own copy of `mutation_json`,
-/// paired with the statement that moves each row into its digest-referencing
-/// successor. `json_extract` reads the digest the encoding already carried,
-/// so no row needs the history table to be migrated.
+/// Retired tables that carried their own copy of payloads the history tables
+/// already hold, paired with the statement that moves each row into its
+/// digest-referencing successor. `json_extract` reads every digest out of the
+/// retired row's own encoding, so no row needs another table to be migrated
+/// first.
 const RETIRED_MUTATION_COPY_TABLES: &[(&str, &str)] = &[
     (
         "external_source_objects_v1",
@@ -39,6 +40,89 @@ const RETIRED_MUTATION_COPY_TABLES: &[(&str, &str)] = &[
          FROM external_source_projection_effects_v1
          WHERE json_extract(mutation_json, '$.mutation_digest') IS NOT NULL;
          DROP TABLE external_source_projection_effects_v1;",
+    ),
+    // Receipts embedded their mutations and aggregate frontiers. The slim
+    // shape keeps mutation digests in place of mutations, frontier digests in
+    // place of frontiers (the payloads move to `external_source_frontiers_v1`),
+    // and, for projections, an empty effects list that hydrates from the
+    // effects table. Every replacement value is read out of the retired row's
+    // own encoding.
+    (
+        "external_source_commit_receipts_v1",
+        "INSERT OR IGNORE INTO external_source_frontiers_v1 (
+            binding_id, frontier_digest, frontier_json
+         )
+         SELECT binding_id,
+                json_extract(receipt_json, '$.source_frontier.digest'),
+                json_extract(receipt_json, '$.source_frontier')
+         FROM external_source_commit_receipts_v1
+         WHERE json_extract(receipt_json, '$.source_frontier.digest') IS NOT NULL;
+         INSERT OR IGNORE INTO external_source_frontiers_v1 (
+            binding_id, frontier_digest, frontier_json
+         )
+         SELECT binding_id,
+                json_extract(receipt_json, '$.prior_source_frontier.digest'),
+                json_extract(receipt_json, '$.prior_source_frontier')
+         FROM external_source_commit_receipts_v1
+         WHERE json_extract(receipt_json, '$.prior_source_frontier.digest') IS NOT NULL;
+         INSERT OR IGNORE INTO external_source_commit_receipts_v2 (
+            binding_id, idempotency_key, request_digest, definition_revision,
+            binding_revision, predecessor_frontier_digest, successor_frontier_digest,
+            receipt_digest, receipt_json
+         )
+         SELECT binding_id, idempotency_key, request_digest, definition_revision,
+                binding_revision, predecessor_frontier_digest, successor_frontier_digest,
+                receipt_digest,
+                json_set(
+                    receipt_json,
+                    '$.mutations', json((
+                        SELECT json_group_array(json_extract(mutation.value, '$.mutation_digest'))
+                        FROM json_each(receipt_json, '$.mutations') AS mutation
+                    )),
+                    '$.source_frontier', json_extract(receipt_json, '$.source_frontier.digest'),
+                    '$.prior_source_frontier',
+                    json_extract(receipt_json, '$.prior_source_frontier.digest')
+                )
+         FROM external_source_commit_receipts_v1;
+         DROP TABLE external_source_commit_receipts_v1;",
+    ),
+    (
+        "external_source_projection_publications_v1",
+        "INSERT OR IGNORE INTO external_source_frontiers_v1 (
+            binding_id, frontier_digest, frontier_json
+         )
+         SELECT binding_id,
+                json_extract(receipt_json, '$.source_frontier.digest'),
+                json_extract(receipt_json, '$.source_frontier')
+         FROM external_source_projection_publications_v1
+         WHERE json_extract(receipt_json, '$.source_frontier.digest') IS NOT NULL;
+         INSERT OR IGNORE INTO external_source_frontiers_v1 (
+            binding_id, frontier_digest, frontier_json
+         )
+         SELECT binding_id,
+                json_extract(receipt_json, '$.expected_projection_frontier.digest'),
+                json_extract(receipt_json, '$.expected_projection_frontier')
+         FROM external_source_projection_publications_v1
+         WHERE json_extract(receipt_json, '$.expected_projection_frontier.digest') IS NOT NULL;
+         INSERT OR IGNORE INTO external_source_projection_publications_v2 (
+            binding_id, projection_digest, source_receipt_digest,
+            predecessor_frontier_digest, successor_frontier_digest, receipt_json
+         )
+         SELECT binding_id, projection_digest, source_receipt_digest,
+                predecessor_frontier_digest, successor_frontier_digest,
+                json_set(
+                    receipt_json,
+                    '$.mutations', json((
+                        SELECT json_group_array(json_extract(mutation.value, '$.mutation_digest'))
+                        FROM json_each(receipt_json, '$.mutations') AS mutation
+                    )),
+                    '$.effects', json('[]'),
+                    '$.source_frontier', json_extract(receipt_json, '$.source_frontier.digest'),
+                    '$.expected_projection_frontier',
+                    json_extract(receipt_json, '$.expected_projection_frontier.digest')
+                )
+         FROM external_source_projection_publications_v1;
+         DROP TABLE external_source_projection_publications_v1;",
     ),
 ];
 
@@ -146,7 +230,20 @@ mod tests {
                     ('b', 'sha256:obj', '{\"x\":1,\"mutation_digest\":\"sha256:mut1\"}');
                  INSERT INTO external_source_projection_effects_v1 VALUES
                     ('b', 'sha256:proj', 0, 'sha256:obj', '{\"effect\":true}',
-                     '{\"mutation_digest\":\"sha256:mut1\"}');",
+                     '{\"mutation_digest\":\"sha256:mut1\"}');
+                 CREATE TABLE external_source_commit_receipts_v1 (
+                    binding_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+                    request_digest TEXT NOT NULL, definition_revision INTEGER NOT NULL,
+                    binding_revision INTEGER NOT NULL, predecessor_frontier_digest TEXT NOT NULL,
+                    successor_frontier_digest TEXT NOT NULL, receipt_digest TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    PRIMARY KEY (binding_id, idempotency_key));
+                 INSERT INTO external_source_commit_receipts_v1 VALUES
+                    ('b', 'sha256:key', 'sha256:req', 1, 1, 'root', 'sha256:front1', 'sha256:rcpt',
+                     '{\"idempotency_key\":\"sha256:key\",\"prior_source_frontier\":null,'
+                     || '\"source_frontier\":{\"binding\":{\"id\":\"b\"},\"partitions\":{},\"digest\":\"sha256:front1\"},'
+                     || '\"mutations\":[{\"x\":1,\"mutation_digest\":\"sha256:mut1\"},{\"x\":2,\"mutation_digest\":\"sha256:mut2\"}],'
+                     || '\"receipt_digest\":\"sha256:rcpt\"}');",
             )
             .await
             .unwrap();
@@ -159,10 +256,38 @@ mod tests {
             &writer,
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
                 'external_source_objects_v1', 'external_source_projected_objects_v1',
-                'external_source_projection_effects_v1')",
+                'external_source_projection_effects_v1', 'external_source_commit_receipts_v1')",
         )
         .await;
         assert_eq!(retired, 0, "every retired table is dropped");
+        // The receipt is slim: mutation digests where mutations were, the
+        // frontier digest where the frontier was, and the frontier itself
+        // stored once under its digest.
+        assert_eq!(
+            count(
+                &writer,
+                "SELECT COUNT(*) FROM external_source_commit_receipts_v2
+                 WHERE binding_id = 'b'
+                   AND json_extract(receipt_json, '$.source_frontier') = 'sha256:front1'
+                   AND json_type(receipt_json, '$.prior_source_frontier') = 'null'
+                   AND json_extract(receipt_json, '$.mutations[0]') = 'sha256:mut1'
+                   AND json_extract(receipt_json, '$.mutations[1]') = 'sha256:mut2'
+                   AND json_array_length(receipt_json, '$.mutations') = 2
+                   AND json_extract(receipt_json, '$.receipt_digest') = 'sha256:rcpt'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &writer,
+                "SELECT COUNT(*) FROM external_source_frontiers_v1
+                 WHERE binding_id = 'b' AND frontier_digest = 'sha256:front1'
+                   AND json_extract(frontier_json, '$.binding.id') = 'b'"
+            )
+            .await,
+            1
+        );
         assert_eq!(
             count(
                 &writer,
