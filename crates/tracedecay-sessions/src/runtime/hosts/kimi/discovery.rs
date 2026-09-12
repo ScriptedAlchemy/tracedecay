@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -12,11 +13,12 @@ use super::{MAX_DISCOVERY_FAILURE_EVIDENCE, invalid_frame};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum KimiDiscoveryFailureKind {
-    InvalidProviderPartition,
     DirectoryUnavailable,
     DirectoryEntryUnavailable,
     EntryTypeUnavailable,
-    ContextMetadataUnavailable,
+    SessionMetadataUnavailable,
+    InvalidSessionMetadata,
+    InvalidAgentPartition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,20 +63,17 @@ impl KimiDiscoveryReport {
 }
 
 #[derive(Deserialize)]
-pub(super) struct KimiMetadata {
+pub(super) struct KimiSessionState {
+    pub(super) id: String,
+    pub(super) cwd: PathBuf,
     #[serde(default)]
-    pub(super) work_dirs: Vec<KimiWorkDir>,
+    pub(super) agents: BTreeMap<String, KimiAgentState>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct KimiWorkDir {
-    pub(super) path: PathBuf,
-    #[serde(default = "local_kaos")]
-    pub(super) kaos: String,
-}
-
-fn local_kaos() -> String {
-    "local".to_owned()
+pub(super) struct KimiAgentState {
+    #[serde(rename = "type")]
+    pub(super) kind: String,
 }
 
 pub(super) fn charge_discovered_path(
