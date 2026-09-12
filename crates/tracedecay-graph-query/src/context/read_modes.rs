@@ -60,9 +60,6 @@ impl LineRange {
     }
 }
 
-pub fn render_full(source: &str) -> String {
-    source.to_owned()
-}
 pub fn estimate_tokens(s: &str) -> u32 {
     s.chars().count().div_ceil(4).min(u32::MAX as usize) as u32
 }
