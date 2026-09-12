@@ -533,23 +533,13 @@ fn dispatch_info_tools_inner<'a>(
             "tracedecay_status" => {
                 let project = admitted_project_authorities(cg, &options)?;
                 let snapshots = admitted_status_snapshots(cg, &options).await;
-                let ctx = admitted_tool_context(
-                    &options,
-                    &project,
-                    &snapshots,
-                    options.code_index_freshness_reader.as_ref(),
-                )?;
+                let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
                 portable_info::handle_status(&ctx, args, server_stats, scope_prefix).await
             }
             "tracedecay_active_project" => {
                 let project = admitted_project_authorities(cg, &options)?;
                 let snapshots = AdmittedRequestSnapshotsV1::default();
-                let ctx = admitted_tool_context(
-                    &options,
-                    &project,
-                    &snapshots,
-                    options.code_index_freshness_reader.as_ref(),
-                )?;
+                let ctx = admitted_tool_context_for(&options, &project, &snapshots)?;
                 portable_info::handle_active_project(&ctx, &args, server_stats, scope_prefix).await
             }
             "tracedecay_project_list" => {
@@ -1093,6 +1083,20 @@ fn graph_freshness_reader<'a>(
 ///
 /// The snapshot comes from [`admitted_project_authorities`]; this function
 /// is the binding constructor, not a second admission.
+/// [`admitted_tool_context`] with the registry's own freshness reader.
+fn admitted_tool_context_for<'a>(
+    options: &'a ToolCallRegistryOptions<'a>,
+    project: &'a McpAdmittedProjectV1,
+    snapshots: &'a AdmittedRequestSnapshotsV1,
+) -> Result<McpToolContext<'a>> {
+    admitted_tool_context(
+        options,
+        project,
+        snapshots,
+        options.code_index_freshness_reader.as_ref(),
+    )
+}
+
 fn admitted_tool_context<'a>(
     options: &'a ToolCallRegistryOptions<'a>,
     project: &'a McpAdmittedProjectV1,
