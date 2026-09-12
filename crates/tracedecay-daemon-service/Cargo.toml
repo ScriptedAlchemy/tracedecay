@@ -35,7 +35,6 @@ futures-util = "0.3.33"
 getrandom = "0.2"
 hex = "0.4"
 hotpath.workspace = true
-libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
@@ -74,6 +73,9 @@ tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 url = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
