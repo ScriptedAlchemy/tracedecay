@@ -118,7 +118,7 @@ pub struct RuntimeRegistryCheckpointBlockerSnapshot {
 
 impl RuntimeRegistrySnapshot {
     pub fn from_projection(
-        projection: tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryProjection,
+        projection: crate::shard_runtime::telemetry::RuntimeTelemetryProjection,
     ) -> Self {
         let aggregate = &projection.aggregate;
         let shards = projection
@@ -181,9 +181,7 @@ impl RuntimeRegistrySnapshot {
 }
 
 impl RuntimeRegistryShardSnapshot {
-    fn from_telemetry(
-        telemetry: &tracedecay_runtime_core::shard_runtime::telemetry::ShardRuntimeTelemetry,
-    ) -> Self {
+    fn from_telemetry(telemetry: &crate::shard_runtime::telemetry::ShardRuntimeTelemetry) -> Self {
         Self {
             binding: telemetry.binding.clone(),
             state: runtime_state_label(telemetry.state).to_owned(),
@@ -232,9 +230,9 @@ impl RuntimeRegistryShardSnapshot {
 }
 
 fn checkpoint_snapshot(
-    writer: &tracedecay_runtime_core::shard_runtime::registry::PhysicalWriterRuntimeSnapshot,
+    writer: &crate::shard_runtime::registry::PhysicalWriterRuntimeSnapshot,
 ) -> RuntimeRegistryCheckpointSnapshot {
-    use tracedecay_runtime_core::shard_runtime::registry::{CheckpointOutcome, CheckpointPressure};
+    use crate::shard_runtime::registry::{CheckpointOutcome, CheckpointPressure};
 
     let outcome = writer
         .checkpoint_status
@@ -272,9 +270,9 @@ fn checkpoint_snapshot(
 }
 
 fn checkpoint_outcome_wal_bytes(
-    outcome: Option<&tracedecay_runtime_core::shard_runtime::registry::CheckpointOutcome>,
+    outcome: Option<&crate::shard_runtime::registry::CheckpointOutcome>,
 ) -> Option<u64> {
-    use tracedecay_runtime_core::shard_runtime::registry::CheckpointOutcome;
+    use crate::shard_runtime::registry::CheckpointOutcome;
 
     outcome.and_then(|outcome| match outcome {
         CheckpointOutcome::BelowSoft { wal }
@@ -285,9 +283,9 @@ fn checkpoint_outcome_wal_bytes(
 }
 
 fn checkpoint_blocker_snapshot(
-    blocker: &tracedecay_runtime_core::shard_runtime::registry::CheckpointBlocker,
+    blocker: &crate::shard_runtime::registry::CheckpointBlocker,
 ) -> RuntimeRegistryCheckpointBlockerSnapshot {
-    use tracedecay_runtime_core::shard_runtime::registry::CheckpointBlocker;
+    use crate::shard_runtime::registry::CheckpointBlocker;
 
     match blocker {
         CheckpointBlocker::SnapshotLease { lease_id, age } => {
@@ -321,25 +319,23 @@ fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'
     }
 }
 
-fn runtime_health_label(
-    health: tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth,
-) -> &'static str {
+fn runtime_health_label(health: crate::shard_runtime::shard::ShardRuntimeHealth) -> &'static str {
     match health {
-        tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
-        tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
-        tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
-        tracedecay_runtime_core::shard_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
+        crate::shard_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
+        crate::shard_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
+        crate::shard_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
+        crate::shard_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
-    use tracedecay_runtime_core::shard_runtime::registry::PhysicalWriterRuntimeSnapshot;
-    use tracedecay_runtime_core::shard_runtime::registry::{
+    use crate::shard_runtime::registry::PhysicalWriterRuntimeSnapshot;
+    use crate::shard_runtime::registry::{
         CheckpointBlocker, CheckpointBlockers, CheckpointPressure, CheckpointWal,
     };
+    use std::time::Duration;
     use tracedecay_store::{
         BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
         StoreShardIdV1, UserProfileId,

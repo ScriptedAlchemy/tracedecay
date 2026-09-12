@@ -230,24 +230,20 @@ impl DatabaseSnapshot {
     /// Assembles the wire snapshot from kernel store facts plus admitted
     /// census, dirty-marker, and registry projection values.
     pub fn from_collected(
-        collected: tracedecay_runtime_core::store_telemetry::CollectedStoreTelemetry,
+        collected: crate::store_telemetry::CollectedStoreTelemetry,
         dirty_marker: DirtyMarkerSnapshot,
         generation_census: GenerationCensusSnapshot,
         runtime_registry: RuntimeRegistrySnapshot,
     ) -> Self {
         let writer_owner = match collected.writer_owner {
-            Ok(tracedecay_runtime_core::db::WriterOwnership::Idle) => WriterOwnerSnapshot::Idle,
-            Ok(tracedecay_runtime_core::db::WriterOwnership::Active(owner)) => {
-                WriterOwnerSnapshot::Active {
-                    pid: owner.pid,
-                    started_epoch_ms: u64::try_from(owner.started_epoch_ms).unwrap_or(u64::MAX),
-                    version: owner.version,
-                    intent: owner.intent,
-                }
-            }
-            Ok(tracedecay_runtime_core::db::WriterOwnership::ActiveUnknown) => {
-                WriterOwnerSnapshot::ActiveUnknown
-            }
+            Ok(crate::db::WriterOwnership::Idle) => WriterOwnerSnapshot::Idle,
+            Ok(crate::db::WriterOwnership::Active(owner)) => WriterOwnerSnapshot::Active {
+                pid: owner.pid,
+                started_epoch_ms: u64::try_from(owner.started_epoch_ms).unwrap_or(u64::MAX),
+                version: owner.version,
+                intent: owner.intent,
+            },
+            Ok(crate::db::WriterOwnership::ActiveUnknown) => WriterOwnerSnapshot::ActiveUnknown,
             Err(error) => WriterOwnerSnapshot::ProbeFailed { error },
         };
         Self {
@@ -301,13 +297,11 @@ pub struct ReaderLaneOccupancy {
 
 impl ReaderPoolOccupancy {
     /// Projects the kernel reader-pool snapshot onto the wire shape.
-    pub fn from_pool(snapshot: &tracedecay_runtime_core::db::engine::ReaderPoolSnapshot) -> Self {
+    pub fn from_pool(snapshot: &crate::db::engine::ReaderPoolSnapshot) -> Self {
         Self {
             state: match snapshot.state {
-                tracedecay_runtime_core::db::engine::ReaderPoolState::Ready => "ready".to_string(),
-                tracedecay_runtime_core::db::engine::ReaderPoolState::Draining => {
-                    "draining".to_string()
-                }
+                crate::db::engine::ReaderPoolState::Ready => "ready".to_string(),
+                crate::db::engine::ReaderPoolState::Draining => "draining".to_string(),
             },
             snapshot_admissions: snapshot.snapshot_admissions,
             general: ReaderLaneOccupancy {
@@ -1089,7 +1083,7 @@ mod tests {
                 snapshot.rss_bytes = sample_number as u64;
                 Ok(snapshot)
             }),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
 
         assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
@@ -1100,7 +1094,9 @@ mod tests {
                 .outcome
                 .as_mut()
                 .expect("the warm sample is retained")
-                .completed = Instant::now() - Duration::from_secs(61);
+                .completed = Instant::now()
+                .checked_sub(Duration::from_secs(61))
+                .expect("process uptime exceeds the stale window");
         }
         let stale = serde_json::to_value(sampler.read()).unwrap();
         assert_eq!(stale["state"], "stale");
@@ -1146,7 +1142,7 @@ mod tests {
                 snapshot.rss_bytes = sample_number as u64;
                 Ok(snapshot)
             }),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
 
         assert_eq!(sampler.read(), ProcessTelemetry::NotYetSampled);
@@ -1157,7 +1153,9 @@ mod tests {
                 .outcome
                 .as_mut()
                 .expect("the warm sample is retained")
-                .completed = Instant::now() - Duration::from_secs(61);
+                .completed = Instant::now()
+                .checked_sub(Duration::from_secs(61))
+                .expect("process uptime exceeds the stale window");
         }
 
         let process = tokio::time::timeout(
@@ -1262,22 +1260,20 @@ mod tests {
 
     #[test]
     fn reader_pool_occupancy_projects_both_lanes_onto_the_wire() {
-        let occupancy = ReaderPoolOccupancy::from_pool(
-            &tracedecay_runtime_core::db::engine::ReaderPoolSnapshot {
-                state: tracedecay_runtime_core::db::engine::ReaderPoolState::Draining,
-                general_workers: 8,
-                available_general: 1,
-                health_workers: 1,
-                available_health: 0,
-                leased_general: 5,
-                leased_health: 1,
-                limbo_general: 2,
-                limbo_health: 0,
-                waiting_general: 4,
-                waiting_health: 0,
-                snapshot_admissions: 73,
-            },
-        );
+        let occupancy = ReaderPoolOccupancy::from_pool(&crate::db::engine::ReaderPoolSnapshot {
+            state: crate::db::engine::ReaderPoolState::Draining,
+            general_workers: 8,
+            available_general: 1,
+            health_workers: 1,
+            available_health: 0,
+            leased_general: 5,
+            leased_health: 1,
+            limbo_general: 2,
+            limbo_health: 0,
+            waiting_general: 4,
+            waiting_health: 0,
+            snapshot_admissions: 73,
+        });
         let wire = serde_json::to_value(&occupancy).unwrap();
 
         assert_eq!(wire["state"], "draining");

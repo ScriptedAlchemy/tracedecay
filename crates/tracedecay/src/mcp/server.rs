@@ -355,7 +355,7 @@ pub struct McpServer {
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
-        tokio::sync::OnceCell<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>,
+        tokio::sync::OnceCell<tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader>,
     /// Admission supplied by an authenticated daemon application route. It is
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,

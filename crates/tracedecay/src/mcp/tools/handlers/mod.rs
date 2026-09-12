@@ -347,7 +347,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.
     pub(crate) generation_census_reader:
-        Option<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>,
+        Option<tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader>,
     /// Retained server authority consumed by the dashboard boundary. Project
     /// selection itself is completed before handler dispatch.
     pub(crate) retained_project_server_resolver:

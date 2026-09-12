@@ -252,7 +252,7 @@ pub fn project_code_index_generation_census_reader(
     schedulers: CodeIndexSchedulerRegistryV1,
     project_root: PathBuf,
     scope: ResolvedScope,
-) -> tracedecay_session_memory::runtime_telemetry::GenerationCensusReader {
+) -> tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader {
     let authority = ProjectCodeGraphServingAuthorityV1 {
         schedulers,
         project_root,
@@ -262,39 +262,39 @@ pub fn project_code_index_generation_census_reader(
         let authority = authority.clone();
         Box::pin(async move {
             let Ok(projection) = authority.project().await else {
-                return tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-                    reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
+                return tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                    reason: tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::ExactScopeGenerationNotReady,
                 };
             };
             match projection.statistics {
                 Some(statistics) => {
                     let freshness = match projection.freshness {
                         tracedecay_graph_query::CodeGraphReadFreshnessV1::Current => {
-                            tracedecay_session_memory::runtime_telemetry::GenerationCensusServingFreshness::Current
+                            tracedecay_runtime_core::runtime_telemetry::GenerationCensusServingFreshness::Current
                         }
                         tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
                             sealed_at,
                             rebuild_in_flight,
                         } => {
-                            tracedecay_session_memory::runtime_telemetry::GenerationCensusServingFreshness::LastCompleteStale {
+                            tracedecay_runtime_core::runtime_telemetry::GenerationCensusServingFreshness::LastCompleteStale {
                                 sealed_at_micros: sealed_at.0,
                                 rebuild_in_flight,
                             }
                         }
                     };
-                    tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Observed {
+                    tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Observed {
                         generation_id: projection.generation_id.as_str().to_owned(),
                         freshness,
                         statistics:
-                            tracedecay_session_memory::runtime_telemetry::GenerationCensusStatistics {
+                            tracedecay_runtime_core::runtime_telemetry::GenerationCensusStatistics {
                                 source_total_bytes: statistics.source_total_bytes,
                                 symbol_count: statistics.symbol_count,
                                 edge_count: statistics.edge_count,
                             },
                     }
                 }
-                None => tracedecay_session_memory::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
-                    reason: tracedecay_session_memory::runtime_telemetry::GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
+                None => tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot::Unavailable {
+                    reason: tracedecay_runtime_core::runtime_telemetry::GenerationCensusUnavailableReason::SealedGenerationCensusInvalid,
                 },
             }
         })
