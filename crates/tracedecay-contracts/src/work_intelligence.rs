@@ -27,9 +27,11 @@ use tracedecay_policy::work_loop::{
     WorkProposalReasonV1, WorkProposalRuntimeCoverageV1, WorkRouteCandidateV1,
 };
 
+use crate::work::work_authority;
 use crate::{
     CancellationState, RequestAdmission, RequestContext, VerifiedWorkEvidenceRootV1,
-    VerifiedWorkGraphVersionV1, WorkEvidenceRootReadErrorV1, WorkEvidenceRootReadPortV1,
+    VerifiedWorkGraphVersionV1, WorkAttemptProviderOutcomeV1, WorkAttemptReceiptReadPortV1,
+    WorkAttemptReceiptV1, WorkEvidenceRootReadErrorV1, WorkEvidenceRootReadPortV1,
     WorkGraphReadModeV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1,
     WorkGraphReadV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
     WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
@@ -202,6 +204,10 @@ pub struct WorkExperienceCandidateV1 {
     pub item: WorkItemV1,
     /// Exact anchored evidence establishing that this is observed experience.
     pub evidence: Vec<TaskEvidenceLinkV1>,
+    /// Exact receipts for accepted successful attempts whose sealed provider
+    /// evidence and declared artifacts establish reusable observed work. The
+    /// identity is also the canonical `work_retrieve_evidence` drill target.
+    pub attempt_receipts: Vec<WorkAttemptReceiptV1>,
     /// Separate declared applicability facts. This is intentionally not a
     /// score and candidates remain in canonical TaskId order.
     pub applicability: BTreeSet<WorkExperienceApplicabilityV1>,
@@ -546,7 +552,10 @@ where
         context: &RequestContext,
         request: WorkExperienceRequestV1,
         consent: WorkExpertiseConsentSnapshotV1,
-    ) -> Result<WorkExperienceV1, WorkProductApplicationErrorV1> {
+    ) -> Result<WorkExperienceV1, WorkProductApplicationErrorV1>
+    where
+        G: WorkAttemptReceiptReadPortV1,
+    {
         validate_experience_request(&request)?;
         let (authorized_scope, port_context) =
             self.authorize(context, &request.selection, request.observed_at)?;
@@ -586,6 +595,8 @@ where
                 coverage: WorkExperienceCoverageV1::Unavailable,
             });
         }
+        let authority = work_authority(context)
+            .map_err(|_| WorkProductApplicationErrorV1::NotFoundOrNotAuthorized)?;
 
         // The in-window evidence links are grouped by task once so the item
         // loop below does not rescan the full link set for every item.
@@ -621,14 +632,33 @@ where
             if applicability.is_empty() {
                 continue;
             }
-            let Some(evidence) = evidence_by_task
+            let evidence = evidence_by_task
                 .get(item.task_id())
-                .filter(|links| !links.is_empty())
-            else {
+                .map_or_else(Vec::new, |links| links.iter().copied().cloned().collect());
+            let attempt_receipts = item
+                .accepted_attempts()
+                .iter()
+                .map(|identity| {
+                    self.graph
+                        .attempt_receipt(&authority, identity)
+                        .map_err(|_| WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|receipt| {
+                    qualifying_experience_receipt(
+                        receipt,
+                        &request.task_id,
+                        request.evidence_not_before,
+                        request.observed_at,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if evidence.is_empty() && attempt_receipts.is_empty() {
                 stale_excluded = stale_excluded.saturating_add(1);
                 continue;
-            };
-            picks.push((item, evidence.as_slice(), applicability));
+            }
+            picks.push((item, evidence, attempt_receipts, applicability));
         }
         picks.sort_by(|left, right| left.0.task_id().cmp(right.0.task_id()));
         let applicable = bounded(picks.len())?
@@ -641,9 +671,10 @@ where
             .into_iter()
             .take(limit)
             .map(
-                |(item, evidence, applicability)| WorkExperienceCandidateV1 {
+                |(item, evidence, attempt_receipts, applicability)| WorkExperienceCandidateV1 {
                     item: item.clone(),
-                    evidence: evidence.iter().copied().cloned().collect(),
+                    evidence,
+                    attempt_receipts,
                     applicability,
                 },
             )
@@ -763,6 +794,25 @@ where
             WorkProductPortContextV1::from_request(context, scope.clone(), observed_at);
         Ok((scope, port_context))
     }
+}
+
+fn qualifying_experience_receipt(
+    receipt: &WorkAttemptReceiptV1,
+    target_task_id: &TaskId,
+    evidence_not_before: UtcMicros,
+    observed_at: UtcMicros,
+) -> bool {
+    receipt.identity.task_id() != target_task_id
+        && !receipt.artifacts.is_empty()
+        && receipt.evidence.as_ref().is_some_and(|evidence| {
+            evidence.identity == receipt.identity
+                && matches!(
+                    evidence.outcome,
+                    WorkAttemptProviderOutcomeV1::Exited { code: 0 }
+                )
+                && evidence.observed_at >= evidence_not_before
+                && evidence.observed_at <= observed_at
+        })
 }
 
 fn validate_experience_request(
