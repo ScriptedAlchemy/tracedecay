@@ -374,7 +374,10 @@ pub fn census_sealed_store(
         let path = entry.path();
         let bytes = directory_bytes(&path)?;
         let name = entry.file_name();
-        if name.to_str().is_some_and(|name| name.starts_with(".staging-")) {
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(".staging-"))
+        {
             census.abandoned_staging_count += 1;
             census.abandoned_staging_bytes += bytes;
             continue;

@@ -978,23 +978,32 @@ mod tests {
                 stranded_scope_count: 0,
                 stranded_scope_bytes: StorageByteSizeV1::ZERO,
                 superseded_sealed_generation_count: superseded_sealed,
-                superseded_sealed_generation_bytes: StorageByteSizeV1(superseded_sealed * 1_500_000_000),
+                superseded_sealed_generation_bytes: StorageByteSizeV1(
+                    superseded_sealed * 1_500_000_000,
+                ),
                 abandoned_sealed_staging_count: staging,
                 abandoned_sealed_staging_bytes: StorageByteSizeV1(staging * 2_400_000_000),
             }
         };
 
-        let superseded =
-            code_generation_retention_finding(&clean_index(7, 0), DoctorCoverageCompletenessV1::Complete)
-                .expect("finding");
-        assert_eq!(superseded.kind(), DoctorStorageFindingKindV1::RetentionBacklog);
+        let superseded = code_generation_retention_finding(
+            &clean_index(7, 0),
+            DoctorCoverageCompletenessV1::Complete,
+        )
+        .expect("finding");
+        assert_eq!(
+            superseded.kind(),
+            DoctorStorageFindingKindV1::RetentionBacklog
+        );
         assert_eq!(superseded.finding().state(), DoctorEvidenceStateV1::Stale);
         assert!(sealed_evidence(&superseded).contains("superseded-sealed-7"));
         assert!(sealed_evidence(&superseded).contains("superseded-sealed-bytes-10500000000b"));
 
-        let staging =
-            code_generation_retention_finding(&clean_index(0, 3), DoctorCoverageCompletenessV1::Complete)
-                .expect("finding");
+        let staging = code_generation_retention_finding(
+            &clean_index(0, 3),
+            DoctorCoverageCompletenessV1::Complete,
+        )
+        .expect("finding");
         assert_eq!(staging.finding().state(), DoctorEvidenceStateV1::Stale);
         assert!(sealed_evidence(&staging).contains("abandoned-staging-3"));
         assert!(sealed_evidence(&staging).contains("abandoned-staging-bytes-7200000000b"));
