@@ -2157,6 +2157,64 @@ fn scope_plan_refuses_an_unproven_live_root_set() {
     assert!(store.path().join(stranded).is_dir());
 }
 
+/// A stranded scope whose recorded checkout root is gone is collectable at
+/// once; the stranding age applies only when the root still exists (or was
+/// never recorded), and a record that does not hash to its own directory
+/// never condemns anything.
+#[test]
+fn scope_plan_skips_the_stranding_age_when_the_recorded_root_is_gone() {
+    let (store, _live, stranded) = fixture_scope_store();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs(),
+    )
+    .expect("clock fits");
+    let scope = store.path().join(&stranded);
+
+    // No record: too young to collect.
+    let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
+        .expect("plan");
+    assert_eq!(plan.collectable_scopes.len(), 0);
+    assert_eq!(plan.retained_immature_scopes.len(), 1);
+
+    // A record naming a different root than the directory hash: still young.
+    record_scope_root(&scope, Path::new("/repos/somewhere-else")).expect("record");
+    let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
+        .expect("plan");
+    assert_eq!(plan.collectable_scopes.len(), 0);
+    assert_eq!(plan.retained_immature_scopes.len(), 1);
+
+    // The genuine record for a root that never existed on this machine.
+    record_scope_root(&scope, Path::new(STRANDED_ROOT)).expect("record");
+    let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
+        .expect("plan");
+    assert_eq!(plan.retained_immature_scopes.len(), 0);
+    assert_eq!(plan.collectable_scopes.len(), 1);
+    assert!(plan.collectable_scopes[0].root_missing);
+    assert_eq!(plan.collectable_scopes[0].scope_hash, stranded);
+
+    // The same record for a root that exists keeps the age gate.
+    let present = tempfile::TempDir::new().expect("present root");
+    let present_root = present.path().canonicalize().expect("canonical present root");
+    let present_hash = code_index_scope_hash(&present_root);
+    let present_scope = store.path().join(&present_hash);
+    std::fs::create_dir_all(present_scope.join(GENERATIONS_DIRECTORY)).expect("scope");
+    std::fs::write(
+        present_scope.join(GENERATIONS_DIRECTORY).join("generation-fixture"),
+        b"present",
+    )
+    .expect("payload");
+    record_scope_root(&present_scope, &present_root).expect("record");
+    let plan = plan_scope_root_retention(store.path(), &live_root_set(), 7 * 24 * 3600, now)
+        .expect("plan");
+    assert_eq!(plan.collectable_scopes.len(), 1, "only the scope whose root is gone");
+    assert_eq!(plan.retained_immature_scopes.len(), 1);
+    assert_eq!(plan.retained_immature_scopes[0].scope_hash, present_hash);
+    assert!(!plan.retained_immature_scopes[0].root_missing);
+}
+
 #[test]
 fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     let (store, live, stranded) = fixture_scope_store();
@@ -2345,11 +2403,13 @@ fn scope_transaction_never_journals_a_live_scope() {
                 scope_hash: stranded,
                 size_bytes: 8,
                 newest_mtime_secs: 1,
+                root_missing: false,
             },
             StrandedCodeIndexScopeV1 {
                 scope_hash: live,
                 size_bytes: 4,
                 newest_mtime_secs: 1,
+                root_missing: false,
             },
         ],
         reclaimed_bytes: 12,

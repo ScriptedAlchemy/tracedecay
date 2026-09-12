@@ -919,6 +919,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
         std::fs::create_dir_all(&segments_root)?;
         let _store_lock = acquire_code_generation_store_lock(store_root)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        // Scope reconciliation only sees this directory's hash; the record
+        // lets it collect the scope as soon as the checkout is deleted rather
+        // than after the stranding age.
+        tracedecay_code_index_retention::code_index_generations::record_scope_root(
+            store_root,
+            project_root,
+        )?;
         Self::remove_abandoned_evidence_packs(&segments_root)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(Self {
