@@ -1001,6 +1001,16 @@ mod tests {
     }
 
     #[test]
+    fn approval_projection_returns_the_apply_transaction_identity() {
+        let schema = serde_json::to_value(schemars::schema_for!(
+            NativeIntegrationApprovalProjectionV1
+        ))
+        .expect("approval schema");
+        let required = schema["required"].as_array().expect("required fields");
+        assert!(required.iter().any(|field| field == "transaction_id"));
+    }
+
+    #[test]
     fn every_native_integration_journey_operation_is_bound_to_cli_and_mcp() {
         let contribution = native_integration_surface_catalog_contribution().expect("contribution");
         for operation in [
