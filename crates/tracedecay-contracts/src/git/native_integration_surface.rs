@@ -31,18 +31,19 @@ use tracedecay_domain::{
     RepositoryId, UtcMicros, WorktreeInventoryEpoch,
 };
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, AuthorityRequirement, AvailabilityContract, BindingId,
-    BindingSurface, CancellationContract, CancellationPoint, CapabilityId,
-    CapabilityManifestInputV1, CapabilityManifestV1, CatalogContributionInputV1,
-    CatalogContributionV1, ContributionId, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority, IdempotencyContract,
-    InverseContract, InverseUnavailableReason, LifecycleClass, PrivacyClass, ProfileId,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
+    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    LifecycleClass, PrivacyClass, ProfileId, RevalidationContract, RevalidationPoint,
     RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
     TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::CancellationSignal;
+use crate::capability_manifest::{
+    ApplicationCapabilityManifestInput, application_capability_manifest,
+};
 use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
 use crate::git::native_integration::{
@@ -885,71 +886,48 @@ fn capability(
     capability_id: CapabilityId,
     binding_ids: Vec<BindingId>,
 ) -> Result<CapabilityManifestV1, ApplicationContractError> {
-    let is_effect = spec.effect.is_effect();
-    Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
-        capability_id,
-        use_case_id: UseCaseId::new(spec.use_case)?,
-        routing: RoutingContractV1::new(
-            1,
-            spec.summary,
-            spec.description,
-            vec![spec.example.to_owned()],
-        )?,
-        request_schema: schema(spec.request_schema)?,
-        result_schema: schema(spec.result_schema)?,
-        effect: spec.effect,
-        scope: ScopeRequirement::new(vec![
-            ScopeDimension::Project,
-            ScopeDimension::Repository,
-            ScopeDimension::Worktree,
-        ])?,
-        // Stack resolution, preflight, and apply stay separate capabilities:
-        // preflight permission never implies apply.
-        authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
-        denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
-        privacy: PrivacyClass::ScopedMetadata,
-        lifecycle: LifecycleClass::Resumable,
-        streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(cancellation_points(spec.effect))?,
-        deadline: DeadlineContract::new(30_000, deadline_behavior(spec.effect))?,
-        pagination: None,
-        idempotency: if is_effect {
-            IdempotencyContract::Required
-        } else {
-            IdempotencyContract::NotRequired
+    Ok(application_capability_manifest(
+        ApplicationCapabilityManifestInput {
+            capability_id,
+            use_case_id: UseCaseId::new(spec.use_case)?,
+            routing: RoutingContractV1::new(
+                1,
+                spec.summary,
+                spec.description,
+                vec![spec.example.to_owned()],
+            )?,
+            request_schema: schema(spec.request_schema)?,
+            result_schema: schema(spec.result_schema)?,
+            effect: spec.effect,
+            scope: ScopeRequirement::new(vec![
+                ScopeDimension::Project,
+                ScopeDimension::Repository,
+                ScopeDimension::Worktree,
+            ])?,
+            // Stack resolution, preflight, and apply stay separate capabilities:
+            // preflight permission never implies apply.
+            denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
+            privacy: PrivacyClass::ScopedMetadata,
+            lifecycle: LifecycleClass::Resumable,
+            streaming: StreamingContract::Unsupported,
+            cancellation: CancellationContract::cooperative(cancellation_points(spec.effect))?,
+            deadline: DeadlineContract::new(30_000, deadline_behavior(spec.effect))?,
+            pagination: None,
+            inverse: None,
+            authority_revalidation: RevalidationContract::required(vec![
+                RevalidationPoint::Authority,
+                RevalidationPoint::Scope,
+                RevalidationPoint::Policy,
+                RevalidationPoint::Configuration,
+                RevalidationPoint::ExpectedState,
+            ])?,
+            terminal_states: TerminalStateContract::new(terminal_states(spec.effect))?,
+            availability: AvailabilityContract::Available,
+            binding_ids,
+            profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+            required_features: Vec::new(),
         },
-        // Rebase, revert, force-push, and history rewriting are impossible
-        // through this surface, so no shipped inverse exists.
-        inverse: if is_effect {
-            InverseContract::Unavailable {
-                reason: InverseUnavailableReason::NoShippedInverse,
-            }
-        } else {
-            InverseContract::NotApplicable
-        },
-        authority_revalidation: RevalidationContract::required(vec![
-            RevalidationPoint::Authority,
-            RevalidationPoint::Scope,
-            RevalidationPoint::Policy,
-            RevalidationPoint::Configuration,
-            RevalidationPoint::ExpectedState,
-        ])?,
-        reconciliation: if is_effect {
-            ReconciliationContract::Required
-        } else {
-            ReconciliationContract::NotRequired
-        },
-        receipt: if is_effect {
-            ReceiptContract::DurableEffect
-        } else {
-            ReceiptContract::Operation
-        },
-        terminal_states: TerminalStateContract::new(terminal_states(spec.effect))?,
-        availability: AvailabilityContract::Available,
-        binding_ids,
-        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
-        required_features: Vec::new(),
-    })?)
+    )?)
 }
 
 fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
