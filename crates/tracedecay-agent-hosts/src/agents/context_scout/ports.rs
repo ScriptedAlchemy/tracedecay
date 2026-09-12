@@ -7,7 +7,6 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_application::configuration::ConfigurationCurrentStateV1;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
     ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
@@ -32,6 +31,7 @@ use tracedecay_domain::{
     AgentInstanceId, ManifestDigest, MessageId, ProjectId, ProviderId, SessionId, TemporalModeV1,
     ThreadId, TurnId, UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
 };
+use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopeBindingV1};
 
 use super::{

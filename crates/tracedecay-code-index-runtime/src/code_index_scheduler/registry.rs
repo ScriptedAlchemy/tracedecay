@@ -21,7 +21,7 @@ use std::{
 use std::sync::Condvar;
 
 use tracedecay_code_index::production::{CodeIndexInterruptionV1, CodeIndexPublishedGenerationV1};
-use tracedecay_dashboard_api::code_index_freshness_api::{
+use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexConvergenceParkedV1,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
@@ -772,11 +772,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Owner-configuration recovery observed by the scheduler. This stays
     /// readable while a replacement build owns the scheduler mutex.
     generation_recovery: Arc<
-        RwLock<
-            Option<
-                tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryV1,
-            >,
-        >,
+        RwLock<Option<tracedecay_contracts::code_index_freshness::CodeIndexGenerationRecoveryV1>>,
     >,
     /// The exact-source currency witness for the seated generation, readable
     /// without the scheduler mutex. Armed when the quiet exact-source probe
@@ -950,9 +946,9 @@ fn clear_convergence_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
 /// `Option<String>` — matched by name rather than by position.
 fn dashboard_freshness_identity(
     latest: Option<&LatestCompleteCodeIndexV1>,
-) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+) -> tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
     let mut identity =
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1::default();
+        tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1::default();
     if let Some(latest) = latest {
         let generation = &latest.generation;
         let snapshot = generation.snapshot();
@@ -1027,9 +1023,9 @@ fn dashboard_generation_is_ready(
 
 fn dashboard_text_freshness_identity(
     latest: Option<&LatestCodeTextGenerationV1>,
-) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+) -> tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
     let mut identity =
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1::default();
+        tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1::default();
     if let Some(latest) = latest {
         let metadata = latest.metadata();
         let snapshot = metadata.snapshot();
@@ -6434,8 +6430,7 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn dashboard_freshness(
         &self,
         project_root: &Path,
-    ) -> Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1>
-    {
+    ) -> Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1> {
         let canonical_root = project_root.canonicalize().ok()?;
         let (
             scheduler,
@@ -6547,7 +6542,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         0 => None,
                         micros => Some(micros),
                     };
-                    return tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                    return tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                         worktree_root: canonical_root.display().to_string(),
                         code_graph_serving,
                         last_reconcile_micros,
@@ -6644,7 +6639,7 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 dashboard_freshness_identity(latest.as_ref())
             };
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+            tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
                 worktree_root: canonical_root.display().to_string(),
                 code_graph_serving,
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),

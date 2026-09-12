@@ -133,6 +133,15 @@ pub fn resolve_db_for_branch(
     )
 }
 
+/// The git source the served graph was built from, as the graph reports it.
+#[derive(Clone, Copy, Debug)]
+pub struct ServingGraphSource<'a> {
+    pub reference: &'a str,
+    pub revision: Option<&'a str>,
+    /// Whether that source still matches the checkout the graph is serving.
+    pub is_current: bool,
+}
+
 pub fn build_branch_diagnostics(
     project_root: &Path,
     data_root: &Path,
@@ -140,11 +149,12 @@ pub fn build_branch_diagnostics(
     serving_branch: Option<String>,
     fallback_warning: Option<String>,
     serving_db_path: PathBuf,
-    serving_source: Option<(&str, Option<&str>, bool)>,
+    serving_source: Option<ServingGraphSource<'_>>,
 ) -> BranchDiagnostics {
     let meta = branch_meta::load_branch_meta(data_root);
     let current_branch = branch::current_branch(project_root);
-    let published_serving_branch = serving_source.and_then(|(reference, revision, _)| {
+    let published_serving_branch = serving_source.and_then(|source| {
+        let (reference, revision) = (source.reference, source.revision);
         revision.and_then(|revision| {
             meta.as_ref().and_then(|meta| {
                 meta.branches.iter().find_map(|(name, entry)| {
@@ -162,8 +172,8 @@ pub fn build_branch_diagnostics(
         })
     });
     let current_source_branch = serving_source
-        .filter(|(_, _, is_current)| *is_current)
-        .and_then(|(reference, _, _)| reference.strip_prefix("refs/heads/"))
+        .filter(|source| source.is_current)
+        .and_then(|source| source.reference.strip_prefix("refs/heads/"))
         .filter(|name| current_branch.as_deref() == Some(*name))
         .map(str::to_owned);
     let observed_serving_branch = published_serving_branch.or(current_source_branch);

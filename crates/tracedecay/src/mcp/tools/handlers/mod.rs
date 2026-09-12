@@ -306,7 +306,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) remote_operational_status:
         Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     pub(crate) code_index_freshness_reader:
-        Option<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexFreshnessReader>,
+        Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
     pub(crate) explorer_semantic_reader: Option<tracedecay_dashboard_api::ExplorerSemanticReader>,
     pub feedback_status_reader:
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
@@ -348,7 +348,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.
     pub(crate) generation_census_reader:
-        Option<tracedecay_session_memory::runtime_telemetry::GenerationCensusReader>,
+        Option<tracedecay_runtime_core::runtime_telemetry::GenerationCensusReader>,
     /// Retained server authority consumed by the dashboard boundary. Project
     /// selection itself is completed before handler dispatch.
     pub(crate) retained_project_server_resolver:

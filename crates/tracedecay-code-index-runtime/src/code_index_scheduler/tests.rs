@@ -343,7 +343,7 @@ fn replace_scheduler_chunker_revision(
 
 fn build_progress_snapshot(
     scheduler: &CodeIndexWorktreeSchedulerV1,
-) -> Arc<tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1> {
+) -> Arc<tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1> {
     scheduler
         .build_progress_slot()
         .read()
@@ -355,15 +355,14 @@ fn build_progress_snapshot(
 fn progress_snapshot_for_generation(
     generation_id: &CodeGenerationId,
     committed_pages: u64,
-) -> tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1 {
-    tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildProgressV1 {
+) -> tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1 {
+    tracedecay_contracts::code_index_freshness::CodeIndexBuildProgressV1 {
         generation_id: generation_id.as_str().to_owned(),
         daemon_incarnation: 1,
         producer_incarnation: 1,
         progress_epoch: 0,
         sealed_source_digest: format!("sha256:{}", "a".repeat(64)),
-        phase:
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        phase: tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit,
         committed_pages,
         committed_chunks: committed_pages,
         committed_imports: 0,
@@ -1271,12 +1270,17 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     let orphan_digest = encode_lowercase_hex(&Sha256::digest(orphan_bytes));
     let orphan_pack = segment_root.join(format!("segment-{orphan_digest}.json"));
     std::fs::write(&orphan_pack, orphan_bytes).expect("write committed orphan evidence pack");
-    // A rollback reserve of one holds the single superseded generation; the
+    // A vector-readable mark holds the single superseded generation; the
     // pointer index it is still named by would not.
+    let first_generation = CodeGenerationId::new(
+        first_pointer["generation_id"]
+            .as_str()
+            .expect("first generation id"),
+    )
+    .expect("valid first generation id");
     let orphan_report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(),
-        &BTreeSet::new(),
-        1,
+        &BTreeSet::from([first_generation]),
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(8_000_000),
         None,
@@ -1284,7 +1288,7 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     .expect("sweep committed orphan without collecting a generation");
     assert!(
         orphan_report.deleted_generations.is_empty(),
-        "the rollback reserve must retain the superseded generation"
+        "the vector-readable mark must retain the superseded generation"
     );
     assert!(
         !orphan_pack.exists(),
@@ -1308,7 +1312,6 @@ fn partitioned_publication_reuses_unchanged_file_segments() {
     let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(9_000_000),
         None,
@@ -1395,7 +1398,6 @@ fn lazy_lexical_source_cancels_when_retention_retires_its_unread_segments() {
     remove_historical_pointer_entries(store.path());
     let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         store.path(), &BTreeSet::new(),
-        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(9_000_000), None,
     ).expect("collect retired generation");
@@ -1895,7 +1897,6 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     let report = tracedecay_code_index_retention::code_index_generations::run_code_generation_retention(
         failed_store.path(),
         &BTreeSet::new(),
-        tracedecay_code_index_retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         tracedecay_code_index_retention::code_index_generations::CodeGenerationRetentionModeV1::Apply,
         UtcMicros(8_100_000),
         Some(&graph_replay_pool),
@@ -1910,31 +1911,34 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
 
 /// Membership of the durable `generation_index` is a referential-integrity
 /// check, not a liveness mark: a published store keeps the active generation
-/// and the newest `rollback_floor` superseded generations, and everything older
-/// is collectable while the pointer still names it.
+/// and the vector-readable sources, and everything older is collectable while
+/// the pointer still names it.
 #[test]
-fn code_generation_retention_keeps_only_the_rollback_floor_reserve() {
+fn code_generation_retention_keeps_only_the_active_and_marked_generations() {
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
 
-    const ROLLBACK_FLOOR: usize = 2;
+    const MARKED_SUPERSEDED: usize = 2;
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
     let store = TempDir::new().expect("store root");
     let generations = retention_generations(&fixture, store.path(), 5);
+    let (collected, reserved) = generations.split_at(generations.len() - MARKED_SUPERSEDED - 1);
+    let vector_readable_sources = reserved[..MARKED_SUPERSEDED]
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
     let report = run_code_generation_retention(
         store.path(),
-        &BTreeSet::new(),
-        ROLLBACK_FLOOR,
+        &vector_readable_sources,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(49),
         None,
     )
     .expect("apply retention");
 
-    let (collected, reserved) = generations.split_at(generations.len() - ROLLBACK_FLOOR - 1);
     assert_eq!(
         report
             .deleted_generations
@@ -1945,7 +1949,7 @@ fn code_generation_retention_keeps_only_the_rollback_floor_reserve() {
             .iter()
             .map(CodeGenerationId::as_str)
             .collect::<BTreeSet<_>>(),
-        "everything older than the active generation and its rollback reserve is collectable"
+        "everything older than the active generation and the marked sources is collectable"
     );
     let reserved = reserved
         .iter()
@@ -1964,7 +1968,7 @@ fn code_generation_retention_keeps_only_the_rollback_floor_reserve() {
                 .expect("read retained generation")
                 .is_some(),
             reserved.contains(generation.as_str()),
-            "only the active generation and the rollback reserve survive collection"
+            "only the active generation and the marked sources survive collection"
         );
     }
 }
@@ -2019,10 +2023,9 @@ fn sealed_replay_binding_resolves_an_exact_superseded_generation() {
 #[test]
 fn one_bounded_pass_collects_clean_and_dirty_superseded_generations() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
-        MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
+        MAX_CODE_GENERATION_RETENTION_BATCH_V1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
+        MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2062,7 +2065,6 @@ fn one_bounded_pass_collects_clean_and_dirty_superseded_generations() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(50),
         None,
@@ -2119,8 +2121,7 @@ fn one_bounded_pass_collects_clean_and_dirty_superseded_generations() {
 #[test]
 fn code_generation_retention_dry_run_reports_without_deleting() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2131,7 +2132,6 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::DryRun,
         UtcMicros(50),
         None,
@@ -2171,8 +2171,7 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
 #[test]
 fn code_generation_retention_never_sweeps_vector_readable_source() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2184,7 +2183,6 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
     let report = run_code_generation_retention(
         store.path(),
         &vector_readable,
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(60),
         None,
@@ -2228,8 +2226,7 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
 #[test]
 fn code_generation_retention_emits_durable_reclaim_receipt() {
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        run_code_generation_retention,
+        CodeGenerationRetentionModeV1, run_code_generation_retention,
     };
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
@@ -2240,7 +2237,6 @@ fn code_generation_retention_emits_durable_reclaim_receipt() {
     let report = run_code_generation_retention(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         CodeGenerationRetentionModeV1::Apply,
         UtcMicros(70),
         None,
@@ -2623,8 +2619,7 @@ fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
 #[test]
 fn oversized_generations_still_produce_a_complete_retention_finding() {
     use tracedecay_code_index_retention::code_index_generations::{
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR, GenerationDigestVerificationV1,
-        plan_code_generation_retention_with_verification,
+        GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
     };
     use tracedecay_contracts::doctor::DoctorCoverageCompletenessV1;
     use tracedecay_contracts::storage::{
@@ -2675,7 +2670,6 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     let plan = plan_code_generation_retention_with_verification(
         store.path(),
         &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         GenerationDigestVerificationV1::MetadataOnly,
     )
     .expect("metadata-only census must not depend on re-hashing gigabytes");
@@ -3779,7 +3773,7 @@ fn unchanged_policy_transition_refuses_unsafe_serving_and_rebuilds_once() {
     assert_eq!(recovery.incompatibilities, ["policy_revision"]);
     assert_eq!(
         recovery.serving,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryServingV1::Refused
+        tracedecay_contracts::code_index_freshness::CodeIndexGenerationRecoveryServingV1::Refused
     );
     let generation_b = published(
         config_b
@@ -3873,7 +3867,7 @@ fn chunker_transition_preserves_safe_serving_until_replacement() {
     assert_eq!(recovery.incompatibilities, ["chunker_revision"]);
     assert_eq!(
         recovery.serving,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexGenerationRecoveryServingV1::Preserved
+        tracedecay_contracts::code_index_freshness::CodeIndexGenerationRecoveryServingV1::Preserved
     );
     let generation_b = published(
         config_b
@@ -4709,7 +4703,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         let progress = build_progress_snapshot(&scheduler);
         assert_eq!(
             progress.phase,
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         );
         progress
     };
@@ -4773,7 +4767,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
     let completed_after_restart = build_progress_snapshot(&scheduler);
     assert_eq!(
         completed_after_restart.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
     );
     assert_eq!(
         completed_after_restart.generation_id,
@@ -4960,7 +4954,7 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
     let scan = build_progress_snapshot(&reopened);
     assert_eq!(
         scan.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::SourceScan
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::SourceScan
     );
     assert!(scan.total_lexical_units > 0);
     assert_eq!(scan.completed_lexical_units, scan.total_lexical_units);
@@ -5006,8 +5000,8 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     use std::thread;
 
     use tracedecay_code_index_retention::code_index_generations::{
-        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        execute_code_generation_retention, plan_code_generation_retention,
+        CodeGenerationRetentionModeV1, execute_code_generation_retention,
+        plan_code_generation_retention,
     };
 
     struct PauseAfterExistingArtifactRead {
@@ -5107,12 +5101,8 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
     });
     control.wait_until_paused();
 
-    let plan = plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    )
-    .expect("plan the orphan artifact observed before attachment");
+    let plan = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("plan the orphan artifact observed before attachment");
     let retention_root = store.path().to_path_buf();
     let (retention_done_tx, retention_done_rx) = mpsc::sync_channel(1);
     let retention = thread::spawn(move || {
@@ -6608,7 +6598,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
                 .snapshot()
                 .is_some_and(|snapshot| {
                     snapshot.phase
-                        == tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+                        == tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit
                 });
             if cancel {
                 self.observed_bulk_commit
@@ -6696,7 +6686,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
     let dashboard_after = build_progress_snapshot(&scheduler);
     assert_eq!(
         dashboard_after.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit
     );
     assert_eq!(dashboard_after.current_batch_pages, 1);
     assert_eq!(
@@ -6717,7 +6707,7 @@ fn dashboard_progress_advances_only_after_durable_batch_commit() {
     let dashboard_ready = build_progress_snapshot(&scheduler);
     assert_eq!(
         dashboard_ready.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
     );
     assert!(dashboard_ready.progress_epoch > dashboard_after.progress_epoch);
 }
@@ -7051,7 +7041,7 @@ fn generation_replacement_drops_incomplete_text_projection_state() {
     );
     assert!(replacement_progress.progress_epoch > original_progress.progress_epoch);
     original.publish_text_progress_phase(
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::BulkCommit,
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::BulkCommit,
         99,
         99,
     );
@@ -9563,7 +9553,7 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
             .await
             .expect("mounted dashboard freshness");
         if let Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Unavailable {
                 ref reason,
             },
         ) = freshness.code_graph_serving
@@ -9577,13 +9567,13 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
             .is_some_and(|latest| {
                 latest.generation().manifest().generation_id == sealed_generation_id
                     && latest.code_graph_serving_readiness()
-                        == tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+                        == tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
             });
         if seated
             && matches!(
                 freshness.code_graph_serving,
                 Some(
-                    tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+                    tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
                 )
             )
         {
@@ -16930,7 +16920,7 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
         .expect("mounted worktree freshness");
     match freshness.code_graph_serving {
         Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Refused {
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
                 reason,
             },
         ) => assert_eq!(
@@ -17040,7 +17030,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         if let (owner_epoch, Some(progress)) = observed
             && progress.committed_pages > 0
             && progress.phase
-                != tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+                != tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         {
             break (owner_epoch, progress);
         }
@@ -17205,7 +17195,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     assert!(progress_after_overflow.committed_pages >= progress_before_overflow.committed_pages);
     assert_eq!(
         progress_after_overflow.phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
     );
     assert_eq!(
         decode_count, 0,
@@ -17265,7 +17255,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
             .as_ref()
             .expect("ready progress stays observable")
             .phase,
-        tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
     );
     let current = registry
         .execute_query_search(&scope, core_search_request("alpha_0000"))
@@ -18202,8 +18192,8 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
         crate::config::resolver::resolve_configuration(&configuration_registry, &[layer])
             .expect("resolve configured native graph refusal")
             .snapshot;
-    let config = tracedecay_application::config::PinnedRuntimeConfiguration::new(
-        tracedecay_application::config::RuntimeConfigurationTarget {
+    let config = tracedecay_configuration::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::RuntimeConfigurationTarget {
             project_id: test_project_id(),
             project_root: fixture.path().to_path_buf(),
         },
@@ -18621,7 +18611,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         if let Some(progress) = observed
             && progress.committed_pages > 0
             && progress.phase
-                != tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+                != tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         {
             break progress;
         }
@@ -18727,7 +18717,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
         assert_ne!(progress.generation_id, progress_before_retry.generation_id);
         assert_eq!(
             progress.phase,
-            tracedecay_dashboard_api::code_index_freshness_api::CodeIndexBuildPhaseV1::Ready
+            tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         );
     }
     assert!(
@@ -18813,7 +18803,7 @@ fn dashboard_graph_readiness_follows_the_current_text_generation() {
     old_ready.warm_serving_caches();
     assert_eq!(
         old_ready.code_graph_serving_readiness(),
-        tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Ready
+        tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
     );
 
     fixture.edit("src/current.rs", "pub fn current() -> u32 { 2 }\n");
@@ -18829,9 +18819,7 @@ fn dashboard_graph_readiness_follows_the_current_text_generation() {
             Some(&current.text_generation_handle()),
             true,
         ),
-        Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Pending
-        ),
+        Some(tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Pending),
         "an older Ready graph must not mask the current text generation's Pending state"
     );
 }
@@ -18893,7 +18881,7 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
             .await
             .expect("mounted dashboard freshness");
         if let Some(
-            tracedecay_dashboard_api::code_index_freshness_api::CodeGraphServingReadinessV1::Unavailable {
+            tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Unavailable {
                 ref reason,
             },
         ) = freshness.code_graph_serving

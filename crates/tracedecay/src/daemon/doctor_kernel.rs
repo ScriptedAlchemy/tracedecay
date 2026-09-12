@@ -597,9 +597,9 @@ pub(super) async fn collect_code_generation_retention_findings(
     graph: &tracedecay_runtime_core::db::Database,
 ) -> DoctorStorageFamilyReadV1 {
     use tracedecay_code_index_retention::code_index_generations::{
-        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
-        plan_code_generation_retention_with_verification, plan_scope_root_retention,
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, GenerationDigestVerificationV1,
+        ScopeRootRetentionPlanV1, plan_code_generation_retention_with_verification,
+        plan_scope_root_retention,
     };
     use tracedecay_contracts::storage::{
         CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
@@ -659,7 +659,6 @@ pub(super) async fn collect_code_generation_retention_findings(
         let plan = plan_code_generation_retention_with_verification(
             &root,
             &vector_readable_sources,
-            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             GenerationDigestVerificationV1::MetadataOnly,
         );
         // Zeros are only ever published together with `Partial`: a live-root set

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::time::Instant;
-use tracedecay_dashboard_api::code_index_freshness_api::{
+use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_domain::ProjectId;
