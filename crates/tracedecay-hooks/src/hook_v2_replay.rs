@@ -145,7 +145,7 @@ pub async fn drain_host_spool_once<A, F>(
     admit: A,
 ) -> HookReplayPassReportV1
 where
-    A: Fn(HookEventEnvelopeV2) -> F,
+    A: Fn(HookEventEnvelopeV2, Option<crate::NativeContextScoutLifecycleV1>) -> F,
     F: Future<Output = HookReplayAdmissionOutcomeV1>,
 {
     let host = spool.config().host;
@@ -215,7 +215,7 @@ where
                 continue;
             }
             let outcome = hotpath::future!(
-                admit(record.envelope.clone()),
+                admit(record.envelope.clone(), record.native_lifecycle.clone()),
                 label = "hooks.replay.delivery"
             )
             .await;
@@ -331,6 +331,7 @@ fn log_tombstone(
 
 pub async fn admit_replayed_envelope_with_authoritative_session<R, RF, A, AF, O>(
     envelope: HookEventEnvelopeV2,
+    native_lifecycle: Option<crate::NativeContextScoutLifecycleV1>,
     resolve_session: R,
     admit: A,
 ) -> O
@@ -340,12 +341,20 @@ where
     A: FnOnce(HookEventEnvelopeV2, Option<tracedecay_domain::SessionId>) -> AF,
     AF: Future<Output = O>,
 {
-    let native_session_id = resolve_session(
-        envelope.project_id,
-        envelope.worktree_id,
-        envelope.protected_session_id,
-    )
-    .await;
+    let native_session_id = match native_lifecycle
+        .as_ref()
+        .filter(|lifecycle| lifecycle.matches_envelope(&envelope))
+    {
+        Some(lifecycle) => Some(lifecycle.session_id.clone()),
+        None => {
+            resolve_session(
+                envelope.project_id,
+                envelope.worktree_id,
+                envelope.protected_session_id,
+            )
+            .await
+        }
+    };
     admit(envelope, native_session_id).await
 }
 
@@ -479,7 +488,7 @@ mod tests {
 
     async fn drain<A, F>(data_root: &Path, now: UtcMicros, admit: A) -> HookReplayPassReportV1
     where
-        A: Fn(HookEventEnvelopeV2) -> F,
+        A: Fn(HookEventEnvelopeV2, Option<crate::NativeContextScoutLifecycleV1>) -> F,
         F: Future<Output = HookReplayAdmissionOutcomeV1>,
     {
         drain_host_spool_once(
@@ -529,49 +538,85 @@ mod tests {
     async fn live_failure_spools_then_replay_preserves_lifecycle_for_suggestion() {
         let root = TestRoot::new("lifecycle-suggestion");
         let now = UtcMicros(1_000);
-        let binding = binding(7);
-        publish_binding(root.path(), &binding, now);
-        let mut edit = envelope(9, &binding);
-        edit.protected_session_id = protected_session_id("session.native.replay");
-        edit.event = HookEventV2::SavedEdit {
-            file_id: [8; 16],
-            changed_range_count: 1,
+        let mut binding = binding(7);
+        binding.host = HookHostV1::OpenCode;
+        binding.capabilities = binding
+            .capabilities
+            .iter()
+            .map(|capability| HookCapabilityV1 {
+                family: capability.family,
+                support: stock_event_support(HookHostV1::OpenCode, capability.family),
+            })
+            .collect();
+        let mut tool_after = envelope(9, &binding);
+        tool_after.producer = HookHostV1::OpenCode;
+        tool_after.protected_session_id = protected_session_id("session.native.replay");
+        tool_after.event = HookEventV2::ToolLifecycle {
+            tool_id: [8; 16],
+            phase: crate::HookLifecyclePhaseV1::Completed,
+            effect_receipt_id: None,
         };
-        // The synchronous admission failed, so the host retained only the
-        // validated, payload-free envelope for daemon replay.
-        spool_envelopes(root.path(), &binding, &[edit], now);
+        let lifecycle = crate::NativeContextScoutLifecycleV1::new(
+            "session.native.replay",
+            "call.native.replay",
+            tool_after.event_id,
+        )
+        .unwrap();
+        publish_binding(root.path(), &binding, now);
+        let spool_root = hook_v2_spool_root(root.path(), HookHostV1::OpenCode);
+        let (mut spool, _) = HookSpoolV1::open(
+            &spool_root,
+            HookSpoolConfigV1::stock(HookHostV1::OpenCode),
+            now,
+        )
+        .unwrap();
+        spool
+            .append_with_native_lifecycle(tool_after, Some(lifecycle), &binding, now)
+            .unwrap();
+        drop(spool);
         let suggestions = Arc::new(StdMutex::new(Vec::new()));
         let captured = Arc::clone(&suggestions);
 
-        let report = drain(root.path(), now, move |envelope| {
-            let captured = Arc::clone(&captured);
-            async move {
-                admit_replayed_envelope_with_authoritative_session(
-                    envelope,
-                    |project_id, worktree_id, protected_session_id| async move {
-                        assert_eq!(project_id, PROJECT_ID);
-                        assert_eq!(worktree_id, [3; 16]);
-                        assert_eq!(
-                            protected_session_id,
-                            self::protected_session_id("session.native.replay")
-                        );
-                        Some(SessionId::new("session.native.replay".to_owned()).unwrap())
-                    },
-                    |_, native_session_id| async move {
-                        if native_session_id.as_ref().map(SessionId::as_str)
-                            == Some("session.native.replay")
-                        {
-                            captured
-                                .lock()
-                                .unwrap()
-                                .push("replayed lifecycle suggestion");
-                        }
-                        admitted()
-                    },
-                )
-                .await
-            }
-        })
+        let report = drain_host_spool_once(
+            HookSpoolV1::open(
+                &spool_root,
+                HookSpoolConfigV1::stock(HookHostV1::OpenCode),
+                now,
+            )
+            .unwrap()
+            .0,
+            PROJECT_ID,
+            Some(&binding),
+            now,
+            move |envelope, native_lifecycle| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    assert_eq!(
+                        native_lifecycle
+                            .as_ref()
+                            .map(|lifecycle| lifecycle.call_id.as_str()),
+                        Some("call.native.replay")
+                    );
+                    admit_replayed_envelope_with_authoritative_session(
+                        envelope,
+                        native_lifecycle,
+                        |_, _, _| async move { panic!("retained lifecycle must be authoritative") },
+                        |_, native_session_id| async move {
+                            if native_session_id.as_ref().map(SessionId::as_str)
+                                == Some("session.native.replay")
+                            {
+                                captured
+                                    .lock()
+                                    .unwrap()
+                                    .push("replayed lifecycle suggestion");
+                            }
+                            admitted()
+                        },
+                    )
+                    .await
+                }
+            },
+        )
         .await;
 
         assert_eq!(report.committed, 1);
@@ -579,7 +624,14 @@ mod tests {
             suggestions.lock().unwrap().as_slice(),
             ["replayed lifecycle suggestion"]
         );
-        assert_eq!(pending_records(root.path(), now), 0);
+        let (spool, report) = HookSpoolV1::open(
+            spool_root,
+            HookSpoolConfigV1::stock(HookHostV1::OpenCode),
+            now,
+        )
+        .unwrap();
+        assert_eq!(report.pending_records, 0);
+        drop(spool);
     }
 
     #[tokio::test]
@@ -604,7 +656,7 @@ mod tests {
         let (release_tx, release_rx) = oneshot::channel();
         let entered_tx = Arc::new(StdMutex::new(Some(entered_tx)));
         let release_rx = Arc::new(StdMutex::new(Some(release_rx)));
-        let drain = drain(data_root.path(), current, move |_| {
+        let drain = drain(data_root.path(), current, move |_, _| {
             let entered_tx = Arc::clone(&entered_tx);
             let release_rx = Arc::clone(&release_rx);
             async move {
@@ -653,7 +705,7 @@ mod tests {
         let admissions = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&admissions);
 
-        let report = drain(root.path(), now, move |_| {
+        let report = drain(root.path(), now, move |_, _| {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::Relaxed);
@@ -681,7 +733,7 @@ mod tests {
             now,
         );
 
-        let report = drain(root.path(), now, |envelope| async move {
+        let report = drain(root.path(), now, |envelope, _| async move {
             if envelope.event_id == [9; 16] {
                 HookReplayAdmissionOutcomeV1::ExactDuplicate
             } else {
@@ -708,7 +760,7 @@ mod tests {
             now,
         );
 
-        let report = drain(root.path(), now, |_| async move {
+        let report = drain(root.path(), now, |_, _| async move {
             HookReplayAdmissionOutcomeV1::Unavailable
         })
         .await;
@@ -718,7 +770,7 @@ mod tests {
         assert_eq!(pending_records(root.path(), now), 2);
 
         // A later pass with a healthy daemon drains it.
-        let report = drain(root.path(), now, |_| async move { admitted() }).await;
+        let report = drain(root.path(), now, |_, _| async move { admitted() }).await;
         assert_eq!(report.committed, 2);
         assert_eq!(pending_records(root.path(), now), 0);
     }
@@ -730,7 +782,7 @@ mod tests {
         let binding = binding(7);
         spool_envelopes(root.path(), &binding, &[envelope(9, &binding)], now);
 
-        let report = drain(root.path(), now, |_| async move { admitted() }).await;
+        let report = drain(root.path(), now, |_, _| async move { admitted() }).await;
 
         assert!(report.binding_unavailable);
         assert_eq!(pending_records(root.path(), now), 1);
@@ -749,7 +801,7 @@ mod tests {
             [9; 16],
             published_hook_scope_binding(root.path(), HOST, now).as_ref(),
             now,
-            |_| async move { admitted() },
+            |_, _| async move { admitted() },
         )
         .await;
 
@@ -792,6 +844,7 @@ mod tests {
 
             let outcome = admit_replayed_envelope_with_authoritative_session(
                 replayed,
+                None,
                 move |project_id, worktree_id, protected_session_id| async move {
                     assert_eq!(project_id, PROJECT_ID);
                     assert_eq!(worktree_id, [3; 16]);
@@ -830,7 +883,7 @@ mod tests {
         let later = UtcMicros(queued_at.0 + crate::MAX_SPOOL_AGE_MICROS + 1);
         publish_binding(root.path(), &binding, later);
 
-        let report = drain(root.path(), later, |_| async move { admitted() }).await;
+        let report = drain(root.path(), later, |_, _| async move { admitted() }).await;
 
         assert_eq!(report.tombstoned, 1);
         assert_eq!(report.committed, 0);
@@ -845,6 +898,7 @@ mod tests {
             protected_session_id: [5; 32],
             queued_at: UtcMicros(9),
             envelope: envelope(9, &binding),
+            native_lifecycle: None,
             encoded_len: 17,
             checksum: [6; 32],
             framed_len: 91,
@@ -882,7 +936,7 @@ mod tests {
         // Pass 1: the daemon is unavailable, so nothing is acknowledged.
         let first_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
         let recorder = Arc::clone(&first_seen);
-        let report = drain(root.path(), now, move |envelope| {
+        let report = drain(root.path(), now, move |envelope, _| {
             let recorder = Arc::clone(&recorder);
             async move {
                 recorder.lock().unwrap().push(envelope.event_id);
@@ -900,7 +954,7 @@ mod tests {
         // Pass 2: the replay re-offers the same identities and commits them.
         let second_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
         let recorder = Arc::clone(&second_seen);
-        let report = drain(root.path(), now, move |envelope| {
+        let report = drain(root.path(), now, move |envelope, _| {
             let recorder = Arc::clone(&recorder);
             async move {
                 recorder.lock().unwrap().push(envelope.event_id);
@@ -921,7 +975,7 @@ mod tests {
         // Pass 3: an acknowledged record is never redelivered.
         let third_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
         let recorder = Arc::clone(&third_seen);
-        let report = drain(root.path(), now, move |envelope| {
+        let report = drain(root.path(), now, move |envelope, _| {
             let recorder = Arc::clone(&recorder);
             async move {
                 recorder.lock().unwrap().push(envelope.event_id);

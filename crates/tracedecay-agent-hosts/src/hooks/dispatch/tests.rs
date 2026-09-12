@@ -696,6 +696,7 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
             temporary.path(),
             host,
             &first_envelope,
+            None,
             &binding,
             UtcMicros(10),
         ),
@@ -868,6 +869,41 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
         native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, material.event_id).unwrap();
     assert_eq!(lifecycle.session_id.as_str(), "session.opencode.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.opencode.native");
+
+    let decoded = tracedecay_hooks::decode_opencode_plugin_event(
+        tracedecay_hooks::OpenCodePluginSurfaceV1::ToolExecuteAfter,
+        tool_after.as_bytes(),
+    )
+    .unwrap();
+    let binding = spool_binding(
+        HookHostV1::OpenCode,
+        [tracedecay_hooks::HookEventFamily::SavedEdit],
+    );
+    let envelope = decoded.into_envelope(&binding, material).unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    assert_eq!(
+        append_for_replay(
+            temporary.path(),
+            HookHostV1::OpenCode,
+            &envelope,
+            Some(lifecycle.clone()),
+            &binding,
+            UtcMicros(10),
+        ),
+        SpoolAppendOutcomeV1::Accepted,
+    );
+    let spool_root = temporary
+        .path()
+        .join("hook-v2-spool")
+        .join(HookHostV1::OpenCode.hook_key());
+    let (mut spool, _) = HookSpoolV1::open(
+        spool_root,
+        HookSpoolConfigV1::stock(HookHostV1::OpenCode),
+        UtcMicros(10),
+    )
+    .unwrap();
+    let replayed = spool.claim_replay_batches(UtcMicros(10), 1).unwrap();
+    assert_eq!(replayed[0].records[0].native_lifecycle, Some(lifecycle));
 
     let file_edit = fixture["events"]
         .as_array()

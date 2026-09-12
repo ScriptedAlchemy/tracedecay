@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
 };
-use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
+use tracedecay_domain::{ProjectId, UtcMicros};
 #[cfg(test)]
 use tracedecay_hooks::HookImmediateAdmissionStateV1;
 use tracedecay_hooks::{
@@ -16,9 +16,9 @@ use tracedecay_hooks::{
     HookFeedbackDeliveryRouteV1, HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1,
     HookGuidanceStateV1, HookHostV1, HookImmediateAdmissionV1, HookRuntimeControlV1,
     HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1,
-    HookTransportDispositionV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
-    SpoolAppendOutcomeV1, admit_async_exact_scope, deliver_hook_feedback, envelope_identity_hash16,
-    finish_synchronous_hook,
+    HookTransportDispositionV1, NativeContextScoutLifecycleV1, NativeEnvelopeMaterialV1,
+    NativeHookDecodeError, SpoolAppendOutcomeV1, admit_async_exact_scope, deliver_hook_feedback,
+    envelope_identity_hash16, finish_synchronous_hook,
 };
 
 use crate::agents::context_scout::{
@@ -253,42 +253,6 @@ struct NativeIdentityRoute {
 #[derive(Default, Deserialize)]
 struct NativeIdentityReceipt {
     tool_call_id: Option<String>,
-}
-
-/// Provider-native lifecycle identity that may cross the local hook/daemon
-/// boundary. Session and call values come from checked-in host fields; the
-/// event ID binds them to the exact content-free envelope admitted alongside
-/// them. Paths and payloads remain unrepresentable.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeContextScoutLifecycleV1 {
-    pub session_id: SessionId,
-    pub call_id: ObservationId,
-    pub event_id: [u8; 16],
-}
-
-impl NativeContextScoutLifecycleV1 {
-    pub fn new(session_id: &str, call_id: &str, event_id: [u8; 16]) -> Option<Self> {
-        Some(Self {
-            session_id: SessionId::new(session_id.to_owned()).ok()?,
-            call_id: ObservationId::new(call_id.to_owned()).ok()?,
-            event_id,
-        })
-    }
-
-    pub fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
-        matches!(
-            envelope.producer,
-            HookHostV1::KimiCode | HookHostV1::OpenCode
-        ) && protected_session_id_for_native(self.session_id.as_str())
-            == envelope.protected_session_id
-            && self.event_id == envelope.event_id
-            && matches!(
-                envelope.event,
-                tracedecay_hooks::HookEventV2::SavedEdit { .. }
-                    | tracedecay_hooks::HookEventV2::ToolLifecycle { .. }
-            )
-    }
 }
 
 impl NativeIdentityFields {
@@ -669,6 +633,7 @@ async fn dispatch_decoded(
         layout,
         snapshot,
         envelope,
+        native_lifecycle,
         prepared_at,
         ..
     } = prepared;
@@ -696,6 +661,7 @@ async fn dispatch_decoded(
             &layout.data_root,
             host,
             &envelope,
+            native_lifecycle,
             binding,
             prepared_at,
         )),
@@ -830,6 +796,7 @@ fn append_for_replay(
     data_root: &Path,
     host: HookHostV1,
     envelope: &HookEventEnvelopeV2,
+    native_lifecycle: Option<NativeContextScoutLifecycleV1>,
     binding: &HookScopeBindingV1,
     now: UtcMicros,
 ) -> SpoolAppendOutcomeV1 {
@@ -842,7 +809,7 @@ fn append_for_replay(
     ) else {
         return SpoolAppendOutcomeV1::Unavailable;
     };
-    match spool.append(envelope.clone(), binding, now) {
+    match spool.append_with_native_lifecycle(envelope.clone(), native_lifecycle, binding, now) {
         Ok(_) => SpoolAppendOutcomeV1::Accepted,
         Err(HookSpoolError::SpoolFull) => SpoolAppendOutcomeV1::Full,
         Err(_) => SpoolAppendOutcomeV1::Unavailable,

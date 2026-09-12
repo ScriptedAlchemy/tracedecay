@@ -1281,6 +1281,12 @@ impl McpServer {
         self.project_session_db.clone()
     }
 
+    pub(crate) fn background_cpu_authority(
+        &self,
+    ) -> Option<Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>> {
+        self.background_cpu.clone()
+    }
+
     #[cfg(feature = "test-transport")]
     #[doc(hidden)]
     pub fn has_project_application_retrieval_for_test(&self) -> bool {
