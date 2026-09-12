@@ -37,16 +37,17 @@ pub mod handoff;
 pub mod handoff_catalog;
 pub mod hint_outcomes;
 pub mod historical_query;
+mod hook_orchestration;
 mod identity;
 pub mod invocation;
 pub mod lsp_context_catalog;
 mod mcp_catalog;
-pub mod mcp_construction;
 pub mod memory;
 pub mod multi_root;
 pub mod observability;
 pub mod observatory_surface;
 pub mod policy;
+mod profile_identity;
 pub mod project_registry;
 pub mod remote;
 pub mod request_identity;
@@ -57,6 +58,7 @@ pub mod retrieval;
 pub mod sdk_catalog;
 pub mod semantic_activation;
 pub mod session_sync;
+mod session_temporal_refresh;
 pub mod settings_preview;
 pub mod source_edit;
 mod source_edit_rollback;
@@ -282,6 +284,7 @@ pub use hint_outcomes::{
     HintEmission, HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError,
     HintOutcomePortFuture, HintOutcomePortOperation, HintOutcomeResolution, HintToolActivity,
 };
+pub use hook_orchestration::HookOrchestrationAdmissionV1;
 pub use invocation::{
     ApplicationInvocation, ApplicationInvocationBinding, ApplicationInvocationContext,
     ApplicationInvocationExecutor, ApplicationInvocationFuture, ApplicationRequest,
@@ -290,10 +293,6 @@ pub use invocation::{
 };
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
 pub use mcp_catalog::mcp_executable_binding_registry;
-pub use mcp_construction::{
-    HookOrchestrationAdmissionV1, ProfileIdentityReadPort, SessionTemporalRefreshWakeFuture,
-    SessionTemporalRefreshWakePort, UnavailableSessionTemporalRefreshWake,
-};
 pub use multi_root::{
     AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,
     AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootCollectionResolutionV1,
@@ -327,6 +326,7 @@ pub use policy::{
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1,
     RegisteredPolicyCapabilityV1,
 };
+pub use profile_identity::ProfileIdentityReadPort;
 pub use project_registry::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryEntry, ProjectRegistryListingCommand,
@@ -399,6 +399,10 @@ pub use sdk_catalog::{
 };
 pub use semantic_activation::{
     SemanticActivationCoordinationErrorV1, SemanticActivationCoordinationPort,
+};
+pub use session_temporal_refresh::{
+    SessionTemporalRefreshWakeFuture, SessionTemporalRefreshWakePort,
+    UnavailableSessionTemporalRefreshWake,
 };
 pub use settings_preview::{
     MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
