@@ -1081,7 +1081,7 @@ impl<'a> AgentRunFinalizer<'a> {
                     )
                     .await?;
                 Err(AutomationRunError::RecordedFailure {
-                    error: err.into(),
+                    error: err,
                     ledger_record: Box::new(ledger_record),
                 })
             }
