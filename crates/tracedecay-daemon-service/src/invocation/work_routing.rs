@@ -10,9 +10,12 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, SettingKey,
-    WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1,
 };
-use tracedecay_domain::{ManifestDigest, TaskId, WorkRouteCandidateV1};
+use tracedecay_domain::{
+    ManifestDigest, TaskId, UtcMicros, WorkExecutionSnapshot, WorkExecutionSnapshotInput,
+    WorkFallbackTopology, WorkProposalV1, WorkRouteCandidateV1, WorkTopologyPolicyV1,
+};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 /// The project-open-pinned authority for one Work proposal's routing state.
@@ -25,10 +28,12 @@ pub struct DaemonWorkProposalRoutingAuthorityV1 {
     configuration_revision: ConfigurationRevisionId,
     configuration_snapshot: ConfigurationSnapshotId,
     configuration_digest: ManifestDigest,
+    resolution_provenance_digest: ManifestDigest,
     grant_digest: ManifestDigest,
     generate_proposal_capability: CapabilityId,
     generate_proposal_use_case: UseCaseId,
     eligible_routes: Vec<WorkRouteCandidateV1>,
+    executable_bindings: Vec<WorkExecutableBindingV1>,
     pub(super) executable_binding_resolver: PinnedWorkExecutableBindingResolver,
 }
 
@@ -99,10 +104,14 @@ impl DaemonWorkProposalRoutingAuthorityV1 {
             configuration_revision: configuration.revision_id().clone(),
             configuration_snapshot: configuration_snapshot.snapshot_id.clone(),
             configuration_digest: expected_configuration_digest.clone(),
+            resolution_provenance_digest: configuration_snapshot
+                .resolution_provenance_digest
+                .clone(),
             grant_digest: grant.digest.clone(),
             generate_proposal_capability,
             generate_proposal_use_case,
             eligible_routes,
+            executable_bindings: bindings.clone(),
             executable_binding_resolver: resolver,
         })
     }
@@ -112,8 +121,10 @@ impl DaemonWorkProposalRoutingAuthorityV1 {
             && self.configuration_revision == other.configuration_revision
             && self.configuration_snapshot == other.configuration_snapshot
             && self.configuration_digest == other.configuration_digest
+            && self.resolution_provenance_digest == other.resolution_provenance_digest
             && self.grant_digest == other.grant_digest
             && self.eligible_routes == other.eligible_routes
+            && self.executable_bindings == other.executable_bindings
     }
 
     pub(super) fn matches_scope(&self, scope: &ResolvedScope) -> bool {
@@ -126,6 +137,86 @@ impl DaemonWorkProposalRoutingAuthorityV1 {
 
     pub(super) fn configuration_revision(&self) -> &ConfigurationRevisionId {
         &self.configuration_revision
+    }
+
+    pub(super) fn execution_snapshot(
+        &self,
+        proposal: &WorkProposalV1,
+        topology: &WorkTopologyPolicyV1,
+        admitted_at: UtcMicros,
+    ) -> Result<WorkExecutionSnapshot, WorkRoutingSnapshotErrorV1> {
+        if proposal.configuration_digest() != &self.configuration_digest {
+            return Err(WorkRoutingSnapshotErrorV1::Unavailable);
+        }
+        let route = proposal
+            .route()
+            .recommended()
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let (binding, candidate) = self
+            .executable_bindings
+            .iter()
+            .find_map(|binding| {
+                binding
+                    .routes()
+                    .iter()
+                    .find(|candidate| {
+                        candidate.route_id == route.route_id().as_str()
+                            && candidate.provider_capability_id == route.provider_id().as_str()
+                    })
+                    .map(|candidate| (binding, candidate))
+            })
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let capability = binding
+            .capabilities()
+            .iter()
+            .copied()
+            .find(|capability| capability.provider_id() == route.provider_id())
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        self.executable_binding_resolver
+            .resolve(
+                binding.executable(),
+                capability.backend(),
+                capability.protocol(),
+            )
+            .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        if let WorkFallbackTopology::CodexCli { executable, .. } = &candidate.execution.fallback {
+            self.executable_binding_resolver
+                .resolve(
+                    executable,
+                    tracedecay_domain::WorkProviderBackendV1::CodexCli,
+                    tracedecay_domain::WorkProviderProtocol::CodexExecJson,
+                )
+                .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        }
+        let duration = i64::try_from(candidate.execution.maximum_duration_micros)
+            .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)?;
+        let deadline = admitted_at
+            .0
+            .checked_add(duration)
+            .filter(|deadline| *deadline > 0)
+            .ok_or(WorkRoutingSnapshotErrorV1::Unavailable)?;
+        WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+            configuration_revision_id: self.configuration_revision.clone(),
+            configuration_snapshot_id: self.configuration_snapshot.clone(),
+            effective_behavior_digest: self.configuration_digest.clone(),
+            resolution_provenance_digest: self.resolution_provenance_digest.clone(),
+            route: route.clone(),
+            backend: capability.backend(),
+            protocol: capability.protocol(),
+            model: candidate.model_id.clone(),
+            executable: binding.executable().clone(),
+            sandbox: candidate.execution.sandbox,
+            approval: candidate.execution.approval,
+            filesystem: candidate.execution.filesystem,
+            egress: candidate.execution.egress,
+            environment_allowlist: candidate.execution.environment_allowlist.clone(),
+            credential_references: candidate.execution.credential_references.clone(),
+            limits: candidate.execution.limits,
+            deadline: UtcMicros(deadline),
+            fallback: candidate.execution.fallback.clone(),
+            topology: topology.clone(),
+        })
+        .map_err(|_| WorkRoutingSnapshotErrorV1::Unavailable)
     }
 }
 

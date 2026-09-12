@@ -473,6 +473,7 @@ async fn registered_work_evidence_hydrates_the_provider_qualified_task_session()
         .expect("proposal route"),
         "Hydrate the exact provider session.".to_owned(),
         digest('4'),
+        configuration_digest.clone(),
     )
     .expect("Work proposal");
     let prepared_accept = invoke_work(

@@ -6,8 +6,8 @@ use thiserror::Error;
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, ManifestDigest,
     PolicyRevisionId, ProposalId, TaskEvidenceLinkId, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkCommandId, WorkGraphVersionV1, WorkHandoffV1, WorkInitiativeV1, WorkItemV1,
-    WorkMilestoneV1, WorkPlanV1, WorkProductEventEvidenceV1, WorkProductEventId,
+    WorkCommandId, WorkExecutionSnapshot, WorkGraphVersionV1, WorkHandoffV1, WorkInitiativeV1,
+    WorkItemV1, WorkMilestoneV1, WorkPlanV1, WorkProductEventEvidenceV1, WorkProductEventId,
     WorkProductEventPayloadV1, WorkProductEventV1, WorkProductGraphV1, WorkProductProfileScopeV1,
     WorkProductSourceWatermarkV1, WorkProposalDispositionV1, WorkProposalV1,
     WorkRelationReplanProposalV1,
@@ -231,6 +231,15 @@ impl WorkProductMutationReceiptV1 {
     pub const fn replayed(&self) -> bool {
         self.replayed
     }
+}
+
+/// Execution admission together with the immutable provider snapshot licensed
+/// by the accepted proposal and current configuration authority.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedWorkExecutionV1 {
+    pub mutation: WorkProductMutationReceiptV1,
+    pub execution_snapshot: WorkExecutionSnapshot,
 }
 
 macro_rules! mutation_request {
