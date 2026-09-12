@@ -68,12 +68,12 @@ pub async fn handle_multi_root(
                 message: error.to_string(),
             })?,
     };
-    // The MCP transport injects its protocol request id for cooperative
-    // cancellation; the typed multi-root requests deny unknown fields and
-    // never consume it (the protocol id already arrives as a parameter).
+    // MCP transport controls arrive outside the typed application request.
+    // Strip them before decoding the deny-unknown-fields contract.
     let mut body = body;
     if let Some(map) = body.as_object_mut() {
         map.remove("__mcp_request_id");
+        map.remove("format");
     }
     let invocation = hotpath::measure_block!(
         "mcp.multi_root.decode",
@@ -341,10 +341,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_request_id_is_stripped_before_typed_deserialization() {
+    async fn transport_controls_are_stripped_before_typed_deserialization() {
         let body = json!({
             "scope_set_id": "tool-sweep-scope-set.v1",
             "__mcp_request_id": "request.mcp.fixture",
+            "format": "json",
         });
 
         let result = handle_multi_root(
@@ -358,8 +359,8 @@ mod tests {
         .await
         .unwrap();
 
-        // The injected transport id must not fail typed deserialization; the
-        // request reaches the daemon-owner gate and reports its absence.
+        // Transport controls must not fail typed deserialization; the request
+        // reaches the daemon-owner gate and reports its absence.
         assert_eq!(problem_code(&result), "multi_root.daemon_unavailable");
     }
 
