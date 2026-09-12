@@ -1,8 +1,6 @@
 //! Backend-owned preparation of exact Work mutation commands.
 
-use tracedecay_contracts::{
-    ApplicationProblem, RequestContext, RequestId, RetryDirective, SafeDiagnostic,
-};
+use tracedecay_contracts::{ApplicationProblem, RequestContext, RequestId, SafeDiagnostic};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -260,12 +258,7 @@ pub(super) fn decide_product_proposal(
     capability: &str,
     use_case: &UseCaseId,
     request: tracedecay_contracts::DecideWorkProposalRequestV1,
-    accepting: bool,
 ) -> Result<tracedecay_contracts::WorkProductMutationReceiptV1, ApplicationProblem> {
-    if (request.disposition == tracedecay_domain::WorkProposalDispositionV1::Accepted) != accepting
-    {
-        return Err(invalid_work_product_request());
-    }
     let capability =
         CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
     let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
@@ -283,17 +276,6 @@ pub(super) fn decide_product_proposal(
         .mutations()
         .decide_proposal(context, &binding, request)
         .map_err(work_product_problem)
-}
-
-fn invalid_work_product_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "work.invalid_graph_operation".to_owned(),
-            message: "The Work graph request is invalid".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-    }
 }
 
 fn work_product_authority_unavailable() -> ApplicationProblem {

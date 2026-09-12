@@ -1,5 +1,36 @@
 {
   "$defs": {
+    "AcceptWorkProposalDispositionV1": {
+      "description": "The accept-proposal operation can commit acceptance only.",
+      "enum": [
+        "accepted"
+      ],
+      "type": "string"
+    },
+    "AcceptWorkProposalRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/AcceptWorkProposalDispositionV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal",
+        "disposition",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "AcceptWorkTaskRequestV1": {
       "additionalProperties": false,
       "properties": {
@@ -17311,6 +17342,38 @@
       ],
       "type": "object"
     },
+    "ReviewWorkProposalDispositionV1": {
+      "description": "The only non-accepting dispositions the proposal-review operation can\ncommit. The broader decision request remains available to the graph\nmutation operation, which owns all decision forms.",
+      "enum": [
+        "rejected",
+        "superseded"
+      ],
+      "type": "string"
+    },
+    "ReviewWorkProposalRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/ReviewWorkProposalDispositionV1"
+        },
+        "mutation": {
+          "$ref": "#/$defs/WorkProductMutationIdentityV1"
+        },
+        "proposal": {
+          "$ref": "#/$defs/WorkProposalV1"
+        },
+        "selection": {
+          "$ref": "#/$defs/WorkProductSelectionScopeV1"
+        }
+      },
+      "required": [
+        "selection",
+        "proposal",
+        "disposition",
+        "mutation"
+      ],
+      "type": "object"
+    },
     "RootGenerationV1": {
       "additionalProperties": false,
       "description": "Immutable collection and stack revisions for one exact resolved root.",
@@ -29610,6 +29673,9 @@
     "storage_telemetry": {
       "$ref": "#/$defs/StorageTelemetryPayloadV1"
     },
+    "work_accept_proposal_request": {
+      "$ref": "#/$defs/AcceptWorkProposalRequestV1"
+    },
     "work_admit_execution_request": {
       "$ref": "#/$defs/AdmitWorkExecutionRequestV1"
     },
@@ -29645,9 +29711,6 @@
     },
     "work_create_task_request": {
       "$ref": "#/$defs/CreateWorkTaskRequestV1"
-    },
-    "work_decide_proposal_request": {
-      "$ref": "#/$defs/DecideWorkProposalRequestV1"
     },
     "work_duplicate_adjudication_command": {
       "$ref": "#/$defs/WorkDuplicateAdjudicationCommandV1"
@@ -29738,6 +29801,9 @@
     },
     "work_retry_attempt_outcome": {
       "$ref": "#/$defs/WorkRetryAttemptOutcomeV1"
+    },
+    "work_review_proposal_request": {
+      "$ref": "#/$defs/ReviewWorkProposalRequestV1"
     },
     "work_run_control": {
       "$ref": "#/$defs/WorkRunControlV1"
@@ -29851,7 +29917,8 @@
     "work_generate_proposal_request",
     "work_generated_proposal",
     "work_create_task_request",
-    "work_decide_proposal_request",
+    "work_review_proposal_request",
+    "work_accept_proposal_request",
     "work_admit_execution_request",
     "work_start_attempt_command",
     "work_admit_synthesis_command",
