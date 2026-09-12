@@ -257,10 +257,22 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
     });
     let _: tracedecay_contracts::StartWorkAttemptCommand =
         serde_json::from_value(start_request.clone()).expect("valid start-attempt request");
+    let mut second_start_request = start_request.clone();
+    second_start_request["attempt_id"] = json!("attempt.mcp-attempt-read.second");
     let started = call(&server, "tracedecay_work_start_attempt", start_request).await;
     assert_eq!(
         started["identity"]["attempt_id"], "attempt.mcp-attempt-read",
         "{started}"
+    );
+    let second_started = call(
+        &server,
+        "tracedecay_work_start_attempt",
+        second_start_request,
+    )
+    .await;
+    assert_eq!(
+        second_started["identity"]["attempt_id"], "attempt.mcp-attempt-read.second",
+        "{second_started}"
     );
 
     let attempts = call(
@@ -270,14 +282,15 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
     )
     .await;
     assert_eq!(attempts["state"], "listed", "{attempts}");
-    assert!(
-        attempts["attempts"]
-            .as_array()
-            .is_some_and(|attempts| attempts
+    let listed_attempt = attempts["attempts"]
+        .as_array()
+        .and_then(|attempts| {
+            attempts
                 .iter()
-                .any(|attempt| attempt["identity"] == started["identity"])),
-        "{attempts}"
-    );
+                .find(|attempt| attempt["identity"] == started["identity"])
+        })
+        .expect("started attempt must be listed");
+    assert_eq!(listed_attempt["state"], started["state"], "{attempts}");
 
     let history = call(
         &server,
@@ -331,7 +344,7 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         "tracedecay_work_prepare_duplicate_adjudication",
         json!({
             "first_attempt": started["identity"],
-            "second_attempt": started["identity"],
+            "second_attempt": second_started["identity"],
             "verdict": "not_duplicate",
             "reason": "distinct fixture attempts",
             "quantities": {
@@ -347,11 +360,29 @@ async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
         }),
     )
     .await;
-    assert_ne!(
-        duplicate.pointer("/value/problem/code"),
-        Some(&json!("work.graph_authority_unavailable")),
-        "duplicate adjudication must read the attempt-producing graph authority: {duplicate}"
+    assert_eq!(
+        duplicate["first_attempt"], started["identity"],
+        "{duplicate}"
     );
+    assert_eq!(
+        duplicate["second_attempt"], second_started["identity"],
+        "{duplicate}"
+    );
+    assert!(
+        duplicate["evidence"]["work_generation"].is_string(),
+        "{duplicate}"
+    );
+    assert!(
+        duplicate["evidence"]["topology_generation"].is_string(),
+        "{duplicate}"
+    );
+    let adjudicated = call(
+        &server,
+        "tracedecay_work_adjudicate_duplicate",
+        duplicate.clone(),
+    )
+    .await;
+    assert_eq!(adjudicated["command"], duplicate, "{adjudicated}");
 
     let experience = call(
         &server,

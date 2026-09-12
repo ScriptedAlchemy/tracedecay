@@ -415,7 +415,7 @@ pub(super) async fn dispatch_work_application(
                     operation_key,
                     use_case.clone(),
                     input_digest,
-                    services.attempts().list(&context, &request, |_authority| {
+                    services.attempts().list(&context, &request, || {
                         preparation::current_work_product_attempt_topology(
                             &registered,
                             &context,
@@ -501,7 +501,7 @@ pub(super) async fn dispatch_work_application(
                         &registered.work_topology_policy,
                         &context,
                         &request,
-                        |_authority| {
+                        || {
                             preparation::current_work_product_attempt_topology(
                                 &registered,
                                 &context,

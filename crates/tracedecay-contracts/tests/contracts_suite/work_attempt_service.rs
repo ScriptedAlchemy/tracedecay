@@ -650,7 +650,7 @@ fn list_page_bounds_are_refused_before_any_topology_read() {
                     page_size,
                     cursor: None,
                 },
-                |_| panic!("an out-of-bounds page size must not resolve the topology"),
+                || panic!("an out-of-bounds page size must not resolve the topology"),
             )
             .unwrap_err();
         assert_eq!(refused.kind(), ApplicationProblemKind::InvalidRequest);
@@ -676,7 +676,7 @@ fn list_pages_attempts_in_stable_order_and_resumes_from_the_cursor() {
                 page_size: 2,
                 cursor: None,
             },
-            |_| Ok(verified_topology("generation.work.list.1", 1)),
+            || Ok(verified_topology("generation.work.list.1", 1)),
         )
         .unwrap();
     let WorkAttemptListV1::Listed {
@@ -712,7 +712,7 @@ fn list_pages_attempts_in_stable_order_and_resumes_from_the_cursor() {
                 page_size: 2,
                 cursor: Some(resume),
             },
-            |_| Ok(verified_topology("generation.work.list.1", 1)),
+            || Ok(verified_topology("generation.work.list.1", 1)),
         )
         .unwrap();
     let WorkAttemptListV1::Listed {
@@ -742,7 +742,7 @@ fn list_of_an_authorized_scope_without_attempts_is_an_explicit_zero_complete_pag
                 page_size: 10,
                 cursor: None,
             },
-            |_| Ok(verified_topology("generation.work.list.zero", 1)),
+            || Ok(verified_topology("generation.work.list.zero", 1)),
         )
         .unwrap();
     let WorkAttemptListV1::Listed {
@@ -770,7 +770,7 @@ fn list_without_any_work_is_a_typed_absent_state() {
                 page_size: 10,
                 cursor: None,
             },
-            |_| Ok(WorkAttemptTopologyStateV1::Absent),
+            || Ok(WorkAttemptTopologyStateV1::Absent),
         )
         .unwrap();
     assert_eq!(listed, WorkAttemptListV1::Absent);
@@ -796,7 +796,7 @@ fn list_cursor_from_a_superseded_topology_generation_is_stale() {
                 page_size: 2,
                 cursor: Some(cursor.clone()),
             },
-            |_| Ok(verified_topology("generation.work.list.new", 1)),
+            || Ok(verified_topology("generation.work.list.new", 1)),
         )
         .unwrap_err();
     assert_eq!(stale.kind(), ApplicationProblemKind::Stale);
@@ -808,7 +808,7 @@ fn list_cursor_from_a_superseded_topology_generation_is_stale() {
                 page_size: 2,
                 cursor: Some(cursor),
             },
-            |_| Ok(WorkAttemptTopologyStateV1::Absent),
+            || Ok(WorkAttemptTopologyStateV1::Absent),
         )
         .unwrap_err();
     assert_eq!(gone.kind(), ApplicationProblemKind::Stale);
@@ -833,7 +833,7 @@ fn list_conceals_foreign_scopes_behind_their_own_typed_states() {
                 page_size: 10,
                 cursor: None,
             },
-            |_| Ok(WorkAttemptTopologyStateV1::Absent),
+            || Ok(WorkAttemptTopologyStateV1::Absent),
         )
         .unwrap();
     assert_eq!(absent, WorkAttemptListV1::Absent);
@@ -847,7 +847,7 @@ fn list_conceals_foreign_scopes_behind_their_own_typed_states() {
                 page_size: 10,
                 cursor: None,
             },
-            |_| Ok(verified_topology("generation.work.list.conceal", 1)),
+            || Ok(verified_topology("generation.work.list.conceal", 1)),
         )
         .unwrap();
     let WorkAttemptListV1::Listed {

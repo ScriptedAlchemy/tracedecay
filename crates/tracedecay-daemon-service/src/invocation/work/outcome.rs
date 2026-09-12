@@ -8,7 +8,7 @@ use tracedecay_contracts::{
     EvidenceDomain, EvidenceIdentity, EvidencePacket, OperationBudgetUsage, OperationReceipt,
     PageState, PolicyDecisionRef, ReconciliationState, RequestAdmission, RequestContext, RequestId,
     RetryDirective, SafeDiagnostic, TemporalState, WorkProductApplicationErrorV1,
-    WorkProjectionApplicationError, WorkflowEffectTerminalV1,
+    WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
@@ -192,35 +192,6 @@ pub(crate) fn work_blocked_interval_recovery_context(
         deadline,
         cancellation,
     )
-}
-
-pub(super) fn work_projection_problem(error: WorkProjectionApplicationError) -> ApplicationProblem {
-    match error {
-        WorkProjectionApplicationError::Admission(problem) => problem,
-        WorkProjectionApplicationError::InvalidPageSize => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "work.invalid_page_size".to_owned(),
-                message: "The Work projection page size is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-        },
-        WorkProjectionApplicationError::Port(
-            tracedecay_contracts::WorkProjectionPortError::StaleCursor,
-        ) => ApplicationProblem::stale(SafeDiagnostic {
-            code: "work.stale_cursor".to_owned(),
-            message: "The Work projection cursor is stale".to_owned(),
-        }),
-        WorkProjectionApplicationError::Port(
-            tracedecay_contracts::WorkProjectionPortError::Unavailable,
-        ) => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work.projection_unavailable".to_owned(),
-            message: "The Work projection authority is unavailable".to_owned(),
-        }),
-        WorkProjectionApplicationError::Port(
-            tracedecay_contracts::WorkProjectionPortError::NotFoundOrNotAuthorized,
-        ) => ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

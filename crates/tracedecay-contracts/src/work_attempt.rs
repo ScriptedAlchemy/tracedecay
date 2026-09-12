@@ -477,8 +477,7 @@ where
     }
 
     /// Lists one authority-scoped, page-bounded slice of provider attempts in
-    /// stable task/run/attempt order, read under the verified Work topology
-    /// snapshot the caller resolves through the graph publication mount.
+    /// stable task/run/attempt order, bound to the current Work product graph.
     ///
     /// Every non-success is typed: an out-of-bounds page size is an invalid
     /// request, a cursor minted under a superseded topology generation is
@@ -489,7 +488,7 @@ where
         &self,
         context: &RequestContext,
         request: &WorkAttemptListRequestV1,
-        topology: impl FnOnce(&WorkAuthority) -> Result<WorkAttemptTopologyStateV1, ApplicationProblem>,
+        topology: impl FnOnce() -> Result<WorkAttemptTopologyStateV1, ApplicationProblem>,
     ) -> Result<WorkAttemptListV1, ApplicationProblem> {
         if request.page_size == 0 || request.page_size > MAX_WORK_ATTEMPT_LIST_PAGE_SIZE {
             return Err(invalid_problem(
@@ -498,7 +497,7 @@ where
             ));
         }
         let authority = work_authority(context)?;
-        let binding = match topology(&authority)? {
+        let binding = match topology()? {
             WorkAttemptTopologyStateV1::Absent => {
                 return if request.cursor.is_some() {
                     // The snapshot the cursor was minted under no longer

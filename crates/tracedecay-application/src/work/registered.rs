@@ -8,45 +8,6 @@ use tracedecay_runtime_core::shard_runtime::{
 };
 
 #[derive(Clone)]
-pub struct RegisteredWorkTopologyV1 {
-    source: tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    runtime: VerifiedGraphRuntimeWeakProxyV1,
-}
-
-impl RegisteredWorkTopologyV1 {
-    pub fn verified_snapshot(
-        &self,
-        authority: &tracedecay_domain::WorkAuthority,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<
-        crate::work::work_topology::WorkTopologyStore,
-        crate::work::work_topology::WorkTopologyError,
-    > {
-        let events = self
-            .source
-            .load_authority_events(authority)
-            .map_err(|error| {
-                crate::work::work_topology::WorkTopologyError::Unavailable(error.to_string())
-            })?;
-        let check = || {
-            if cancelled.load(Ordering::Acquire) {
-                Err(tracedecay_graph_db::GraphDbError::Cancelled)
-            } else {
-                Ok(())
-            }
-        };
-        crate::work::work_topology::WorkTopologyStore::publish_from_events(
-            &events,
-            &check,
-            |manifest, key| {
-                self.runtime
-                    .publish_verified_manifest(manifest, key, Arc::clone(&cancelled))
-            },
-        )
-    }
-}
-
-#[derive(Clone)]
 pub struct RegisteredWorkflowTopologyV1 {
     source: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     runtime: VerifiedGraphRuntimeWeakProxyV1,
@@ -96,12 +57,6 @@ impl RegisteredWorkflowTopologyV1 {
 /// Core Work command and projection services over the registered exact-SQL
 /// channel.
 pub struct RegisteredWorkApplicationServicesV1 {
-    commands:
-        tracedecay_contracts::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>,
-    projections: tracedecay_contracts::WorkProjectionReadService<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
-    topology: RegisteredWorkTopologyV1,
     attempts: tracedecay_contracts::WorkAttemptService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
@@ -239,15 +194,7 @@ impl RegisteredWorkProductServicesV1 {
 impl RegisteredWorkApplicationServicesV1 {
     pub fn attach(db: &RegisteredGlobalDb) -> tracedecay_domain::errors::Result<Self> {
         let storage = db.work_storage()?;
-        let runtime = db.project_graph_runtime().cloned().ok_or_else(|| {
-            attach_error(
-                "attach registered Work topology",
-                "project graph runtime is not bound",
-            )
-        })?;
         Ok(Self {
-            commands: tracedecay_contracts::WorkService::new(storage.clone()),
-            projections: tracedecay_contracts::WorkProjectionReadService::new(storage.clone()),
             attempts: tracedecay_contracts::WorkAttemptService::new(storage.clone()),
             attempt_effects: tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage.clone()),
             run_control: tracedecay_contracts::WorkRunControlService::new(storage.clone()),
@@ -258,30 +205,7 @@ impl RegisteredWorkApplicationServicesV1 {
             duplicate_adjudications: tracedecay_contracts::WorkDuplicateAdjudicationServiceV1::new(
                 storage.clone(),
             ),
-            topology: RegisteredWorkTopologyV1 {
-                source: storage,
-                runtime,
-            },
         })
-    }
-
-    pub fn commands(
-        &self,
-    ) -> &tracedecay_contracts::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
-    {
-        &self.commands
-    }
-
-    pub fn projections(
-        &self,
-    ) -> &tracedecay_contracts::WorkProjectionReadService<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.projections
-    }
-
-    pub fn topology(&self) -> &RegisteredWorkTopologyV1 {
-        &self.topology
     }
 
     pub fn attempts(
