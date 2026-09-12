@@ -558,20 +558,6 @@ fn merge_commit(commits: &mut Vec<CommitSessionRecord>, incoming: &CommitSession
 pub async fn run_commit_attribution_sweep<S, F>(
     session_store: &S,
     gap_secs: i64,
-    scan: F,
-) -> Result<usize, GitCorrelationError>
-where
-    S: GitCorrelationSessionStore,
-    F: FnMut(&SpanScanTarget) -> TargetScan,
-{
-    run_commit_attribution_sweep_outcome(session_store, gap_secs, scan)
-        .await
-        .map(|outcome| outcome.commits_attributed)
-}
-
-pub async fn run_commit_attribution_sweep_outcome<S, F>(
-    session_store: &S,
-    gap_secs: i64,
     mut scan: F,
 ) -> Result<CommitAttributionSweepOutcome, GitCorrelationError>
 where
