@@ -994,8 +994,7 @@ async fn stale_owner_cannot_persist_after_cancellation() {
     let temp = TempDir::new().unwrap();
     let authority =
         Arc::new(registered_test_database(&temp, "stale-owner", HostAdmissionScope::Profile).await);
-    let store =
-        tracedecay_session_temporal_store::SessionTemporalStore::new(authority.database());
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(authority.database());
     store
         .begin_or_join_session_refresh(request("session.stale.owner", 0))
         .await

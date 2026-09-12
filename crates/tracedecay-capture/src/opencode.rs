@@ -9,8 +9,8 @@ use tracedecay_domain::{
     SessionId,
 };
 
-use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_string as canonical_u64};
 use crate::timestamp::timestamp_secs as shared_timestamp_secs;
+use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_string as canonical_u64};
 
 const PROVIDER: &str = "opencode";
 

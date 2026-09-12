@@ -909,8 +909,7 @@ fn operation_profile_and_graph_leases_block_and_dropping_reservation_restores_re
             StoreRuntimeRegistryFailure::RuntimeRetirementInProgress { .. }
         )
     ));
-    let request =
-        StoreRuntimeOpenRequest::new(binding.shard_id.clone(), binding.incarnation, None);
+    let request = StoreRuntimeOpenRequest::new(binding.shard_id.clone(), binding.incarnation, None);
     assert!(matches!(
         registry.begin_or_join_open(&request),
         StoreRuntimeOpenBegin::Rejected(

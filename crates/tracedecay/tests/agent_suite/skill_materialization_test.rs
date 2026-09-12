@@ -6,12 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
+use tracedecay_automation::skill_frontmatter::parse_skill_frontmatter;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSupportFile, create_managed_skill, default_managed_skill_targets,
     set_managed_skill_state,
 };
-use tracedecay_automation::skill_frontmatter::parse_skill_frontmatter;
 use tracedecay_automation_runtime::automation::skill_materialization::{
     MaterializationHost, MaterializationScope, MaterializeAction, RemoveAction, detect_scopes,
     materialize_skill, reconcile_detected_scopes, reconcile_scope, remove_materialized_skill,

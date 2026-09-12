@@ -82,11 +82,11 @@ impl<'de> Deserialize<'de> for CanonicalQualificationBlob {
 
 #[cfg(test)]
 mod semantic_qualification_tests {
-    use super::*;
     use super::super::{
         DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationProblem,
         DaemonInvocationRequest, DaemonInvocationResponse,
     };
+    use super::*;
     use tracedecay_contracts::{CancellationContext, Deadline};
     use tracedecay_domain::UtcMicros;
 
