@@ -801,6 +801,7 @@ async fn serve_broker_socket_client(
 
 /// LSP sessions this connection owns are cleaned up exactly once, on every
 /// exit path of the invocation loop.
+#[cfg(unix)]
 #[expect(
     clippy::too_many_lines,
     reason = "LSP sessions this connection owns are cleaned up exactly once, on every exit path of the invocation loop."
