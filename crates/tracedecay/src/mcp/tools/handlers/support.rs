@@ -127,16 +127,6 @@ pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
     })
 }
 
-/// Returns the user-provided `path` argument, falling back to the scope
-/// prefix when the argument is absent. This makes listing tools
-/// automatically scoped to the subdirectory the server was launched from.
-pub(super) fn effective_path<'a>(
-    args: &'a Value,
-    scope_prefix: Option<&'a str>,
-) -> Option<&'a str> {
-    args.get("path").and_then(|v| v.as_str()).or(scope_prefix)
-}
-
 pub(super) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
