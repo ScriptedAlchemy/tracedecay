@@ -820,6 +820,72 @@ async fn run_authenticated_multi_root_journey() {
     }
     assert!(second_page.continuation.is_none());
 
+    let capped_phrase_operation = MultiRootOperationV1::Query {
+        request: json!({
+            "operation": "code_phrase_search",
+            "request": {
+                "query": "multi-root-page-marker",
+                "phrases": ["multi-root-page-marker"],
+                "field_filters": [],
+                "fuzzy_budget": 0,
+                "scope": {"generation": "code-generation:unpinned-latest.v1", "path_prefix": null},
+                "meta": {"projection": "summary", "order": "relevance", "cursor": null}
+            }
+        }),
+    };
+    let observed_at = now();
+    let (deadline, cancellation) = controls("capped-phrase-query", observed_at);
+    let capped_phrase_response = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.capped-phrase-query",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                capped_phrase_operation,
+                0,
+                None,
+            )
+            .expect("capped phrase request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::MultiRootQueryPage {
+        outcome: tracedecay_contracts::ApplicationOutcome::Evidence(capped_phrase_evidence),
+        ..
+    } = capped_phrase_response.outcome
+    else {
+        panic!("capped phrase query must return evidence")
+    };
+    let capped_phrase_page = capped_phrase_evidence
+        .payload
+        .expect("capped phrase payload");
+    for root in &capped_phrase_page.roots {
+        let tracedecay_domain::ScopeOutcome::Partial { value, reason } = &root.outcome else {
+            panic!("each capped phrase root must remain partial")
+        };
+        assert_eq!(
+            *reason,
+            tracedecay_domain::ScopePartialReasonV1::BudgetExceeded
+        );
+        assert_eq!(value[0]["items"].as_array().map(Vec::len), Some(32));
+        assert_eq!(value[0]["total"].as_u64(), Some(32));
+        assert!(value[0]["next_cursor"].is_null());
+    }
+    assert!(matches!(
+        capped_phrase_page.aggregate,
+        tracedecay_domain::ScopeOutcome::Partial {
+            reason: tracedecay_domain::ScopePartialReasonV1::BudgetExceeded,
+            ..
+        }
+    ));
+    assert!(capped_phrase_page.continuation.is_none());
+
     // Every operation family fans out over the authorized scope set.
     for (index, operation) in [
         MultiRootOperationV1::Work { request: json!({}) },
