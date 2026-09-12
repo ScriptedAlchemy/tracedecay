@@ -16,12 +16,12 @@
 //! `tracedecay-daemon-service`; only construction, validation, and the
 //! application-DTO conversions travel with the types they belong to.
 
-mod git_surface;
-mod problem_response;
 mod feedback;
 mod git;
+mod git_surface;
 mod handoff;
 mod lsp;
+mod problem_response;
 mod semantic;
 mod work;
 mod workflow;
@@ -31,8 +31,6 @@ pub use git::{DaemonGitEffectResult, DaemonGitPreviewResult};
 pub use handoff::{HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1};
 pub use lsp::DaemonLspSessionAccess;
 pub use semantic::{CanonicalQualificationBlob, CanonicalQualificationBlobError};
-pub use work::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
-pub use workflow::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblem, AuthorizedScopeSet, CancellationContext, Deadline,
@@ -42,6 +40,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ManifestDigest, ScopeSetId, UtcMicros};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
+pub use work::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
+pub use workflow::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
 
 use crate::lsp_wire::{MAX_LSP_FRAME_BYTES, MAX_LSP_WORKSPACE_ROOTS};
 use crate::surface::GitReadSurfaceRequest;
@@ -493,7 +493,6 @@ impl DaemonInvocationOperation {
         }
     }
 }
-
 
 /// One versioned, request-correlated daemon operation.
 #[derive(Debug, Serialize, Deserialize)]
@@ -2413,7 +2412,6 @@ mod operation_label_tests {
     }
 }
 
-
 /// A safe, deliberately non-diagnostic daemon invocation failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2690,7 +2688,6 @@ pub enum DaemonInvocationOutcome {
         problem: DaemonInvocationProblem,
     },
 }
-
 
 impl DaemonInvocationResponse {
     pub fn lsp_opened(

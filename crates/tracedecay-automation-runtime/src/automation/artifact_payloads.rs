@@ -530,10 +530,10 @@ fn generated_eval_application_effect(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use tracedecay_automation::artifact_policy::artifact_policy;
     use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict};
     use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
     use super::*;
+    use tracedecay_automation::artifact_policy::artifact_policy;
     use tracedecay_domain::{
         DomainError, FactEventId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
         ProvenanceId, RunId,

@@ -10,11 +10,11 @@ use tracedecay_domain::{
 };
 use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
+use crate::git_facts::append_diff_and_pull_request_facts;
 use crate::{
     ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
     parse_cursor_human_timestamp,
 };
-use crate::git_facts::append_diff_and_pull_request_facts;
 
 pub fn normalize_cursor_observation(
     native: &Value,

@@ -9,9 +9,9 @@ use tracedecay_domain::{
     ProviderUsageContractDimensionV1, SessionId,
 };
 
-use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_string};
 use crate::content::content_is_empty;
 use crate::timestamp::timestamp_secs;
+use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_string};
 
 const PROVIDER: &str = "kimi";
 const COMPACTION_PREFIX: &str =

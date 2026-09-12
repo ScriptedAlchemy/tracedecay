@@ -79,7 +79,12 @@ impl TranscriptCatchUpFailure {
     /// defect, not a transient condition.
     #[hotpath::skip]
     pub(super) const fn session_review_unwired() -> Self {
-        Self::new("scheduler", "session_review", "session_review_unwired", false)
+        Self::new(
+            "scheduler",
+            "session_review",
+            "session_review_unwired",
+            false,
+        )
     }
 
     #[hotpath::skip]

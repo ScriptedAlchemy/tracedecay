@@ -39,8 +39,8 @@ use super::config_error;
 use super::host_io::{HostIo, home_dir, uses_default_user_profile};
 pub use crate::automation::managed_skills::managed_skill_root;
 use crate::automation::managed_skills::{ManagedSkill, ManagedSkillState};
-use tracedecay_domain::errors::Result;
 use tracedecay_automation::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
+use tracedecay_domain::errors::Result;
 
 pub use tracedecay_automation::managed_skills::MATERIALIZED_SKILL_MANAGED_BY;
 

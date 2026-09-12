@@ -20,9 +20,9 @@ mod tests {
     use super::*;
     use crate::automation::artifact_payloads::ArtifactPayloadContext;
     use crate::automation::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
-    use tracedecay_automation::artifact_policy::artifact_policy;
     use crate::automation::outcomes::AutomationOutcomesSnapshot;
     use crate::automation::run_ledger::AutomationRunLedgerRecord;
+    use tracedecay_automation::artifact_policy::artifact_policy;
 
     #[test]
     fn combined_skill_response_excludes_fact_output_payloads() {

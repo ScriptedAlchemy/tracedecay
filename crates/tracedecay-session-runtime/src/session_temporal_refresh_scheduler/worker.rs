@@ -26,7 +26,7 @@ use super::wake::{
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_session_temporal_store::{
-    SessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
+    SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalStore,
 };
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
