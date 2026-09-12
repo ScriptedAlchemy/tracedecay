@@ -827,7 +827,7 @@ impl DaemonInvocationState {
                     continue;
                 }
             };
-            let Some(registry_context) = registry_context else {
+            let Some(_registry_context) = registry_context else {
                 let Ok(generation) = denied_root_generation(scope) else {
                     return DaemonInvocationResponse::problem(
                         request_id,
@@ -837,7 +837,11 @@ impl DaemonInvocationState {
                 generations.push(generation);
                 continue;
             };
-            let root = PathBuf::from(registry_context.project.canonical_root);
+            // A registered project may contribute more than one exact linked
+            // worktree. The persisted locator is the authorized root for this
+            // scope; resolving only by project id aliases every linked scope
+            // back to the project's primary checkout.
+            let root = locator.canonical_root.clone();
             if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
                 let Ok(generation) = unavailable_root_generation(
                     scope,
