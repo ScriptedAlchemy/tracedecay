@@ -524,7 +524,14 @@ async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
     commit_attribution_sweep(&db.git_correlation_store(), gap)
         .await
-        .map(|_| ())
+        .map(|outcome| {
+            if outcome.unavailable_references > 0 {
+                tracing::warn!(
+                    unavailable_references = outcome.unavailable_references,
+                    "historical Git attribution unavailable for archived session branches"
+                );
+            }
+        })
 }
 
 /// One bounded sweep over the verified span projection. Any changed attribution
@@ -532,7 +539,7 @@ async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(
 async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
     store: &S,
     gap_secs: i64,
-) -> Result<usize, git_correlation::GitCorrelationError> {
+) -> Result<git_correlation::CommitAttributionSweepOutcome, git_correlation::GitCorrelationError> {
     git_correlation::run_commit_attribution_sweep(store, gap_secs, |target| {
         git_scan_commits(target, gap_secs)
     })
@@ -542,10 +549,10 @@ async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
 /// Reads commits on one span target's branch within its (gap-widened) window
 /// via `git log`.
 ///
-/// Reports [`TargetScan::Unavailable`] — not an empty commit list — when the
-/// recorded worktree is gone or `git log` fails, so the sweep holds its
-/// watermark and retries the target rather than treating "could not look" as
-/// "nothing there" and never revisiting those spans.
+/// Reports [`TargetScan::MissingReference`] when an archived branch is gone;
+/// its observed branch identity remains evidence, while historical commit
+/// attribution is unavailable. Repository and command failures remain
+/// [`TargetScan::Unavailable`] so the background sweep retries them.
 pub(super) fn git_scan_commits(
     target: &git_correlation::SpanScanTarget,
     gap_secs: i64,
@@ -569,6 +576,11 @@ pub(super) fn git_scan_commits(
     // Scope to the recorded branch when known; detached-HEAD spans scan HEAD.
     match target.branch.as_deref() {
         Some(branch) if !branch.is_empty() => {
+            match git_correlation::git_commit_reference_exists(worktree, branch) {
+                Ok(true) => {}
+                Ok(false) => return git_correlation::TargetScan::MissingReference,
+                Err(_) => return git_correlation::TargetScan::Unavailable,
+            }
             command.arg(branch);
         }
         _ => {}

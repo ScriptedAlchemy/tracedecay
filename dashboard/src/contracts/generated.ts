@@ -3457,7 +3457,8 @@ export const MultiRootContinuationV1Schema = z.object({
   next_page: z.number().int().safe().min(1),
   order_digest: z.lazy(() => ManifestDigestSchema),
   query_digest: z.lazy(() => ManifestDigestSchema),
-  root_generations: z.array(z.lazy(() => RootScopeOutcomeV1_for_RootGenerationV1Schema)),
+  root_cursors: z.array(z.lazy(() => RootScopeOutcomeV1_for_Nullable_stringSchema)),
+  root_generations: z.array(z.lazy(() => RootScopeOutcomeV1_for_Nullable_RootGenerationV1Schema)),
   scope_set_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 export type MultiRootContinuationV1 = z.infer<typeof MultiRootContinuationV1Schema>;
@@ -3498,7 +3499,7 @@ export type MultiRootOperationV1 = z.infer<typeof MultiRootOperationV1Schema>;
 /** Federated page preserving each root outcome and aggregate partial truth. */
 export const MultiRootQueryPageV1_for_AnyValueSchema = z.object({
   aggregate: z.lazy(() => ScopeOutcome_for_Array_of_AnyValueSchema),
-  continuation: z.lazy(() => MultiRootContinuationV1Schema),
+  continuation: z.union([z.lazy(() => MultiRootContinuationV1Schema), z.null()]),
   roots: z.array(z.lazy(() => RootScopeOutcomeV1_for_Array_of_AnyValueSchema)),
   scope_set_digest: z.lazy(() => ManifestDigestSchema),
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
@@ -4143,11 +4144,18 @@ export const RootScopeOutcomeV1_for_Array_of_AnyValueSchema = z.object({
 export type RootScopeOutcomeV1_for_Array_of_AnyValue = z.infer<typeof RootScopeOutcomeV1_for_Array_of_AnyValueSchema>;
 
 /** One typed outcome pinned to the digest of an exact resolved root. */
-export const RootScopeOutcomeV1_for_RootGenerationV1Schema = z.object({
-  outcome: z.lazy(() => ScopeOutcome_for_RootGenerationV1Schema),
+export const RootScopeOutcomeV1_for_Nullable_RootGenerationV1Schema = z.object({
+  outcome: z.lazy(() => ScopeOutcome_for_Nullable_RootGenerationV1Schema),
   scope_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
-export type RootScopeOutcomeV1_for_RootGenerationV1 = z.infer<typeof RootScopeOutcomeV1_for_RootGenerationV1Schema>;
+export type RootScopeOutcomeV1_for_Nullable_RootGenerationV1 = z.infer<typeof RootScopeOutcomeV1_for_Nullable_RootGenerationV1Schema>;
+
+/** One typed outcome pinned to the digest of an exact resolved root. */
+export const RootScopeOutcomeV1_for_Nullable_stringSchema = z.object({
+  outcome: z.lazy(() => ScopeOutcome_for_Nullable_stringSchema),
+  scope_digest: z.lazy(() => ManifestDigestSchema),
+}).strict();
+export type RootScopeOutcomeV1_for_Nullable_string = z.infer<typeof RootScopeOutcomeV1_for_Nullable_stringSchema>;
 
 /** Strongly typed canonical identity: `RunId`. */
 export const RunIdSchema = z.string();
@@ -4336,16 +4344,16 @@ export type ScopeOutcome_for_Array_of_AnyValue = z.infer<typeof ScopeOutcome_for
 
 `Denied` and `Unavailable` carry no value and therefore cannot be confused
 with a successful empty result. */
-export const ScopeOutcome_for_RootGenerationV1Schema = z.discriminatedUnion("outcome", [z.object({
+export const ScopeOutcome_for_Nullable_RootGenerationV1Schema = z.discriminatedUnion("outcome", [z.object({
   outcome: z.literal("denied"),
 }), z.object({
   outcome: z.literal("exact"),
-  value: z.lazy(() => RootGenerationV1Schema),
+  value: z.union([z.lazy(() => RootGenerationV1Schema), z.null()]),
 }), z.object({
   outcome: z.literal("partial"),
   value: z.object({
   reason: z.lazy(() => ScopePartialReasonV1Schema),
-  value: z.lazy(() => RootGenerationV1Schema),
+  value: z.union([z.lazy(() => RootGenerationV1Schema), z.null()]),
 }),
 }), z.object({
   outcome: z.literal("unavailable"),
@@ -4353,7 +4361,30 @@ export const ScopeOutcome_for_RootGenerationV1Schema = z.discriminatedUnion("out
   reason: z.lazy(() => ScopeUnavailableReasonV1Schema),
 }),
 })]);
-export type ScopeOutcome_for_RootGenerationV1 = z.infer<typeof ScopeOutcome_for_RootGenerationV1Schema>;
+export type ScopeOutcome_for_Nullable_RootGenerationV1 = z.infer<typeof ScopeOutcome_for_Nullable_RootGenerationV1Schema>;
+
+/** Truthful outcome for one authorized root or an aggregate over roots.
+
+`Denied` and `Unavailable` carry no value and therefore cannot be confused
+with a successful empty result. */
+export const ScopeOutcome_for_Nullable_stringSchema = z.discriminatedUnion("outcome", [z.object({
+  outcome: z.literal("denied"),
+}), z.object({
+  outcome: z.literal("exact"),
+  value: z.string().nullable(),
+}), z.object({
+  outcome: z.literal("partial"),
+  value: z.object({
+  reason: z.lazy(() => ScopePartialReasonV1Schema),
+  value: z.string().nullable(),
+}),
+}), z.object({
+  outcome: z.literal("unavailable"),
+  value: z.object({
+  reason: z.lazy(() => ScopeUnavailableReasonV1Schema),
+}),
+})]);
+export type ScopeOutcome_for_Nullable_string = z.infer<typeof ScopeOutcome_for_Nullable_stringSchema>;
 
 /** Typed explanation for a root that returned usable but incomplete data. */
 export const ScopePartialReasonV1Schema = z.enum(["budget_exceeded", "incomplete", "root_denied", "root_unavailable", "stale"]);

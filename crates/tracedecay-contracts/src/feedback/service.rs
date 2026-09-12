@@ -12,7 +12,8 @@ use tracedecay_domain::feedback::{
     FeedbackAdvisoryProviderStateV1, FeedbackBaselineStateV1, FeedbackContentIdentityV1,
     FeedbackCycleObservationV1, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
     FeedbackDedupeKeyV1, FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
-    FeedbackDiagnosticClassificationV1, FeedbackDiagnosticV1, FeedbackDurabilityV1,
+    FeedbackDiagnosticClassificationV1, FeedbackDiagnosticProducerV1,
+    FeedbackDiagnosticProjectionV1, FeedbackDiagnosticV1, FeedbackDurabilityV1,
     FeedbackEvaluationInputV1, FeedbackEvaluationStageV1, FeedbackFindingLifecycleV1,
     FeedbackFindingV1, FeedbackImpactStateV1, FeedbackImpactV1, ProviderEvaluationStateV1,
     derive_feedback_finding_id, derive_overlay_feedback_finding_id,
@@ -1723,7 +1724,19 @@ fn collect_diagnostics(
                                 &diagnostic.message,
                                 512,
                             )),
-                            diagnostic_projection: None,
+                            diagnostic_projection: Some(FeedbackDiagnosticProjectionV1 {
+                                file: diagnostic.file_occurrence_id.clone(),
+                                span: diagnostic.span,
+                                symbol: diagnostic.symbol_occurrence_id.clone(),
+                                code: diagnostic.code.clone(),
+                                severity: diagnostic.severity,
+                                safe_bounded_message: truncate_at_char_boundary(
+                                    &diagnostic.message,
+                                    512,
+                                ),
+                                producer: FeedbackDiagnosticProducerV1::CodeDiagnostic,
+                                code_description_uri: None,
+                            }),
                         });
                     }
                     FeedbackDiagnosticV1::SessionOverlay(diagnostic)

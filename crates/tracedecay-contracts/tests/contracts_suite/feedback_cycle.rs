@@ -1154,6 +1154,32 @@ fn cycle_runs_diagnostics_impact_and_tests_once_with_anchored_new_findings() {
             .as_str(),
         "anchor.diagnostic.feedback.fixture"
     );
+    let projection = result.cycle.findings[0]
+        .diagnostic_projection
+        .as_ref()
+        .expect("saved compiler diagnostic projection");
+    assert_eq!(
+        projection.producer,
+        tracedecay_domain::feedback::FeedbackDiagnosticProducerV1::CodeDiagnostic
+    );
+    assert_eq!(
+        projection.file,
+        result.cycle.impact.as_ref().unwrap().target.file
+    );
+    assert_eq!(
+        projection.span,
+        SourceSpan {
+            start_byte: 10,
+            end_byte: 42
+        }
+    );
+    assert_eq!(
+        projection.symbol.as_ref().map(SymbolOccurrenceId::as_str),
+        Some(SYMBOL)
+    );
+    assert_eq!(projection.code, "E0308");
+    assert_eq!(projection.severity, DiagnosticSeverityV1::Error);
+    assert_eq!(projection.safe_bounded_message, "mismatched types");
     assert_eq!(
         result.cycle.impact.as_ref().unwrap().affected_tests[0].as_str(),
         "symbol.test.feedback.fixture"

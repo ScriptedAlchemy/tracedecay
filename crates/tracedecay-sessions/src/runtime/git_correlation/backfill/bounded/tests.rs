@@ -131,6 +131,14 @@ impl GitReflogSource for FailCommitLogCall {
         SystemGit.current_branch(worktree)
     }
 
+    fn commit_reference_exists(
+        &self,
+        worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        SystemGit.commit_reference_exists(worktree, reference)
+    }
+
     fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == self.fail_on {
             None

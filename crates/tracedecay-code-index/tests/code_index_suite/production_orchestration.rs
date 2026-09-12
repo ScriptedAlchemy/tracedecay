@@ -3053,6 +3053,14 @@ fn parallel_and_sequential_decodes_are_byte_identical() {
     parallel_equivalence::assert_parallel_and_sequential_decodes_are_byte_identical();
 }
 
+/// Sealing resolves each file's retained cross-file references against the
+/// whole staged file set, one ordered fan-out over the indexing pool. Width
+/// must not change which references bind or where the resulting edges sort.
+#[test]
+fn cross_file_resolution_is_width_invariant() {
+    parallel_equivalence::assert_cross_file_resolution_is_width_invariant();
+}
+
 fn partitioned_codec_request(beta_value: u64, sealed_at: i64) -> CodeIndexBuildRequestV1 {
     let sources = [
         (

@@ -972,6 +972,19 @@ pub fn retrieval_budget() -> RetrievalBudget {
     }
 }
 
+/// # `per_file` bounds what an optional lane can contribute at all
+///
+/// Exact-tier and contradiction evidence is cap-exempt in
+/// `crate::retrieval::diversity`, so `per_file` bounds only the *approximate*
+/// candidates one file may contribute. On this 13-file corpus that is a hard
+/// ceiling on optional-lane influence: `validation-006`'s three labelled
+/// targets all live in `repository.rs`, whose two approximate slots the
+/// lexical lane already fills, so an admitted semantic candidate can only
+/// enter that ranking by displacing one — which is how the last packaged
+/// qualification pushed a labelled target out of the result. The pairwise
+/// gate now refuses that displacement outright
+/// (`evaluate::dropped_relevant_label`); raising this cap instead would change
+/// production ranking for every query, so it needs its own measurement.
 pub fn evaluated_diversity_policy() -> Result<DiversityPolicy, CandidateOutputError> {
     Ok(DiversityPolicy {
         policy_id: typed_id("diversity.candidate.v1")?,

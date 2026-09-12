@@ -171,7 +171,9 @@ impl TransactionLeaseState {
 
     /// The rollback the writer already performed, for a caller whose own
     /// rollback arrived after the transaction was released.
-    pub(super) fn settled_rollback(&self) -> Option<Result<ExactSqlRollbackReceipt, ExactSqlError>> {
+    pub(super) fn settled_rollback(
+        &self,
+    ) -> Option<Result<ExactSqlRollbackReceipt, ExactSqlError>> {
         self.settled
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

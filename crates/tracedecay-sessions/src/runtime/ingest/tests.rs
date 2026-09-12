@@ -431,13 +431,13 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     git_correlation::publish_graph_evidence(&store, "live-ingest", &[live_span], &[]).unwrap();
 
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
+    let attribution = git_correlation::run_commit_attribution_sweep(&store, gap, |target| {
         super::project::git_scan_commits(target, gap)
     })
     .await
     .unwrap();
     assert!(
-        inserted >= 1,
+        attribution.commits_attributed >= 1,
         "a commit made during a live session must be attributed"
     );
 
@@ -478,7 +478,8 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     })
     .await
     .unwrap();
-    assert_eq!(again, 0, "re-sweeping an attributed commit is a no-op");
+    assert_eq!(again.commits_attributed, 0, "re-sweeping an attributed commit is a no-op");
+    assert_eq!(again.unavailable_references, 0);
 }
 
 /// A fresh project has never published a Git evidence projection. The
@@ -497,12 +498,84 @@ async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() 
     };
 
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
+    let attribution = git_correlation::run_commit_attribution_sweep(&store, gap, |_| {
         panic!("a never-published projection has no span targets to scan")
     })
     .await
     .expect("the empty start is not an error");
-    assert_eq!(inserted, 0, "nothing to attribute on the empty start");
+    assert_eq!(attribution, git_correlation::CommitAttributionSweepOutcome::default());
+}
+
+#[tokio::test]
+async fn archived_branch_keeps_observed_span_without_retrying_attribution() {
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())
+            .current_dir(repo.path())
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "TraceDecay")
+            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
+            .env("GIT_COMMITTER_NAME", "TraceDecay")
+            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q", "-b", "main"]).status.success());
+    assert!(
+        git(&["commit", "-q", "--allow-empty", "-m", "initial"])
+            .status
+            .success()
+    );
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = GraphBackedTestStore {
+        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
+            &store_dir.path().join("sessions.db"),
+        ),
+        graph: MemoryEvidenceGraphRuntime::default(),
+    };
+    let archived = git_correlation::SessionGitSpan {
+        span_id: "span-archived".to_owned(),
+        provider: "codex".to_owned(),
+        session_id: "archived-session".to_owned(),
+        thread_id: None,
+        branch: Some("codex/archived".to_owned()),
+        worktree: git_correlation::normalize_worktree(&repo.path().to_string_lossy()),
+        first_ts: 1,
+        last_ts: 2,
+        event_count: 2,
+        source: git_correlation::SpanSource::Ingest,
+    };
+    git_correlation::publish_graph_evidence(&store, "archived", &[archived], &[]).unwrap();
+
+    let attribution = git_correlation::run_commit_attribution_sweep(
+        &store,
+        git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+        |target| {
+            super::project::git_scan_commits(target, git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS)
+        },
+    )
+    .await
+    .expect("a deleted historical branch is settled optional attribution");
+    assert_eq!(attribution.commits_attributed, 0);
+    assert_eq!(attribution.unavailable_references, 1);
+
+    let identity = git_correlation::git_evidence_projection_identity(
+        tracedecay_graph_db::GraphNamespace::new("project").unwrap(),
+    )
+    .unwrap();
+    let evidence = git_correlation::recover_git_evidence_projection(
+        git_correlation::GitCorrelationSessionStore::graph_runtime(&store).unwrap(),
+        &identity,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(evidence.projection().spans().len(), 1);
+    assert_eq!(
+        evidence.projection().spans()[0].branch.as_deref(),
+        Some("codex/archived")
+    );
 }
 
 #[test]

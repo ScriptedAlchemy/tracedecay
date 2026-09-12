@@ -385,10 +385,13 @@ pub(super) fn def_rename_symbol() -> ToolDefinition {
                             "preview_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
                             "preview_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
                             "plan_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-                            "repository_revision": {"type": ["string", "null"]},
+                            "repository_revision": {
+                                "type": ["string", "null"],
+                                "description": "Exact repository_revision returned by the accepted preview; copy the string or null value verbatim."
+                            },
                             "graph_revision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
                         },
-                        "required": ["preview_id", "preview_digest", "plan_digest", "graph_revision"]
+                        "required": ["preview_id", "preview_digest", "plan_digest", "repository_revision", "graph_revision"]
                     },
                     "dry_run": {
                         "type": "boolean",
@@ -704,6 +707,42 @@ mod tests {
                 json!(["idempotency_key", "expected_state"])
             );
         }
+    }
+
+    #[test]
+    fn rename_help_requires_the_exact_preview_repository_revision() {
+        let definition = def_rename_symbol();
+        assert!(
+            definition.input_schema["properties"]["accepted_preview"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("repository_revision"))
+        );
+
+        let help = crate::render_tool_cli_help(&definition);
+        assert!(help.contains(
+            "object with required keys: preview_id, preview_digest, plan_digest, repository_revision, graph_revision"
+        ));
+        assert!(help.contains("\"repository_revision\":"));
+
+        let preview = serde_json::to_value(tracedecay_contracts::RenameResult::default()).unwrap();
+        assert_eq!(
+            preview.get("repository_revision"),
+            Some(&serde_json::Value::Null)
+        );
+        let acceptance: tracedecay_contracts::RenamePreviewAcceptanceV1 =
+            serde_json::from_value(json!({
+                "preview_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "preview_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "plan_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "graph_revision": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+            }))
+            .unwrap();
+        let acceptance = serde_json::to_value(acceptance).unwrap();
+        assert_eq!(
+            acceptance.get("repository_revision"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]

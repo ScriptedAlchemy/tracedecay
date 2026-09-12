@@ -1454,7 +1454,17 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
             crate::agents::host_bundle::HostBundleLifecycleOpV1::Update
             | crate::agents::host_bundle::HostBundleLifecycleOpV1::Repair => true,
         };
-        if self.integration.interactive_activation_guidance().is_some() {
+        let interactive_guidance = match self.operation {
+            crate::agents::host_bundle::HostBundleLifecycleOpV1::Uninstall => {
+                self.integration.interactive_removal_guidance()
+            }
+            crate::agents::host_bundle::HostBundleLifecycleOpV1::Install
+            | crate::agents::host_bundle::HostBundleLifecycleOpV1::Update
+            | crate::agents::host_bundle::HostBundleLifecycleOpV1::Repair => {
+                self.integration.interactive_activation_guidance()
+            }
+        };
+        if interactive_guidance.is_some() {
             let native_state_already_matches = match self.operation {
                 crate::agents::host_bundle::HostBundleLifecycleOpV1::Uninstall => all_missing,
                 crate::agents::host_bundle::HostBundleLifecycleOpV1::Install

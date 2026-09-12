@@ -573,6 +573,21 @@ impl CompositionKernel {
             input,
             policy,
             &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
+            &[],
+        )
+    }
+
+    pub(crate) fn compose_preserving_cap_incumbents(
+        &self,
+        input: &FusionStageInput,
+        policy: &tracedecay_domain::DiversityPolicy,
+        incumbents: &[RankedCandidate],
+    ) -> Result<CompositionOutputV1, FusionStageError> {
+        self.compose_required(
+            input,
+            policy,
+            &[RetrieverKind::ExactLiteral, RetrieverKind::Lexical],
+            incumbents,
         )
     }
 
@@ -585,7 +600,7 @@ impl CompositionKernel {
         policy: &tracedecay_domain::DiversityPolicy,
         lane: RetrieverKind,
     ) -> Result<CompositionOutputV1, FusionStageError> {
-        self.compose_required(input, policy, &[lane])
+        self.compose_required(input, policy, &[lane], &[])
     }
 
     #[hotpath::measure(label = "query.fusion")]
@@ -594,6 +609,7 @@ impl CompositionKernel {
         input: &FusionStageInput,
         policy: &tracedecay_domain::DiversityPolicy,
         required_lanes: &[RetrieverKind],
+        cap_incumbents: &[RankedCandidate],
     ) -> Result<CompositionOutputV1, FusionStageError> {
         let admitted = admitted_lanes(input, required_lanes)?;
         let (compact, dedupe_decisions) = self
@@ -612,7 +628,7 @@ impl CompositionKernel {
             .map_err(|error| FusionStageError::Contract(error.to_string()))?;
         let (ranked_candidates, diversity_decisions) = self
             .diversity
-            .apply_caps(policy, deduped)
+            .apply_caps_preserving(policy, deduped, cap_incumbents)
             .map_err(map_diversity_error)?;
         let comparator_records = ranked_comparator_records(&ranked_candidates, comparator_records)?;
 

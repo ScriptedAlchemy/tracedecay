@@ -1,7 +1,7 @@
 pub mod authority;
 mod failure;
 mod project;
-mod project_provider;
+pub(in crate::runtime) mod project_provider;
 mod scheduler;
 mod startup;
 mod user;

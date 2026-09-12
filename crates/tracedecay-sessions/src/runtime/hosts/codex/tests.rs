@@ -19,6 +19,8 @@ use crate::runtime::source::TranscriptSource;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod goal_event_tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use serde_json::json;
     use tracedecay_domain::{
@@ -36,6 +38,9 @@ mod goal_event_tests {
         try_admit_codex_jsonl_observations_for_project_window,
         try_admit_codex_jsonl_observations_for_project_with_admission,
     };
+    use crate::runtime::ingest::project_provider::ProjectProviderRun;
+    use crate::runtime::source::{HostProviderCoverage, read_host_provider_coverage};
+    use crate::runtime::{SessionProvider, with_transcript_source_home};
 
     fn goal_event_line(objective: &str, status: &str) -> Value {
         json!({
@@ -791,6 +796,169 @@ mod goal_event_tests {
         assert_eq!(
             first.bytes_consumed + second.bytes_consumed,
             encoded.len() as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn project_provider_yields_between_dated_rollouts_and_converges_without_loss() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let rollouts = [
+            (("2026", "09", "03"), "session-newest"),
+            (("2026", "09", "02"), "session-middle"),
+            (("2026", "09", "01"), "session-oldest"),
+        ];
+        let messages_per_rollout = 3;
+        for (date, session_id) in rollouts {
+            let directory = home
+                .join(".codex/sessions")
+                .join(date.0)
+                .join(date.1)
+                .join(date.2);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut lines = vec![json!({
+                "timestamp": format!("{}-{}-{}T12:00:00.000Z", date.0, date.1, date.2),
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": project}
+            })];
+            lines.extend((0..messages_per_rollout).map(|ordinal| {
+                json!({
+                    "timestamp": format!("{}-{}-{}T12:00:0{}.000Z", date.0, date.1, date.2, ordinal + 1),
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": format!("{session_id}-message-{ordinal}")
+                    }
+                })
+            }));
+            std::fs::write(
+                directory.join(format!("rollout-{session_id}.jsonl")),
+                lines
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+        }
+
+        let project_id = ProjectId::new("project-dated-rollouts").unwrap();
+        let scope = ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let failure_ceiling = rollouts.len().saturating_add(1);
+        let mut completed_after = None;
+
+        for pass_index in 0..failure_ceiling {
+            let before = admission.observations().len();
+            let outcome = with_transcript_source_home(
+                home.clone(),
+                ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: None,
+                }
+                .run_codex(),
+            )
+            .await;
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+
+            let after = admission.observations();
+            let admitted_this_pass = &after[before..];
+            assert!(
+                pass_index < rollouts.len(),
+                "coverage did not complete within the fixture-derived ceiling"
+            );
+            let expected_session = rollouts[pass_index].1;
+            assert_eq!(
+                admitted_this_pass.len(),
+                messages_per_rollout + 1,
+                "pass {pass_index} must finish exactly {expected_session}"
+            );
+            assert!(admitted_this_pass.iter().all(|stored| {
+                let envelope: CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.relations().session_id().as_str() == expected_session
+            }));
+
+            let coverage = read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap();
+            if coverage == Some(HostProviderCoverage::Complete) {
+                completed_after = Some(pass_index + 1);
+                break;
+            }
+            assert_eq!(coverage, Some(HostProviderCoverage::Partial));
+        }
+
+        assert_eq!(completed_after, Some(rollouts.len()));
+        let observations = admission.observations();
+        assert_eq!(
+            observations.len(),
+            rollouts.len() * (messages_per_rollout + 1)
+        );
+        let envelopes = observations
+            .iter()
+            .map(|stored| {
+                serde_json::from_value::<CanonicalObservationEnvelopeV1>(
+                    stored.observation().payload().clone(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let admitted_sessions = envelopes
+            .iter()
+            .map(|envelope| envelope.relations().session_id().as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            admitted_sessions.iter().cloned().collect::<BTreeSet<_>>(),
+            rollouts
+                .iter()
+                .map(|(_, session_id)| (*session_id).to_owned())
+                .collect::<BTreeSet<_>>()
+        );
+        for (_, session_id) in rollouts {
+            assert_eq!(
+                admitted_sessions
+                    .iter()
+                    .filter(|admitted| admitted.as_str() == session_id)
+                    .count(),
+                messages_per_rollout + 1,
+                "{session_id} must be admitted exactly once"
+            );
+            for ordinal in 0..messages_per_rollout {
+                let expected = format!("{session_id}-message-{ordinal}");
+                assert_eq!(
+                    envelopes
+                        .iter()
+                        .flat_map(|envelope| envelope.facts())
+                        .filter(|fact| matches!(
+                            fact,
+                            CanonicalObservationFactV1::Message { content, .. }
+                                if content.as_str() == Some(expected.as_str())
+                        ))
+                        .count(),
+                    1,
+                    "{expected} must be admitted exactly once"
+                );
+            }
+        }
+        assert_eq!(
+            read_host_provider_coverage(&admission, &scope, "codex")
+                .await
+                .unwrap(),
+            Some(HostProviderCoverage::Complete)
         );
     }
 

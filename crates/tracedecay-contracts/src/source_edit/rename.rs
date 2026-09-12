@@ -37,7 +37,7 @@ pub struct RenamePreviewAcceptanceV1 {
     pub preview_id: ManifestDigest,
     pub preview_digest: ManifestDigest,
     pub plan_digest: ManifestDigest,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub repository_revision: Option<String>,
     pub graph_revision: ManifestDigest,
 }
@@ -206,7 +206,7 @@ pub struct RenameResult {
     pub plan_digest: Option<ManifestDigest>,
     /// Current Git HEAD when the worktree has one; dirty bytes remain bound by
     /// `preview_digest` independently of this revision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub repository_revision: Option<String>,
     /// Digest of the admitted generation, exact target, same-name symbols,
     /// and graph edges used to classify bound and protected sites.

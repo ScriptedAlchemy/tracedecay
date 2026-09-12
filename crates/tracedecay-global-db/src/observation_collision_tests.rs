@@ -3073,6 +3073,64 @@ async fn runtime_cursor_replay_without_a_ledger_row_keeps_generic_collision_sema
     ));
 }
 
+#[tokio::test]
+async fn runtime_cursor_replay_preserves_storage_failure() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.cursor-runtime-storage-failure").unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        "record.cursor-runtime-storage-failure",
+        1,
+        "runtime storage failure fixture",
+        "receipt.cursor-runtime-storage-failure",
+        None,
+    );
+    let advance = ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        None,
+        observation.identity().position(),
+        ObservationCoverageReason::OutOfScope,
+    )
+    .unwrap();
+    seed_cursor_replay(&runtime, &advance, None).await;
+
+    assert!(matches!(
+        store
+            .advance_source_cursor(advance.clone())
+            .await
+            .unwrap_err(),
+        ObservationStoreError::CursorAdvanceCollision
+    ));
+
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "DROP TABLE td_runtime_writer_idempotency_v2;
+             CREATE VIEW td_runtime_writer_idempotency_v2 AS SELECT 1 AS invalid_shape;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let error = store.advance_source_cursor(advance).await.unwrap_err();
+    assert!(
+        matches!(error, ObservationStoreError::Storage { .. }),
+        "runtime storage failure was misclassified as a durable cursor collision: {error:?}"
+    );
+}
+
 /// Narrow-collision gate: a durable provenance row that names the SAME output
 /// as the drain now derives but disagrees on its content — corrupt digest,
 /// receipt, or anchor — is corrupt provenance authority, not an

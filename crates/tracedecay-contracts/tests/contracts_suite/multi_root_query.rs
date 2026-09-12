@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use schemars::schema_for;
 use tracedecay_contracts::{
     AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
     CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, MultiRootQueryError,
-    MultiRootQueryPort, MultiRootQueryRequestV1, RequestContext, RequestId, ResolvedScope,
+    MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootRootPageV1, OpaqueCursor, RequestContext,
+    RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, CollectionRevision, ManifestDigest, ProjectId, RefId, RepositoryId, RootGenerationV1,
@@ -78,17 +80,17 @@ fn setup() -> (AuthorizedScopeSet, Vec<RequestContext>) {
     (set, contexts)
 }
 
-fn generation(scope: &ResolvedScope, byte: char) -> RootScopeOutcomeV1<RootGenerationV1> {
+fn generation(scope: &ResolvedScope, byte: char) -> RootScopeOutcomeV1<Option<RootGenerationV1>> {
     RootScopeOutcomeV1::new(
         scope.scope_digest.clone(),
-        ScopeOutcome::Exact(
+        ScopeOutcome::Exact(Some(
             RootGenerationV1::new(
                 scope.scope_digest.clone(),
                 CollectionRevision::new(digest(byte)).unwrap(),
                 StackRevision::new(digest(byte)).unwrap(),
             )
             .unwrap(),
-        ),
+        )),
     )
     .unwrap()
 }
@@ -105,10 +107,10 @@ impl MultiRootQueryPort<String, String> for Port {
     fn query_root(
         &self,
         context: &RequestContext,
-        _generation: &RootGenerationV1,
+        _generation: Option<&RootGenerationV1>,
         query: &String,
-        page: u64,
-    ) -> ScopeOutcome<Vec<String>> {
+        cursor: Option<&OpaqueCursor>,
+    ) -> ScopeOutcome<MultiRootRootPageV1<String>> {
         if context.scope().worktree_id.as_str() == "worktree.linked" {
             return match self.0 {
                 LinkedOutcome::Unavailable => ScopeOutcome::Unavailable {
@@ -117,10 +119,40 @@ impl MultiRootQueryPort<String, String> for Port {
                 LinkedOutcome::Denied => ScopeOutcome::Denied,
             };
         }
-        ScopeOutcome::Exact(vec![format!(
-            "{}:{query}:{page}",
-            context.scope().worktree_id.as_str(),
-        )])
+        ScopeOutcome::Exact(MultiRootRootPageV1 {
+            value: vec![format!(
+                "{}:{query}:{}",
+                context.scope().worktree_id.as_str(),
+                if cursor.is_some() { 1 } else { 0 },
+            )],
+            next_cursor: cursor
+                .is_none()
+                .then(|| OpaqueCursor::new("cursor.page-1").unwrap()),
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct PagingPort(Arc<Mutex<Vec<(String, Option<String>)>>>);
+
+impl MultiRootQueryPort<String, String> for PagingPort {
+    fn query_root(
+        &self,
+        context: &RequestContext,
+        _generation: Option<&RootGenerationV1>,
+        _query: &String,
+        cursor: Option<&OpaqueCursor>,
+    ) -> ScopeOutcome<MultiRootRootPageV1<String>> {
+        let root = context.scope().worktree_id.as_str().to_owned();
+        self.0.lock().unwrap().push((
+            root.clone(),
+            cursor.map(|cursor| cursor.as_str().to_owned()),
+        ));
+        ScopeOutcome::Exact(MultiRootRootPageV1 {
+            value: vec![format!("{root}:{}", cursor.map_or("page-0", |_| "page-1"))],
+            next_cursor: (cursor.is_none() && root == "worktree.main")
+                .then(|| OpaqueCursor::new("cursor.main.page-1").unwrap()),
+        })
     }
 }
 
@@ -168,22 +200,51 @@ fn two_root_query_returns_partial_truth_and_frozen_continuation() {
         }
     ));
     assert!(matches!(page.roots[1].outcome, ScopeOutcome::Exact(_)));
-    assert_eq!(page.continuation.root_generations().len(), 2);
-    assert_eq!(page.continuation.next_page(), 1);
+    let continuation = page.continuation.expect("continuation");
+    assert_eq!(continuation.root_generations().len(), 2);
+    assert_eq!(continuation.next_page(), 1);
 
     let next = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Unavailable))
-        .execute(request(
-            set,
-            contexts,
-            digest('d'),
-            1,
-            Some(page.continuation),
-        ))
+        .execute(request(set, contexts, digest('d'), 1, Some(continuation)))
         .unwrap();
     let ScopeOutcome::Partial { value, .. } = next.aggregate else {
         panic!("one available root must keep the continuation partial");
     };
     assert_eq!(value, ["worktree.main:needle:1"]);
+    assert!(next.continuation.is_none());
+}
+
+#[test]
+fn child_cursors_advance_only_their_own_root_and_terminate() {
+    let (set, contexts) = setup();
+    let port = PagingPort::default();
+    let first = AuthorizedMultiRootQueryService::new(port.clone())
+        .execute(request(set.clone(), contexts.clone(), digest('d'), 0, None))
+        .unwrap();
+    assert_eq!(
+        first.aggregate,
+        ScopeOutcome::Exact(vec![
+            "worktree.linked:page-0".to_owned(),
+            "worktree.main:page-0".to_owned(),
+        ])
+    );
+    let continuation = first.continuation.expect("main root has another page");
+    let second = AuthorizedMultiRootQueryService::new(port.clone())
+        .execute(request(set, contexts, digest('d'), 1, Some(continuation)))
+        .unwrap();
+    assert_ne!(first.roots, second.roots);
+    assert!(second.continuation.is_none());
+    assert_eq!(
+        port.0.lock().unwrap().as_slice(),
+        [
+            ("worktree.linked".to_owned(), None),
+            ("worktree.main".to_owned(), None),
+            (
+                "worktree.main".to_owned(),
+                Some("cursor.main.page-1".to_owned())
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -194,15 +255,27 @@ fn cursor_mismatch_and_denied_root_never_become_empty_success() {
         .unwrap();
     assert!(matches!(first.aggregate, ScopeOutcome::Partial { .. }));
     assert!(matches!(first.roots[0].outcome, ScopeOutcome::Denied));
+    let continuation = first.continuation.expect("available root continues");
+
+    let mut drifted = request(
+        set.clone(),
+        contexts.clone(),
+        digest('d'),
+        1,
+        Some(continuation.clone()),
+    );
+    drifted.root_generations[0] = generation(set.roots()[0].scope(), '9');
+    assert_eq!(
+        AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Denied))
+            .execute(drifted)
+            .unwrap_err(),
+        MultiRootQueryError::CursorMismatch {
+            field: "root generations"
+        }
+    );
 
     let mismatch = AuthorizedMultiRootQueryService::new(Port(LinkedOutcome::Denied))
-        .execute(request(
-            set,
-            contexts,
-            digest('f'),
-            1,
-            Some(first.continuation),
-        ))
+        .execute(request(set, contexts, digest('f'), 1, Some(continuation)))
         .unwrap_err();
     assert_eq!(
         mismatch,
@@ -250,10 +323,18 @@ fn continuation_schema_and_runtime_reject_page_zero() {
         &context("worktree.main", "schema").scope().clone(),
         'b',
     )];
+    let cursors = vec![
+        RootScopeOutcomeV1::new(
+            generations[0].scope_digest.clone(),
+            ScopeOutcome::Exact(Some(OpaqueCursor::new("cursor.next").unwrap())),
+        )
+        .unwrap(),
+    ];
     assert!(
         tracedecay_contracts::MultiRootContinuationV1::new(
             digest('a'),
             generations.clone(),
+            cursors.clone(),
             digest('c'),
             digest('d'),
             0,
@@ -264,6 +345,7 @@ fn continuation_schema_and_runtime_reject_page_zero() {
     let continuation = tracedecay_contracts::MultiRootContinuationV1::new(
         digest('a'),
         generations,
+        cursors,
         digest('c'),
         digest('d'),
         1,

@@ -134,12 +134,13 @@ impl SemanticCompositionExecutionAuthorityV1 {
 
         let mut lanes = authorized_query.fallback_lanes.clone();
         lanes.push(semantic_lane);
-        let mut composition = match self.composition.compose(
+        let mut composition = match self.composition.compose_preserving_cap_incumbents(
             &FusionStageInput {
                 profile: self.profile.clone(),
                 lanes,
             },
             &self.diversity,
+            &authorized_query.composition.ranked_candidates,
         ) {
             Ok(composition) => composition,
             Err(error) => {
