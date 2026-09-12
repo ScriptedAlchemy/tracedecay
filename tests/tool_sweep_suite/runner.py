@@ -419,7 +419,7 @@ def _run_checked(
     return completed
 
 
-def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
+def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
     """Create a disposable project whose values are produced by normal product startup."""
     root = parent / "fixture"
     if root.exists():
@@ -506,9 +506,9 @@ def _producer_call(client: McpClient, tool: str, arguments: dict[str, Any], dead
 
 
 def prime_fixture_values(
-    client: McpClient, fixture: dict[str, str], policies: dict[str, ToolPolicy]
+    client: McpClient, fixture: dict[str, Any], policies: dict[str, ToolPolicy]
 ) -> None:
-    """Mint node and retrieval identities from the release binary's normal output."""
+    """Mint graph, retrieval, configuration, and git identities from real producers."""
     def deadline(tool: str) -> int:
         policy = policies.get(tool)
         if policy is None or policy.availability != "available":
@@ -569,6 +569,49 @@ def prime_fixture_values(
     if not any("catalog sweep handle source" in text for text in text_blocks(retrieved)):
         raise SweepError("retrieve consumer did not return the producer's exact large response")
     fixture.update({"node_id": node_id, "qualified_name": qualified_name, "node_kind": node_kind, "handle": handle})
+
+    settings = _producer_call(
+        client, "tracedecay_configuration_list", {"format": "json"},
+        deadline("tracedecay_configuration_list"),
+    )
+    keys = {
+        value["key"]
+        for value in _objects(settings)
+        if isinstance(value.get("key"), str) and value["key"]
+    }
+    configuration_key = "work.topology_policy.v1"
+    if configuration_key not in keys:
+        raise SweepError("configuration list producer omitted work.topology_policy.v1")
+    setting = _producer_call(
+        client,
+        "tracedecay_configuration_get",
+        {"key": configuration_key, "format": "json"},
+        deadline("tracedecay_configuration_get"),
+    )
+    revision = first_value(setting, {"revision_id"})
+    effective_value = next(
+        (
+            value["effective_value"]
+            for value in _objects(setting)
+            if isinstance(value.get("effective_value"), dict)
+        ),
+        None,
+    )
+    if (
+        not isinstance(revision, str)
+        or not revision
+        or not isinstance(effective_value, dict)
+        or effective_value.get("kind") != "work_topology_policy"
+        or "value" not in effective_value
+    ):
+        raise SweepError("configuration get producer omitted topology value or revision")
+    fixture.update(
+        {
+            "configuration_key": configuration_key,
+            "configuration_revision": revision,
+            "configuration_topology_policy": effective_value["value"],
+        }
+    )
 
     # The callable code-query surface serves only complete immutable index
     # generations, and a cold fixture publishes its first generation
@@ -678,7 +721,7 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(
 #   the branch serving path, not a designed denial; the entry exists so the
 #   moment the branch runtime rework lands a hermetic success, this row FAILs
 #   with expected_denial_superseded and the entry must be deleted.
-# - multi_root_* tools are daemon-owned and fail closed on every direct MCP
+# - multi_root mutations are daemon-owned and fail closed on every direct MCP
 #   transport: the multi-root invocation owner is only composed into
 #   daemon-internal project servers, so the hermetic stdio server has no
 #   executor and the typed daemon_unavailable denial is the complete
@@ -704,7 +747,6 @@ EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
     "tracedecay_skill_view": ("failed", "not_found"),
     "tracedecay_test_results": ("unavailable", "application.retrieval.unavailable"),
     "tracedecay_branch_search": ("unavailable", "search_failed"),
-    "tracedecay_multi_root_scope_set_read": ("unavailable", "multi_root.daemon_unavailable"),
     "tracedecay_multi_root_scope_set_compare_and_swap": ("unavailable", "multi_root.daemon_unavailable"),
     "tracedecay_multi_root_execute": ("unavailable", "multi_root.daemon_unavailable"),
 }
@@ -735,8 +777,9 @@ _SCOUT_CONTROL_PROBE = {
 }
 # Structurally valid multi-root requests: every typed field deserializes so
 # the probe reaches the daemon-availability gate instead of parse-failing.
-# The identities are sweep-minted; the daemon owner (absent hermetically)
-# is the only authority that could resolve them.
+# The mutation identities are sweep-minted; the daemon owner (absent
+# hermetically) is the only authority that could resolve them. The read probe
+# is an ordinary lookup key and now exercises its successful absence result.
 _MULTI_ROOT_SCOPE_SET_ID = "tool-sweep-scope-set.v1"
 _MULTI_ROOT_READ_PROBE = {"scope_set_id": _MULTI_ROOT_SCOPE_SET_ID}
 _MULTI_ROOT_CAS_PROBE = {
@@ -764,13 +807,12 @@ HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     # The real fixture branch and query: this probe would succeed the moment
     # the branch serving path activates, flipping the expected denial.
     "tracedecay_branch_search": {"query": "sweep_anchor", "branch": "main", "format": "json"},
-    "tracedecay_multi_root_scope_set_read": _MULTI_ROOT_READ_PROBE,
     "tracedecay_multi_root_scope_set_compare_and_swap": _MULTI_ROOT_CAS_PROBE,
     "tracedecay_multi_root_execute": _MULTI_ROOT_EXECUTE_PROBE,
 }
 
 
-def git_preview_arguments(fixture: dict[str, str]) -> dict[str, Any]:
+def git_preview_arguments(fixture: dict[str, Any]) -> dict[str, Any]:
     """Build one real stage preview from the git_hunks producer's minted input."""
     preview_input_id = fixture.get("preview_input_id")
     digests = json.loads(fixture.get("selected_hunk_digests", "[]"))
@@ -784,7 +826,7 @@ def git_preview_arguments(fixture: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, str]) -> dict[str, Any]:
+def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, Any]) -> dict[str, Any]:
     """Produce valid ordinary inputs from the negotiated schema; opaque values are never invented."""
     name = definition.get("name")
     if name == "tracedecay_api_migration_plan":
@@ -796,6 +838,33 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, st
         # it optional (schema gap logged to the binding owner). Diff the real
         # fixture branch against itself through the live code-index executor.
         return {"base": fixture["branch"], "head": fixture["branch"], "format": "json"}
+    if name in {"tracedecay_affected", "tracedecay_diff_context"}:
+        return {"files": [fixture["file"]], "format": "json"}
+    if name == "tracedecay_configuration_get":
+        return {"key": fixture["configuration_key"], "format": "json"}
+    if name == "tracedecay_configuration_protected_preview":
+        return {
+            "change": {
+                "kind": "replace_work_topology_policy",
+                "value": fixture["configuration_topology_policy"],
+            },
+            "expected_revision": fixture["configuration_revision"],
+            "format": "json",
+        }
+    if name == "tracedecay_configuration_rollback_preview":
+        return {
+            "target_revision_id": fixture["configuration_revision"],
+            "mode": "all_or_nothing",
+            "format": "json",
+        }
+    if name == "tracedecay_work_topology_metrics":
+        return {
+            "horizon": {"since_micros": 0, "until_micros": int(time.time() * 1_000_000)},
+            "max_events": 100,
+            "format": "json",
+        }
+    if name == "tracedecay_multi_root_scope_set_read":
+        return dict(_MULTI_ROOT_READ_PROBE)
     probe = HERMETIC_DENIAL_PROBE_ARGUMENTS.get(name) if isinstance(name, str) else None
     if probe is not None:
         if name not in EXPECTED_HERMETIC_DENIALS:
@@ -815,7 +884,7 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, st
     return value
 
 
-def _materialize(schema: dict[str, Any], fixture: dict[str, str], field: str | None, root: dict[str, Any]) -> Any:
+def _materialize(schema: dict[str, Any], fixture: dict[str, Any], field: str | None, root: dict[str, Any]) -> Any:
     schema = _resolve_ref(schema, root)
     if "const" in schema:
         return schema["const"]

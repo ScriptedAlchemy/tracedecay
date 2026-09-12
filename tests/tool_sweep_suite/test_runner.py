@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 import tempfile
@@ -99,6 +100,37 @@ class ProblemCodeTests(unittest.TestCase):
         )
 
         self.assertEqual(fact_id, 42)
+
+    def test_nested_string_fact_identity_is_consumable_by_rollback(self) -> None:
+        """The retained fact contract nests an opaque string id inside fact envelopes."""
+        runner = load_runner()
+        content = "catalog sweep temporary isolated fact"
+        response = {
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "outcome": {
+                            "outcome": "effect",
+                            "value": {
+                                "payload": {
+                                    "result": {
+                                        "fact": {
+                                            "fact": {
+                                                "fact_id": "fact.v1.fixture",
+                                                "content": content,
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    }),
+                }]
+            }
+        }
+
+        self.assertEqual(runner.fact_id_with_content(response, content), "fact.v1.fixture")
 
     def test_indented_markdown_node_identity_is_consumable(self) -> None:
         """Nested Markdown fields from a live qualified-name producer retain their identity."""
@@ -300,6 +332,63 @@ class ExpectedHermeticDenialTests(unittest.TestCase):
         with self.assertRaises(runner.SweepError):
             runner.materialize_tool_arguments(definition, {"node_id": "function:graph"})
 
+    def test_graph_file_consumers_use_the_seeded_source_file(self) -> None:
+        runner = load_runner()
+        schema = {
+            "type": "object",
+            "properties": {"files": {"type": "array", "items": {"type": "string"}}},
+            "required": ["files"],
+        }
+        for name in ("tracedecay_affected", "tracedecay_diff_context"):
+            arguments = runner.materialize_tool_arguments(
+                {"name": name, "inputSchema": schema}, {"file": "src/lib.rs"}
+            )
+            self.assertEqual(arguments, {"files": ["src/lib.rs"], "format": "json"})
+
+    def test_configuration_consumers_use_the_current_read_revision(self) -> None:
+        runner = load_runner()
+        fixture = {
+            "configuration_key": "work.topology_policy.v1",
+            "configuration_revision": "configuration.fixture.v1",
+            "configuration_topology_policy": {"collision_threshold_millionths": 500_000},
+        }
+        placeholder = {"type": "object", "properties": {}, "required": []}
+
+        get = runner.materialize_tool_arguments(
+            {"name": "tracedecay_configuration_get", "inputSchema": placeholder}, fixture
+        )
+        protected = runner.materialize_tool_arguments(
+            {"name": "tracedecay_configuration_protected_preview", "inputSchema": placeholder},
+            fixture,
+        )
+        rollback = runner.materialize_tool_arguments(
+            {"name": "tracedecay_configuration_rollback_preview", "inputSchema": placeholder},
+            fixture,
+        )
+
+        self.assertEqual(get["key"], "work.topology_policy.v1")
+        self.assertEqual(protected["expected_revision"], "configuration.fixture.v1")
+        self.assertEqual(
+            protected["change"],
+            {
+                "kind": "replace_work_topology_policy",
+                "value": {"collision_threshold_millionths": 500_000},
+            },
+        )
+        self.assertEqual(rollback["target_revision_id"], "configuration.fixture.v1")
+
+    def test_topology_metrics_materializes_a_valid_bounded_horizon(self) -> None:
+        runner = load_runner()
+        arguments = runner.materialize_tool_arguments(
+            {
+                "name": "tracedecay_work_topology_metrics",
+                "inputSchema": {"type": "object", "properties": {}, "required": []},
+            },
+            {},
+        )
+        self.assertLess(arguments["horizon"]["since_micros"], arguments["horizon"]["until_micros"])
+        self.assertGreater(arguments["max_events"], 0)
+
 
 class NegotiatedSurfaceTests(unittest.TestCase):
     def test_resources_and_prompts_are_exercised_from_live_discovery(self) -> None:
@@ -422,16 +511,20 @@ class MutationJourneyTests(unittest.TestCase):
     def test_fact_feedback_journey_requires_a_real_trust_change(self) -> None:
         """Helpful feedback must move the seeded fact's trust, then remove the fact."""
         runner = load_runner()
-        state = {"trust": 0.5, "removed": False}
+        state = {"trust_millionths": 500_000, "removed": False}
 
         def call(tool, arguments, _deadline_ms):
             if tool == "tracedecay_fact_store_add":
+                self.assertEqual(arguments["source_label"], "catalog_sweep")
+                self.assertNotIn("source", arguments)
                 return self.response(
-                    '{"fact":{"fact_id":7,"content":"' + arguments["content"] + '"}}'
+                    '{"result":{"fact":{"fact":{"fact_id":"fact.v1.fixture","content":"'
+                    + arguments["content"] + '"}}}}'
                 )
             if tool == "tracedecay_fact_store_get":
                 return self.response(
-                    '{"fact":{"fact_id":7,"trust_score":' + str(state["trust"]) + "}}"
+                    '{"fact":{"fact_id":"fact.v1.fixture","trust_score_millionths":'
+                    + str(state["trust_millionths"]) + "}}"
                 )
             if tool == "tracedecay_fact_store_remove":
                 state["removed"] = True
@@ -441,15 +534,22 @@ class MutationJourneyTests(unittest.TestCase):
         prepared = runner.prepare_journey(
             "tracedecay_fact_feedback", object(), {}, lambda _tool: 1_000, call
         )
-        self.assertEqual(prepared.arguments["fact_id"], 7)
+        self.assertEqual(prepared.arguments["fact_id"], "fact.v1.fixture")
         self.assertEqual(prepared.arguments["action"], "helpful")
+        self.assertEqual(prepared.arguments["source_label"], "catalog_sweep")
 
         with self.assertRaises(Exception):
             prepared.cleanup(self.response('{"status":"recorded"}'))
         self.assertFalse(state["removed"])
 
-        state["trust"] = 0.55
-        note = prepared.cleanup(self.response('{"status":"recorded"}'))
+        state["trust_millionths"] = 550_000
+        note = prepared.cleanup(
+            self.response(
+                '{"outcome":"effect","value":{"payload":{"feedback":'
+                '{"fact_id":"fact.v1.fixture","action":"helpful",'
+                '"old_trust_millionths":500000,"new_trust_millionths":550000}}}}'
+            )
+        )
         self.assertIn("trust", note)
         self.assertTrue(state["removed"])
 
@@ -637,6 +737,99 @@ class MutationJourneyTests(unittest.TestCase):
             note = prepared.cleanup(rollback_receipt)
             self.assertIn("preimage restoration verified", note)
 
+    def test_move_journey_rolls_back_from_the_effect_receipt(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "src").mkdir()
+            source = root / "src/lib.rs"
+            moved = "pub fn sweep_anchor() -> i32 { 7 }\n"
+            source.write_text(moved)
+            relocated = root / "src/relocated.rs"
+            relocated.write_text("pub fn relocation_marker() -> i32 { 0 }\n")
+            original_source = source.read_text()
+            original_relocated = relocated.read_text()
+            fixture = {
+                "root": str(root),
+                "file": "src/lib.rs",
+                "symbol": "sweep_anchor",
+                "qualified_name": "src/lib.rs::sweep_anchor",
+            }
+            digest = "sha256:" + "c" * 64
+            calls = []
+
+            def call(tool, arguments, _deadline_ms):
+                calls.append((tool, dict(arguments)))
+                if tool == "tracedecay_move_symbol" and arguments.get("dry_run") is True:
+                    return self.response(f'{{"expected_state":"{digest}"}}')
+                if tool == "tracedecay_move_symbol":
+                    return self.response(
+                        '{"success":true,"replayed":true,"effect_id":"effect.move",'
+                        f'"input_digest":"{digest}","committed_state":"{digest}"}}'
+                    )
+                self.assertEqual(tool, "tracedecay_source_edit_rollback")
+                self.assertEqual(arguments["effect_id"], "effect.move")
+                source.write_text(original_source)
+                relocated.write_text(original_relocated)
+                return self.response(
+                    '{"success":true,"reconciled":true,"effect_id":"effect.rollback"}'
+                )
+
+            prepared = runner.prepare_journey(
+                "tracedecay_move_symbol", object(), fixture, lambda _tool: 1_000, call
+            )
+            source.write_text("")
+            relocated.write_text(original_relocated + moved)
+            response = self.response(
+                '{"success":true,"effect_id":"effect.move",'
+                f'"input_digest":"{digest}","committed_state":"{digest}"}}'
+            )
+            note = prepared.cleanup(response)
+
+        self.assertIn("journaled rollback", note)
+        self.assertNotIn("tracedecay_by_qualified_name", [tool for tool, _ in calls])
+
+    def test_rename_apply_copies_the_preview_capability_verbatim(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "src").mkdir()
+            (root / "src/lib.rs").write_text("pub fn sweep_anchor() -> i32 { 7 }\n")
+            (root / "src/relocated.rs").write_text("pub fn relocation_marker() -> i32 { 0 }\n")
+            fixture = {
+                "root": str(root),
+                "file": "src/lib.rs",
+                "symbol": "sweep_anchor",
+                "qualified_name": "src/lib.rs::sweep_anchor",
+                "node_id": "function:fixture",
+            }
+            accepted = {
+                "preview_id": "rename.preview.fixture",
+                "preview_digest": "sha256:" + "1" * 64,
+                "plan_digest": "sha256:" + "2" * 64,
+                "graph_revision": "graph.fixture.v1",
+                "repository_revision": "repository.fixture.v1",
+            }
+
+            def call(tool, arguments, _deadline_ms):
+                if tool == "tracedecay_rename_preview":
+                    return self.response(
+                        '{"node":{"id":"function:fixture",'
+                        '"qualified_name":"src/lib.rs::sweep_anchor","kind":"function",'
+                        '"file":"src/lib.rs","name":"sweep_anchor"},'
+                        f'"accepted_preview":{json.dumps(accepted)}}}'
+                    )
+                self.assertEqual(tool, "tracedecay_rename_symbol")
+                self.assertIs(arguments["dry_run"], True)
+                self.assertEqual(arguments["accepted_preview"], accepted)
+                return self.response('{"expected_state":"sha256:' + "3" * 64 + '"}')
+
+            prepared = runner.prepare_journey(
+                "tracedecay_rename_symbol", object(), fixture, lambda _tool: 1_000, call
+            )
+
+        self.assertEqual(prepared.arguments["accepted_preview"], accepted)
+
     def test_source_edit_journey_replays_receipt_and_restores_exact_source(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as raw:
@@ -744,6 +937,15 @@ class FixturePrimingRetryTests(unittest.TestCase):
                 '{"preview_input_id":"preview.fixture","hunks":'
                 '[{"digest":"sha256:fixture","hunk":{}}]}'
             ),
+            "tracedecay_configuration_list": cls.response(
+                '{"payload":[{"key":"work.topology_policy.v1"}]}'
+            ),
+            "tracedecay_configuration_get": cls.response(
+                '{"payload":{"key":"work.topology_policy.v1",'
+                '"revision_id":"configuration.fixture.v1",'
+                '"effective_value":{"kind":"work_topology_policy",'
+                '"value":{"collision_threshold_millionths":500000}}}}'
+            ),
         }
 
         class Client:
@@ -768,6 +970,8 @@ class FixturePrimingRetryTests(unittest.TestCase):
             "tracedecay_retrieve",
             "tracedecay_code_symbol_search",
             "tracedecay_git_hunks",
+            "tracedecay_configuration_list",
+            "tracedecay_configuration_get",
         )
         return {
             name: runner.ToolPolicy(name, "available", "read", 1_000)
@@ -804,6 +1008,7 @@ class FixturePrimingRetryTests(unittest.TestCase):
         self.assertEqual(fixture["node_id"], "function:fixture")
         self.assertEqual(fixture["code_node_id"], "sym:code")
         self.assertEqual(fixture["preview_input_id"], "preview.fixture")
+        self.assertEqual(fixture["configuration_revision"], "configuration.fixture.v1")
 
     def test_non_retryable_graph_failure_remains_immediately_fatal(self) -> None:
         """The warming reason code alone cannot authorize another attempt."""
@@ -943,7 +1148,6 @@ class MountRetryTests(unittest.TestCase):
         """Materialized multi-root bodies parse, so the typed owner denial is exact."""
         runner = load_runner()
         for name in (
-            "tracedecay_multi_root_scope_set_read",
             "tracedecay_multi_root_scope_set_compare_and_swap",
             "tracedecay_multi_root_execute",
         ):
@@ -961,6 +1165,23 @@ class MountRetryTests(unittest.TestCase):
             self.assertEqual(len(client.calls), 1, name)
             arguments = client.calls[0][1]
             self.assertEqual(arguments["scope_set_id"], "tool-sweep-scope-set.v1", name)
+
+    def test_multi_root_read_no_longer_claims_the_superseded_daemon_denial(self) -> None:
+        runner = load_runner()
+        name = "tracedecay_multi_root_scope_set_read"
+        self.assertNotIn(name, runner.EXPECTED_HERMETIC_DENIALS)
+        arguments = runner.materialize_tool_arguments(
+            {
+                "name": name,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"scope_set_id": {"type": "string"}},
+                    "required": ["scope_set_id"],
+                },
+            },
+            {},
+        )
+        self.assertEqual(arguments, {"scope_set_id": "tool-sweep-scope-set.v1"})
 
     def test_expired_preview_is_reminted_from_the_live_producer(self) -> None:
         """An expired stage-preview cursor re-mints through git_hunks, never a blind replay."""
