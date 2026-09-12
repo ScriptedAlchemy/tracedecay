@@ -1255,6 +1255,7 @@ type ReadyProbeServingPartsV1 = (
     Arc<AtomicBool>,
     Arc<tokio::sync::Notify>,
     Arc<PendingWakeV1>,
+    Arc<AtomicUsize>,
 );
 
 #[derive(Clone)]
@@ -6585,6 +6586,7 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::clone(&worktree.shutting_down),
             Arc::clone(&worktree.wake),
             Arc::clone(&worktree.pending_wake),
+            Arc::clone(&worktree.reconcile_in_progress),
         ))
     }
 
@@ -6597,6 +6599,7 @@ impl CodeIndexSchedulerRegistryV1 {
             shutting_down,
             wake,
             pending_wake,
+            reconcile_in_progress,
         ): ReadyProbeServingPartsV1,
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -6618,20 +6621,17 @@ impl CodeIndexSchedulerRegistryV1 {
             .is_some_and(|witness| {
                 witness.generation_id == serving.generation().manifest().generation_id
             });
+        let wake_trigger = if reconcile_in_progress.load(Ordering::Acquire) == 0 {
+            CodeIndexCadenceTriggerV1::QueryAdmission
+        } else {
+            CodeIndexCadenceTriggerV1::BusyFollowUp
+        };
         if !witness_matches_seat {
-            Self::note_wake_if_idle(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
+            Self::note_wake_if_idle(&pending_wake, &wake, wake_trigger);
             return None;
         }
         if !source_freshness.ready_without_stat(project_root, &shutting_down) {
-            Self::note_wake_if_idle(
-                &pending_wake,
-                &wake,
-                CodeIndexCadenceTriggerV1::QueryAdmission,
-            );
+            Self::note_wake_if_idle(&pending_wake, &wake, wake_trigger);
             return None;
         }
         if !historical_generation_owner
