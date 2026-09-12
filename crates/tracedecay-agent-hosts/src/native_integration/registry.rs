@@ -347,6 +347,16 @@ struct OwnerKey {
     repository_root: PathBuf,
 }
 
+/// The exact project/repository identity one native-integration owner is
+/// composed for, plus the pinned policy it is authorized under.
+#[derive(Clone, Debug)]
+pub struct NativeIntegrationTargetV1 {
+    pub repository_root: PathBuf,
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub policy_digest: ManifestDigest,
+}
+
 /// Owns the store actor, topology resolver, native mechanics, authorization,
 /// and coordinator for each exact project/repository identity.
 #[derive(Default)]
@@ -365,23 +375,12 @@ impl DaemonNativeIntegrationServiceRegistry {
     pub async fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,
-        repository_root: PathBuf,
-        project_id: ProjectId,
-        repository_id: RepositoryId,
-        policy_digest: ManifestDigest,
+        target: NativeIntegrationTargetV1,
         observed_at: UtcMicros,
         analysis: Arc<dyn NativeIntegrationAnalysisPort>,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
         let owner = self
-            .ensure_registered(
-                database,
-                repository_root,
-                project_id,
-                repository_id,
-                policy_digest,
-                observed_at,
-                analysis,
-            )
+            .ensure_registered(database, target, observed_at, analysis)
             .await;
         if owner.is_err() {
             hotpath::gauge!("daemon.native_integration.ensure.failed").inc(1.0);
@@ -392,13 +391,16 @@ impl DaemonNativeIntegrationServiceRegistry {
     async fn ensure_registered(
         &self,
         database: RegisteredGlobalDbLeaseV1,
-        repository_root: PathBuf,
-        project_id: ProjectId,
-        repository_id: RepositoryId,
-        policy_digest: ManifestDigest,
+        target: NativeIntegrationTargetV1,
         observed_at: UtcMicros,
         analysis: Arc<dyn NativeIntegrationAnalysisPort>,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError> {
+        let NativeIntegrationTargetV1 {
+            repository_root,
+            project_id,
+            repository_id,
+            policy_digest,
+        } = target;
         let database_path = database.db_path().to_path_buf();
         let scope_sets = database
             .authorized_scope_set_storage()
@@ -668,6 +670,7 @@ impl DaemonNativeIntegrationServiceRegistry {
 
 #[cfg(test)]
 mod tests {
+    use super::NativeIntegrationTargetV1;
     use std::collections::BTreeSet;
     use std::path::Path;
     use std::process::Command;
@@ -903,10 +906,12 @@ mod tests {
         let owner = registry
             .ensure(
                 database,
-                repository_root,
-                project_id.clone(),
-                repository_id.clone(),
-                policy_digest(),
+                NativeIntegrationTargetV1 {
+                    repository_root,
+                    project_id: project_id.clone(),
+                    repository_id: repository_id.clone(),
+                    policy_digest: policy_digest(),
+                },
                 UtcMicros(100),
                 Arc::new(UnexpectedAnalysis),
             )
@@ -1014,10 +1019,13 @@ mod tests {
         let owner = registry
             .ensure(
                 database.clone(),
-                repository_root.clone(),
-                project_id.clone(),
-                RepositoryId::new("repository.native-owner.fixture").expect("repository id"),
-                policy_digest(),
+                NativeIntegrationTargetV1 {
+                    repository_root: repository_root.clone(),
+                    project_id: project_id.clone(),
+                    repository_id: RepositoryId::new("repository.native-owner.fixture")
+                        .expect("repository id"),
+                    policy_digest: policy_digest(),
+                },
                 UtcMicros(1),
                 Arc::new(UnexpectedAnalysis),
             )
@@ -1082,10 +1090,13 @@ mod tests {
         let second = registry
             .ensure(
                 database,
-                repository_root.clone(),
-                project_id,
-                RepositoryId::new("repository.native-owner.fixture").expect("repository id"),
-                policy_digest(),
+                NativeIntegrationTargetV1 {
+                    repository_root: repository_root.clone(),
+                    project_id,
+                    repository_id: RepositoryId::new("repository.native-owner.fixture")
+                        .expect("repository id"),
+                    policy_digest: policy_digest(),
+                },
                 UtcMicros(3),
                 Arc::new(UnexpectedAnalysis),
             )

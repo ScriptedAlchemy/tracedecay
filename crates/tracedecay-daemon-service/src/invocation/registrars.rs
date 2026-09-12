@@ -1484,10 +1484,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
     pub async fn ensure(
         &self,
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-        repository_root: PathBuf,
-        project_id: ProjectId,
-        repository_id: tracedecay_domain::RepositoryId,
-        policy_digest: ManifestDigest,
+        target: tracedecay_agent_hosts::native_integration::NativeIntegrationTargetV1,
         observed_at: UtcMicros,
         analysis: Arc<
             dyn tracedecay_application::native_integration::NativeIntegrationAnalysisPort,
@@ -1497,15 +1494,7 @@ impl DaemonNativeIntegrationRuntimeRegistrar {
         tracedecay_contracts::NativeIntegrationPortError,
     > {
         self.registry
-            .ensure(
-                database,
-                repository_root,
-                project_id,
-                repository_id,
-                policy_digest,
-                observed_at,
-                analysis,
-            )
+            .ensure(database, target, observed_at, analysis)
             .await
     }
 

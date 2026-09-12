@@ -1017,9 +1017,15 @@ The decision above rests on a wrong premise. Read against the pinned fork:
    bytes, the sealed heads' bytes, and the deferred native retirement count,
    and reads Stale when retirements are deferred and the container exceeds
    twice its heads — the inactive-project case is visible instead of silent.
-2. Open: an inactive project never publishes again, so its container never
-   reopens. The reclaim for that case must not load the old container.
-   Two candidate designs, neither chosen yet:
+   Landed: the maintenance sweep's retirement pass now follows the release
+   sweep's policy — when the census finds work and the engine is
+   hibernated, open it once, delete, hibernate again — so an inactive
+   project converges on the ordinary maintenance cadence at the cost of
+   one open per productive tick. That open still costs roughly twice the
+   container in RAM the first time; the designs below remove the cost
+   rather than pay it.
+2. Open: reclaim without loading the old container at all. Two candidate
+   designs, neither chosen yet:
    a. Keep the live container in layered form (columnar base + overlay)
       from the first seal onward, so a hibernated open is an mmap of the
       base rather than a replay into RAM, deletes land in the overlay's

@@ -502,7 +502,7 @@ fn message_hit_session_ids(payload: &Value) -> Vec<String> {
 }
 
 fn grep_hits(payload: &Value) -> &[Value] {
-    payload["hits"].as_array().map(Vec::as_slice).unwrap_or(&[])
+    payload["hits"].as_array().map_or(&[], Vec::as_slice)
 }
 
 fn grep_session_ids(payload: &Value) -> Vec<String> {

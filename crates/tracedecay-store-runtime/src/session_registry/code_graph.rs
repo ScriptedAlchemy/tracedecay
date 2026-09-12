@@ -2984,21 +2984,24 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ))),
                 deadline: deadline_at,
             };
-            let outcome = graph_registry.release_sealed_generation_staging_rows(
+            // Retirement first: it deletes the superseded generations' rows,
+            // so when the release below opens a hibernated engine it opens the
+            // container those rows no longer inflate.
+            retire_superseded_replays(
+                "sweep",
+                &graph_registry,
                 registration.clone(),
+                &mut storage,
+                &context,
+                &projection,
+            );
+            let outcome = graph_registry.release_sealed_generation_staging_rows(
+                registration,
                 &mut storage,
                 &context,
                 &projection,
             )?;
             observe_sealed_staging_release("sweep", &projection, outcome);
-            retire_superseded_replays(
-                "sweep",
-                &graph_registry,
-                registration,
-                &mut storage,
-                &context,
-                &projection,
-            );
             Ok(Some(projection))
         })
         .await
