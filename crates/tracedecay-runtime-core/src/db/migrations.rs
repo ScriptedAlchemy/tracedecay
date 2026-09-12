@@ -217,6 +217,12 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
             message: format!("failed to create handoff-open schema: {e}"),
             operation: "create_schema".to_string(),
         })?;
+    conn.execute_batch(tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create runtime writer ledger: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
     final_shape::require_exact_final_shape(conn).await?;
     set_version(conn, SCHEMA_VERSION).await?;
     Ok(())
