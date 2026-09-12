@@ -672,6 +672,22 @@ fn take_full_encoder_groups<'a>(
 /// score storage and preserves the previous 32-by-512 worst-case budget.
 /// Longer configured sequences run alone when even one row exceeds that
 /// historical budget.
+///
+/// Which chunks share a group is a vector-identity decision, not only a
+/// throughput one. FastEmbed's tokenizer pads with
+/// `PaddingStrategy::BatchLongest`, so a group's ONNX input shape is
+/// `[group_len, longest_encoding_in_that_group]`; moving a chunk between
+/// groups re-pads its row. Whether that perturbs the emitted floats is a
+/// property of the specific ONNX graph, not a guarantee anything provides. On
+/// `jinaai/jina-embeddings-v2-base-code` — today's only cataloged FastEmbed
+/// entry — regrouping is byte-identical, which
+/// `tests/inference_batch_identity.rs` asserts against a verified local
+/// fixture. On `Xenova/all-MiniLM-L6-v2` the same regrouping moves every lane
+/// of every row by up to 2.4e-2. Vector bytes feed `vector_output_digest` and
+/// thence the generation manifest digest, so a second cataloged transformer
+/// must be measured against that gate before it is added: length bucketing is
+/// byte-safe for the current catalog, not byte-safe in general, and an
+/// unmeasured addition would land as an unannounced full re-embed.
 fn canonical_encoder_groups<'a, Missing>(
     changes: &'a [ChangedCodeChunkV1],
     chunks: &BTreeMap<CodeSearchChunkId, &'a Arc<CodeSearchChunkV1>>,
