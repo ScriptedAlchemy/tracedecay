@@ -8,9 +8,9 @@ use crate::cli::WorkInvocationArgs;
 pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::errors::Result<()> {
     #[cfg(feature = "hotpath")]
     hotpath::val!("cli.work.operation").set(&invocation.operation.operation_key());
-    let body = crate::work_cli::application_cli::read_request(
+    let body = crate::application_cli::read_request(
         &invocation.request_file,
-        crate::work_cli::application_cli::WORK,
+        crate::application_cli::WORK,
     )?;
     let project_root = tracedecay_configuration::resolve_path_with_discovery(invocation.project);
     let operation = invocation.operation;
@@ -22,8 +22,8 @@ pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::er
         label = "cli.work.request"
     )
     .await?;
-    let rendered = crate::work_cli::application_cli::render(
-        crate::work_cli::application_cli::WORK,
+    let rendered = crate::application_cli::render(
+        crate::application_cli::WORK,
         operation.route_segment(),
         &project_root,
         &response.outcome,
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn work_json_line_preserves_the_canonical_typed_problem() {
-        crate::work_cli::application_cli::tests::assert_json_problem(
+        crate::application_cli::tests::assert_json_problem(
             "schema.work.start_attempt.result",
             "request.cli.work.7",
         );

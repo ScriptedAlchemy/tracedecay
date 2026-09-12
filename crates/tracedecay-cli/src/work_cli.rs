@@ -39,10 +39,7 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-#[path = "application_cli.rs"]
-pub(crate) mod application_cli;
-
-use application_cli::{WORK, config_error};
+use crate::application_cli::{WORK, config_error};
 
 const WORK_CLI_DEADLINE_MICROS: i64 = 120_000_000;
 
